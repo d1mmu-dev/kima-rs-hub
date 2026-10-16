@@ -1,0 +1,339 @@
+"use client";
+
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { api } from "@/lib/api";
+import { X, Plus, Music2, Check } from "lucide-react";
+import { GradientSpinner } from "./GradientSpinner";
+import { Button } from "@/components/ui/Button";
+import { useDialog } from "@/hooks/useDialog";
+
+interface PlaylistSelectorProps {
+    isOpen: boolean;
+    onClose: () => void;
+    onSelectPlaylist?: (playlistId: string) => Promise<void>;
+    onSelectPlaylists?: (playlistIds: string[]) => Promise<void>;
+    mode?: "single" | "multi";
+    isLoading?: boolean;
+    loadingMessage?: string;
+}
+
+export function PlaylistSelector({
+    isOpen,
+    onClose,
+    onSelectPlaylist,
+    onSelectPlaylists,
+    mode = "single",
+    isLoading: isSaving,
+    loadingMessage,
+}: PlaylistSelectorProps) {
+    const [playlists, setPlaylists] = useState<Array<{ id: string; name: string; trackCount?: number }>>([]);
+    const [newPlaylistName, setNewPlaylistName] = useState("");
+    const [isPublic, setIsPublic] = useState(false);
+    const [isCreating, setIsCreating] = useState(false);
+    const [isLoading, setIsLoading] = useState(false);
+    const [selected, setSelected] = useState<Set<string>>(new Set());
+    const [error, setError] = useState<string | null>(null);
+    const [isConfirming, setIsConfirming] = useState(false);
+
+    const isMulti = mode === "multi";
+
+    // Reset dialog state when `isOpen` flips. Done during render (the
+    // React-endorsed prop-change pattern) rather than in an effect body,
+    // where a synchronous setState is a lint error.
+    const [prevOpen, setPrevOpen] = useState(isOpen);
+    if (isOpen !== prevOpen) {
+        setPrevOpen(isOpen);
+        if (isOpen) {
+            setSelected(new Set());
+            setError(null);
+        }
+    }
+
+    const loadPlaylists = async () => {
+        try {
+            setIsLoading(true);
+            const data = await api.getPlaylists();
+            setPlaylists(Array.isArray(data) ? data : []);
+        } catch (error) {
+            console.error("Failed to load playlists:", error);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+    const dialogRef = useRef<HTMLDivElement>(null);
+    useDialog(dialogRef, isOpen, onClose);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        let cancelled = false;
+        api.getPlaylists()
+            .then((data) => {
+                if (!cancelled) setPlaylists(Array.isArray(data) ? data : []);
+            })
+            .catch((error) => console.error("Failed to load playlists:", error));
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen]);
+
+    const handleCreatePlaylist = async () => {
+        try {
+            setIsCreating(true);
+            setError(null);
+            const playlist = await api.createPlaylist(
+                newPlaylistName.trim(),
+                isPublic
+            );
+
+            if (isMulti) {
+                setSelected((prev) => new Set(prev).add(playlist.id));
+                await loadPlaylists();
+            } else {
+                await onSelectPlaylist?.(playlist.id);
+                onClose();
+            }
+
+            setNewPlaylistName("");
+            setIsPublic(false);
+
+            window.dispatchEvent(
+                new CustomEvent("playlist-created", { detail: playlist })
+            );
+        } catch (error) {
+            console.error("Failed to create playlist:", error);
+            setError("Couldn't create that playlist — try again.");
+        } finally {
+            setIsCreating(false);
+        }
+    };
+
+    const handleSelectPlaylist = async (playlistId: string) => {
+        if (isMulti) {
+            setSelected((prev) => {
+                const next = new Set(prev);
+                if (next.has(playlistId)) {
+                    next.delete(playlistId);
+                } else {
+                    next.add(playlistId);
+                }
+                return next;
+            });
+            return;
+        }
+
+        try {
+            setError(null);
+            await onSelectPlaylist?.(playlistId);
+            window.dispatchEvent(
+                new CustomEvent("playlist-updated", { detail: { playlistId } })
+            );
+            await loadPlaylists();
+            onClose();
+        } catch (error) {
+            console.error("Failed to add to playlist:", error);
+            setError("Couldn't add to that playlist — try again.");
+        }
+    };
+
+    const handleConfirm = async () => {
+        if (selected.size === 0 || !onSelectPlaylists) return;
+
+        try {
+            setIsConfirming(true);
+            setError(null);
+            await onSelectPlaylists(Array.from(selected));
+            for (const playlistId of selected) {
+                window.dispatchEvent(
+                    new CustomEvent("playlist-updated", { detail: { playlistId } })
+                );
+            }
+            onClose();
+        } catch (error) {
+            console.error("Failed to add to playlists:", error);
+            setError("Couldn't add to those playlists — try again.");
+        } finally {
+            setIsConfirming(false);
+        }
+    };
+
+    if (!isOpen) return null;
+
+    return (
+        <div
+            className="fixed inset-0 bg-black/80 flex items-center justify-center z-(--z-modal) p-4 transition-opacity duration-200"
+            onClick={onClose}
+        >
+            <div
+                ref={dialogRef}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="playlist-selector-title"
+                className="bg-[#121212] rounded-xl max-w-md w-full max-h-[80vh] overflow-hidden flex flex-col border border-white/10 animate-pop"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="flex items-center justify-between p-6 border-b border-white/10">
+                    <h2 id="playlist-selector-title" className="text-2xl font-bold text-white">
+                        Add to Playlist
+                    </h2>
+                    <button
+                        onClick={onClose}
+                        aria-label="Close"
+                        className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                    >
+                        <X className="w-5 h-5 text-[var(--text-secondary)]" />
+                    </button>
+                </div>
+
+                {isSaving && (
+                    <div className="px-6 py-3 flex items-center gap-3 bg-black/30 border-b border-white/10 text-sm text-[var(--text-primary)]">
+                        <GradientSpinner size="sm" />
+                        <span>{loadingMessage || "Adding..."}</span>
+                    </div>
+                )}
+
+                {error && (
+                    <div
+                        role="alert"
+                        className="px-6 py-3 bg-black/30 border-b border-white/10 text-sm text-[var(--text-primary)]"
+                    >
+                        {error}
+                    </div>
+                )}
+
+                <div className="flex-1 overflow-y-auto p-4 space-y-2">
+                    {isLoading ? (
+                        <div className="flex items-center justify-center py-12">
+                            <GradientSpinner size="md" />
+                        </div>
+                    ) : playlists.length === 0 ? (
+                        <div className="flex flex-col items-center justify-center py-12 text-center">
+                            <Music2 className="w-12 h-12 text-[var(--text-muted)] mb-3" />
+                            <p className="text-[var(--text-secondary)]">No playlists yet</p>
+                            <p className="text-[var(--text-muted)] text-sm mt-1">
+                                Create one below to get started
+                            </p>
+                        </div>
+                    ) : (
+                        playlists.map((playlist, i) => {
+                            const isSelected = selected.has(playlist.id);
+                            return (
+                                <button
+                                    key={playlist.id}
+                                    onClick={() => handleSelectPlaylist(playlist.id)}
+                                    className={`w-full text-left px-4 py-4 rounded-lg transition-all border group ${
+                                        i < 8 ? `animate-rise [animation-delay:calc(var(--i)*45ms)]` : ""
+                                    } ${
+                                        isMulti && isSelected
+                                            ? "bg-[var(--color-brand)]/10 border-[var(--color-brand)]/30"
+                                            : "bg-white/5 hover:bg-white/10 border-white/5 hover:border-white/10"
+                                    }`}
+                                    disabled={isSaving || isConfirming}
+                                    style={{ "--i": i } as CSSProperties}
+                                >
+                                    <div className="flex items-center justify-between">
+                                        {isMulti && (
+                                            <div
+                                                className={`w-5 h-5 rounded border-2 flex items-center justify-center mr-3 shrink-0 transition-all ${
+                                                    isSelected
+                                                        ? "bg-brand border-[var(--color-brand)]"
+                                                        : "border-gray-500 group-hover:border-gray-300"
+                                                }`}
+                                            >
+                                                {isSelected && (
+                                                    <Check className="w-3.5 h-3.5 text-black" strokeWidth={3} />
+                                                )}
+                                            </div>
+                                        )}
+                                        <div className="flex-1 min-w-0">
+                                            <p className={`font-semibold truncate transition-colors ${
+                                                isMulti && isSelected
+                                                    ? "text-brand"
+                                                    : "text-white group-hover:text-brand"
+                                            }`}>
+                                                {playlist.name}
+                                            </p>
+                                            <p className="text-xs text-[var(--text-secondary)] mt-1">
+                                                {playlist.trackCount || 0}{" "}
+                                                {playlist.trackCount === 1
+                                                    ? "track"
+                                                    : "tracks"}
+                                            </p>
+                                        </div>
+                                        {!isMulti && (
+                                            <Plus className="w-5 h-5 text-[var(--text-secondary)] group-hover:text-brand transition-colors ml-2 shrink-0" />
+                                        )}
+                                    </div>
+                                </button>
+                            );
+                        })
+                    )}
+                </div>
+
+                {isMulti && playlists.length > 0 && (
+                    <div className="px-4 py-3 border-t border-white/10">
+                        <Button
+                            variant="primary"
+                            size="lg"
+                            onClick={handleConfirm}
+                            disabled={selected.size === 0 || isConfirming}
+                            className="w-full"
+                        >
+                            {isConfirming ? (
+                                <GradientSpinner size="sm" />
+                            ) : selected.size > 0 ? (
+                                `Add to ${selected.size} playlist${selected.size > 1 ? "s" : ""}`
+                            ) : (
+                                "Select playlists"
+                            )}
+                        </Button>
+                    </div>
+                )}
+
+                <div className="p-6 border-t border-white/10 bg-[var(--bg-primary)]/50">
+                    <p className="text-sm text-[var(--text-secondary)] mb-3 font-medium">
+                        Create New Playlist
+                    </p>
+                    <div className="flex gap-2 mb-3">
+                        <input
+                            type="text"
+                            placeholder="Enter playlist name..."
+                            value={newPlaylistName}
+                            onChange={(e) => setNewPlaylistName(e.target.value)}
+                            onKeyDown={(e) =>
+                                e.key === "Enter" && handleCreatePlaylist()
+                            }
+                            className="flex-1 px-4 py-3 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-[var(--color-brand)] focus:bg-white/10 transition-all"
+                        />
+                        <Button
+                            variant="primary"
+                            onClick={handleCreatePlaylist}
+                            disabled={
+                                !newPlaylistName.trim() ||
+                                isCreating ||
+                                isSaving
+                            }
+                        >
+                            <Plus className="w-5 h-5" />
+                            <span className="hidden sm:inline">Create</span>
+                        </Button>
+                    </div>
+                    <label className="flex items-center gap-3 cursor-pointer group">
+                        <div className="relative">
+                            <input
+                                type="checkbox"
+                                checked={isPublic}
+                                onChange={(e) => setIsPublic(e.target.checked)}
+                                className="sr-only peer"
+                            />
+                            <div className="w-10 h-5 bg-white/10 rounded-full peer-checked:bg-brand transition-colors" />
+                            <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full transition-transform peer-checked:translate-x-5" />
+                        </div>
+                        <span className="text-sm text-[var(--text-secondary)] group-hover:text-gray-300 transition-colors">
+                            Share with other users
+                        </span>
+                    </label>
+                </div>
+            </div>
+        </div>
+    );
+}

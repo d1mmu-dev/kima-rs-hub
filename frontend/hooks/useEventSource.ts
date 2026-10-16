@@ -1,0 +1,186 @@
+"use client";
+
+import { useEffect, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useAuth } from "@/lib/auth-context";
+import { searchResultStore } from "@/lib/search-result-store";
+import { api, getApiBaseUrl } from "@/lib/api";
+
+/** In proxy mode this is "", so events go through the streaming route in app/api/events. */
+function getSSEBaseUrl(): string {
+    if (typeof window === "undefined") return "";
+    return getApiBaseUrl();
+}
+
+export function useEventSource() {
+    const { isAuthenticated } = useAuth();
+    const queryClient = useQueryClient();
+    const eventSourceRef = useRef<EventSource | null>(null);
+    const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const reconnectAttemptsRef = useRef(0);
+
+    useEffect(() => {
+        if (!isAuthenticated) return;
+
+        let mounted = true;
+
+        const connect = async () => {
+            if (!mounted) return;
+
+            const ticket = await api.getSSETicket();
+            if (!mounted) return;
+            if (!ticket) {
+                const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
+                reconnectAttemptsRef.current++;
+                reconnectTimeoutRef.current = setTimeout(() => { connect().catch(() => {}); }, delay);
+                return;
+            }
+
+            const es = new EventSource(`${getSSEBaseUrl()}/api/events?ticket=${ticket}`);
+            eventSourceRef.current = es;
+
+            es.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+
+                    switch (data.type) {
+                        case "notification":
+                        case "notification:cleared":
+                        case "notification:read":
+                            queryClient.invalidateQueries({ queryKey: ["notifications"] });
+                            if (data.notificationType === "playlist_ready" || data.notificationType === "import_complete") {
+                                queryClient.invalidateQueries({ queryKey: ["playlists"] });
+                            }
+                            break;
+                        case "download:complete":
+                            queryClient.invalidateQueries({ queryKey: ["active-downloads"] });
+                            queryClient.invalidateQueries({ queryKey: ["download-history"] });
+                            queryClient.invalidateQueries({ queryKey: ["notifications"] });
+                            if (data.albumId) {
+                                queryClient.invalidateQueries({ queryKey: ["album", data.albumId] });
+                            }
+                            break;
+                        case "download:failed":
+                            queryClient.invalidateQueries({ queryKey: ["active-downloads"] });
+                            queryClient.invalidateQueries({ queryKey: ["download-history"] });
+                            queryClient.invalidateQueries({ queryKey: ["notifications"] });
+                            break;
+                        case "search:result":
+                            if (data.searchId && data.results) {
+                                searchResultStore.push(data.searchId, data.results);
+                            }
+                            break;
+                        case "search:complete":
+                            if (data.searchId) {
+                                searchResultStore.complete(data.searchId);
+                            }
+                            break;
+                        case "scan:progress":
+                            queryClient.setQueryData(
+                                ["scan-status", data.jobId],
+                                { status: "active", progress: data.progress, jobId: data.jobId }
+                            );
+                            break;
+                        case "scan:complete":
+                            queryClient.setQueryData(
+                                ["scan-status", data.jobId],
+                                { status: data.error ? "failed" : "completed", progress: 100, jobId: data.jobId, result: data.result, error: data.error }
+                            );
+                            queryClient.invalidateQueries({ queryKey: ["enrichment-progress"] });
+                            queryClient.invalidateQueries({ queryKey: ["library", "recently-added"] });
+                            break;
+                        case "enrichment:progress":
+                            queryClient.invalidateQueries({ queryKey: ["enrichment-progress"] });
+                            break;
+                        case "import:progress":
+                            queryClient.setQueryData(
+                                ["import-status", data.jobId],
+                                data
+                            );
+                            queryClient.invalidateQueries({ queryKey: ["user-imports"] });
+                            if (data.status === "completed" || data.status === "failed" || data.status === "cancelled") {
+                                queryClient.invalidateQueries({ queryKey: ["notifications"] });
+                                queryClient.invalidateQueries({ queryKey: ["playlists"] });
+                            }
+                            break;
+                        case "discover:progress":
+                            queryClient.setQueryData(
+                                ["discover-batch-status"],
+                                { active: true, status: data.status, batchId: data.batchId, progress: data.progress, completed: data.completed, failed: data.failed, total: data.total }
+                            );
+                            break;
+                        case "discover:complete":
+                            queryClient.setQueryData(
+                                ["discover-batch-status"],
+                                { active: false, status: null, batchId: data.batchId }
+                            );
+                            queryClient.invalidateQueries({ queryKey: ["discover-playlist"] });
+                            break;
+                        case "preview:progress":
+                            queryClient.setQueryData(
+                                ["preview-status", data.jobId],
+                                { status: "running", phase: data.phase, message: data.message, jobId: data.jobId }
+                            );
+                            break;
+                        case "preview:complete":
+                            queryClient.setQueryData(
+                                ["preview-status", data.jobId],
+                                { status: data.error ? "failed" : "completed", preview: data.preview, error: data.error, jobId: data.jobId }
+                            );
+                            break;
+                        case "playlist:updated":
+                            if (data.playlistId) {
+                                queryClient.invalidateQueries({ queryKey: ["playlists"] });
+                                queryClient.invalidateQueries({ queryKey: ["playlist", data.playlistId] });
+                            }
+                            break;
+                        case "connected":
+                            // Only refetch on reconnect (not initial connect) to avoid
+                            // duplicate requests when queries were just fetched on mount.
+                            if (reconnectAttemptsRef.current > 0) {
+                                queryClient.invalidateQueries({ queryKey: ["notifications"] });
+                                queryClient.invalidateQueries({ queryKey: ["active-downloads"] });
+                                queryClient.invalidateQueries({ queryKey: ["download-history"] });
+                            }
+                            reconnectAttemptsRef.current = 0;
+                            // Sync batch status after reconnect to clear stale cache
+                            api.getDiscoverBatchStatus()
+                                .then(status => {
+                                    queryClient.setQueryData(["discover-batch-status"], status);
+                                })
+                                .catch(() => {
+                                    // On error, assume no active batch
+                                    queryClient.setQueryData(["discover-batch-status"], { active: false, status: null, batchId: null });
+                                });
+                            break;
+                    }
+                } catch {
+                    // Ignore parse errors (heartbeat comments, etc.)
+                }
+            };
+
+            es.onerror = () => {
+                es.close();
+                eventSourceRef.current = null;
+                if (mounted) {
+                    const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
+                    reconnectAttemptsRef.current++;
+                    reconnectTimeoutRef.current = setTimeout(() => { connect().catch(() => {}); }, delay);
+                }
+            };
+        };
+
+        connect();
+
+        return () => {
+            mounted = false;
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+            }
+            if (eventSourceRef.current) {
+                eventSourceRef.current.close();
+                eventSourceRef.current = null;
+            }
+        };
+    }, [isAuthenticated, queryClient]);
+}

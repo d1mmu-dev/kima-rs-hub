@@ -1,0 +1,957 @@
+@import "tailwindcss";
+
+/* Phones, and any screen too short for a header row above the content. */
+@custom-variant compact {
+    @media (max-width: 639px) {
+        @slot;
+    }
+    @media (max-height: 560px) {
+        @slot;
+    }
+}
+
+/* Screens where every row of height counts, such as a phone browser with its toolbars showing. */
+@custom-variant short (@media (max-height: 720px));
+
+/* A phone on its side: the app's bars and the mini player take less height. */
+@custom-variant landscape-short (@media (orientation: landscape) and (max-height: 480px));
+
+@theme {
+    /* The smallest text size, for eyebrows, counts and status chips.
+     * Tailwind's named scale stops at 12px; nothing goes below this. */
+    --text-micro: 0.6875rem;     /* 11px */
+    --text-micro--line-height: 1.4;
+
+    --color-brand: #fca200;
+    --color-brand-hover: #e69200;
+    --color-brand-light: #fcb84d;
+    --color-brand-dark: #d48c00;
+    /* Glyphs and text that sit on an amber fill. */
+    --color-on-brand: #160a02;
+
+    /* The violet cosmos bleed behind page headers and hero backdrops. */
+    --color-ambient: #773b97;
+
+    /* One colour per content type, used only to mark the type: section bars,
+     * type dots. Controls and the playing state always use brand. */
+    --color-type-track: #773b97;
+    --color-type-album: oklch(0.63 0.07 195);
+    --color-type-podcast: oklch(0.6 0.125 350);
+    --color-type-audiobook: oklch(0.57 0.155 33);
+    --color-type-artist: #fca200;
+
+    /* Status: outcome of an action, never decoration. */
+    --color-success: #22c55e;
+    --color-warning: #eab308;
+    --color-danger: #ef4444;
+    --color-danger-light: #f87171;
+    --color-spotify: #1db954;
+
+    /* ── Motion ───────────────────────────────────────────────────────────
+     * Every transition defaults to ease-out-quart: it leaves fast and settles.
+     * No bounce or elastic curves. Durations stay on Tailwind's numeric scale:
+     * 150 hover zoom, 200 state change, 300 open/close, 500 section arrival. */
+    --default-transition-timing-function: cubic-bezier(0.25, 1, 0.5, 1);
+    --default-transition-duration: 200ms;
+
+    /* ── Animation primitives ─────────────────────────────────────────────
+     * Stagger with [animation-delay:calc(var(--i)*var(--stagger))] on each item
+     * and cascadeStyle(count) on the container, so any list lands in one window.
+     * Reduced motion is zeroed globally; exits run at ~3/4 of their entrance. */
+    --animate-rise: rise 300ms cubic-bezier(0.25, 1, 0.5, 1) both;
+    --animate-fade-soft: fade-soft 200ms cubic-bezier(0.25, 1, 0.5, 1) both;
+    --animate-pop: pop 200ms cubic-bezier(0.25, 1, 0.5, 1) both;
+    --animate-panel-up: panel-up 300ms cubic-bezier(0.25, 1, 0.5, 1) both;
+    --animate-panel-down: panel-down 220ms cubic-bezier(0.25, 1, 0.5, 1) both;
+    --animate-slide-in: slide-in 280ms cubic-bezier(0.25, 1, 0.5, 1) both;
+    --animate-sweep: sweep 1600ms cubic-bezier(0.65, 0, 0.35, 1) infinite;
+    --animate-kima-drift: kima-drift 16s linear infinite;
+
+    @keyframes rise {
+        from { opacity: 0; transform: translateY(8px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fade-soft {
+        from { opacity: 0; }
+        to { opacity: 1; }
+    }
+    @keyframes pop {
+        from { opacity: 0; transform: scale(0.96); }
+        to { opacity: 1; transform: scale(1); }
+    }
+    @keyframes panel-up {
+        from { opacity: 0; transform: translateY(16px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes panel-down {
+        from { opacity: 1; transform: translateY(0); }
+        to { opacity: 0; transform: translateY(8px); }
+    }
+    @keyframes slide-in {
+        from { transform: translateX(100%); }
+        to { transform: translateX(0); }
+    }
+    @keyframes sweep {
+        from { transform: translateX(-100%); }
+        to { transform: translateX(300%); }
+    }
+    /* One sine period: each quarter eases like sin(t) between its zero and its peak. */
+    @keyframes kima-drift {
+        0% { filter: hue-rotate(0deg); animation-timing-function: cubic-bezier(0.61, 1, 0.88, 1); }
+        25% { filter: hue-rotate(14deg); animation-timing-function: cubic-bezier(0.12, 0, 0.39, 0); }
+        50% { filter: hue-rotate(0deg); animation-timing-function: cubic-bezier(0.61, 1, 0.88, 1); }
+        75% { filter: hue-rotate(-14deg); animation-timing-function: cubic-bezier(0.12, 0, 0.39, 0); }
+        100% { filter: hue-rotate(0deg); }
+    }
+}
+
+:root {
+    /* Kima Design System - Dark Theme Only */
+
+    /* Background Layers */
+    --bg-primary: #0a0a0a; /* Primary canvas */
+    --bg-secondary: #0f0f0f; /* Cards, panels */
+    --bg-tertiary: #141414; /* Nested content, wells */
+    --bg-hover: #1a1a1a; /* Modals, dropdowns, hover */
+
+    /* Borders */
+    --border-subtle: #1c1c1c; /* Subtle borders (default) */
+    --border-interactive: #262626; /* Interactive elements */
+    --border-focus: #333333; /* Focus, selected states */
+
+    /* Three text tones, contrast measured against the #0a0a0a ground. */
+    --text-primary: #e5e5e5; /* 16.4:1 -- titles, values, emphasis */
+    --text-secondary: #a3a3a3; /* 8.6:1  -- sentences, descriptions, help text */
+    /* 5.4:1 on the page ground, 4.7:1 on the lightest card surface (#1a1a1a). */
+    --text-muted: #858585; /* labels, meta, timestamps */
+
+/* Stacking order: one ladder, named by what sits on each rung. */
+    --z-raised: 10;            /* overlay inside a component: hover play, scrim */
+    --z-scene: 20;             /* overlays within the vibe canvas */
+    --z-scene-panel: 30;       /* the vibe sheet */
+    --z-nav: 40;               /* bottom navigation */
+    --z-player: 45;            /* mini player, above the nav it overlaps */
+    --z-header: 50;            /* fixed top bar */
+    --z-dropdown: 55;          /* menus and popovers anchored to a control */
+    --z-drawer-backdrop: 70;   /* mobile sidebar backdrop */
+    --z-drawer: 75;            /* mobile sidebar */
+    --z-modal: 80;             /* dialogs, above the activity panel */
+    --z-panel-backdrop: 75;    /* activity panel scrim */
+    --z-panel: 76;             /* activity panel, below any dialog it opens */
+    --z-overlay: 200;          /* full-screen player */
+}
+
+* {
+    box-sizing: border-box;
+}
+
+/* ── Type roles ───────────────────────────────────────────────────────────
+ * Six roles cover every piece of text; size, weight and colour carry the
+ * hierarchy. Nothing is capitalised: the body sets every page lowercase. Monospace
+ * is only for machine strings (codes, tokens, URLs); aligned digits use tabular
+ * figures instead. */
+@layer components {
+    /* The short status kicker above a page title. */
+    .t-eyebrow {
+        font-size: var(--text-micro);
+        line-height: 1.4;
+        font-weight: 500;
+        letter-spacing: 0.12em;
+        color: var(--text-muted);
+    }
+
+    /* Names a group, a column or a field. Never a sentence. */
+    .t-label {
+        font-size: 0.75rem;
+        line-height: 1.4;
+        font-weight: 500;
+        color: var(--text-muted);
+    }
+
+    /* Counts, durations, track numbers, dates, file sizes. Digits align. */
+    .t-meta {
+        font-size: 0.75rem;
+        line-height: 1.4;
+        font-variant-numeric: tabular-nums;
+        color: var(--text-muted);
+    }
+
+    /* Sentences: descriptions, help text, empty-state copy. */
+    .t-body {
+        font-size: 0.875rem;
+        line-height: 1.55;
+        color: var(--text-secondary);
+    }
+
+    /* Anything you press: buttons, tabs, links. */
+    .t-control {
+        font-size: 0.875rem;
+        line-height: 1.25rem;
+        font-weight: 500;
+    }
+
+    /* Machine strings only. <code> gets this for free, below. They keep their
+     * case, since a key or code has to be read exactly. */
+    .t-data {
+        text-transform: none;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+            "Liberation Mono", monospace;
+        font-size: 0.75rem;
+        font-variant-numeric: tabular-nums;
+    }
+
+    /* A measurement. Numbers carry the weight and the words beside them stay
+     * light; size is set separately, so the same weight serves every rank. */
+    .t-figure {
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+        letter-spacing: -0.035em;
+        line-height: 0.9;
+        color: var(--text-primary);
+    }
+}
+
+/* A machine string is monospace because it is a machine string, not because
+ * someone remembered to add a class. */
+code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+        "Liberation Mono", monospace;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── The media grid ───────────────────────────────────────────────────────
+ * Every wall of artwork cards uses this grid. auto-fill keeps a short library
+ * at normal card size instead of stretching it; the gap grows with the
+ * viewport from 12px on a phone to 20px on a desktop. */
+@layer components {
+    .grid-media {
+        /* Fluid card floor: extra width goes to bigger artwork, not more columns.
+         * 152px still fits two cards on a 388px phone; 14vw keeps titles
+         * readable in the column left beside the sidebar and activity rail. */
+        --card-min: clamp(9.5rem, 14vw, 12rem);
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(var(--card-min), 1fr));
+        gap: clamp(0.75rem, 1.6vw, 1.25rem);
+    }
+}
+
+/* ── Hover-revealed controls on a device that cannot hover ────────────────
+ * opacity: 0 hides a control from the eye but not from a tap, so on touch
+ * screens hover-revealed controls are either shown or made non-interactive. */
+@media (hover: none) {
+    /* Hover-revealed buttons are real actions, so they are shown. Anything else
+     * with the class is a decorative scrim over a tile that is itself the
+     * control; it becomes non-interactive so the tap reaches the tile. */
+    button.group-hover\:opacity-100,
+    .group-hover\:opacity-100 button {
+        opacity: 1;
+        pointer-events: auto;
+    }
+
+    div.group-hover\:opacity-100,
+    span.group-hover\:opacity-100 {
+        pointer-events: none;
+    }
+
+    /* Press feedback for touch, where hover never fires. The dip is instant on
+     * the way down and eased back up; opacity, so it never fights the scale
+     * and translate already on many of these controls. */
+    button:not(:disabled):active,
+    a:not([aria-disabled="true"]):active,
+    [role="button"]:not([aria-disabled="true"]):active {
+        opacity: 0.6;
+        transition-duration: 0ms;
+    }
+
+    /* A 44px floor for anything a finger has to hit. Range, checkbox and radio
+     * are excluded: their tap area is the label beside them. Chart cells marked
+     * .touch-exempt are a picture on touch screens and keep their size. */
+    button:not(.touch-exempt),
+    input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+    select,
+    textarea {
+        min-height: 44px;
+    }
+
+    /* The same 44px floor for width, so icon buttons are a full fingertip wide.
+     * textarea is already full-width; range, checkbox and radio as above. */
+    button:not(.touch-exempt),
+    input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+    select {
+        min-width: 44px;
+    }
+
+    /* For hover-revealed controls the rules above miss, such as a partial
+     * group-hover opacity. */
+    .touch-reveal {
+        opacity: 1;
+        pointer-events: auto;
+    }
+}
+
+@layer components {
+    /* Every card's cover on hover: a slow, slight push-in. Touch screens and
+     * reduced motion keep the cover still. */
+    .cover-zoom {
+        transition: transform 600ms cubic-bezier(0.33, 1, 0.68, 1);
+    }
+    @media (hover: hover) and (prefers-reduced-motion: no-preference) {
+        .group:hover .cover-zoom,
+        .group:focus-visible .cover-zoom {
+            transform: scale(1.04);
+        }
+    }
+
+    /* The page column: one width and one side gutter for every page. */
+    .page-shell {
+        max-width: 1800px;
+        margin-inline: auto;
+        padding-inline: 1rem;
+    }
+    @media (min-width: 48rem) {
+        .page-shell {
+            padding-inline: 2rem;
+        }
+    }
+}
+
+/* The vertical beat between top-level page sections: 48px on a phone,
+ * opening to 72px on a desktop. */
+@layer components {
+    .section-stack > * + * {
+        margin-top: clamp(3rem, 5vw, 4.5rem);
+    }
+}
+
+/* A cover that fails to load leaves its placeholder background showing
+ * instead of printing the alt text over it. */
+img {
+    color: transparent;
+}
+
+body {
+    background: var(--bg-primary);
+    color: #e5e5e5;
+    font-family: var(--font-montserrat), -apple-system, BlinkMacSystemFont,
+        "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    min-height: 100vh;
+    /* Every page is lowercase, as in Kima v2. Display only: typed, copied and
+     * submitted text keeps its case. */
+    text-transform: lowercase;
+}
+
+/* Browsers set form controls to text-transform: none; these follow the page. */
+button, input, textarea, select, optgroup, option {
+    text-transform: inherit;
+}
+
+/* Keys, codes and addresses are read exactly, so they keep their case. */
+code, pre, .font-mono {
+    text-transform: none;
+}
+
+/* Keyboard focus ring -- restores visibility removed by Tailwind outline-none.
+   :focus-visible triggers only for keyboard nav, not mouse clicks.
+   This rule lives outside @layer, so it wins over Tailwind's @layer utilities
+   regardless of source order (unlayered CSS beats layered CSS in the cascade). */
+:focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+}
+
+/* Make all buttons have pointer cursor */
+button {
+    cursor: pointer;
+}
+
+button:disabled {
+    cursor: not-allowed;
+}
+
+/* Hide scrollbar utility - for horizontal scroll areas */
+.scrollbar-hide {
+    -ms-overflow-style: none; /* IE and Edge */
+    scrollbar-width: none; /* Firefox */
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+    display: none; /* Chrome, Safari, Opera */
+}
+
+/* Scrollbar Styling - Desktop only */
+@media (min-width: 769px) {
+    ::-webkit-scrollbar {
+        width: 12px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: var(--bg-primary);
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: var(--bg-hover);
+        border-radius: 6px;
+        border: 2px solid var(--bg-primary);
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background: var(--border-focus);
+    }
+}
+
+/* Hide scrollbars on mobile and tablet */
+@media (max-width: 768px) {
+    ::-webkit-scrollbar {
+        display: none;
+    }
+
+    * {
+        scrollbar-width: none;
+    }
+}
+
+/* Fade in animation for login page artist info */
+@keyframes fade-in {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.animate-fade-in {
+    animation: fade-in 0.6s ease-out forwards;
+}
+
+/* Shake animation for error messages */
+@keyframes shake {
+    0%,
+    100% {
+        transform: translateX(0);
+    }
+    10%,
+    30%,
+    50%,
+    70%,
+    90% {
+        transform: translateX(-4px);
+    }
+    20%,
+    40%,
+    60%,
+    80% {
+        transform: translateX(4px);
+    }
+}
+
+.animate-shake {
+    animation: shake 0.5s ease-in-out;
+}
+
+/* =====================================================
+   Accessibility - Reduced Motion Support
+   ===================================================== */
+
+/* Reduced motion zeroes both duration and delay, so staggered lists appear at
+ * once, and turns off smooth scrolling. --motion-ok and useReducedMotion expose
+ * the same preference for motion a media query cannot reach. */
+:root {
+    --motion-ok: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    :root {
+        --motion-ok: 0;
+    }
+
+    html {
+        scroll-behavior: auto !important;
+    }
+
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        animation-delay: 0ms !important;
+        transition-duration: 0.01ms !important;
+        transition-delay: 0ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+/* =====================================================
+   Android TV - Navigation Bar & Now Playing Only
+   ===================================================== */
+
+/* TV mode base setup */
+html.tv-mode,
+body.tv-mode {
+    background: linear-gradient(180deg, #1a1020 0%, #0a0a0a 100%) !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    width: 100vw !important;
+    height: 100vh !important;
+}
+
+body.tv-mode {
+    display: flex !important;
+    flex-direction: column !important;
+}
+
+body.tv-mode ::-webkit-scrollbar {
+    display: none;
+}
+
+body.tv-mode * {
+    scrollbar-width: none;
+}
+
+/* TV Content Area */
+.tv-content {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* ===== TV NAVIGATION BAR ===== */
+.tv-nav {
+    height: 56px;
+    padding: 0 40px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    flex-shrink: 0;
+    background: transparent;
+}
+
+/* The logo's shape; its gradient comes from lib/brandGradient.ts. */
+.kima-mark {
+    -webkit-mask: url("/assets/images/kima.webp") center / contain no-repeat;
+    mask: url("/assets/images/kima.webp") center / contain no-repeat;
+    animation: var(--animate-kima-drift);
+}
+
+.tv-logo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+}
+
+.tv-logo span {
+    font-size: 18px;
+    font-weight: 700;
+    color: #fff;
+}
+
+.tv-nav-links {
+    display: flex;
+    gap: 4px;
+}
+
+.tv-nav-link {
+    padding: 6px 14px;
+    font-size: 14px;
+    color: #777;
+    text-decoration: none;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+}
+
+.tv-nav-link.active {
+    color: #fff;
+}
+
+.tv-nav-link.focused {
+    color: var(--color-brand);
+    background: rgba(236, 178, 0, 0.1);
+}
+
+.tv-sync-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.tv-sync-btn:hover,
+.tv-sync-btn:focus {
+    background: rgba(255, 255, 255, 0.2);
+    outline: 2px solid var(--color-brand);
+}
+
+.tv-sync-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* ===== TV NOW PLAYING BAR ===== */
+.tv-now-playing-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 12px 40px;
+    background: rgba(255, 255, 255, 0.03);
+    flex-shrink: 0;
+}
+
+.tv-np-cover {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    object-fit: cover;
+}
+
+.tv-np-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.tv-np-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tv-np-artist {
+    font-size: 12px;
+    color: #888;
+}
+
+.tv-np-time {
+    font-size: 12px;
+    color: #888;
+    margin-right: 16px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Play/Pause button - main circular button */
+.tv-np-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    background: var(--color-brand);
+    color: #000;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: transform 0.15s, background 0.15s;
+}
+
+.tv-np-btn svg {
+    width: 16px !important;
+    height: 16px !important;
+}
+
+.tv-np-btn:hover {
+    background: #ffc107;
+    transform: scale(1.05);
+}
+
+/* Control buttons (shuffle, prev, next, repeat) */
+.tv-np-ctrl {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: transparent;
+    color: #888;
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+    position: relative;
+}
+
+.tv-np-ctrl:hover,
+.tv-np-ctrl:focus {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.tv-np-ctrl.active {
+    color: var(--color-brand);
+}
+
+.tv-np-ctrl.active:hover {
+    color: #ffc107;
+}
+
+/* Repeat "1" indicator */
+.tv-np-repeat-one {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    font-size: 8px;
+    font-weight: bold;
+    color: var(--color-brand);
+}
+
+/* ===== TV FOCUS STATES ===== */
+/* Card focus styling - visible ring around focused cards */
+body.tv-mode [data-tv-card]:focus {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--color-brand), 0 0 20px rgba(252, 162, 0, 0.4);
+    transform: scale(1.02);
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
+    z-index: 10;
+    position: relative;
+}
+
+body.tv-mode [data-tv-card]:focus-visible {
+    outline: none;
+}
+
+/* Buttons in TV mode */
+body.tv-mode button:focus,
+body.tv-mode a:focus {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 2px;
+}
+
+/* Remove default focus outlines for cards since we use box-shadow */
+body.tv-mode [data-tv-card] {
+    outline: none;
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+/* Filter buttons / tabs focus */
+body.tv-mode [data-tv-filter]:focus {
+    outline: none;
+    background: rgba(252, 162, 0, 0.2);
+    color: var(--color-brand);
+    box-shadow: 0 0 0 2px var(--color-brand);
+}
+
+/* Track list items focus */
+body.tv-mode [data-tv-track]:focus {
+    outline: none;
+    background: rgba(252, 162, 0, 0.15);
+    box-shadow: inset 0 0 0 2px var(--color-brand);
+}
+
+/* Action buttons in action bars */
+body.tv-mode [data-tv-action]:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--color-brand);
+    transform: scale(1.05);
+}
+
+/* Smooth scrolling for TV */
+body.tv-mode .tv-content {
+    scroll-behavior: smooth;
+}
+
+/* ===== PWA Standalone Mode Styles ===== */
+
+/* Safe area insets for notched devices and PWA window controls */
+:root {
+    /* Window Controls Overlay (Desktop PWA title bar) */
+    --titlebar-height: env(titlebar-area-height, 0px);
+
+    /* Safe-area insets apply only in the installed PWA (display-mode:
+     * standalone); in a browser the chrome already clears the notch. */
+    --standalone-safe-area-top: 0px;
+    --standalone-safe-area-bottom: 0px;
+}
+
+/* When running as installed PWA */
+@media all and (display-mode: standalone) {
+    /* Ensure body fills viewport properly */
+    html,
+    body {
+        height: 100%;
+        overflow: hidden;
+    }
+
+    :root {
+        --standalone-safe-area-top: env(safe-area-inset-top, 0px);
+        --standalone-safe-area-bottom: env(safe-area-inset-bottom, 0px);
+    }
+}
+
+/* Window Controls Overlay mode (Desktop PWA with custom title bar) */
+@media all and (display-mode: window-controls-overlay) {
+    /* Make the top bar draggable like a native title bar */
+    .pwa-titlebar-drag {
+        -webkit-app-region: drag;
+        app-region: drag;
+    }
+
+    /* Buttons and interactive elements should not be draggable */
+    .pwa-titlebar-drag button,
+    .pwa-titlebar-drag a,
+    .pwa-titlebar-drag input {
+        -webkit-app-region: no-drag;
+        app-region: no-drag;
+    }
+}
+
+/* =====================================================
+   Vibe map — the library as a night sky
+   ===================================================== */
+
+/* Near-black with a faint violet breath near the middle. The canvas above it is
+   transparent, so this is the deepest layer of the sky. */
+.vibe-sky {
+    background: radial-gradient(115% 90% at 50% 40%, #180b1e 0%, #0b0510 25%, #040207 48%, #000000 68%);
+}
+
+/* Floating surfaces over the map: dark violet glass, so the stars read through. */
+.vibe-glass {
+    background: rgba(8, 5, 14, 0.66);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(18px) saturate(120%);
+    -webkit-backdrop-filter: blur(18px) saturate(120%);
+    box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.7);
+}
+
+.vibe-glass--solid {
+    background: rgba(12, 8, 20, 0.94);
+}
+
+.vibe-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    white-space: nowrap;
+    font-size: var(--text-micro);
+    line-height: 1.2;
+    letter-spacing: 0.02em;
+    color: rgba(255, 255, 255, 0.9);
+    background: rgba(8, 5, 14, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    box-shadow: 0 2px 9px rgba(0, 0, 0, 0.6);
+    user-select: none;
+    pointer-events: none;
+}
+.vibe-chip--region {
+    font-size: 11px;
+    letter-spacing: 0.16em;
+    color: rgba(255, 255, 255, 0.55);
+    background: rgba(8, 5, 14, 0.42);
+    border-color: rgba(255, 255, 255, 0.07);
+}
+.vibe-chip--track,
+.vibe-chip--focus {
+    translate: 0 calc(-50% - 16px);
+}
+.vibe-chip--track {
+    max-width: 14rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: rgba(255, 255, 255, 0.78);
+}
+.vibe-chip--focus {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    padding: 5px 10px;
+    border-radius: 10px;
+    border-color: rgba(255, 255, 255, 0.2);
+}
+.vibe-chip__title {
+    font-size: 11px;
+    font-weight: 600;
+    max-width: 16rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.vibe-chip__meta {
+    color: rgba(255, 255, 255, 0.55);
+    max-width: 16rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* ── Chart ink ─────────────────────────────────────────────────────────────
+ * SVG chart furniture a Tailwind class cannot reach. Five rungs named for the
+ * job; a new chart picks a rung rather than inventing another white. */
+:root {
+    /* Something that exists but holds nothing: an unplayed key, a hovered
+     * ground. */
+    --chart-ink-faint: rgba(255, 255, 255, 0.035);
+    /* An empty cell or an unfilled disc, visible enough that a quiet week
+     * still reads as a grid. */
+    --chart-ink-empty: rgba(255, 255, 255, 0.055);
+    /* An axis, a baseline, the line a timeline sits on. */
+    --chart-ink-rule: rgba(255, 255, 255, 0.09);
+    /* A filled area behind a line, where the fill is context and not the
+     * subject. */
+    --chart-ink-band: rgba(255, 255, 255, 0.13);
+    /* The outline that makes a shape read as a shape rather than a smudge. */
+    --chart-ink-edge: rgba(255, 255, 255, 0.3);
+}
+
+/* ── Touch rows ────────────────────────────────────────────────────────────
+ * Ranked list rows grow to 44px on devices without hover and stay dense
+ * with a pointer. */
+@media (hover: none) {
+    .t-touch-row {
+        min-height: 44px;
+    }
+}
+
+/* Stats display scale; every step is at least 1.3x the one below. */
+:root {
+    --stat-hero: clamp(2rem, 3.6vw, 2.75rem);      /* 32-44: the opening figure */
+    --stat-figure: clamp(1.5rem, 2.4vw, 1.875rem); /* 24-30: a headline measurement */
+    --stat-claim: clamp(1.25rem, 1.9vw, 1.5rem);   /* 20-24: a finding in words */
+    --stat-lead: 1.125rem;                         /* 18: a reading or its gloss */
+
+    /* Space between blocks inside a chapter. */
+    --stat-gap-block: 2rem;     /* 32 */
+
+    /* Room under the chapters for the player when it floats over the content. */
+    --stats-under: 1rem;
+}
+
+/* The mini player floats over the content wherever the bottom-nav layout is used. */
+@media (max-width: 1024px), (max-width: 1366px) and (any-hover: none) and (pointer: coarse) {
+    :root {
+        --stats-under: calc(var(--mini-clearance) + 0.5rem);
+    }
+}
+
+/* Heights of the phone layout's top bar and bottom bar, and the space the floating mini player covers above the bar. */
+:root {
+    --topbar-h: 58px;
+    --nav-h: 56px;
+    --mini-clearance: 88px;
+}
+
+@media (orientation: landscape) and (max-height: 480px) {
+    :root {
+        --topbar-h: 50px;
+        --nav-h: 44px;
+        --mini-clearance: 66px;
+    }
+}
+
+@media (max-width: 640px) {
+    :root {
+        --stat-gap-block: 1.5rem;
+    }
+}

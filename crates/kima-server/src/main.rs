@@ -55,19 +55,23 @@ async fn main() -> anyhow::Result<()> {
         })
         .into_future();
     tokio::pin!(server);
-    tokio::select! {
-        res = &mut server => res?,
+    let served = tokio::select! {
+        res = &mut server => res,
         () = shutdown.cancelled() => {
             // Backstop: a connection that ignores shutdown must not keep the process alive.
             match tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await {
-                Ok(res) => res?,
-                Err(_) => warn!(grace = ?SHUTDOWN_GRACE, "connections still open; exiting anyway"),
+                Ok(res) => res,
+                Err(_) => {
+                    warn!(grace = ?SHUTDOWN_GRACE, "connections still open; exiting anyway");
+                    Ok(())
+                }
             }
         }
-    }
-    // Reached on every exit path of the serve future above, signalled or not.
+    };
+    // Runs whether serving ended by signal or by error, before the error is returned.
     shutdown.cancel();
     kima_server::jobs::drain(workers, SHUTDOWN_GRACE).await;
+    served?;
     Ok(())
 }
 

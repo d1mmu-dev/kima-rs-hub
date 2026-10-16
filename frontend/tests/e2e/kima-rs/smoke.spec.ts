@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 
 // Runs against a fresh kima-rs container (empty /data): the first account becomes admin.
-test("fresh install: health, register, log in, land on onboarding", async ({ page, request }) => {
+test("fresh install: health, register, log in, finish onboarding", async ({ page, request }) => {
     const consoleErrors: string[] = [];
     const failedApi: string[] = [];
     page.on("console", (m) => {
@@ -28,6 +28,17 @@ test("fresh install: health, register, log in, land on onboarding", async ({ pag
     await page.locator("#password").fill("smoke-pass-1");
     await page.locator('button[type="submit"]').click();
     await expect(page).toHaveURL(/\/onboarding\/?$/);
+
+    // Logged in but not onboarded: the page opens on the integrations step. Finishing with
+    // every integration disabled lands on /sync, as upstream does.
+    await page.getByRole("button", { name: "Save & Finish" }).click();
+    await expect(page).toHaveURL(/\/sync\/?$/);
+    const token = await page.evaluate(() => localStorage.getItem("auth_token"));
+    const me = await request.get("/api/auth/me", {
+        headers: { Authorization: `Bearer ${token}` },
+    });
+    expect((await me.json()).onboardingComplete).toBe(true);
+    expect(failedApi.filter((f) => f.includes("/api/onboarding/"))).toEqual([]);
     console.log("CONSOLE_ERRORS", JSON.stringify(consoleErrors));
     console.log("FAILED_API", JSON.stringify(failedApi));
 });

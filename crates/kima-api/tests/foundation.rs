@@ -180,3 +180,31 @@ async fn stream_ticket_endpoint(pool: PgPool) {
     assert_eq!(claims.kind(), kima_core::auth::TokenKind::Stream);
     assert_eq!(claims.user_id, user.id);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refresh_and_empty_query_tokens_are_rejected(pool: PgPool) {
+    let state = common::state(pool);
+    let (user, _) = common::user_with_token(&state, "ana").await;
+    let refresh = state.jwt.issue_refresh(user.id, user.token_version);
+    let server = probe(state);
+    server
+        .get(&format!("/media/stream?token={refresh}"))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    server
+        .get("/media/stream?token=")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn bad_header_falls_through_to_query_token(pool: PgPool) {
+    let state = common::state(pool);
+    let (user, _) = common::user_with_token(&state, "ana").await;
+    let stream = state.jwt.issue_stream(user.id, user.token_version);
+    probe(state)
+        .get(&format!("/media/stream?token={stream}"))
+        .authorization_bearer("garbage")
+        .await
+        .assert_status_ok();
+}

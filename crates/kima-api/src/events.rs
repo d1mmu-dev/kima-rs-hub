@@ -43,6 +43,14 @@ impl SseRegistry {
         ticket
     }
 
+    /// Forgets every outstanding ticket of a user (their sessions were revoked).
+    pub fn revoke_user(&self, user: Uuid) {
+        self.tickets
+            .lock()
+            .unwrap()
+            .retain(|_, (id, _)| *id != user);
+    }
+
     pub fn redeem_ticket(&self, ticket: &str) -> Option<Uuid> {
         let (user, issued) = self.tickets.lock().unwrap().remove(ticket)?;
         (issued.elapsed() < self.ttl).then_some(user)

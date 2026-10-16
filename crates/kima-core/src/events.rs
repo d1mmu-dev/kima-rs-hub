@@ -24,7 +24,8 @@ impl Event {
     }
 
     pub fn is_revocation(&self) -> bool {
-        self.data.get("type").and_then(|t| t.as_str()) == Some("session:revoked")
+        self.user_id.is_some()
+            && self.data.get("type").and_then(|t| t.as_str()) == Some("session:revoked")
     }
 }
 

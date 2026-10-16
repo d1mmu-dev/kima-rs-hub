@@ -82,8 +82,11 @@ async fn concurrent_claims_split_the_work(pool: PgPool) {
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn complete_marks_done(pool: PgPool) {
     let id = queue::enqueue(&pool, "scan", json!({}), 3).await.unwrap();
-    queue::claim(&pool, "scan", 1, LEASE).await.unwrap();
-    queue::complete(&pool, id).await.unwrap();
+    let job = queue::claim(&pool, "scan", 1, LEASE)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(queue::complete(&pool, &job).await.unwrap());
     assert_eq!(state_of(&pool, id).await.0, "done");
 }
 
@@ -155,4 +158,73 @@ async fn expired_lease_on_last_attempt_is_reaped_not_reclaimed(pool: PgPool) {
     let (state, _, error, _) = state_of(&pool, id).await;
     assert_eq!(state, "failed");
     assert_eq!(error.as_deref(), Some("lease expired on the final attempt"));
+}
+
+/// Review focus 5, fix round 1: a stale worker must not touch a job another worker now owns.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stale_complete_after_reclaim_is_ignored(pool: PgPool) {
+    let id = queue::enqueue(&pool, "scan", json!({}), 3).await.unwrap();
+    let stale = queue::claim(&pool, "scan", 1, LEASE)
+        .await
+        .unwrap()
+        .remove(0);
+    sqlx::query("UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let fresh = queue::claim(&pool, "scan", 1, LEASE)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(fresh.attempts, 2);
+
+    assert!(!queue::complete(&pool, &stale).await.unwrap());
+    assert_eq!(state_of(&pool, id).await.0, "running");
+
+    assert!(queue::complete(&pool, &fresh).await.unwrap());
+    assert_eq!(state_of(&pool, id).await.0, "done");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stale_complete_after_reap_is_ignored(pool: PgPool) {
+    let id = queue::enqueue(&pool, "scan", json!({}), 1).await.unwrap();
+    let stale = queue::claim(&pool, "scan", 1, LEASE)
+        .await
+        .unwrap()
+        .remove(0);
+    sqlx::query("UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queue::reap(&pool).await.unwrap(), 1);
+
+    assert!(!queue::complete(&pool, &stale).await.unwrap());
+    assert_eq!(state_of(&pool, id).await.0, "failed");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stale_fail_is_ignored(pool: PgPool) {
+    let id = queue::enqueue(&pool, "scan", json!({}), 3).await.unwrap();
+    let stale = queue::claim(&pool, "scan", 1, LEASE)
+        .await
+        .unwrap()
+        .remove(0);
+    sqlx::query("UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let fresh = queue::claim(&pool, "scan", 1, LEASE)
+        .await
+        .unwrap()
+        .remove(0);
+
+    assert!(!queue::fail(&pool, &stale, "stale boom").await.unwrap());
+    let (state, attempts, error, _) = state_of(&pool, id).await;
+    assert_eq!((state.as_str(), attempts, error), ("running", 2, None));
+
+    assert!(queue::fail(&pool, &fresh, "fresh boom").await.unwrap());
+    assert_eq!(state_of(&pool, id).await.0, "queued");
 }

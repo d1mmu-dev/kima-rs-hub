@@ -31,13 +31,13 @@ playlists and likes, and get a preview of how their files would be organized, th
 From the parent spec's M1 row:
 - User management: admin creates/lists/deletes users, changes roles, toggles registration;
   any user changes their own password (bumps `token_version`).
-- Scanner (lofty) with incremental rescans; artwork; browse; tsvector search.
+- Scanner (lofty) that keeps the library current by watching for changes; artwork; browse; tsvector search.
 - Streaming with HTTP range requests; ffmpeg transcode at 320/192/128 kbps.
 - Plays (listening history), playlists, likes, playback state (resume/queue sync).
 
 Added for the messy library:
 - The clean *Artist → Year – Album → songs* view (§4).
-- A "needs attention" report listing what the scanner had to guess (§4.4).
+- A "needs attention" report listing what the scanner had to guess (§4.5).
 - The organizer: preview, then copy/move into the clean layout, with an undo journal (§5).
 
 Carried forward from M0 (roadmap "Notes carried forward", all must land in M1):
@@ -66,7 +66,6 @@ Carried forward from M0 (roadmap "Notes carried forward", all must land in M1):
   M3 can feed it corrected values.
 - Subsonic API (M2), ML analysis (M4), vibe/radio/mixes (M5), podcasts/audiobooks (M6),
   Lidarr/Soulseek/downloads/discovery (M7).
-- Filesystem watching (inotify). Rescans run on start, on a schedule, and on demand.
 - Waveforms and "prewarm" endpoints, unless a page the M1 frontend shows cannot work without them.
 
 ## 4. The library view
@@ -103,14 +102,44 @@ The builder ports those helpers and their unit tests.
   trimming. The best-capitalized spelling wins as the display name (as upstream does).
 - An album is identified by (album artist, normalized album title). The year is an
   attribute, not part of the identity, so one album whose tracks carry different years stays
-  one album. It shows the most common year, and the conflict is reported (4.4).
+  one album. It shows the most common year, and the conflict is reported (§4.5).
 - A track is identified by its file path. Rescans update rows in place by path; a file whose
   size and mtime are unchanged is skipped.
 - Files that disappear are marked missing, not deleted, so plays, likes and playlist entries
   survive a temporarily unmounted drive. They are removed after a grace period (builder's call:
   keep the upstream behaviour if it has one, else 7 days).
 
-### 4.4 "Needs attention" report
+### 4.4 Keeping the library up to date (watching)
+
+The owner's requirement: kima watches the library and, on every change, adds, updates or
+removes only the files that changed. There is no nightly full rescan.
+
+- **Watcher.** The `notify` crate watches the library root recursively. Events are debounced
+  (about 2 s after the last event for a path), so a file being copied in is read once it is
+  complete, not halfway through. The debounced paths are queued as small jobs on the `library`
+  queue. Each job is a single-file update:
+  - a new file is added;
+  - a changed file (size or mtime differs) has its tags re-read;
+  - a deleted file is marked missing;
+  - a renamed or moved file is re-pointed by its fingerprint (§9), so its history is kept.
+  Folder renames are expanded into their files.
+- **Fallback mode.** Network shares (NFS/SMB) and some Docker bind mounts deliver no change
+  events. `KIMA_WATCH_MODE` sets the behaviour:
+  - `auto` (default) uses native events where they work;
+  - `poll` uses notify's polling watcher at `KIMA_WATCH_POLL_SECS` (default 60) for such mounts;
+  - `off` disables watching.
+  The settings page shows which mode is active.
+- **Safety-net reconcile, not a schedule.** Change events can be lost: the watcher can overflow
+  when many files change at once, inotify can hit its watch limit, or kima can be stopped
+  while files change. So kima runs an incremental reconcile in three cases: on startup, when
+  the watcher reports an overflow or error, and on demand from a "Rescan" button. A reconcile
+  walks the tree but skips every file whose size and mtime are unchanged. It is a full read
+  only for files that actually differ. If the watch limit is too low for the library, the
+  settings page says so and names the sysctl to raise.
+- **kima's own changes.** While the organizer applies a move, the watcher ignores paths in the
+  run's journal. The organizer updates those rows itself (§5.2).
+
+### 4.5 "Needs attention" report
 
 An admin-only page and endpoint that lists, per album, what the scanner had to guess:
 - artist or album taken from folder names, or "Unknown …"
@@ -121,7 +150,7 @@ An admin-only page and endpoint that lists, per album, what the scanner had to g
 This is how the owner sees how messy the library is, and what the organizer will do with it.
 It is a list, not an editor; there is no tag editing in M1.
 
-### 4.5 Artwork
+### 4.6 Artwork
 
 Embedded cover art first; else `cover.*`, `folder.*`, `front.*` in the album folder. Images are
 resized (the `image` crate) to the sizes the frontend asks for and cached under
@@ -151,7 +180,7 @@ It proposes a target path for every track, from the same fields the library view
 ### 5.2 How it runs
 
 1. **Preview** (always first). The admin opens the organizer page and sees a table: current
-   path → proposed path, grouped by album, with warnings (guessed fields from §4.4,
+   path → proposed path, grouped by album, with warnings (guessed fields from §4.5,
    collisions, unchanged files). Nothing touches the disk. The preview is a job, so large
    libraries don't block a request; progress arrives over SSE.
 2. **Apply**, with one of two modes:
@@ -246,9 +275,10 @@ where the frontend depends on a field.
   new path whose fingerprint matches a track marked missing, it re-points that track instead of
   creating a new one. This covers external moves and crashes mid-move, and keeps plays, likes
   and playlists attached.
-- **Scans and organizer runs never overlap.** They share one single-concurrency job queue
-  (`library`). Scheduled rescans: daily at 03:00 by default, set by `KIMA_SCAN_SCHEDULE`
-  (cron syntax, empty = off). Progress for both goes out as SSE events
+- **Watcher updates, reconciles and organizer runs never overlap.** They share one
+  single-concurrency job queue (`library`), so a single-file update waits while an organizer
+  run is applying. The library stays current through watching (§4.4), with no scheduled
+  rescan (owner's decision). Progress for reconcile and organizer runs goes out as SSE events
   `{"type":"library:progress","job":"scan"|"organize","done":n,"total":m}`.
 - **Transcode seeking:** while a transcode is still being written, the stream answers 200
   without range support. Once cached, ranges work like the original file.

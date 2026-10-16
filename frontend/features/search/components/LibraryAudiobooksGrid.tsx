@@ -20,7 +20,7 @@ export function LibraryAudiobooksGrid({
             {audiobooks.slice(0, 6).map((audiobook, index) => (
                 <MediaCard
                     key={audiobook.id}
-                    href={`/audiobooks/${audiobook.id}`}
+                    href={`/audiobooks/book/?id=${encodeURIComponent(audiobook.id)}`}
                     title={audiobook.title}
                     subtitle={audiobook.author || "Unknown author"}
                     imageUrl={

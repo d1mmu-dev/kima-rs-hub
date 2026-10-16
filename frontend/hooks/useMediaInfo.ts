@@ -25,10 +25,10 @@ export function useMediaInfo(coverSize: number = 100): MediaInfo {
 
         if (playbackType === "track" && currentTrack) {
             const albumLink = currentTrack.album?.id
-                ? `/album/${currentTrack.album.id}`
+                ? `/album/?id=${encodeURIComponent(currentTrack.album.id)}`
                 : null;
             const artistLink = currentTrack.artist?.id
-                ? `/artist/${currentTrack.artist.id}`
+                ? `/artist/?id=${encodeURIComponent(currentTrack.artist.id)}`
                 : null;
             return {
                 title: currentTrack.title,
@@ -52,7 +52,7 @@ export function useMediaInfo(coverSize: number = 100): MediaInfo {
                     : null,
                 albumLink: null,
                 artistLink: null,
-                mediaLink: `/audiobooks/${currentAudiobook.id}`,
+                mediaLink: `/audiobooks/book/?id=${encodeURIComponent(currentAudiobook.id)}`,
                 hasMedia,
             };
         }
@@ -67,7 +67,7 @@ export function useMediaInfo(coverSize: number = 100): MediaInfo {
                     : null,
                 albumLink: null,
                 artistLink: null,
-                mediaLink: `/podcasts/${podcastId}`,
+                mediaLink: `/podcasts/show/?id=${encodeURIComponent(podcastId)}`,
                 hasMedia,
             };
         }

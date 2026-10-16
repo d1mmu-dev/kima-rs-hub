@@ -36,7 +36,7 @@ const ArtistCardItem = memo(
     }: ArtistCardItemProps) {
         return (
             <MediaCard
-                href={`/artist/${artist.id}`}
+                href={`/artist/?id=${encodeURIComponent(artist.id)}`}
                 title={artist.name}
                 subtitle={plural(artist.albumCount || 0, "album")}
                 imageUrl={artist.coverArt ? api.getCoverArtUrl(artist.coverArt, 200) : null}

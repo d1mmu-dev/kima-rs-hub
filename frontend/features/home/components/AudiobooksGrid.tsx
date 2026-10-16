@@ -18,7 +18,7 @@ const AudiobooksGrid = memo(function AudiobooksGrid({ audiobooks }: AudiobooksGr
             {audiobooks.map((audiobook, index) => (
                 <CarouselItem key={audiobook.id}>
                     <MediaCard
-                        href={`/audiobooks/${audiobook.id}`}
+                        href={`/audiobooks/book/?id=${encodeURIComponent(audiobook.id)}`}
                         title={audiobook.title}
                         subtitle={audiobook.author || "Audiobook"}
                         imageUrl={audiobook.coverUrl ? api.getCoverArtUrl(audiobook.coverUrl, 300) : null}

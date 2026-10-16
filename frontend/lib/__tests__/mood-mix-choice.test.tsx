@@ -98,7 +98,8 @@ describe("MoodMixChoice", () => {
         await click("moodmix-save");
         expect(save).toHaveBeenCalledWith("your-mood-mix-1");
         expect(q("moodmix-save")).toBeNull();
-        expect(q("moodmix-saved")!.querySelector("a")!.getAttribute("href")).toBe("/playlist/pl1");
+        // next/link adds the trailing slash only under next.config (trailingSlash: true), not in vitest.
+        expect(q("moodmix-saved")!.querySelector("a")!.getAttribute("href")).toMatch(/^\/playlist\/?\?id=pl1$/);
 
         await click("moodmix-rebuild");
         expect(q("moodmix-saved")).not.toBeNull();

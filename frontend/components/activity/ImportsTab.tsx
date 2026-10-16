@@ -294,7 +294,7 @@ function ImportJobCard({
                     {/* Completed: link to playlist */}
                     {job.status === "completed" && job.createdPlaylistId && (
                         <Link
-                            href={`/playlist/${job.createdPlaylistId}`}
+                            href={`/playlist/?id=${encodeURIComponent(job.createdPlaylistId)}`}
                             className="inline-flex items-center gap-1 mt-1.5 text-micro tabular-nums font-semibold text-success hover:text-success/80 transition-colors"
                         >
                             <ExternalLink className="w-3 h-3" />

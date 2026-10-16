@@ -24,7 +24,7 @@ import { coverArtUrl } from "@/lib/cover-art";
 function PodcastCard({ podcast, index }: { podcast: { id: string; title: string; author: string; coverUrl?: string }; index: number }) {
     return (
         <MediaCard
-            href={`/podcasts/${podcast.id}`}
+            href={`/podcasts/show/?id=${encodeURIComponent(podcast.id)}`}
             title={podcast.title}
             subtitle={podcast.author}
             imageUrl={coverArtUrl(podcast.coverUrl)}
@@ -136,7 +136,7 @@ export default function PodcastsPage() {
             const result = await api.subscribePodcast(url);
             if (result.success && result.podcast?.id) {
                 queryClient.invalidateQueries({ queryKey: queryKeys.podcasts() });
-                router.push(`/podcasts/${result.podcast.id}`);
+                router.push(`/podcasts/show/?id=${encodeURIComponent(result.podcast.id)}`);
             }
             setRssUrl("");
             setShowRssInput(false);
@@ -277,7 +277,7 @@ export default function PodcastsPage() {
                                                 aria-selected={false}
                                                 className="flex items-center gap-3 p-3 hover:bg-white/5 transition-colors cursor-pointer border-b border-white/5 last:border-b-0"
                                                 onClick={() => {
-                                                    router.push(`/podcasts/${result.id}`);
+                                                    router.push(`/podcasts/show/?id=${encodeURIComponent(result.id)}`);
                                                     setShowDropdown(false);
                                                 }}
                                             >
@@ -308,7 +308,7 @@ export default function PodcastsPage() {
                                                     <button
                                                         onClick={(e) => {
                                                             e.stopPropagation();
-                                                            router.push(`/podcasts/${result.id}`);
+                                                            router.push(`/podcasts/show/?id=${encodeURIComponent(result.id)}`);
                                                             setShowDropdown(false);
                                                         }}
                                                         aria-label={`Subscribe to ${result.name}`}
@@ -447,7 +447,7 @@ export default function PodcastsPage() {
                                     title={genreName}
                                     action={
                                         <button
-                                            onClick={() => router.push(`/podcasts/genre/${genreId}`)}
+                                            onClick={() => router.push(`/podcasts/genre/?genreId=${encodeURIComponent(genreId)}`)}
                                             className="text-xs text-[var(--text-muted)] hover:text-brand transition-colors"
                                         >
                                             View All

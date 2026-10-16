@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useState, useEffect, useRef } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname } from "@/lib/use-pathname";
+import { Suspense, useState, useEffect, useRef } from "react";
 import { Plus } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { api } from "@/lib/api";
@@ -36,8 +37,10 @@ interface Playlist {
     user?: { username: string };
 }
 
-export function Sidebar() {
+function SidebarInner() {
     const pathname = usePathname();
+    const searchParams = useSearchParams();
+    const activePlaylistId = pathname === "/playlist" ? searchParams.get("id") : null;
     const router = useRouter();
     const queryClient = useQueryClient();
     const { isAuthenticated } = useAuth();
@@ -113,7 +116,7 @@ export function Sidebar() {
             });
             setShowCreatePlaylist(false);
             setNewPlaylistName("");
-            router.push(`/playlist/${result.id}`);
+            router.push(`/playlist/?id=${encodeURIComponent(result.id)}`);
         } catch {
             notify.error("Failed to create playlist");
         } finally {
@@ -280,13 +283,12 @@ export function Sidebar() {
                         playlists
                             .filter((p) => !p.isHidden)
                             .map((playlist, index) => {
-                                const isActive =
-                                    pathname === `/playlist/${playlist.id}`;
+                                const isActive = activePlaylistId === playlist.id;
                                 const isShared = playlist.isOwner === false;
                                 return (
                                     <Link
                                         key={playlist.id}
-                                        href={`/playlist/${playlist.id}`}
+                                        href={`/playlist/?id=${encodeURIComponent(playlist.id)}`}
                                         prefetch={false}
                                         className={cn(
                                             "flex items-center gap-3 py-2 px-2 border-l-2 transition-all duration-200 group",
@@ -373,5 +375,15 @@ export function Sidebar() {
                 </aside>
             )}
         </>
+    );
+}
+
+// SidebarInner reads search params (active playlist), which a static export
+// only allows below a Suspense boundary.
+export function Sidebar() {
+    return (
+        <Suspense fallback={null}>
+            <SidebarInner />
+        </Suspense>
     );
 }

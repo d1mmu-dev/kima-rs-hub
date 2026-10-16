@@ -701,7 +701,7 @@ test.describe("Dogfood walkthrough", () => {
         // The one deliberate full reload in the walkthrough. Everything up to here has been
         // in-memory React state; this proves the write reached the server and comes back.
         await session.step("reload the playlist and the track is still there", async () => {
-            await page.goto(`/playlist/${playlistId}`);
+            await page.goto(`/playlist/?id=${encodeURIComponent(playlistId)}`);
             await settle(page, 1500);
             const rows = page.locator("[data-track-index]");
             await expect(rows.first()).toBeVisible({ timeout: 12_000 });
@@ -760,7 +760,7 @@ test.describe("Dogfood walkthrough", () => {
                 await page.waitForTimeout(800);
             }
 
-            await page.goto(`/playlist/${playlistId}`);
+            await page.goto(`/playlist/?id=${encodeURIComponent(playlistId)}`);
             await settle(page, 1500);
             const rows = page.locator("[data-track-index]");
             await expect(rows.first()).toBeVisible({ timeout: 12_000 });
@@ -818,7 +818,7 @@ test.describe("Dogfood walkthrough", () => {
         });
 
         await session.step("delete it from the UI, with the confirmation", async () => {
-            await page.goto(`/playlist/${playlistId}`);
+            await page.goto(`/playlist/?id=${encodeURIComponent(playlistId)}`);
             await settle(page, 1500);
             await page.getByTitle("Delete Playlist").click();
             const confirm = page.getByRole("button", { name: "Delete", exact: true });
@@ -891,7 +891,7 @@ test.describe("Dogfood walkthrough", () => {
         });
 
         await session.step("open the playlist and capture initial order", async () => {
-            await page.goto(`/playlist/${playlistId}`);
+            await page.goto(`/playlist/?id=${encodeURIComponent(playlistId)}`);
             await settle(page, 2000);
             const rows = page.locator("[data-track-index]");
             await expect(rows.first()).toBeVisible({ timeout: 15_000 });
@@ -1590,7 +1590,7 @@ test.describe("Dogfood walkthrough", () => {
         if (!bookId) return;
 
         await session.step("open one and listen", async () => {
-            await page.goto(`/audiobooks/${bookId}`);
+            await page.goto(`/audiobooks/book/?id=${encodeURIComponent(bookId)}`);
             await settle(page, 3000);
 
             const play = page

@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { Suspense, useState, useEffect } from "react";
 import { formatTime, plural } from "@/lib/format";
-import { useParams, useRouter } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import {
     ArrowLeft,
     Play,
@@ -52,10 +52,10 @@ interface DeezerPlaylistFull {
     url: string;
 }
 
-export default function DeezerPlaylistDetailPage() {
-    const params = useParams();
+function DeezerPlaylistDetailPageInner() {
+    const searchParams = useSearchParams();
     const router = useRouter();
-    const playlistId = params.id as string;
+    const playlistId = searchParams.get("id") ?? "";
 
     const [playlist, setPlaylist] = useState<DeezerPlaylistFull | null>(null);
     const [isLoading, setIsLoading] = useState(true);
@@ -362,5 +362,13 @@ export default function DeezerPlaylistDetailPage() {
             </div>
 
         </div>
+    );
+}
+
+export default function DeezerPlaylistDetailPage() {
+    return (
+        <Suspense fallback={null}>
+            <DeezerPlaylistDetailPageInner />
+        </Suspense>
     );
 }

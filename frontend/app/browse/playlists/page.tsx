@@ -156,7 +156,7 @@ export default function BrowsePlaylistsPage() {
     ) => (
         <MediaCard
             key={`${item.source}-${item.type}-${item.id}-${context || "main"}-${index}`}
-            href={`/browse/playlists/${item.id}`}
+            href={`/browse/playlists/view/?id=${encodeURIComponent(item.id)}`}
             title={item.title}
             subtitle={`${plural(item.trackCount, "song")} · ${item.creator}`}
             imageUrl={item.imageUrl}

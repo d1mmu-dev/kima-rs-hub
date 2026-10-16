@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useAudioState, useAudioPlayback, useAudioControls } from "@/lib/audio-context";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { useImageColor } from "@/hooks/useImageColor";
@@ -20,14 +20,7 @@ import { TrackList } from "@/features/album/components/TrackList";
 import { SimilarAlbums } from "@/features/album/components/SimilarAlbums";
 import { PageMessage } from "@/components/ui/PageMessage";
 
-interface AlbumPageProps {
-    params: Promise<{
-        id: string;
-    }>;
-}
-
-export default function AlbumPage({ params }: AlbumPageProps) {
-    const { id } = use(params);
+function AlbumPageInner() {
     const addToPlaylist = useAddToPlaylistMutation();
     // Split hooks avoid re-renders from currentTime updates.
     const { currentTrack } = useAudioState();
@@ -37,7 +30,7 @@ export default function AlbumPage({ params }: AlbumPageProps) {
     const [showPlaylistSelector, setShowPlaylistSelector] = useState(false);
     const [pendingTrackIds, setPendingTrackIds] = useState<string[]>([]);
 
-    const { album, source, loading, failed, notFound, reloadAlbum } = useAlbumData(id);
+    const { album, source, loading, failed, notFound, reloadAlbum } = useAlbumData();
     const { playAlbum, shufflePlay, addToQueue, downloadAlbum } =
         useAlbumActions();
     const { isPendingByMbid } = useDownloadContext();
@@ -251,5 +244,13 @@ export default function AlbumPage({ params }: AlbumPageProps) {
                 onSelectPlaylist={handlePlaylistSelected}
             />
         </div>
+    );
+}
+
+export default function AlbumPage() {
+    return (
+        <Suspense fallback={null}>
+            <AlbumPageInner />
+        </Suspense>
     );
 }

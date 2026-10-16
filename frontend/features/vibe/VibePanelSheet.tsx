@@ -165,7 +165,7 @@ export function VibePanelSheet({
                             <span className="text-[var(--text-secondary)]">{selectedTrackTitle}</span>
                             {selectedTrackArtist && (
                                 <> &middot; {selectedArtistId
-                                    ? <Link href={`/artist/${selectedArtistId}`} className="underline-offset-2 hover:underline">{selectedTrackArtist}</Link>
+                                    ? <Link href={`/artist/?id=${encodeURIComponent(selectedArtistId)}`} className="underline-offset-2 hover:underline">{selectedTrackArtist}</Link>
                                     : selectedTrackArtist}</>
                             )}
                         </p>

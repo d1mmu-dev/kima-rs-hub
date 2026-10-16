@@ -44,7 +44,7 @@ export const ArtistsGrid = memo(function ArtistsGrid({ artists }: { artists: Art
             tiles={artists.map((a) => ({
                 key: a.id,
                 name: a.name,
-                href: `/artist/${a.id}`,
+                href: `/artist/?id=${encodeURIComponent(a.id)}`,
                 coverArt: a.coverArt,
                 subtitle: "Artist",
             }))}

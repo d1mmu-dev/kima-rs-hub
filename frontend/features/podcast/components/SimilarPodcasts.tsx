@@ -22,7 +22,7 @@ export function SimilarPodcasts({ podcasts }: SimilarPodcastsProps) {
                 {podcasts.map((podcast, index) => (
                     <MediaCard
                         key={podcast.id}
-                        href={`/podcasts/${podcast.id}`}
+                        href={`/podcasts/show/?id=${encodeURIComponent(podcast.id)}`}
                         imageUrl={podcast.coverUrl ? api.getCoverArtUrl(podcast.coverUrl, 300) : null}
                         title={podcast.title}
                         subtitle={podcast.author}

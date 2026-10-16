@@ -30,7 +30,7 @@ const MixesGrid = memo(function MixesGrid({ mixes }: MixesGridProps) {
                         style={{ "--i": index } as CSSProperties}
                     >
                         <MediaCard
-                            href={`/mix/${mix.id}`}
+                            href={`/mix/?id=${encodeURIComponent(mix.id)}`}
                             title={mix.name}
                             subtitle={plural(mix.trackCount, "track")}
                             imageUrl={mix.coverUrls.slice(0, 4).map((url) => api.getCoverArtUrl(url, 300))}

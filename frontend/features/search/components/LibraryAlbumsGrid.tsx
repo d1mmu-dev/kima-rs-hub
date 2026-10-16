@@ -14,7 +14,7 @@ export function LibraryAlbumsGrid({ albums }: LibraryAlbumsGridProps) {
             {albums.slice(0, 6).map((album, index) => (
                 <MediaCard
                     key={album.id}
-                    href={`/album/${album.id}`}
+                    href={`/album/?id=${encodeURIComponent(album.id)}`}
                     title={album.title}
                     subtitle={album.artist?.name || ""}
                     imageUrl={

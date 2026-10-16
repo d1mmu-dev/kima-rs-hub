@@ -70,7 +70,7 @@ export function AlbumHero({
                 <>
                     {album.artist && (
                         <Link
-                            href={`/artist/${album.artist.id}`}
+                            href={`/artist/?id=${encodeURIComponent(album.artist.id)}`}
                             className="font-medium text-white hover:underline"
                         >
                             {album.artist.name}

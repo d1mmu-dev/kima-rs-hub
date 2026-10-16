@@ -44,7 +44,7 @@ export function SimilarArtists({ similarArtists }: SimilarArtistsProps) {
                     return (
                         <MediaCard
                             key={artist.id || artist.name}
-                            href={`/artist/${navigationId}`}
+                            href={`/artist/?id=${encodeURIComponent(navigationId)}`}
                             title={artist.name}
                             subtitle={matchPercentage !== null ? `${libraryLine} · ${matchPercentage}% match` : libraryLine}
                             imageUrl={imageUrl}

@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { Suspense, useState, useEffect, useRef, useCallback } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Mic2, ArrowLeft } from "lucide-react";
 import { api } from "@/lib/api";
 import { GradientSpinner } from "@/components/ui/GradientSpinner";
@@ -18,10 +18,10 @@ interface Podcast {
     itunesId?: number;
 }
 
-export default function GenrePage() {
-    const params = useParams();
+function GenrePageInner() {
+    const searchParams = useSearchParams();
     const router = useRouter();
-    const genreId = params.genreId as string;
+    const genreId = searchParams.get("genreId") ?? "";
     const genre = PODCAST_GENRES.find((g) => g.id === genreId);
 
     const [podcasts, setPodcasts] = useState<Podcast[]>([]);
@@ -133,7 +133,7 @@ export default function GenrePage() {
                         {podcasts.map((podcast, index) => (
                             <MediaCard
                                 key={podcast.id}
-                                href={`/podcasts/${podcast.id || podcast.itunesId}`}
+                                href={`/podcasts/show/?id=${encodeURIComponent(String(podcast.id || podcast.itunesId))}`}
                                 title={podcast.title}
                                 subtitle={podcast.author}
                                 imageUrl={podcast.coverUrl}
@@ -172,5 +172,13 @@ export default function GenrePage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function GenrePage() {
+    return (
+        <Suspense fallback={null}>
+            <GenrePageInner />
+        </Suspense>
     );
 }

@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect } from "react";
-import { useParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useAudiobookQuery } from "@/hooks/useQueries";
 import { api } from "@/lib/api";
 import { subscribeQueryEvent } from "@/lib/query-events";
 
 export function useAudiobookData() {
-  const params = useParams();
-  const audiobookId = params.id as string;
+  const searchParams = useSearchParams();
+  const audiobookId = searchParams.get("id") ?? "";
 
   const { data: audiobook, isLoading, refetch } = useAudiobookQuery(audiobookId);
 

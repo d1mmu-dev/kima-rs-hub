@@ -118,7 +118,7 @@ export function LibraryTracksList({ tracks, limit }: LibraryTracksListProps) {
                             </p>
                             <p className="text-xs text-[var(--text-secondary)] truncate">
                                 <Link
-                                    href={`/artist/${track.album.artist.id}`}
+                                    href={`/artist/?id=${encodeURIComponent(track.album.artist.id)}`}
                                     className="hover:underline hover:text-white"
                                     onClick={(e) => e.stopPropagation()}
                                 >
@@ -126,7 +126,7 @@ export function LibraryTracksList({ tracks, limit }: LibraryTracksListProps) {
                                 </Link>
                                 <span className="mx-1">•</span>
                                 <Link
-                                    href={`/album/${track.album.id}`}
+                                    href={`/album/?id=${encodeURIComponent(track.album.id)}`}
                                     className="hover:underline hover:text-white"
                                     onClick={(e) => e.stopPropagation()}
                                 >

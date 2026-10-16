@@ -43,7 +43,7 @@ export const FeaturedPlaylistsGrid = memo(function FeaturedPlaylistsGrid({
             {playlists.slice(0, 20).map((playlist, index) => (
                 <CarouselItem key={`home-playlist-${playlist.id}-${index}`}>
                     <MediaCard
-                        href={`/browse/playlists/${playlist.id}`}
+                        href={`/browse/playlists/view/?id=${encodeURIComponent(playlist.id)}`}
                         title={playlist.title}
                         subtitle={plural(playlist.trackCount, "track")}
                         imageUrl={playlist.imageUrl || null}

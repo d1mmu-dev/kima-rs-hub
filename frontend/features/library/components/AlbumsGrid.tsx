@@ -35,7 +35,7 @@ const AlbumCardItem = memo(
     }: AlbumCardItemProps) {
         return (
             <MediaCard
-                href={`/album/${album.id}`}
+                href={`/album/?id=${encodeURIComponent(album.id)}`}
                 title={album.title}
                 subtitle={album.artist?.name}
                 imageUrl={album.coverArt ? api.getCoverArtUrl(album.coverArt, 200) : null}

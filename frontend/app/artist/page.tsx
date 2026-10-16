@@ -1,5 +1,7 @@
 "use client";
 
+import { Suspense } from "react";
+
 import {
     useAudioState,
     useAudioPlayback,
@@ -25,8 +27,9 @@ import { Discography } from "@/features/artist/components/Discography";
 import { AvailableAlbums } from "@/features/artist/components/AvailableAlbums";
 import { SimilarArtists } from "@/features/artist/components/SimilarArtists";
 import { PageMessage } from "@/components/ui/PageMessage";
+import Loading from "./loading";
 
-export default function ArtistPage() {
+function ArtistPageInner() {
     // Use split hooks to avoid re-renders from currentTime updates
     const { currentTrack } = useAudioState();
     const { isPlaying } = useAudioPlayback();
@@ -238,5 +241,13 @@ export default function ArtistPage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function ArtistPage() {
+    return (
+        <Suspense fallback={<Loading />}>
+            <ArtistPageInner />
+        </Suspense>
     );
 }

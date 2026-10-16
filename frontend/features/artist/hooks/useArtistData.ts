@@ -1,4 +1,4 @@
-import { useParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { queryKeys } from "@/hooks/useQueries";
 import { api } from "@/lib/api";
@@ -7,8 +7,8 @@ import { ArtistSource } from "../types";
 import { useMemo, useEffect, useRef, useState } from "react";
 
 export function useArtistData() {
-    const params = useParams();
-    const id = params.id as string;
+    const searchParams = useSearchParams();
+    const id = searchParams.get("id") ?? "";
     const { downloadStatus } = useDownloadContext();
     const prevActiveCountRef = useRef(downloadStatus.activeDownloads.length);
 

@@ -49,13 +49,13 @@ export function NotificationsTab() {
             return notification.metadata.href;
         }
         if (notification.metadata?.playlistId) {
-            return `/playlist/${notification.metadata.playlistId}`;
+            return `/playlist/?id=${encodeURIComponent(notification.metadata.playlistId)}`;
         }
         if (notification.metadata?.albumId) {
-            return `/album/${notification.metadata.albumId}`;
+            return `/album/?id=${encodeURIComponent(notification.metadata.albumId)}`;
         }
         if (notification.metadata?.artistId) {
-            return `/artist/${notification.metadata.artistId}`;
+            return `/artist/?id=${encodeURIComponent(notification.metadata.artistId)}`;
         }
         return null;
     };

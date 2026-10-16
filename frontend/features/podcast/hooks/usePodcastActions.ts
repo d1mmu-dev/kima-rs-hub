@@ -35,7 +35,7 @@ export function usePodcastActions(podcastId: string, sortedEpisodes?: Episode[])
 
                 if (response.success && response.podcast?.id) {
                     queryClient.invalidateQueries({ queryKey: queryKeys.podcasts() });
-                    router.push(`/podcasts/${response.podcast.id}`);
+                    router.push(`/podcasts/show/?id=${encodeURIComponent(response.podcast.id)}`);
                 }
             } catch (error: unknown) {
                 notify.error("Couldn't subscribe to this podcast", { message: error instanceof Error ? error.message : undefined });

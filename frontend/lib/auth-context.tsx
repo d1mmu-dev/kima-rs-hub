@@ -9,7 +9,8 @@ import {
     useMemo,
     useCallback,
 } from "react";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { usePathname } from "@/lib/use-pathname";
 import { api } from "./api";
 
 interface User {

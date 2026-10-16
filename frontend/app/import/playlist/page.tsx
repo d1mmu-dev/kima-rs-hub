@@ -1023,7 +1023,7 @@ function ImportPlaylistPageContent() {
                                     variant="primary"
                                     onClick={() =>
                                         router.push(
-                                            `/playlist/${importJob.createdPlaylistId}`
+                                            `/playlist/?id=${encodeURIComponent(String(importJob.createdPlaylistId))}`
                                         )
                                     }
                                     className="bg-success hover:bg-success hover:brightness-110"

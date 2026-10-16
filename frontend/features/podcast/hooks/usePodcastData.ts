@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { queryKeys, usePodcastQuery } from "@/hooks/useQueries";
 import { useAuth } from "@/lib/auth-context";
@@ -10,10 +10,10 @@ import { Podcast, PodcastPreview, SimilarPodcast, Episode } from "../types";
 import { subscribeQueryEvent } from "@/lib/query-events";
 
 export function usePodcastData() {
-  const params = useParams();
+  const searchParams = useSearchParams();
   const router = useRouter();
   const { isAuthenticated } = useAuth();
-  const podcastId = params.id as string;
+  const podcastId = searchParams.get("id") ?? "";
 
   const [sortOrder, setSortOrder] = useState<"newest" | "oldest">(() => {
     if (typeof window !== "undefined") {
@@ -121,7 +121,7 @@ export function usePodcastData() {
         setPreviewLoadState('done');
 
         if (preview.isSubscribed && preview.subscribedPodcastId) {
-          router.replace(`/podcasts/${preview.subscribedPodcastId}`);
+          router.replace(`/podcasts/show/?id=${encodeURIComponent(preview.subscribedPodcastId)}`);
         }
       } catch (err) {
         if (!cancelled) {

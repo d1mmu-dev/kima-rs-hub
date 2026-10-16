@@ -90,7 +90,7 @@ function PlaylistCard({
 
     return (
         <MediaCard
-            href={`/playlist/${playlist.id}`}
+            href={`/playlist/?id=${encodeURIComponent(playlist.id)}`}
             title={playlist.name}
             subtitle={`${isShared && playlist.user?.username ? `${playlist.user.username} · ` : ""}${plural(playlist.trackCount || 0, "song")}`}
             imageUrl={imageUrl}
@@ -164,7 +164,7 @@ function CreatePanel({ onClose }: { onClose: () => void }) {
             queryClient.invalidateQueries({ queryKey: queryKeys.playlists() });
             onClose();
             if (result?.id) {
-                router.push(`/playlist/${result.id}`);
+                router.push(`/playlist/?id=${encodeURIComponent(result.id)}`);
             }
         } catch (err) {
             setError(err instanceof Error ? err.message : "Failed to create playlist");
@@ -339,7 +339,7 @@ function ImportM3UPanel({ onClose }: { onClose: () => void }) {
                     </span>
                 </div>
                 <Link
-                    href={`/playlist/${result.playlistId}`}
+                    href={`/playlist/?id=${encodeURIComponent(result.playlistId)}`}
                     className="px-4 py-2 rounded-lg text-xs font-semibold bg-brand text-black hover:bg-brand-hover transition-colors"
                 >
                     View Playlist

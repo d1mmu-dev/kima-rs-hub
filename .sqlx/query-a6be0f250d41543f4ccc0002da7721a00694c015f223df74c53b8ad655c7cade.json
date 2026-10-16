@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET token_version = token_version + 1 WHERE id = $1 RETURNING token_version",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "token_version",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a6be0f250d41543f4ccc0002da7721a00694c015f223df74c53b8ad655c7cade"
+}

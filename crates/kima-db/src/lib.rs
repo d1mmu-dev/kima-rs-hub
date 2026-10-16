@@ -4,6 +4,7 @@ use sqlx::postgres::PgPoolOptions;
 
 pub use sqlx::PgPool;
 
+pub mod settings;
 pub mod users;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

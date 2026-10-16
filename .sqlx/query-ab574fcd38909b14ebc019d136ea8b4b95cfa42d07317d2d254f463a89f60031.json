@@ -1,0 +1,106 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, album_id, artist_name, title, disc, track_no, duration_secs, codec,\n                  bitrate, path, size, mtime, fingerprint,\n                  guessed AS \"guessed: Json<Guessed>\", missing_since\n           FROM tracks WHERE path = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "album_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "artist_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "disc",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "track_no",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "duration_secs",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "codec",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "bitrate",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "mtime",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "fingerprint",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 13,
+        "name": "guessed: Json<Guessed>",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 14,
+        "name": "missing_since",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ab574fcd38909b14ebc019d136ea8b4b95cfa42d07317d2d254f463a89f60031"
+}

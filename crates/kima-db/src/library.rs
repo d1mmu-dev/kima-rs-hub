@@ -1,0 +1,211 @@
+//! Artists, albums and tracks: upserts keyed on identity, missing-file tracking.
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use sqlx::types::Json;
+use sqlx::{PgConnection, PgPool};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+/// Which fields of a track came from fallbacks (folder names, file name) rather than tags.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Guessed {
+    pub album_artist: bool,
+    pub track_artist: bool,
+    pub album: bool,
+    pub year: bool,
+    pub title: bool,
+    pub track_no: bool,
+    pub disc: bool,
+}
+
+/// A track with every field resolved, ready to store. The `*_key` fields are the
+/// normalised identity keys (NFC, trimmed, whitespace-collapsed, lowercase), computed
+/// by the caller.
+#[derive(Debug, Clone)]
+pub struct ResolvedTrack {
+    pub album_artist: String,
+    pub album_artist_key: String,
+    pub track_artist: String,
+    pub album: String,
+    pub album_key: String,
+    pub year: Option<i32>,
+    pub is_compilation: bool,
+    pub disc: i32,
+    pub track_no: i32,
+    pub title: String,
+    pub duration_secs: i32,
+    pub codec: String,
+    pub bitrate: Option<i32>,
+    pub path: String,
+    pub size: i64,
+    pub mtime: OffsetDateTime,
+    pub fingerprint: [u8; 32],
+    pub guessed: Guessed,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackRow {
+    pub id: Uuid,
+    pub album_id: Uuid,
+    pub artist_name: String,
+    pub title: String,
+    pub disc: i32,
+    pub track_no: i32,
+    pub duration_secs: i32,
+    pub codec: String,
+    pub bitrate: Option<i32>,
+    pub path: String,
+    pub size: i64,
+    pub mtime: OffsetDateTime,
+    pub fingerprint: Vec<u8>,
+    pub guessed: Json<Guessed>,
+    pub missing_since: Option<OffsetDateTime>,
+}
+
+/// A spelling with both upper and lower case letters beats an all-lower or all-upper one.
+fn is_well_capitalised(s: &str) -> bool {
+    s.chars().any(char::is_lowercase) && s.chars().any(char::is_uppercase)
+}
+
+/// Finds or creates the artist and album, then upserts the track by path. A re-seen
+/// path clears `missing_since`. Returns the track id.
+pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Result<Uuid> {
+    let artist_id = sqlx::query_scalar!(
+        r#"INSERT INTO artists (id, name, name_key) VALUES ($1, $2, $3)
+           ON CONFLICT (name_key) DO UPDATE
+           SET name = CASE WHEN $4 AND NOT (artists.name <> lower(artists.name)
+                                            AND artists.name <> upper(artists.name))
+                           THEN EXCLUDED.name ELSE artists.name END
+           RETURNING id"#,
+        Uuid::now_v7(),
+        t.album_artist,
+        t.album_artist_key,
+        is_well_capitalised(&t.album_artist)
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let album_id = sqlx::query_scalar!(
+        r#"INSERT INTO albums (id, artist_id, title, title_key, year, is_compilation)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (artist_id, title_key, (COALESCE(year, -1))) DO UPDATE
+           SET is_compilation = albums.is_compilation OR EXCLUDED.is_compilation
+           RETURNING id"#,
+        Uuid::now_v7(),
+        artist_id,
+        t.album,
+        t.album_key,
+        t.year,
+        t.is_compilation
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query_scalar!(
+        r#"INSERT INTO tracks (id, album_id, artist_name, title, disc, track_no, duration_secs,
+                               codec, bitrate, path, size, mtime, fingerprint, guessed)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+           ON CONFLICT (path) DO UPDATE
+           SET album_id = EXCLUDED.album_id, artist_name = EXCLUDED.artist_name,
+               title = EXCLUDED.title, disc = EXCLUDED.disc, track_no = EXCLUDED.track_no,
+               duration_secs = EXCLUDED.duration_secs, codec = EXCLUDED.codec,
+               bitrate = EXCLUDED.bitrate, size = EXCLUDED.size, mtime = EXCLUDED.mtime,
+               fingerprint = EXCLUDED.fingerprint, guessed = EXCLUDED.guessed,
+               missing_since = NULL, updated_at = now()
+           RETURNING id"#,
+        Uuid::now_v7(),
+        album_id,
+        t.track_artist,
+        t.title,
+        t.disc,
+        t.track_no,
+        t.duration_secs,
+        t.codec,
+        t.bitrate,
+        t.path,
+        t.size,
+        t.mtime,
+        t.fingerprint.as_slice(),
+        serde_json::to_value(&t.guessed).expect("Guessed serialises"),
+    )
+    .fetch_one(&mut *tx)
+    .await
+}
+
+pub async fn find_by_path(pool: &PgPool, path: &str) -> sqlx::Result<Option<TrackRow>> {
+    sqlx::query_as!(
+        TrackRow,
+        r#"SELECT id, album_id, artist_name, title, disc, track_no, duration_secs, codec,
+                  bitrate, path, size, mtime, fingerprint,
+                  guessed AS "guessed: Json<Guessed>", missing_since
+           FROM tracks WHERE path = $1"#,
+        path
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Marks the given paths missing (keeping the original time for those already missing).
+/// Returns how many rows changed.
+pub async fn mark_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> {
+    let r = sqlx::query!(
+        "UPDATE tracks SET missing_since = now()
+         WHERE path = ANY($1) AND missing_since IS NULL",
+        paths
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// Moves a missing track with this fingerprint to `new_path`, clearing its missing flag.
+/// Only missing tracks match. Returns the track id.
+pub async fn repoint_by_fingerprint(
+    pool: &PgPool,
+    fingerprint: &[u8; 32],
+    new_path: &str,
+) -> sqlx::Result<Option<Uuid>> {
+    sqlx::query_scalar!(
+        r#"UPDATE tracks SET path = $2, missing_since = NULL, updated_at = now()
+           WHERE id = (SELECT id FROM tracks
+                       WHERE fingerprint = $1 AND missing_since IS NOT NULL
+                       ORDER BY missing_since, id LIMIT 1 FOR UPDATE SKIP LOCKED)
+           RETURNING id"#,
+        fingerprint.as_slice(),
+        new_path
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Deletes tracks missing for longer than `older_than`. Returns how many.
+pub async fn purge_missing(pool: &PgPool, older_than: Duration) -> sqlx::Result<u64> {
+    let r = sqlx::query!(
+        "DELETE FROM tracks
+         WHERE missing_since IS NOT NULL
+           AND missing_since < now() - make_interval(secs => $1::float8)",
+        older_than.as_secs_f64()
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// Deletes albums with no tracks, then artists with no albums.
+pub async fn prune_empty(pool: &PgPool) -> sqlx::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query!(
+        "DELETE FROM albums a WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)"
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+        "DELETE FROM artists a WHERE NOT EXISTS (SELECT 1 FROM albums b WHERE b.artist_id = a.id)"
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
+}

@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO artists (id, name, name_key) VALUES ($1, $2, $3)\n           ON CONFLICT (name_key) DO UPDATE\n           SET name = CASE WHEN $4 AND NOT (artists.name <> lower(artists.name)\n                                            AND artists.name <> upper(artists.name))\n                           THEN EXCLUDED.name ELSE artists.name END\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e71cfb880536bc02a79913c6e582751f45cff2ed29b91adaafe228cc4ca2e760"
+}

@@ -1,0 +1,31 @@
+import { test, expect } from "@playwright/test";
+import { loginAsTestUser } from "../fixtures/test-helpers";
+
+test.describe("Authentication", () => {
+    test("login with valid credentials redirects to home", async ({ page }) => {
+        await loginAsTestUser(page);
+        await expect(page).not.toHaveURL(/login/);
+    });
+
+    test("login with invalid credentials shows error", async ({ page }) => {
+        await page.goto("/login");
+        await page.locator("#username").fill("invalid-user");
+        await page.locator("#password").fill("wrong-password");
+        await page.getByRole("button", { name: "Sign In" }).click();
+        await expect(page.getByText(/invalid credentials/i)).toBeVisible({ timeout: 5000 });
+        await expect(page.getByText(/not authenticated/i)).toHaveCount(0);
+    });
+
+    test("protected routes redirect to login when unauthenticated", async ({ page }) => {
+        await page.goto("/collection");
+        await expect(page).toHaveURL(/login/);
+    });
+
+    test("logout clears session and redirects to login", async ({ page }) => {
+        await loginAsTestUser(page);
+
+        await page.getByRole("button", { name: "Logout" }).click();
+
+        await expect(page).toHaveURL(/login/, { timeout: 5000 });
+    });
+});

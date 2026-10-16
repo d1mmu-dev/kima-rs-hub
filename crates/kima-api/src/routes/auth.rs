@@ -53,7 +53,12 @@ async fn login(
     Ok(Json(json!({
         "token": state.jwt.issue_access(user.id, &user.username, &user.role, user.token_version),
         "refreshToken": state.jwt.issue_refresh(user.id, user.token_version),
-        "user": { "id": user.id, "username": user.username, "role": user.role },
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "role": user.role,
+            "onboardingComplete": user.onboarding_complete,
+        },
     })))
 }
 

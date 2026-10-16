@@ -98,7 +98,7 @@ test.describe("Playlists", () => {
         await expect(playlistOption).toBeVisible({ timeout: 5_000 });
         await playlistOption.click();
 
-        await page.goto(`/playlist/${playlistId}`);
+        await page.goto(`/playlist/?id=${encodeURIComponent(playlistId)}`);
         await page.waitForLoadState("domcontentloaded");
 
         // Playlist should have at least 1 track (rows use data-track-index on playlist page)
@@ -150,7 +150,7 @@ test.describe("Playlists", () => {
             headers: { Authorization: `Bearer ${token}` },
         });
 
-        await page.goto(`/playlist/${playlistId}`);
+        await page.goto(`/playlist/?id=${encodeURIComponent(playlistId)}`);
         await page.waitForLoadState("domcontentloaded");
 
         // Hover the track row to reveal "Remove from playlist" button
@@ -184,7 +184,7 @@ test.describe("Playlists", () => {
         const created = await createRes.json();
         const playlistId: string = created.id;
 
-        await page.goto(`/playlist/${playlistId}`);
+        await page.goto(`/playlist/?id=${encodeURIComponent(playlistId)}`);
         await page.waitForLoadState("domcontentloaded");
 
         const deleteBtn = page.getByTitle("Delete Playlist");
@@ -196,7 +196,7 @@ test.describe("Playlists", () => {
         await confirmBtn.click();
 
         await page.waitForURL(/\/(playlists|$)/, { timeout: 10_000 });
-        await expect(page).not.toHaveURL(new RegExp(`/playlist/${playlistId}`));
+        await expect(page).not.toHaveURL(new RegExp(`/playlist/\\?id=${encodeURIComponent(playlistId)}`));
     });
 
     test("play all tracks in playlist", async ({ page }) => {
@@ -242,7 +242,7 @@ test.describe("Playlists", () => {
             });
         }
 
-        await page.goto(`/playlist/${playlistId}`);
+        await page.goto(`/playlist/?id=${encodeURIComponent(playlistId)}`);
         await page.waitForLoadState("domcontentloaded");
 
         const playAllBtn = page.getByLabel("Play all").or(page.getByTitle("Play all")).first();

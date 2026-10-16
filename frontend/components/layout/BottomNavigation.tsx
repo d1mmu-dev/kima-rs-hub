@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname } from "@/lib/use-pathname";
 import { Library, Sparkles, BookOpen, Mic, ListMusic } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useIsMobile, useIsTablet } from "@/hooks/useMediaQuery";

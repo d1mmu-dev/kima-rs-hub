@@ -57,7 +57,7 @@ export function Discography({
                     return (
                         <MediaCard
                             key={album.id}
-                            href={`/album/${album.id}`}
+                            href={`/album/?id=${encodeURIComponent(album.id)}`}
                             imageUrl={album.coverArt ? api.getCoverArtUrl(album.coverArt, 300) : null}
                             title={album.title}
                             subtitle={subtitle}

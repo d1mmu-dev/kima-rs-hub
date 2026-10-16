@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, useMemo, type CSSProperties } from "react";
-import { useParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import {
     Play,
     Pause,
@@ -104,8 +104,8 @@ function getEntitySubtitle(shareData: ShareData): string {
 }
 
 export default function SharePageClient() {
-    const params = useParams();
-    const token = params.token as string;
+    const searchParams = useSearchParams();
+    const token = searchParams.get("token") ?? "";
 
     const [data, setData] = useState<ShareData | null>(null);
     const [error, setError] = useState<string | null>(null);

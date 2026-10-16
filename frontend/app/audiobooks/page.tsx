@@ -34,7 +34,7 @@ type SortType = "title" | "author" | "recent" | "series";
 function BookCard({ book, index }: { book: Audiobook; index: number }) {
     return (
         <MediaCard
-            href={`/audiobooks/${book.id}`}
+            href={`/audiobooks/book/?id=${encodeURIComponent(book.id)}`}
             title={book.title}
             subtitle={book.author}
             imageUrl={coverArtUrl(book.coverUrl)}
@@ -251,7 +251,7 @@ export default function AudiobooksPage() {
         }
         const shuffled = shuffleArray(audiobooks);
         if (shuffled[0]) {
-            router.push(`/audiobooks/${shuffled[0].id}`);
+            router.push(`/audiobooks/book/?id=${encodeURIComponent(shuffled[0].id)}`);
         }
     };
 
@@ -508,7 +508,7 @@ export default function AudiobooksPage() {
                                                 return (
                                                     <MediaCard
                                                         key={seriesName}
-                                                        href={`/audiobooks/series/${encodeURIComponent(seriesName)}`}
+                                                        href={`/audiobooks/series/?name=${encodeURIComponent(seriesName)}`}
                                                         title={seriesName}
                                                         subtitle={firstBook.author}
                                                         imageUrl={coverArtUrl(firstBook.coverUrl)}

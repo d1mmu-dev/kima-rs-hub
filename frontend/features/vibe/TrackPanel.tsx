@@ -48,14 +48,14 @@ export function TrackPanel({ track, songPathActive, onClose, onPlay, onVibe, onS
                         {normalizeNFC(track.title)}
                     </p>
                     {track.artistId ? (
-                        <Link href={`/artist/${track.artistId}`} className="block truncate text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] underline-offset-2 hover:underline">
+                        <Link href={`/artist/?id=${encodeURIComponent(track.artistId)}`} className="block truncate text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] underline-offset-2 hover:underline">
                             {normalizeNFC(track.artist)}
                         </Link>
                     ) : (
                         <p className="truncate text-xs text-[var(--text-secondary)]">{normalizeNFC(track.artist)}</p>
                     )}
                     {track.albumId && (
-                        <Link href={`/album/${track.albumId}`} className="mt-0.5 inline-block text-[11px] text-[var(--text-muted)] hover:text-[var(--text-secondary)] underline-offset-2 hover:underline">
+                        <Link href={`/album/?id=${encodeURIComponent(track.albumId)}`} className="mt-0.5 inline-block text-[11px] text-[var(--text-muted)] hover:text-[var(--text-secondary)] underline-offset-2 hover:underline">
                             Open album
                         </Link>
                     )}

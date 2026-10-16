@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { formatDuration, plural } from "@/lib/format";
@@ -21,14 +21,14 @@ import { CachedImage } from "@/components/ui/CachedImage";
 import type { Audiobook } from "@/features/audiobook/types";
 import { coverArtUrl } from "@/lib/cover-art";
 
-export default function SeriesDetailPage() {
-    const params = useParams();
+function SeriesDetailPageInner() {
+    const searchParams = useSearchParams();
     const { isAuthenticated } = useAuth();
     const { currentAudiobook, playbackType } = useAudioState();
     const { isPlaying } = useAudioPlayback();
     const { playAudiobook, pause, resumeWithGesture } = useAudioControls();
 
-    const seriesName = decodeURIComponent(params.name as string);
+    const seriesName = searchParams.get("name") ?? "";
     const [books, setBooks] = useState<Audiobook[]>([]);
     const [isLoading, setIsLoading] = useState(true);
 
@@ -158,7 +158,7 @@ export default function SeriesDetailPage() {
                                                 )}
                                             </div>
 
-                                            <Link href={`/audiobooks/${book.id}`}>
+                                            <Link href={`/audiobooks/book/?id=${encodeURIComponent(book.id)}`}>
                                                 <div className="relative w-10 h-10 rounded overflow-hidden bg-[var(--bg-primary)] border border-white/10 shrink-0 cursor-pointer">
                                                     {bookCover ? (
                                                         <CachedImage
@@ -177,7 +177,7 @@ export default function SeriesDetailPage() {
                                             </Link>
 
                                             <Link
-                                                href={`/audiobooks/${book.id}`}
+                                                href={`/audiobooks/book/?id=${encodeURIComponent(book.id)}`}
                                                 className="flex-1 min-w-0"
                                             >
                                                 <h3 className={`font-bold truncate text-sm tracking-tight ${
@@ -212,5 +212,13 @@ export default function SeriesDetailPage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function SeriesDetailPage() {
+    return (
+        <Suspense fallback={null}>
+            <SeriesDetailPageInner />
+        </Suspense>
     );
 }

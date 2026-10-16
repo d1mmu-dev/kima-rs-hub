@@ -590,7 +590,7 @@ function Ranked({
                     return (
                         <li key={item.key}>
                             {kind === "artist" && item.id ? (
-                                <Link href={`/artist/${item.id}`} className={shared}>
+                                <Link href={`/artist/?id=${encodeURIComponent(item.id)}`} className={shared}>
                                     {inner}
                                 </Link>
                             ) : kind === "track" ? (

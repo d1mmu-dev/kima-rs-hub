@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname } from "@/lib/use-pathname";
 import { AudioStateProvider } from "@/lib/audio-state-context";
 import { AudioPlaybackProvider } from "@/lib/audio-playback-context";
 import { AudioControlsProvider } from "@/lib/audio-controls-context";

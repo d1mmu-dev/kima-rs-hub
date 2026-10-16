@@ -23,7 +23,7 @@ const PodcastsGrid = memo(function PodcastsGrid({
             {podcasts.map((podcast, index) => (
                 <CarouselItem key={podcast.id}>
                     <MediaCard
-                        href={`/podcasts/${podcast.id}`}
+                        href={`/podcasts/show/?id=${encodeURIComponent(podcast.id)}`}
                         title={podcast.title}
                         subtitle={podcast.author || "Podcast"}
                         imageUrl={podcastCover(podcast)}

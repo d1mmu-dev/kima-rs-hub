@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useMemo } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { Suspense, useState, useMemo } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useAudioState, useAudioPlayback, useAudioControls } from "@/lib/audio-context";
 import { GradientSpinner } from "@/components/ui/GradientSpinner";
@@ -31,10 +31,10 @@ interface MixTrack {
     };
 }
 
-export default function MixPage() {
-    const params = useParams();
+function MixPageInner() {
+    const searchParams = useSearchParams();
     const router = useRouter();
-    const mixId = params.id as string;
+    const mixId = searchParams.get("id") ?? "";
     // Use split hooks to avoid re-renders from currentTime updates
     const { currentTrack } = useAudioState();
     const { isPlaying } = useAudioPlayback();
@@ -123,7 +123,7 @@ export default function MixPage() {
             const result = await api.saveMixAsPlaylist(mixId);
             window.dispatchEvent(new Event("playlist-created"));
             setTimeout(() => {
-                router.push(`/playlist/${result.id}`);
+                router.push(`/playlist/?id=${encodeURIComponent(result.id)}`);
             }, 1000);
         } catch (error: unknown) {
             console.error("Failed to save mix as playlist:", error);
@@ -132,7 +132,7 @@ export default function MixPage() {
                 notify.info("You've already saved this mix as a playlist.");
                 if (err?.data?.playlistId) {
                     setTimeout(() => {
-                        router.push(`/playlist/${err.data!.playlistId}`);
+                        router.push(`/playlist/?id=${encodeURIComponent(String(err.data!.playlistId))}`);
                     }, 1000);
                 }
             } else {
@@ -384,5 +384,13 @@ export default function MixPage() {
                 )}
             </div>
         </div>
+    );
+}
+
+export default function MixPage() {
+    return (
+        <Suspense fallback={null}>
+            <MixPageInner />
+        </Suspense>
     );
 }

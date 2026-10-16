@@ -1,5 +1,7 @@
 "use client";
 
+import { Suspense } from "react";
+
 import DOMPurify from "dompurify";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { useImageColor } from "@/hooks/useImageColor";
@@ -15,7 +17,7 @@ import { SectionList } from "@/features/audiobook/components/SectionList";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { PageMessage } from "@/components/ui/PageMessage";
 
-export default function AudiobookDetailPage() {
+function AudiobookDetailPageInner() {
     const { audiobookId, audiobook, isLoading, refetch, heroImage, colorExtractionImage } =
         useAudiobookData();
 
@@ -125,5 +127,13 @@ export default function AudiobookDetailPage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function AudiobookDetailPage() {
+    return (
+        <Suspense fallback={null}>
+            <AudiobookDetailPageInner />
+        </Suspense>
     );
 }

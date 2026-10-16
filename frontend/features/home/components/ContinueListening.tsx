@@ -20,9 +20,9 @@ function imageFor(item: ListenedItem) {
 }
 
 const VIEWS = {
-    podcast: { href: "/podcasts/", icon: Disc, label: "Podcast" },
-    audiobook: { href: "/audiobooks/", icon: BookOpen, label: "Audiobook" },
-    artist: { href: "/artist/", icon: Music, label: "Artist" },
+    podcast: { href: "/podcasts/show/?id=", icon: Disc, label: "Podcast" },
+    audiobook: { href: "/audiobooks/book/?id=", icon: BookOpen, label: "Audiobook" },
+    artist: { href: "/artist/?id=", icon: Music, label: "Artist" },
 } as const;
 
 const ContinueListening = memo(function ContinueListening({ items }: ContinueListeningProps) {
@@ -34,7 +34,7 @@ const ContinueListening = memo(function ContinueListening({ items }: ContinueLis
                 return (
                     <CarouselItem key={`${item.type}-${item.id}`}>
                         <MediaCard
-                            href={`${view.href}${item.id}`}
+                            href={`${view.href}${encodeURIComponent(item.id)}`}
                             title={item.name}
                             subtitle={type === "artist" ? view.label : item.author || view.label}
                             imageUrl={imageFor(item)}

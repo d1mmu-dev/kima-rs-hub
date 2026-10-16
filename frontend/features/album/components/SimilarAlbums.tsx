@@ -16,7 +16,7 @@ export function SimilarAlbums({ similarAlbums }: SimilarAlbumsProps) {
                 {similarAlbums.map((album, index) => (
                     <MediaCard
                         key={album.id}
-                        href={`/album/${album.id}`}
+                        href={`/album/?id=${encodeURIComponent(album.id)}`}
                         imageUrl={album.coverArt ? api.getCoverArtUrl(album.coverArt, 300) : album.coverUrl}
                         title={album.title}
                         subtitle={album.artist?.name}

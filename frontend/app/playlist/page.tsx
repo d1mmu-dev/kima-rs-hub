@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useMemo, useRef, useEffect, useLayoutEffect } from "react";
+import { Suspense, useState, useMemo, useRef, useEffect, useLayoutEffect } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useParams, useRouter } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { api } from "@/lib/api";
 import { useAudioState, useAudioPlayback, useAudioControls, Track as AudioTrack } from "@/lib/audio-context";
@@ -107,15 +107,15 @@ interface PendingTrack {
 const TRACK_GRID = "grid-cols-[64px_minmax(0,2fr)_minmax(0,1fr)_56px_160px]";
 const TRACK_GRID_MD = "md:grid-cols-[64px_minmax(0,2fr)_minmax(0,1fr)_56px_160px]";
 
-export default function PlaylistDetailPage() {
-    const params = useParams();
+function PlaylistDetailPageInner() {
+    const searchParams = useSearchParams();
     const router = useRouter();
     const queryClient = useQueryClient();
     const { currentTrack } = useAudioState();
     const { format: trackFormat } = useTrackFormat();
     const { isPlaying } = useAudioPlayback();
     const { playTracks, addToQueue, pause, resumeWithGesture } = useAudioControls();
-    const playlistId = params.id as string;
+    const playlistId = searchParams.get("id") ?? "";
 
     const { mutateAsync: removeTrack } = useRemoveFromPlaylistMutation();
     const { mutateAsync: deletePlaylistMut } = useDeletePlaylistMutation();
@@ -312,7 +312,7 @@ export default function PlaylistDetailPage() {
         setShareLoading(true);
         try {
             const result = await api.createShareLink("playlist", playlistId);
-            const fullUrl = `${window.location.origin}/share/${result.token}`;
+            const fullUrl = `${window.location.origin}/share/?token=${encodeURIComponent(result.token)}`;
             setShareToken(result.token);
             setShareUrl(fullUrl);
             setShowSharePopover(true);
@@ -1209,5 +1209,13 @@ export default function PlaylistDetailPage() {
                 variant="danger"
             />
         </div>
+    );
+}
+
+export default function PlaylistDetailPage() {
+    return (
+        <Suspense fallback={null}>
+            <PlaylistDetailPageInner />
+        </Suspense>
     );
 }

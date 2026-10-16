@@ -31,7 +31,7 @@ export function SimilarArtistsGrid({
                 return (
                     <MediaCard
                         key={`artist-${artistId}-${index}`}
-                        href={`/artist/${artistId}`}
+                        href={`/artist/?id=${encodeURIComponent(artistId)}`}
                         title={result.name}
                         subtitle={formatListeners(result.listeners)}
                         imageUrl={imageUrl}

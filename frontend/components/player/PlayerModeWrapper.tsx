@@ -1,11 +1,23 @@
 "use client";
 
-import { ReactNode } from "react";
+import { ReactNode, Suspense } from "react";
 import { usePlayerMode } from "@/hooks/usePlayerMode";
 
-export function PlayerModeWrapper({ children }: { children: ReactNode }) {
-    // This component exists solely to call the usePlayerMode hook
-    // which must be in a client component
+// usePlayerMode reads search params, which a static export only allows below a
+// Suspense boundary. A separate null-rendering component keeps `children`
+// outside that boundary.
+function PlayerModeSync() {
     usePlayerMode();
-    return <>{children}</>;
+    return null;
+}
+
+export function PlayerModeWrapper({ children }: { children: ReactNode }) {
+    return (
+        <>
+            <Suspense fallback={null}>
+                <PlayerModeSync />
+            </Suspense>
+            {children}
+        </>
+    );
 }

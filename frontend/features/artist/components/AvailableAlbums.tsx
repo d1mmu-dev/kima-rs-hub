@@ -76,7 +76,7 @@ function LazyAlbumCard({
 
     return (
         <MediaCard
-            href={`/album/${album.id}`}
+            href={`/album/?id=${encodeURIComponent(album.id)}`}
             imageUrl={coverArt}
             title={album.title}
             subtitle={subtitle}

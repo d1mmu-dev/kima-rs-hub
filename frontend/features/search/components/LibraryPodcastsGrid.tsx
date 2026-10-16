@@ -20,7 +20,7 @@ export function LibraryPodcastsGrid({ podcasts }: LibraryPodcastsGridProps) {
                 return (
                     <MediaCard
                         key={podcast.id}
-                        href={`/podcasts/${podcast.id}`}
+                        href={`/podcasts/show/?id=${encodeURIComponent(podcast.id)}`}
                         title={podcast.title}
                         subtitle={subtitle}
                         imageUrl={

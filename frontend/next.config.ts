@@ -1,5 +1,8 @@
 import type { NextConfig } from "next";
 
+const isDev = process.env.NODE_ENV === "development";
+const devBackend = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:3111";
+
 const nextConfig: NextConfig = {
     turbopack: {
         root: __dirname,
@@ -18,6 +21,7 @@ const nextConfig: NextConfig = {
     ],
     
     images: {
+        unoptimized: true,
         remotePatterns: [
             {
                 protocol: "https",
@@ -59,66 +63,18 @@ const nextConfig: NextConfig = {
         // SVG optimization disabled for security (prevents XSS via crafted SVGs)
     },
     reactStrictMode: true,
-    async headers() {
-        return [
-            {
-                source: "/(.*)",
-                headers: [
-                    {
-                        key: "Permissions-Policy",
-                        value: "camera=(), microphone=(), geolocation=()",
-                    },
-                    {
-                        key: "X-Frame-Options",
-                        value: "DENY",
-                    },
-                    {
-                        key: "X-Content-Type-Options",
-                        value: "nosniff",
-                    },
-                    {
-                        key: "Referrer-Policy",
-                        value: "strict-origin-when-cross-origin",
-                    },
-                    {
-                        key: "X-DNS-Prefetch-Control",
-                        value: "on",
-                    },
-                    {
-                        key: "Content-Security-Policy",
-                        value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://cdn-images.dzcdn.net https://e-cdns-images.dzcdn.net https://assets.pippa.io https://is1-ssl.mzstatic.com; media-src 'self' blob:; connect-src 'self' ws: wss:; font-src 'self'; frame-ancestors 'none'; worker-src 'self' blob:",
-                    },
-                ],
-            },
-        ];
-    },
-    async redirects() {
-        return [
-            { source: "/setup", destination: "/login", permanent: true },
-            { source: "/import/spotify", destination: "/import/playlist", permanent: true },
-        ];
-    },
-    // /api/* goes to the backend. Images set NEXT_PUBLIC_BACKEND_URL; the
-    // fallback is the local dev backend (backend/.env PORT=3111). /api/events
-    // is excluded: app/api/events/route.ts streams it without buffering.
-    async rewrites() {
-        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:3111";
-
-        return [
-            {
-                source: "/api/:path((?!events).*)*",
-                destination: `${backendUrl}/api/:path*`,
-            },
-            {
-                source: "/rest/:path*",
-                destination: `${backendUrl}/rest/:path*`,
-            },
-            {
-                source: "/health",
-                destination: `${backendUrl}/health`,
-            },
-        ];
-    },
+    trailingSlash: true,
+    ...(isDev
+        ? {
+              async rewrites() {
+                  return [
+                      { source: "/api/:path*", destination: `${devBackend}/api/:path*` },
+                      { source: "/rest/:path*", destination: `${devBackend}/rest/:path*` },
+                      { source: "/health", destination: `${devBackend}/health` },
+                  ];
+              },
+          }
+        : { output: "export" as const }),
 };
 
 // The bundle analyzer is a devDependency, stripped from production images.

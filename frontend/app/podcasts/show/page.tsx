@@ -1,5 +1,7 @@
 "use client";
 
+import { Suspense } from "react";
+
 import DOMPurify from "dompurify";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { useImageColor } from "@/hooks/useImageColor";
@@ -20,7 +22,7 @@ import { SimilarPodcasts } from "@/features/podcast/components/SimilarPodcasts";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { PageMessage } from "@/components/ui/PageMessage";
 
-export default function PodcastDetailPage() {
+function PodcastDetailPageInner() {
     const {
         podcastId,
         podcast,
@@ -206,5 +208,13 @@ export default function PodcastDetailPage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function PodcastDetailPage() {
+    return (
+        <Suspense fallback={null}>
+            <PodcastDetailPageInner />
+        </Suspense>
     );
 }

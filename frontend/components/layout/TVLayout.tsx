@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { usePathname } from "@/lib/use-pathname";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { cn } from "@/lib/cn";
 import { useAudio } from "@/lib/audio-context";

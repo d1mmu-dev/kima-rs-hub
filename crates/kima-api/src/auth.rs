@@ -1,4 +1,6 @@
-use axum::extract::FromRequestParts;
+use std::collections::HashMap;
+
+use axum::extract::{FromRequestParts, Query};
 use axum::http::HeaderMap;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
@@ -24,6 +26,20 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
         .map(str::trim)
         .filter(|token| !token.is_empty())
+}
+
+/// The request's token: the `Authorization: Bearer` header first, then `?token=` — but only on
+/// media paths (`…/stream`, `/api/library/cover-art…`), where `<audio>`/`<img>` cannot send headers.
+pub fn token_from_request(parts: &Parts) -> Option<String> {
+    if let Some(token) = bearer_token(&parts.headers) {
+        return Some(token.to_owned());
+    }
+    let path = parts.uri.path();
+    if !(path.ends_with("/stream") || path.starts_with("/api/library/cover-art")) {
+        return None;
+    }
+    let Query(mut params) = Query::<HashMap<String, String>>::try_from_uri(&parts.uri).ok()?;
+    params.remove("token").filter(|token| !token.is_empty())
 }
 
 /// The user a token names, if it is a live access token (or a stream token on a `/stream` path).
@@ -57,9 +73,8 @@ impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        let token =
-            bearer_token(&parts.headers).ok_or(ApiError::Unauthorized("Not authenticated"))?;
-        authenticate(state, token, parts.uri.path())
+        let token = token_from_request(parts).ok_or(ApiError::Unauthorized("Not authenticated"))?;
+        authenticate(state, &token, parts.uri.path())
             .await?
             .ok_or(ApiError::Unauthorized("Not authenticated"))
     }

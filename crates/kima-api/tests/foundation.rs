@@ -126,3 +126,57 @@ async fn token_of_deleted_user_is_rejected(pool: PgPool) {
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stream_token_in_query_works_on_stream_paths(pool: PgPool) {
+    let state = common::state(pool);
+    let (user, _) = common::user_with_token(&state, "ana").await;
+    let stream = state.jwt.issue_stream(user.id, user.token_version);
+    probe(state)
+        .get(&format!("/media/stream?token={stream}"))
+        .await
+        .assert_status_ok();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn query_token_rejected_off_stream_paths(pool: PgPool) {
+    let state = common::state(pool);
+    let (user, access) = common::user_with_token(&state, "ana").await;
+    let stream = state.jwt.issue_stream(user.id, user.token_version);
+    let server = probe(state);
+    for token in [access, stream] {
+        server
+            .get(&format!("/whoami?token={token}"))
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn access_token_in_query_works_on_stream_paths(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, access) = common::user_with_token(&state, "ana").await;
+    probe(state)
+        .get(&format!("/media/stream?token={access}"))
+        .await
+        .assert_status_ok();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stream_ticket_endpoint(pool: PgPool) {
+    let state = common::state(pool);
+    let (user, access) = common::user_with_token(&state, "ana").await;
+    let server = probe(state.clone());
+    server
+        .post("/api/auth/stream-ticket")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    let body: Value = server
+        .post("/api/auth/stream-ticket")
+        .authorization_bearer(&access)
+        .await
+        .json();
+    let claims = state.jwt.decode(body["token"].as_str().unwrap()).unwrap();
+    assert_eq!(claims.kind(), kima_core::auth::TokenKind::Stream);
+    assert_eq!(claims.user_id, user.id);
+}

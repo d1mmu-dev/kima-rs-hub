@@ -21,6 +21,8 @@ pub struct WorkerConfig {
     pub concurrency: usize,
     pub lease: Duration,
     pub poll_interval: Duration,
+    /// Minimum time between attempts to re-establish a lost LISTEN connection.
+    pub listen_retry: Duration,
 }
 
 impl WorkerConfig {
@@ -30,6 +32,7 @@ impl WorkerConfig {
             concurrency: concurrency.max(1),
             lease: Duration::from_secs(300),
             poll_interval: Duration::from_secs(5),
+            listen_retry: Duration::from_secs(30),
         }
     }
 }
@@ -52,6 +55,7 @@ pub fn spawn_worker(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut listener = listen(&pool).await;
+        let mut last_listen_attempt = tokio::time::Instant::now();
         let permits = Arc::new(Semaphore::new(config.concurrency));
         let mut running = JoinSet::new();
 
@@ -87,7 +91,19 @@ pub fn spawn_worker(
 
             tokio::select! {
                 _ = shutdown.cancelled() => break,
-                _ = notified(&mut listener) => {}
+                woke = notified(&mut listener) => {
+                    if !woke {
+                        // The stream failed; drop it and let the retry arm reconnect.
+                        listener = None;
+                    }
+                }
+                _ = tokio::time::sleep_until(last_listen_attempt + config.listen_retry),
+                    if listener.is_none() =>
+                {
+                    last_listen_attempt = tokio::time::Instant::now();
+                    listener = listen(&pool).await;
+                    // The loop re-claims next, so jobs enqueued while unsubscribed are found.
+                }
                 Some(result) = running.join_next(), if !running.is_empty() => log_join(result),
                 _ = tokio::time::sleep(config.poll_interval) => {}
             }
@@ -122,14 +138,16 @@ async fn listen(pool: &PgPool) -> Option<PgListener> {
     }
 }
 
-async fn notified(listener: &mut Option<PgListener>) {
+/// Resolves when a notification arrives (`true`) or the stream fails (`false`).
+async fn notified(listener: &mut Option<PgListener>) -> bool {
     match listener {
-        Some(l) => {
-            if let Err(error) = l.recv().await {
+        Some(l) => match l.recv().await {
+            Ok(_) => true,
+            Err(error) => {
                 warn!(%error, "job notification stream failed");
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                false
             }
-        }
+        },
         None => std::future::pending().await,
     }
 }

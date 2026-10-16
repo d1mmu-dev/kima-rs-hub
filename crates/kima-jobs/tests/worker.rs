@@ -166,3 +166,102 @@ async fn panic_before_the_future_is_recorded(pool: PgPool) {
     wait_for_state(&pool, good, "done").await;
     shutdown.cancel();
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn listen_is_retried_after_failure(pool: PgPool) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    // The poll interval is long, so only NOTIFY can wake the worker in time.
+    let config = WorkerConfig {
+        poll_interval: Duration::from_secs(30),
+        listen_retry: Duration::from_millis(200),
+        ..WorkerConfig::new("scan", 1)
+    };
+    let _worker = spawn_worker(
+        pool.clone(),
+        config,
+        handler(move |job| {
+            let tx = tx.clone();
+            async move {
+                tx.send(job.payload).unwrap();
+                Ok(())
+            }
+        }),
+        shutdown.clone(),
+    );
+
+    // Kill the LISTEN backend, as a database restart or a network blip would.
+    let mut killed = 0;
+    for _ in 0..50 {
+        killed = sqlx::query_scalar::<_, i64>(
+            "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity \
+             WHERE datname = current_database() AND query ILIKE 'LISTEN%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if killed > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(killed > 0, "never found the LISTEN backend");
+
+    // Give the worker time to notice and re-listen, then enqueue.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    queue::enqueue(&pool, "scan", json!({"n": 7}), 1)
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("job not picked up without a poll")
+        .unwrap();
+    assert_eq!(got, json!({"n": 7}));
+    shutdown.cancel();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn listen_is_retried_when_the_first_attempt_fails(pool: PgPool) {
+    // A pool whose connections are all taken makes the first LISTEN time out.
+    let small = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .acquire_timeout(Duration::from_millis(300))
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let held = (
+        small.acquire().await.unwrap(),
+        small.acquire().await.unwrap(),
+    );
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let config = WorkerConfig {
+        poll_interval: Duration::from_secs(30),
+        listen_retry: Duration::from_millis(200),
+        ..WorkerConfig::new("scan", 1)
+    };
+    let _worker = spawn_worker(
+        small.clone(),
+        config,
+        handler(move |job| {
+            let tx = tx.clone();
+            async move {
+                tx.send(job.payload).unwrap();
+                Ok(())
+            }
+        }),
+        shutdown.clone(),
+    );
+    tokio::time::sleep(Duration::from_millis(800)).await; // first LISTEN has failed
+    drop(held);
+    queue::enqueue(&pool, "scan", json!({"n": 9}), 1)
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .expect("worker never recovered without waiting a poll interval")
+        .unwrap();
+    assert_eq!(got, json!({"n": 9}));
+    shutdown.cancel();
+}

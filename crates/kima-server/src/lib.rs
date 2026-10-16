@@ -9,6 +9,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 pub mod frontend;
+pub mod jobs;
 
 /// Upstream's Next.js `headers()` block, now applied by the server to every response.
 const SECURITY_HEADERS: &[(&str, &str)] = &[

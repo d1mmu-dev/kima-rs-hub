@@ -36,6 +36,10 @@ fn config(frontend: Option<&Path>, origins: &[&str]) -> Config {
         log_level: "info".into(),
         session_secret: None,
         settings_encryption_key: None,
+        watch_mode: kima_core::config::WatchMode::Auto,
+        watch_poll_secs: 60,
+        organize_target: None,
+        transcode_cache_mb: 2048,
     }
 }
 

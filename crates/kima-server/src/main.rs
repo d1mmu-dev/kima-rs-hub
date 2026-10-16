@@ -6,6 +6,7 @@ use kima_api::AppState;
 use kima_core::config::Config;
 use kima_core::secrets;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -35,8 +36,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("running migrations")?;
 
-    let state = AppState::new(pool, &secrets.session_secret);
-    let shutdown = state.shutdown.clone();
+    let shutdown = CancellationToken::new();
+    let state = AppState::with_shutdown(pool.clone(), &secrets.session_secret, shutdown.clone());
+    // Task 8 registers the `library` handler; until then no workers run.
+    let workers =
+        kima_server::jobs::spawn_all(&pool, kima_server::jobs::Registry::new(), shutdown.clone());
     let app = kima_server::app(state, &config);
     let listener = TcpListener::bind(config.bind_addr)
         .await
@@ -61,6 +65,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    // Reached on every exit path of the serve future above, signalled or not.
+    shutdown.cancel();
+    kima_server::jobs::drain(workers, SHUTDOWN_GRACE).await;
     Ok(())
 }
 

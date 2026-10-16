@@ -12,6 +12,21 @@ pub struct Config {
     pub log_level: String,
     pub session_secret: Option<String>,
     pub settings_encryption_key: Option<String>,
+    pub watch_mode: WatchMode,
+    pub watch_poll_secs: u64,
+    pub organize_target: Option<PathBuf>,
+    pub transcode_cache_mb: u64,
+}
+
+/// How the library folder is watched for changes (`KIMA_WATCH_MODE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchMode {
+    /// Filesystem events, falling back to polling where they are unavailable.
+    Auto,
+    /// Periodic scans only.
+    Poll,
+    /// No watching.
+    Off,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -57,6 +72,40 @@ impl Config {
             })
             .unwrap_or_default();
 
+        let watch_mode = match value("KIMA_WATCH_MODE") {
+            None => WatchMode::Auto,
+            Some(raw) => match raw.to_ascii_lowercase().as_str() {
+                "auto" => WatchMode::Auto,
+                "poll" => WatchMode::Poll,
+                "off" => WatchMode::Off,
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        name: "KIMA_WATCH_MODE",
+                        value: raw,
+                    });
+                }
+            },
+        };
+        let watch_poll_secs = match value("KIMA_WATCH_POLL_SECS") {
+            None => 60,
+            Some(raw) => match raw.parse::<u64>() {
+                Ok(n) if n > 0 => n,
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        name: "KIMA_WATCH_POLL_SECS",
+                        value: raw,
+                    });
+                }
+            },
+        };
+        let transcode_cache_mb = match value("KIMA_TRANSCODE_CACHE_MB") {
+            None => 2048,
+            Some(raw) => raw.parse::<u64>().map_err(|_| ConfigError::Invalid {
+                name: "KIMA_TRANSCODE_CACHE_MB",
+                value: raw,
+            })?,
+        };
+
         Ok(Self {
             database_url,
             data_dir: value("KIMA_DATA_DIR")
@@ -71,6 +120,10 @@ impl Config {
             log_level: value("LOG_LEVEL").unwrap_or_else(|| "info".into()),
             session_secret: value("SESSION_SECRET"),
             settings_encryption_key: value("SETTINGS_ENCRYPTION_KEY"),
+            watch_mode,
+            watch_poll_secs,
+            organize_target: value("KIMA_ORGANIZE_TARGET").map(PathBuf::from),
+            transcode_cache_mb,
         })
     }
 }
@@ -110,6 +163,72 @@ mod tests {
         assert_eq!(config.frontend_dir, None);
         assert!(config.allowed_origins.is_empty());
         assert_eq!(config.session_secret, None);
+    }
+
+    #[test]
+    fn watch_and_organize_defaults() {
+        let config = Config::from_lookup(lookup(&[("DATABASE_URL", "postgres://x")])).unwrap();
+        assert_eq!(config.watch_mode, WatchMode::Auto);
+        assert_eq!(config.watch_poll_secs, 60);
+        assert_eq!(config.organize_target, None);
+        assert_eq!(config.transcode_cache_mb, 2048);
+    }
+
+    #[test]
+    fn watch_mode_parses() {
+        let mode = |v: &str| {
+            Config::from_lookup(lookup(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("KIMA_WATCH_MODE", v),
+            ]))
+            .unwrap()
+            .watch_mode
+        };
+        assert_eq!(mode("poll"), WatchMode::Poll);
+        assert_eq!(mode("off"), WatchMode::Off);
+        assert_eq!(mode("AUTO"), WatchMode::Auto);
+    }
+
+    #[test]
+    fn bad_watch_mode_is_invalid() {
+        assert_eq!(
+            Config::from_lookup(lookup(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("KIMA_WATCH_MODE", "sometimes")
+            ])),
+            Err(ConfigError::Invalid {
+                name: "KIMA_WATCH_MODE",
+                value: "sometimes".into()
+            })
+        );
+    }
+
+    #[test]
+    fn poll_secs_must_be_positive() {
+        for bad in ["0", "-1", "soon"] {
+            assert_eq!(
+                Config::from_lookup(lookup(&[
+                    ("DATABASE_URL", "postgres://x"),
+                    ("KIMA_WATCH_POLL_SECS", bad)
+                ])),
+                Err(ConfigError::Invalid {
+                    name: "KIMA_WATCH_POLL_SECS",
+                    value: bad.into()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn organize_target_and_cache_are_read() {
+        let config = Config::from_lookup(lookup(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("KIMA_ORGANIZE_TARGET", "/organized"),
+            ("KIMA_TRANSCODE_CACHE_MB", "512"),
+        ]))
+        .unwrap();
+        assert_eq!(config.organize_target, Some(PathBuf::from("/organized")));
+        assert_eq!(config.transcode_cache_mb, 512);
     }
 
     #[test]

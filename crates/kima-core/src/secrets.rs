@@ -1,4 +1,9 @@
 //! The two server secrets, generated on first start and kept in the data dir.
+//!
+//! Values supplied through the environment (`SESSION_SECRET`,
+//! `SETTINGS_ENCRYPTION_KEY`) are never written to the file. If they are later
+//! removed, the server falls back to the stored generated key, and settings
+//! encrypted under the env key become unreadable.
 
 use std::fs;
 use std::io::{self, Write};
@@ -7,6 +12,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 
 pub const SECRETS_FILE: &str = "secrets.json";
@@ -54,23 +60,27 @@ pub fn load_or_generate(
     env_key: Option<String>,
 ) -> Result<Secrets, SecretsError> {
     let path = data_dir.join(SECRETS_FILE);
-    let stored = match fs::read_to_string(&path) {
-        Ok(text) => {
-            serde_json::from_str::<SecretsFile>(&text).map_err(|source| SecretsError::Corrupt {
-                path: path.clone(),
-                source,
-            })?
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+    let stored = match read_stored(&path)? {
+        Some(stored) => stored,
+        None => {
             let fresh = SecretsFile {
                 session_secret: random_secret(),
                 settings_encryption_key: random_secret(),
             };
             let json = serde_json::to_string_pretty(&fresh).expect("secrets serialise");
-            write_private(&path, &json)?;
-            fresh
+            if publish_new(&path, &json)? {
+                fresh
+            } else {
+                // Another process won the first-start race and published its file first.
+                read_stored(&path)?.ok_or_else(|| SecretsError::Io {
+                    path: path.clone(),
+                    source: io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "secrets file vanished during first start",
+                    ),
+                })?
+            }
         }
-        Err(source) => return Err(SecretsError::Io { path, source }),
     };
     Ok(Secrets {
         session_secret: env_session.unwrap_or(stored.session_secret),
@@ -80,12 +90,35 @@ pub fn load_or_generate(
 
 fn random_secret() -> String {
     let mut bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    OsRng.fill_bytes(&mut bytes);
     STANDARD.encode(bytes)
 }
 
-/// Writes through a temporary file so a crash never leaves a half-written secrets file.
-fn write_private(path: &Path, contents: &str) -> Result<(), SecretsError> {
+/// Reads the stored secrets; `None` when the file does not exist yet.
+fn read_stored(path: &Path) -> Result<Option<SecretsFile>, SecretsError> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str::<SecretsFile>(&text)
+            .map(Some)
+            .map_err(|source| SecretsError::Corrupt {
+                path: path.to_path_buf(),
+                source,
+            }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(SecretsError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Publishes `contents` at `path` only if nothing is there yet. Returns `Ok(false)`
+/// without touching the file when it already exists, so a racing first start cannot
+/// replace secrets another process has already handed out.
+///
+/// Writes to a uniquely named temporary file (created exclusively, mode 0600 on unix)
+/// first, so a crash never leaves a half-written secrets file and a stale or planted
+/// temporary file is never reused.
+fn publish_new(path: &Path, contents: &str) -> Result<bool, SecretsError> {
     let io_err = |source: io::Error| SecretsError::Io {
         path: path.to_path_buf(),
         source,
@@ -93,18 +126,31 @@ fn write_private(path: &Path, contents: &str) -> Result<(), SecretsError> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(io_err)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.{:016x}.tmp", OsRng.next_u64()));
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     let mut file = options.open(&tmp).map_err(io_err)?;
-    file.write_all(contents.as_bytes()).map_err(io_err)?;
-    file.sync_all().map_err(io_err)?;
-    fs::rename(&tmp, path).map_err(io_err)
+    let written = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(source) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(io_err(source));
+    }
+    // hard_link refuses to replace an existing path, unlike rename.
+    let linked = fs::hard_link(&tmp, path);
+    let _ = fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(source) => Err(io_err(source)),
+    }
 }
 
 #[cfg(test)]
@@ -150,6 +196,38 @@ mod tests {
             load_or_generate(dir.path(), Some("from-env".into()), Some("key-env".into())).unwrap();
         assert_eq!(s.session_secret, "from-env");
         assert_eq!(s.settings_encryption_key, "key-env");
+    }
+
+    #[test]
+    fn publish_onto_existing_file_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SECRETS_FILE);
+        fs::write(
+            &path,
+            r#"{"session_secret":"a","settings_encryption_key":"b"}"#,
+        )
+        .unwrap();
+        let published = publish_new(
+            &path,
+            r#"{"session_secret":"x","settings_encryption_key":"y"}"#,
+        )
+        .unwrap();
+        assert!(!published, "existing file must not be replaced");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            r#"{"session_secret":"a","settings_encryption_key":"b"}"#
+        );
+        let leftovers = fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 1, "temporary file is cleaned up");
+    }
+
+    #[test]
+    fn publish_creates_file_with_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SECRETS_FILE);
+        assert!(publish_new(&path, "{}").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -56,7 +56,9 @@ pub fn spawn_worker(
         let mut running = JoinSet::new();
 
         while !shutdown.is_cancelled() {
-            while running.try_join_next().is_some() {}
+            while let Some(result) = running.try_join_next() {
+                log_join(result);
+            }
             if let Err(error) = queue::reap(&pool).await {
                 warn!(%error, "reaping expired jobs failed");
             }
@@ -86,13 +88,21 @@ pub fn spawn_worker(
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = notified(&mut listener) => {}
-                Some(_) = running.join_next(), if !running.is_empty() => {}
+                Some(result) = running.join_next(), if !running.is_empty() => log_join(result),
                 _ = tokio::time::sleep(config.poll_interval) => {}
             }
         }
 
-        while running.join_next().await.is_some() {}
+        while let Some(result) = running.join_next().await {
+            log_join(result);
+        }
     })
+}
+
+fn log_join(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result {
+        warn!(%error, "job task failed");
+    }
 }
 
 async fn listen(pool: &PgPool) -> Option<PgListener> {
@@ -125,7 +135,10 @@ async fn notified(listener: &mut Option<PgListener>) {
 }
 
 async fn run_one(pool: &PgPool, handler: &Handler, job: Job) {
-    let outcome = AssertUnwindSafe(handler(job.clone())).catch_unwind().await;
+    // Lazy, so a panic before the handler returns its future is caught too.
+    let outcome = AssertUnwindSafe(async { handler(job.clone()).await })
+        .catch_unwind()
+        .await;
     let recorded = match outcome {
         Ok(Ok(())) => queue::complete(pool, &job).await,
         Ok(Err(message)) => queue::fail(pool, &job, &message).await,

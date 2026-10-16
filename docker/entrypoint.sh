@@ -3,20 +3,27 @@
 set -euo pipefail
 
 PGDATA=/data/postgres
+# /data is writable by the unprivileged kima user; never follow a symlink planted there while running as root.
+for p in /data "$PGDATA"; do
+    if [ -L "$p" ]; then
+        echo "kima-entrypoint: refusing to start: $p is a symlink" >&2
+        exit 1
+    fi
+done
 mkdir -p /data
-chown kima:kima /data
+chown -h kima:kima /data
 
 if [ -z "${DATABASE_URL:-}" ]; then
     mkdir -p "$PGDATA"
-    chown -R postgres:postgres "$PGDATA"
+    chown -R -h postgres:postgres "$PGDATA"
     chmod 700 "$PGDATA"
     if [ ! -s "$PGDATA/PG_VERSION" ]; then
         gosu postgres initdb -D "$PGDATA" --username=kima --auth=trust --encoding=UTF8 >/dev/null
         echo "listen_addresses = '127.0.0.1'" >> "$PGDATA/postgresql.conf"
     fi
     gosu postgres pg_ctl -D "$PGDATA" -w -l "$PGDATA/server.log" start
-    gosu postgres psql -h 127.0.0.1 -U kima -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'kima'" \
-        | grep -q 1 || gosu postgres createdb -h 127.0.0.1 -U kima kima
+    exists=$(gosu postgres psql -h 127.0.0.1 -U kima -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'kima'")
+    [ "$exists" = 1 ] || gosu postgres createdb -h 127.0.0.1 -U kima kima
     export DATABASE_URL="postgres://kima@127.0.0.1:5432/kima"
     BUNDLED_PG=1
 fi

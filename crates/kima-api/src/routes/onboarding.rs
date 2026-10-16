@@ -74,12 +74,14 @@ async fn register(
     }
 
     let password = body.password;
-    let hash = {
-        let _permit = state.password_permit().await?;
-        tokio::task::spawn_blocking(move || hash_password(&password))
-            .await
-            .map_err(anyhow::Error::from)?
-    };
+    let permit = state.password_permit().await?;
+    let hash = tokio::task::spawn_blocking(move || {
+        // Released when the hash ends, even if the client hung up and the handler was dropped.
+        let _permit = permit;
+        hash_password(&password)
+    })
+    .await
+    .map_err(anyhow::Error::from)?;
 
     match users::register(&state.pool, Uuid::now_v7(), &username, &hash).await? {
         Registration::Closed => Err(ApiError::Forbidden("Registration is closed")),

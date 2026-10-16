@@ -36,6 +36,8 @@ async fn login(
     let password = body.password;
     let permit = state.password_permit().await?;
     let (found, valid) = tokio::task::spawn_blocking(move || {
+        // Released when the verify ends, even if the client hung up and the handler was dropped.
+        let _permit = permit;
         let valid = match &found {
             Some(user) => verify_password(&password, &user.password_hash),
             None => {
@@ -47,7 +49,6 @@ async fn login(
     })
     .await
     .map_err(anyhow::Error::from)?;
-    drop(permit);
 
     let Some(user) = found.filter(|_| valid) else {
         return Err(ApiError::Unauthorized("Invalid credentials"));

@@ -37,7 +37,9 @@ impl AppState {
         }
     }
 
-    /// Waits for a slot to run one argon2 hash or verify; hold it across the `spawn_blocking`.
+    /// Waits for a slot to run one argon2 hash or verify. Move the permit into the
+    /// `spawn_blocking` closure: held by the handler, it would be freed when a client hangs
+    /// up while the blocking work keeps running.
     pub async fn password_permit(&self) -> anyhow::Result<OwnedSemaphorePermit> {
         Ok(self.password_work.clone().acquire_owned().await?)
     }

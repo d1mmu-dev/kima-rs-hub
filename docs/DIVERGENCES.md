@@ -28,3 +28,4 @@ Status: `open` (not yet reviewed) · `accepted` (keep, intended) ·
 | D-014 | Events | SSE tickets stored in Redis (`sse:ticket:*`, 30 s) | Held in an in-memory map with a 30 s TTL | No Redis; single process | accepted |
 | D-015 | Auth | User cache with 30 s TTL in the auth middleware | Version check hits the DB on every request (indexed PK lookup) | Simpler; add a cache only if profiling shows a need | open |
 | D-016 | IDs | cuid string IDs | UUIDv7 | Native Postgres `uuid` type, time-ordered | accepted |
+| D-017 | Config | No `KIMA_DATA_DIR`, `KIMA_FRONTEND_DIR`, `KIMA_BIND_HOST` (paths fixed by the image; Next.js serves the frontend) | New env vars `KIMA_DATA_DIR` (default `/data`), `KIMA_FRONTEND_DIR`, `KIMA_BIND_HOST` (default `0.0.0.0`) | One binary serves everything and must be runnable outside Docker | accepted |

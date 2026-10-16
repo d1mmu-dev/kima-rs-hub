@@ -1,0 +1,13 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: kima
+      POSTGRES_PASSWORD: kima
+      POSTGRES_DB: kima
+    ports:
+      - "5456:5432"
+    volumes:
+      - kima_pg:/var/lib/postgresql/data
+volumes:
+  kima_pg: {}

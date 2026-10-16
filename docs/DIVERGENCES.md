@@ -22,3 +22,9 @@ Status: `open` (not yet reviewed) · `accepted` (keep, intended) ·
 | D-008 | ML / DSP | Essentia RhythmExtractor2013 (BPM) and KeyExtractor | Own Rust onset/autocorrelation tempo and chroma + Krumhansl key | No Essentia in Rust; numbers will differ | to-decide |
 | D-009 | ML | Two Python services, each decoding audio separately | One in-process decode shared by CLAP and musicnn | Memory/speed | accepted |
 | D-010 | API | ~288 route handlers + Subsonic | Only the endpoints the frontend calls get ported, per milestone | Avoid porting dead endpoints; list dropped endpoints here as found | open |
+| D-011 | Frontend | Dynamic path routes (`/album/[id]`, `/artist/[id]`, `/playlist/[id]`, `/mix/[id]`, `/podcasts/[id]`, `/podcasts/genre/[genreId]`, `/audiobooks/[id]`, `/audiobooks/series/[name]`, `/browse/playlists/[id]`, `/share/[token]`) | Query-param routes (`/album?id=…`); axum 301-redirects the old form | Static export can't serve unknown IDs on path segments | accepted |
+| D-012 | Frontend | `/share/[token]` and `/library` are server-rendered (share page can emit link-preview metadata) | Client-rendered only; share links show no rich preview | Static export has no server rendering | to-decide |
+| D-013 | Auth | Also accepts an express-session cookie (`req.session.userId`) | Bearer JWT, API key, or `?token=` only | No cookie sessions in kima-rs; the frontend uses bearer tokens anyway | accepted |
+| D-014 | Events | SSE tickets stored in Redis (`sse:ticket:*`, 30 s) | Held in an in-memory map with a 30 s TTL | No Redis; single process | accepted |
+| D-015 | Auth | User cache with 30 s TTL in the auth middleware | Version check hits the DB on every request (indexed PK lookup) | Simpler; add a cache only if profiling shows a need | open |
+| D-016 | IDs | cuid string IDs | UUIDv7 | Native Postgres `uuid` type, time-ordered | accepted |

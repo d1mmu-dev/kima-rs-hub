@@ -928,6 +928,8 @@ dependencies = [
 name = "kima-db"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "sqlx",
  "time",
  "tokio",

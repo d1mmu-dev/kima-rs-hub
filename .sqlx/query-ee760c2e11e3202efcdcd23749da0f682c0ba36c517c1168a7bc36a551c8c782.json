@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO albums (id, artist_id, title, title_key, year, is_compilation)\n           VALUES ($1, $2, $3, $4, $5, $6)\n           ON CONFLICT (artist_id, title_key, (COALESCE(year, -1))) DO UPDATE\n           SET is_compilation = albums.is_compilation OR EXCLUDED.is_compilation\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ee760c2e11e3202efcdcd23749da0f682c0ba36c517c1168a7bc36a551c8c782"
+}

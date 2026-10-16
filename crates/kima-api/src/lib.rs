@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod error;
+pub mod events;
 pub mod extract;
 mod routes;
 pub mod state;

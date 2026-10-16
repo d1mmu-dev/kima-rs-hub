@@ -17,6 +17,9 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/onboarding/status", get(status))
         .route("/onboarding/register", post(register))
+        .route("/onboarding/lidarr", post(lidarr))
+        .route("/onboarding/audiobookshelf", post(audiobookshelf))
+        .route("/onboarding/soulseek", post(soulseek))
         .route("/onboarding/complete", post(complete))
 }
 
@@ -102,6 +105,51 @@ async fn register(
             })))
         }
     }
+}
+
+/// The integration steps' common field; the url/apiKey or username/password fields are
+/// accepted and ignored until the integrations exist (D-025).
+#[derive(Deserialize)]
+struct IntegrationStep {
+    enabled: bool,
+}
+
+/// Stub for an integration step: "disabled" succeeds as upstream does; enabling one is refused.
+fn integration_step(
+    user: &AuthUser,
+    step: &IntegrationStep,
+    name: &str,
+) -> Result<Json<Value>, ApiError> {
+    if user.role != users::ROLE_ADMIN {
+        return Err(ApiError::Forbidden("Admin access required"));
+    }
+    if step.enabled {
+        return Err(ApiError::BadRequest(format!(
+            "{name} integration is not available yet"
+        )));
+    }
+    Ok(Json(json!({ "success": true, "tested": false })))
+}
+
+async fn lidarr(
+    user: AuthUser,
+    ApiJson(step): ApiJson<IntegrationStep>,
+) -> Result<Json<Value>, ApiError> {
+    integration_step(&user, &step, "Lidarr")
+}
+
+async fn audiobookshelf(
+    user: AuthUser,
+    ApiJson(step): ApiJson<IntegrationStep>,
+) -> Result<Json<Value>, ApiError> {
+    integration_step(&user, &step, "Audiobookshelf")
+}
+
+async fn soulseek(
+    user: AuthUser,
+    ApiJson(step): ApiJson<IntegrationStep>,
+) -> Result<Json<Value>, ApiError> {
+    integration_step(&user, &step, "Soulseek")
 }
 
 async fn complete(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {

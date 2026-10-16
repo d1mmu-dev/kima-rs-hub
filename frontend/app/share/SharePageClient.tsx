@@ -123,7 +123,7 @@ export default function SharePageClient() {
     const progressBarRef = useRef<HTMLDivElement | null>(null);
 
     useEffect(() => {
-        fetch(`/api/share/${token}`)
+        fetch(`/api/share/${encodeURIComponent(token)}`)
             .then(async (res) => {
                 if (!res.ok) {
                     const body = await res.json().catch(() => ({}));
@@ -150,14 +150,14 @@ export default function SharePageClient() {
     const currentTrack = tracks[currentTrackIndex];
 
     const getStreamUrl = useCallback(
-        (trackId: string) => `/api/share/${token}/stream/${trackId}`,
+        (trackId: string) => `/api/share/${encodeURIComponent(token)}/stream/${encodeURIComponent(trackId)}`,
         [token]
     );
 
     const coverArtId = data ? getCoverUrl(data) : null;
 
     function buildCoverArtUrl(id: string): string {
-        return `/api/share/${token}/cover-art/${encodeURIComponent(id)}?size=500`;
+        return `/api/share/${encodeURIComponent(token)}/cover-art/${encodeURIComponent(id)}?size=500`;
     }
 
     const coverArtUrl = coverArtId ? buildCoverArtUrl(coverArtId) : null;

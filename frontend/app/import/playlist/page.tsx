@@ -202,7 +202,7 @@ function ImportPlaylistPageContent() {
             const cached = queryClient.getQueryData<PreviewStatus>(["preview-status", previewJobId]);
             if (cached && cached.status !== "running") return cached;
             // Otherwise poll the backend (handles SSE reconnect gap)
-            return api.get<PreviewStatus>(`/spotify/preview/${previewJobId}`);
+            return api.get<PreviewStatus>(`/spotify/preview/${encodeURIComponent(String(previewJobId))}`);
         },
         enabled: !!previewJobId && step === "previewing",
         // Poll every 3s while pending/running; stop once terminal
@@ -239,7 +239,7 @@ function ImportPlaylistPageContent() {
             const cached = queryClient.getQueryData<ImportJob & { jobId?: string }>(["import-status", importJob?.id]);
             if (cached && TERMINAL_IMPORT_STATUSES.includes(cached.status)) return cached;
             if (!importJob?.id) return null;
-            return api.get<ImportJob & { jobId?: string }>(`/spotify/import/${importJob.id}/status`);
+            return api.get<ImportJob & { jobId?: string }>(`/spotify/import/${encodeURIComponent(importJob.id)}/status`);
         },
         enabled: !!importJob && !TERMINAL_IMPORT_STATUSES.includes(importJob.status),
         refetchInterval: (query) => {

@@ -93,7 +93,7 @@ export function ImportsTab() {
     const handleCancel = async (jobId: string) => {
         setCancelling((prev) => new Set(prev).add(jobId));
         try {
-            await api.post(`/spotify/import/${jobId}/cancel`);
+            await api.post(`/spotify/import/${encodeURIComponent(jobId)}/cancel`);
             queryClient.invalidateQueries({ queryKey: ["user-imports"] });
         } catch (error) {
             console.error("Failed to cancel import:", error);

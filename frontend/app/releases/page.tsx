@@ -60,7 +60,7 @@ export default function ReleasesPage() {
     const handleDownload = async (albumMbid: string, releaseId: string | number) => {
         try {
             setDownloadingId(releaseId);
-            await api.post(`/releases/download/${albumMbid}`);
+            await api.post(`/releases/download/${encodeURIComponent(albumMbid)}`);
             await fetchReleases();
         } catch (err) {
             notify.error("Couldn't start the download", { message: err instanceof Error ? err.message : undefined });

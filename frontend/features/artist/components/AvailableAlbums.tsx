@@ -50,7 +50,7 @@ function LazyAlbumCard({
         const fetchCover = async () => {
             try {
                 const response = await api.request<{ coverUrl: string }>(
-                    `/library/album-cover/${mbid}`
+                    `/library/album-cover/${encodeURIComponent(mbid)}`
                 );
                 if (response.coverUrl) {
                     setCoverArt(api.getCoverArtUrl(response.coverUrl, 300));

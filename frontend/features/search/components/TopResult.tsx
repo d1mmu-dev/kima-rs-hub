@@ -18,7 +18,7 @@ export function TopResult({ libraryArtist, discoveryArtist }: TopResultProps) {
     const name = libraryArtist?.name || discoveryArtist?.name || "";
     const artistId = isLibrary
         ? libraryArtist!.id
-        : discoveryArtist?.mbid || encodeURIComponent(name);
+        : discoveryArtist?.mbid || name;
     const imageUrl = isLibrary
         ? libraryArtist?.heroUrl
         : discoveryArtist?.image;

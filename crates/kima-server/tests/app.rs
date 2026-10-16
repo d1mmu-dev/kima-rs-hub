@@ -117,6 +117,36 @@ async fn old_path_links_redirect_to_query_pages(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn export_files_under_legacy_prefixes_are_served(pool: PgPool) {
+    let web = fake_frontend();
+    write(web.path(), "album/index.txt", "album rsc");
+    write(
+        web.path(),
+        "album/__next.album.__PAGE__.txt",
+        "album segment",
+    );
+    write(web.path(), "podcasts/index.txt", "podcasts rsc");
+    let server = http_server(pool, &config(Some(web.path()), &[]));
+    for (path, body) in [
+        ("/album/index.txt", "album rsc"),
+        ("/album/__next.album.__PAGE__.txt", "album segment"),
+        ("/podcasts/index.txt", "podcasts rsc"),
+        ("/album/index.html", "album page"),
+    ] {
+        let res = server.get(path).await;
+        res.assert_status_ok();
+        res.assert_text(body);
+    }
+    let res = server.get("/album/abc").await;
+    res.assert_status(StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(res.header("location"), "/album/?id=abc");
+    // `../404.html` exists relative to `album/`, but a segment that leaves the prefix is never served.
+    let res = server.get("/album/..%2F404.html").await;
+    res.assert_status(StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(res.header("location"), "/album/?id=..%2F404.html");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn new_page_paths_are_not_mistaken_for_ids(pool: PgPool) {
     let web = fake_frontend();
     let server = http_server(pool, &config(Some(web.path()), &[]));

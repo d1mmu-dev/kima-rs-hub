@@ -20,20 +20,47 @@ async fn set_password_bumps_token_version(pool: PgPool) {
     let Registration::Created(user) = register(&pool, "ana").await else {
         panic!("expected Created")
     };
-    assert_eq!(
-        users::set_password(&pool, user.id, "new-hash")
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        users::set_password(&pool, user.id, "newer").await.unwrap(),
-        2
-    );
+    let set = |hash: &'static str, seen: i32| users::set_password(&pool, user.id, hash, seen);
+    assert_eq!(set("new-hash", 0).await.unwrap(), Some(1));
+    assert_eq!(set("newer", 1).await.unwrap(), Some(2));
+    // A stale version (one a concurrent change already replaced) writes nothing.
+    assert_eq!(set("stale", 1).await.unwrap(), None);
     assert_eq!(users::bump_token_version(&pool, user.id).await.unwrap(), 3);
     let found = users::find_by_id(&pool, user.id).await.unwrap().unwrap();
     assert_eq!(found.password_hash, "newer");
     assert_eq!(found.token_version, 3);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn delete_unless_last_admin_guards_the_only_admin(pool: PgPool) {
+    use users::Deletion;
+    let Registration::Created(admin) = register(&pool, "ana").await else {
+        panic!("expected Created")
+    };
+    open_registration(&pool).await;
+    let Registration::Created(plain) = register(&pool, "ben").await else {
+        panic!("expected Created")
+    };
+    assert_eq!(
+        users::delete_unless_last_admin(&pool, admin.id)
+            .await
+            .unwrap(),
+        Deletion::LastAdmin
+    );
+    assert_eq!(
+        users::delete_unless_last_admin(&pool, Uuid::now_v7())
+            .await
+            .unwrap(),
+        Deletion::NotFound
+    );
+    // A non-admin is always deletable.
+    assert_eq!(
+        users::delete_unless_last_admin(&pool, plain.id)
+            .await
+            .unwrap(),
+        Deletion::Deleted
+    );
+    assert_eq!(users::count(&pool).await.unwrap(), 1);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

@@ -71,41 +71,47 @@ pub async fn claim(
     .await
 }
 
-pub async fn complete(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
-    sqlx::query!(
+/// Marks the claimed attempt done. Returns `false` if the job is no longer ours (its lease
+/// expired and it was reclaimed, reaped, or finished elsewhere), in which case nothing changes.
+pub async fn complete(pool: &PgPool, job: &Job) -> sqlx::Result<bool> {
+    let result = sqlx::query!(
         "UPDATE jobs SET state = 'done', locked_until = NULL, last_error = NULL, finished_at = now()
-         WHERE id = $1",
-        id
+         WHERE id = $1 AND state = 'running' AND attempts = $2",
+        job.id,
+        job.attempts
     )
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() == 1)
 }
 
 /// Records a failed attempt: retried after [`backoff`], or failed for good on the last attempt.
-pub async fn fail(pool: &PgPool, job: &Job, error: &str) -> sqlx::Result<()> {
-    if job.attempts >= job.max_attempts {
+/// Returns `false` if the job is no longer ours, in which case nothing changes.
+pub async fn fail(pool: &PgPool, job: &Job, error: &str) -> sqlx::Result<bool> {
+    let result = if job.attempts >= job.max_attempts {
         sqlx::query!(
             "UPDATE jobs SET state = 'failed', locked_until = NULL, last_error = $2, finished_at = now()
-             WHERE id = $1",
+             WHERE id = $1 AND state = 'running' AND attempts = $3",
             job.id,
-            error
+            error,
+            job.attempts
         )
         .execute(pool)
-        .await?;
+        .await?
     } else {
         sqlx::query!(
             "UPDATE jobs SET state = 'queued', locked_until = NULL, last_error = $2,
                              run_at = now() + make_interval(secs => $3)
-             WHERE id = $1",
+             WHERE id = $1 AND state = 'running' AND attempts = $4",
             job.id,
             error,
-            backoff(job.attempts).as_secs_f64()
+            backoff(job.attempts).as_secs_f64(),
+            job.attempts
         )
         .execute(pool)
-        .await?;
-    }
-    Ok(())
+        .await?
+    };
+    Ok(result.rows_affected() == 1)
 }
 
 /// Fails jobs whose lease ran out on their final attempt (their worker died).

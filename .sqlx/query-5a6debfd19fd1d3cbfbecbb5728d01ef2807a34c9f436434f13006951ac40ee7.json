@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT registration_open FROM system_settings",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "registration_open",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5a6debfd19fd1d3cbfbecbb5728d01ef2807a34c9f436434f13006951ac40ee7"
+}

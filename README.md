@@ -1,8 +1,12 @@
-# kima-rs
+# kima-rs-hub
 
-kima-rs is a Rust rewrite of [Kima](https://github.com/Chevron7Locked/kima-hub), a self-hosted
-music server. It keeps the upstream Next.js frontend (built as a static export) and replaces the
-backend with a single `kima` binary plus Postgres. Licensed under GPL-3.0-only.
+This project is a fork of [Chevron7Locked/kima-hub](https://github.com/Chevron7Locked/kima-hub),
+ported to the Rust language.
+
+Kima is a self-hosted music server. kima-rs keeps the upstream Next.js frontend (built as a static
+export) and replaces the Node/TypeScript backend and the Python analyzers with a single Rust
+`kima` binary plus Postgres. Every difference from upstream is logged in
+[`docs/DIVERGENCES.md`](docs/DIVERGENCES.md). Licensed under GPL-3.0-only, like upstream.
 
 ## Status
 

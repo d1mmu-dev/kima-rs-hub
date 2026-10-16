@@ -1,0 +1,142 @@
+use std::time::Duration;
+
+use kima_db::PgPool;
+use kima_jobs::queue;
+use kima_jobs::worker::{WorkerConfig, handler, spawn_worker};
+use serde_json::json;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+fn fast(queue: &str, concurrency: usize) -> WorkerConfig {
+    WorkerConfig {
+        poll_interval: Duration::from_millis(200),
+        ..WorkerConfig::new(queue, concurrency)
+    }
+}
+
+async fn wait_for_state(pool: &PgPool, id: uuid::Uuid, want: &str) -> (i32, Option<String>) {
+    for _ in 0..50 {
+        let (state, attempts, error): (String, i32, Option<String>) =
+            sqlx::query_as("SELECT state, attempts, last_error FROM jobs WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        if state == want {
+            return (attempts, error);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("job {id} never reached state {want}");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn runs_a_job_and_marks_it_done(pool: PgPool) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let worker = spawn_worker(
+        pool.clone(),
+        fast("scan", 2),
+        handler(move |job| {
+            let tx = tx.clone();
+            async move {
+                tx.send(job.payload).unwrap();
+                Ok(())
+            }
+        }),
+        shutdown.clone(),
+    );
+    let id = queue::enqueue(&pool, "scan", json!({"n": 1}), 3)
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got, json!({"n": 1}));
+    wait_for_state(&pool, id, "done").await;
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), worker)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn handler_error_is_recorded_and_retried_later(pool: PgPool) {
+    let shutdown = CancellationToken::new();
+    let _worker = spawn_worker(
+        pool.clone(),
+        fast("scan", 1),
+        handler(|_job| async { Err("disk on fire".to_string()) }),
+        shutdown.clone(),
+    );
+    let id = queue::enqueue(&pool, "scan", json!({}), 3).await.unwrap();
+    // "queued" is also the initial state, so wait for the recorded error instead.
+    for _ in 0..50 {
+        let (state, attempts, error): (String, i32, Option<String>) =
+            sqlx::query_as("SELECT state, attempts, last_error FROM jobs WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if error.is_some() {
+            assert_eq!(
+                (state.as_str(), attempts, error.as_deref()),
+                ("queued", 1, Some("disk on fire"))
+            );
+            shutdown.cancel();
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("failure never recorded");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn panicking_handler_does_not_kill_the_worker(pool: PgPool) {
+    let shutdown = CancellationToken::new();
+    let _worker = spawn_worker(
+        pool.clone(),
+        fast("scan", 1),
+        handler(|job| async move {
+            if job.payload["panic"] == true {
+                panic!("handler bug");
+            }
+            Ok(())
+        }),
+        shutdown.clone(),
+    );
+    let bad = queue::enqueue(&pool, "scan", json!({"panic": true}), 1)
+        .await
+        .unwrap();
+    let (_, error) = wait_for_state(&pool, bad, "failed").await;
+    assert_eq!(error.as_deref(), Some("handler panicked"));
+    let good = queue::enqueue(&pool, "scan", json!({"panic": false}), 1)
+        .await
+        .unwrap();
+    wait_for_state(&pool, good, "done").await;
+    shutdown.cancel();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn shutdown_waits_for_running_jobs(pool: PgPool) {
+    let shutdown = CancellationToken::new();
+    let worker = spawn_worker(
+        pool.clone(),
+        fast("scan", 1),
+        handler(|_job| async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok(())
+        }),
+        shutdown.clone(),
+    );
+    let id = queue::enqueue(&pool, "scan", json!({}), 1).await.unwrap();
+    wait_for_state(&pool, id, "running").await;
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for_state(&pool, id, "done").await;
+}

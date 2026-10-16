@@ -235,3 +235,47 @@ async fn lagged_stream_gets_resync(pool: PgPool) {
     }
     assert!(seen.contains("data: {\"type\":\"resync\"}\n\n"), "{seen}");
 }
+
+/// Review: a revoke event skipped by lag must still end the stream, via the DB check.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn revocation_survives_lag(pool: PgPool) {
+    let mut state = common::state(pool);
+    state.events = kima_core::events::EventBus::new(2);
+    let (ana, _) = common::user_with_token(&state, "ana").await;
+    let app = kima_api::router(state.clone());
+
+    let mut body = open_stream(&app, &state.sse.issue_ticket(ana.id))
+        .await
+        .into_body();
+    next_text(&mut body).await;
+
+    sqlx::query("UPDATE users SET token_version = token_version + 1 WHERE id = $1")
+        .bind(ana.id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    kima_api::revoke_sessions(&state, ana.id);
+    for n in 0..10 {
+        state.events.publish(Event {
+            user_id: None,
+            data: json!({ "type": "x", "n": n }),
+        });
+    }
+    let end = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .expect("stream ends within 2 s");
+    assert!(end.is_none(), "no frames after revocation");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn revoked_users_pending_ticket_is_rejected(pool: PgPool) {
+    let state = common::state(pool);
+    let (ana, _) = common::user_with_token(&state, "ana").await;
+    let app = kima_api::router(state.clone());
+    let ticket = state.sse.issue_ticket(ana.id);
+    kima_api::revoke_sessions(&state, ana.id);
+    assert_eq!(
+        open_stream(&app, &ticket).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}

@@ -10,7 +10,8 @@ pub mod state;
 pub use routes::router;
 pub use state::AppState;
 
-/// Ends a user's open event streams. Call after bumping their `token_version`.
+/// Ends a user's open event streams and pending tickets. Call after bumping their `token_version`.
 pub fn revoke_sessions(state: &AppState, user: uuid::Uuid) {
+    state.sse.revoke_user(user);
     state.events.publish(kima_core::events::Event::revoke(user));
 }

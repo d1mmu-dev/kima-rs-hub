@@ -28,18 +28,22 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|token| !token.is_empty())
 }
 
-/// The request's token: the `Authorization: Bearer` header first, then `?token=` — but only on
-/// media paths (`…/stream`, `/api/library/cover-art…`), where `<audio>`/`<img>` cannot send headers.
-pub fn token_from_request(parts: &Parts) -> Option<String> {
-    if let Some(token) = bearer_token(&parts.headers) {
-        return Some(token.to_owned());
-    }
+/// The `?token=` value, only on media paths (`.../stream`, `/api/library/cover-art...`), where
+/// `<audio>`/`<img>` cannot send headers.
+fn query_token(parts: &Parts) -> Option<String> {
     let path = parts.uri.path();
     if !(path.ends_with("/stream") || path.starts_with("/api/library/cover-art")) {
         return None;
     }
     let Query(mut params) = Query::<HashMap<String, String>>::try_from_uri(&parts.uri).ok()?;
     params.remove("token").filter(|token| !token.is_empty())
+}
+
+/// The request's token: the `Authorization: Bearer` header first, then `?token=` on media paths.
+pub fn token_from_request(parts: &Parts) -> Option<String> {
+    bearer_token(&parts.headers)
+        .map(str::to_owned)
+        .or_else(|| query_token(parts))
 }
 
 /// The user a token names, if it is a live access token (or a stream token on a `/stream` path).
@@ -73,8 +77,15 @@ impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        let token = token_from_request(parts).ok_or(ApiError::Unauthorized("Not authenticated"))?;
-        authenticate(state, &token, parts.uri.path())
+        let path = parts.uri.path();
+        // A bad header falls through to a valid `?token=` on media paths, as upstream does.
+        if let Some(token) = bearer_token(&parts.headers)
+            && let Some(user) = authenticate(state, token, path).await?
+        {
+            return Ok(user);
+        }
+        let token = query_token(parts).ok_or(ApiError::Unauthorized("Not authenticated"))?;
+        authenticate(state, &token, path)
             .await?
             .ok_or(ApiError::Unauthorized("Not authenticated"))
     }

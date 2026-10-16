@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::StreamExt;
+use kima_db::users;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_stream::wrappers::BroadcastStream;
@@ -31,6 +32,12 @@ struct StreamQuery {
     ticket: Option<String>,
 }
 
+enum Step {
+    Send(String),
+    Skip,
+    End,
+}
+
 async fn stream(
     State(state): State<AppState>,
     Query(query): Query<StreamQuery>,
@@ -40,6 +47,11 @@ async fn stream(
         .sse
         .redeem_ticket(&ticket)
         .ok_or(ApiError::Unauthorized("Invalid or expired ticket"))?;
+    // Read before subscribing so a bump after this point is always seen as an event or a lag.
+    let version = users::find_by_id(&state.pool, user)
+        .await?
+        .ok_or(ApiError::Unauthorized("Invalid or expired ticket"))?
+        .token_version;
     let slot = state
         .sse
         .try_open(user)
@@ -48,25 +60,40 @@ async fn stream(
     let connected = futures::stream::once(async {
         Ok::<_, Infallible>(SseEvent::default().data(r#"{"type":"connected"}"#))
     });
-    // A lagging client gets a resync hint so it refetches what it missed; a revocation for this
-    // user ends the stream (the revoke frame itself is never sent).
+    // A lagging client may have skipped its own revocation, so on lag the session is re-checked
+    // in the DB: revoked (or deleted) ends the stream, otherwise the client gets a resync hint.
+    // A revocation event seen in time also ends the stream (the frame itself is never sent).
+    let pool = state.pool.clone();
     let events = BroadcastStream::new(state.events.subscribe())
-        .filter_map(move |message| {
-            std::future::ready(match message {
-                Ok(event) if event.is_for(user) => Some(Some(event)),
-                Err(BroadcastStreamRecvError::Lagged(_)) => Some(None),
+        .then(move |message| {
+            let pool = pool.clone();
+            async move {
+                match message {
+                    Ok(event) if event.is_for(user) => {
+                        if event.is_revocation() {
+                            Step::End
+                        } else {
+                            Step::Send(event.data.to_string())
+                        }
+                    }
+                    Ok(_) => Step::Skip,
+                    Err(BroadcastStreamRecvError::Lagged(_)) => {
+                        match users::find_by_id(&pool, user).await {
+                            Ok(Some(row)) if row.token_version == version => {
+                                Step::Send(r#"{"type":"resync"}"#.to_owned())
+                            }
+                            _ => Step::End,
+                        }
+                    }
+                }
+            }
+        })
+        .take_while(|step| std::future::ready(!matches!(step, Step::End)))
+        .filter_map(|step| {
+            std::future::ready(match step {
+                Step::Send(data) => Some(Ok::<_, Infallible>(SseEvent::default().data(data))),
                 _ => None,
             })
-        })
-        .take_while(|item| {
-            std::future::ready(!item.as_ref().is_some_and(|event| event.is_revocation()))
-        })
-        .map(|item| {
-            let data = match item {
-                Some(event) => event.data.to_string(),
-                None => r#"{"type":"resync"}"#.to_owned(),
-            };
-            Ok::<_, Infallible>(SseEvent::default().data(data))
         });
     // The slot lives as long as the stream; the client hanging up drops both.
     // Shutdown ends the stream so graceful shutdown is not held open by idle clients.

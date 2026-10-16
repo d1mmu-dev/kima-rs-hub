@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE jobs SET state = 'done', locked_until = NULL, last_error = NULL, finished_at = now()\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "54cf22fb242de2af2d9554a5fe0ed5ee5afbbce50256ce53a5e52432cff62730"
+}

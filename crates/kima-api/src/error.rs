@@ -17,6 +17,8 @@ pub enum ApiError {
     #[error("{0}")]
     NotFound(&'static str),
     #[error("{0}")]
+    Conflict(&'static str),
+    #[error("{0}")]
     TooManyRequests(&'static str),
     #[error("Internal error")]
     Internal(#[from] anyhow::Error),
@@ -35,6 +37,7 @@ impl IntoResponse for ApiError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::Conflict(_) => StatusCode::CONFLICT,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal(error) => {
                 tracing::error!(error = ?error, "internal error");

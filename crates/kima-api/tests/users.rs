@@ -15,7 +15,7 @@ async fn change_password_requires_current(pool: PgPool) {
         .authorization_bearer(&token)
         .json(&json!({ "currentPassword": "wrong-one", "newPassword": "newsecret" }))
         .await;
-    res.assert_status(StatusCode::UNAUTHORIZED);
+    res.assert_status(StatusCode::BAD_REQUEST);
     res.assert_json(&json!({ "error": "Current password is incorrect" }));
 
     let short = server
@@ -64,6 +64,28 @@ async fn change_password_revokes_old_tokens(pool: PgPool) {
         .json(&json!({ "username": "ana", "password": "password1" }))
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
+}
+
+/// Two simultaneous changes with the same current password: at most one may win, and the
+/// stored password is whichever won, never a blend of both.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn concurrent_password_changes_do_not_both_succeed(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+
+    let change = |new: &'static str| {
+        server
+            .post("/api/auth/change-password")
+            .authorization_bearer(&token)
+            .json(&json!({ "currentPassword": "password1", "newPassword": new }))
+    };
+    let (a, b) = tokio::join!(change("firstnew1"), change("secondnew"));
+    let ok = [a.status_code(), b.status_code()]
+        .iter()
+        .filter(|s| **s == StatusCode::OK)
+        .count();
+    assert_eq!(ok, 1);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

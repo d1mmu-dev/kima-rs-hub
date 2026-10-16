@@ -209,15 +209,23 @@ pub async fn delete_unless_last_admin(pool: &PgPool, id: Uuid) -> sqlx::Result<D
     Ok(Deletion::Deleted)
 }
 
-/// Sets a new password hash and bumps the token version. Returns the new version.
-pub async fn set_password(pool: &PgPool, id: Uuid, password_hash: &str) -> sqlx::Result<i32> {
+/// Sets a new password hash and bumps the token version, but only if the version is still
+/// `seen_version` (what the caller verified the old password against). Returns the new version,
+/// or `None` if the user changed meanwhile or is gone.
+pub async fn set_password(
+    pool: &PgPool,
+    id: Uuid,
+    password_hash: &str,
+    seen_version: i32,
+) -> sqlx::Result<Option<i32>> {
     sqlx::query_scalar!(
         "UPDATE users SET password_hash = $2, token_version = token_version + 1
-         WHERE id = $1 RETURNING token_version",
+         WHERE id = $1 AND token_version = $3 RETURNING token_version",
         id,
-        password_hash
+        password_hash,
+        seen_version
     )
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
 }
 

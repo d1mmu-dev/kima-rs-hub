@@ -179,6 +179,7 @@ async fn change_password(
         .await?
         .ok_or(ApiError::NotFound("User not found"))?;
 
+    let seen_version = user.token_version;
     let permit = state.password_permit().await?;
     let (current, new) = (body.current_password, body.new_password);
     let hash = tokio::task::spawn_blocking(move || {
@@ -189,10 +190,13 @@ async fn change_password(
     .await
     .map_err(anyhow::Error::from)?;
     let Some(hash) = hash else {
-        return Err(ApiError::Unauthorized("Current password is incorrect"));
+        // 401 means "not signed in"; a wrong password from a signed-in user is a bad request.
+        return Err(ApiError::BadRequest("Current password is incorrect".into()));
     };
 
-    let version = users::set_password(&state.pool, auth.id, &hash).await?;
+    let version = users::set_password(&state.pool, auth.id, &hash, seen_version)
+        .await?
+        .ok_or_else(|| ApiError::Conflict("Password was changed concurrently, please retry"))?;
     revoke_sessions(&state, auth.id);
     Ok(Json(json!({
         "message": "Password changed successfully",

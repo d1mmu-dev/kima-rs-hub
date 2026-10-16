@@ -119,6 +119,8 @@ async fn login_checks_credentials(pool: PgPool) {
     assert!(body["refreshToken"].is_string());
     assert_eq!(body["user"]["username"], "Ana");
     assert_eq!(body["user"]["role"], "admin");
+    // The frontend routes to /onboarding off this flag right after login.
+    assert_eq!(body["user"]["onboardingComplete"], false);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

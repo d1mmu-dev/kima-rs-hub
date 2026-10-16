@@ -1,0 +1,12 @@
+services:
+  kima:
+    build: .
+    image: kima-rs:dev
+    ports:
+      - "3030:3030"
+    volumes:
+      - ${MUSIC_DIR:-./music}:/music:ro
+      - kima_data:/data
+    restart: unless-stopped
+volumes:
+  kima_data: {}

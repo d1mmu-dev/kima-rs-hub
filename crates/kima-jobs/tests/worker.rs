@@ -140,3 +140,29 @@ async fn shutdown_waits_for_running_jobs(pool: PgPool) {
         .unwrap();
     wait_for_state(&pool, id, "done").await;
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn panic_before_the_future_is_recorded(pool: PgPool) {
+    let shutdown = CancellationToken::new();
+    let _worker = spawn_worker(
+        pool.clone(),
+        fast("scan", 1),
+        handler(|job| {
+            if job.payload["panic"] == true {
+                panic!("handler bug before the future");
+            }
+            async { Ok(()) }
+        }),
+        shutdown.clone(),
+    );
+    let bad = queue::enqueue(&pool, "scan", json!({"panic": true}), 1)
+        .await
+        .unwrap();
+    let (_, error) = wait_for_state(&pool, bad, "failed").await;
+    assert_eq!(error.as_deref(), Some("handler panicked"));
+    let good = queue::enqueue(&pool, "scan", json!({"panic": false}), 1)
+        .await
+        .unwrap();
+    wait_for_state(&pool, good, "done").await;
+    shutdown.cancel();
+}

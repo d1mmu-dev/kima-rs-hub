@@ -1,16 +1,18 @@
-use axum::extract::State;
-use axum::routing::{get, post};
+use axum::extract::{Path, State};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use kima_core::auth::{TokenKind, verify_dummy, verify_password};
-use kima_db::users;
+use kima_core::auth::{TokenKind, hash_password, verify_dummy, verify_password};
+use kima_db::users::{self, Deletion};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
+use uuid::Uuid;
 
 use super::onboarding::Credentials;
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::extract::ApiJson;
+use crate::revoke_sessions;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -20,6 +22,10 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(me))
         .route("/auth/stream-ticket", post(stream_ticket))
+        .route("/auth/change-password", post(change_password))
+        .route("/auth/users", get(list_users))
+        .route("/auth/create-user", post(create_user))
+        .route("/auth/users/{id}", delete(delete_user))
 }
 
 async fn login(
@@ -136,4 +142,156 @@ async fn stream_ticket(
         "ticket": token,
         "expiresIn": kima_core::auth::STREAM_TTL_SECS,
     })))
+}
+
+fn require_admin(user: &AuthUser) -> Result<(), ApiError> {
+    if user.role != users::ROLE_ADMIN {
+        return Err(ApiError::Forbidden("Admin access required"));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChangePassword {
+    #[serde(default)]
+    current_password: String,
+    #[serde(default)]
+    new_password: String,
+}
+
+async fn change_password(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ApiJson(body): ApiJson<ChangePassword>,
+) -> Result<Json<Value>, ApiError> {
+    if body.current_password.is_empty() || body.new_password.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Current and new password are required".into(),
+        ));
+    }
+    if body.new_password.chars().count() < 6 {
+        return Err(ApiError::BadRequest(
+            "New password must be at least 6 characters".into(),
+        ));
+    }
+    let user = users::find_by_id(&state.pool, auth.id)
+        .await?
+        .ok_or(ApiError::NotFound("User not found"))?;
+
+    let permit = state.password_permit().await?;
+    let (current, new) = (body.current_password, body.new_password);
+    let hash = tokio::task::spawn_blocking(move || {
+        // Released when the work ends, even if the client hung up and the handler was dropped.
+        let _permit = permit;
+        verify_password(&current, &user.password_hash).then(|| hash_password(&new))
+    })
+    .await
+    .map_err(anyhow::Error::from)?;
+    let Some(hash) = hash else {
+        return Err(ApiError::Unauthorized("Current password is incorrect"));
+    };
+
+    let version = users::set_password(&state.pool, auth.id, &hash).await?;
+    revoke_sessions(&state, auth.id);
+    Ok(Json(json!({
+        "message": "Password changed successfully",
+        "token": state.jwt.issue_access(auth.id, &auth.username, &auth.role, version),
+        "refreshToken": state.jwt.issue_refresh(auth.id, version),
+    })))
+}
+
+async fn list_users(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&auth)?;
+    let rows = users::list(&state.pool).await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for user in rows {
+        out.push(json!({
+            "id": user.id,
+            "username": user.username,
+            "role": user.role,
+            "onboardingComplete": user.onboarding_complete,
+            "createdAt": user.created_at.format(&Rfc3339).map_err(anyhow::Error::from)?,
+        }));
+    }
+    Ok(Json(Value::Array(out)))
+}
+
+#[derive(Deserialize)]
+struct CreateUser {
+    #[serde(default)]
+    username: String,
+    #[serde(default)]
+    password: String,
+    role: Option<String>,
+}
+
+async fn create_user(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    ApiJson(body): ApiJson<CreateUser>,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&auth)?;
+    let username = body.username.trim().to_string();
+    if username.is_empty() || body.password.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Username and password are required".into(),
+        ));
+    }
+    if body.password.chars().count() < 6 {
+        return Err(ApiError::BadRequest(
+            "Password must be at least 6 characters".into(),
+        ));
+    }
+    let role = match body.role.as_deref() {
+        None | Some("") | Some(users::ROLE_USER) => users::ROLE_USER,
+        Some(users::ROLE_ADMIN) => users::ROLE_ADMIN,
+        Some(_) => return Err(ApiError::BadRequest("Invalid role".into())),
+    };
+
+    let permit = state.password_permit().await?;
+    let password = body.password;
+    let hash = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        hash_password(&password)
+    })
+    .await
+    .map_err(anyhow::Error::from)?;
+
+    let user = users::create_by_admin(&state.pool, Uuid::now_v7(), &username, &hash, role)
+        .await?
+        .map_err(|_| ApiError::BadRequest("Username already taken".into()))?;
+    Ok(Json(json!({
+        "id": user.id,
+        "username": user.username,
+        "role": user.role,
+        "createdAt": user.created_at.format(&Rfc3339).map_err(anyhow::Error::from)?,
+    })))
+}
+
+async fn delete_user(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&auth)?;
+    let id: Uuid = id
+        .parse()
+        .map_err(|_| ApiError::NotFound("User not found"))?;
+    if id == auth.id {
+        return Err(ApiError::BadRequest(
+            "Cannot delete your own account".into(),
+        ));
+    }
+    match users::delete_unless_last_admin(&state.pool, id).await? {
+        Deletion::NotFound => Err(ApiError::NotFound("User not found")),
+        Deletion::LastAdmin => Err(ApiError::BadRequest("Cannot delete the last admin".into())),
+        Deletion::Deleted => {
+            revoke_sessions(&state, id);
+            Ok(Json(json!({ "message": "User deleted successfully" })))
+        }
+    }
 }

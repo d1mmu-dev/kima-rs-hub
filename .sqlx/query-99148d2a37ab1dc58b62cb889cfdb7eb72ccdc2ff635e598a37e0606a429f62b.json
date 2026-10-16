@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE system_settings\n           SET registration_open = COALESCE($1, registration_open),\n               library_root = COALESCE($2, library_root)\n           RETURNING registration_open, library_root",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "registration_open",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "library_root",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "99148d2a37ab1dc58b62cb889cfdb7eb72ccdc2ff635e598a37e0606a429f62b"
+}

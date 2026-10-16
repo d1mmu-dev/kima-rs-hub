@@ -9,6 +9,7 @@ mod events;
 mod health;
 mod onboarding;
 mod system;
+mod system_settings;
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
@@ -16,6 +17,7 @@ pub fn router(state: AppState) -> Router {
         .merge(onboarding::routes())
         .merge(auth::routes())
         .merge(system::routes())
+        .merge(system_settings::routes())
         .merge(events::routes())
         .fallback(|| async { ApiError::NotFound("Not found") });
 

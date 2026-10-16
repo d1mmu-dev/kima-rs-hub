@@ -16,6 +16,51 @@ async fn open_registration(pool: &PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn set_password_bumps_token_version(pool: PgPool) {
+    let Registration::Created(user) = register(&pool, "ana").await else {
+        panic!("expected Created")
+    };
+    assert_eq!(
+        users::set_password(&pool, user.id, "new-hash")
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        users::set_password(&pool, user.id, "newer").await.unwrap(),
+        2
+    );
+    assert_eq!(users::bump_token_version(&pool, user.id).await.unwrap(), 3);
+    let found = users::find_by_id(&pool, user.id).await.unwrap().unwrap();
+    assert_eq!(found.password_hash, "newer");
+    assert_eq!(found.token_version, 3);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn create_by_admin_rejects_duplicate_ignoring_case(pool: PgPool) {
+    let first = users::create_by_admin(&pool, Uuid::now_v7(), "Ana", "h", ROLE_USER)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.role, ROLE_USER);
+    assert!(first.onboarding_complete);
+    let dup = users::create_by_admin(&pool, Uuid::now_v7(), "aNA", "h", ROLE_ADMIN)
+        .await
+        .unwrap();
+    assert_eq!(dup.unwrap_err(), users::Taken);
+    assert_eq!(users::list(&pool).await.unwrap().len(), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn delete_reports_whether_a_row_existed(pool: PgPool) {
+    let Registration::Created(user) = register(&pool, "ana").await else {
+        panic!("expected Created")
+    };
+    assert!(users::delete(&pool, user.id).await.unwrap());
+    assert!(!users::delete(&pool, user.id).await.unwrap());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn first_user_is_admin(pool: PgPool) {
     let Registration::Created(user) = register(&pool, "ana").await else {
         panic!("expected Created")

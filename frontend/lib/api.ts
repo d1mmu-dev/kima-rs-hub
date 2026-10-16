@@ -492,8 +492,9 @@ class ApiClient {
             }
 
             // Signing in checks credentials, not a session: its 401 is the server's answer
-            // (wrong password, wrong code), never an expired session to refresh.
-            const signingIn = endpoint === "/auth/login";
+            // (wrong password, wrong code), never an expired session to refresh. Changing the password
+            // answers a wrong current password the same way (D-036).
+            const signingIn = endpoint === "/auth/login" || endpoint === "/auth/change-password";
 
             // Handle 401 with token refresh (retry once)
             if (

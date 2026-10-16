@@ -263,5 +263,35 @@ async fn listen_is_retried_when_the_first_attempt_fails(pool: PgPool) {
         .expect("worker never recovered without waiting a poll interval")
         .unwrap();
     assert_eq!(got, json!({"n": 9}));
+
+    // The recovered listener must be kept: one LISTEN backend, and the same one
+    // after several retry periods (a discarded listener would be replaced every 200 ms).
+    let listen_pids = || async {
+        sqlx::query_scalar::<_, i32>(
+            "SELECT pid FROM pg_stat_activity \
+             WHERE datname = current_database() AND query ILIKE 'LISTEN%' ORDER BY pid",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let before = listen_pids().await;
+    assert_eq!(before.len(), 1, "expected one LISTEN backend: {before:?}");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        listen_pids().await,
+        before,
+        "listener was replaced, not kept"
+    );
+
+    // With a listener in place no retry or poll can explain a prompt pickup; only NOTIFY can.
+    queue::enqueue(&pool, "scan", json!({"n": 10}), 1)
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("second job needed more than NOTIFY latency")
+        .unwrap();
+    assert_eq!(got, json!({"n": 10}));
     shutdown.cancel();
 }

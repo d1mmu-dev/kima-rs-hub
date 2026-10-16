@@ -1,0 +1,50 @@
+use axum::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde_json::json;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ApiError {
+    /// 400 `{"error":"Invalid request","details":...}`: the body failed validation.
+    #[error("Invalid request")]
+    Invalid(String),
+    #[error("{0}")]
+    BadRequest(String),
+    #[error("{0}")]
+    Unauthorized(&'static str),
+    #[error("{0}")]
+    Forbidden(&'static str),
+    #[error("{0}")]
+    NotFound(&'static str),
+    #[error("{0}")]
+    TooManyRequests(&'static str),
+    #[error("Internal error")]
+    Internal(#[from] anyhow::Error),
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            Self::Invalid(_) | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::Internal(error) => {
+                tracing::error!(error = ?error, "internal error");
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        };
+        let body = match &self {
+            Self::Invalid(details) => json!({ "error": self.to_string(), "details": details }),
+            _ => json!({ "error": self.to_string() }),
+        };
+        (status, Json(body)).into_response()
+    }
+}

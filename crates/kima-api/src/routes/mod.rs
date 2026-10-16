@@ -4,11 +4,17 @@ use axum::routing::get;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+mod auth;
 mod health;
+mod onboarding;
+mod system;
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(health::health))
+        .merge(onboarding::routes())
+        .merge(auth::routes())
+        .merge(system::routes())
         .fallback(|| async { ApiError::NotFound("Not found") });
 
     Router::new()

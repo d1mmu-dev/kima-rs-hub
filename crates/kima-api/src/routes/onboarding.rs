@@ -1,0 +1,100 @@
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use kima_core::auth::hash_password;
+use kima_db::users::{self, Registration};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+use crate::auth::{AuthUser, authenticate, bearer_token};
+use crate::error::ApiError;
+use crate::extract::ApiJson;
+use crate::state::AppState;
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/onboarding/status", get(status))
+        .route("/onboarding/register", post(register))
+        .route("/onboarding/complete", post(complete))
+}
+
+#[derive(Deserialize)]
+pub struct Credentials {
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+}
+
+async fn status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let has_account = users::count(&state.pool).await? > 0;
+    let registration_open = !has_account || users::registration_open(&state.pool).await?;
+
+    let user = match bearer_token(&headers) {
+        Some(token) => authenticate(&state, token, "/api/onboarding/status").await?,
+        None => None,
+    };
+    let needs_onboarding = match user {
+        Some(user) => !users::find_by_id(&state.pool, user.id)
+            .await?
+            .is_some_and(|u| u.onboarding_complete),
+        None => !has_account,
+    };
+    Ok(Json(json!({
+        "needsOnboarding": needs_onboarding,
+        "hasAccount": has_account,
+        "registrationOpen": registration_open,
+    })))
+}
+
+async fn register(
+    State(state): State<AppState>,
+    ApiJson(body): ApiJson<Credentials>,
+) -> Result<Json<Value>, ApiError> {
+    let username = body.username.trim().to_string();
+    if !(3..=50).contains(&username.chars().count()) {
+        return Err(ApiError::Invalid(
+            "Username must be 3 to 50 characters".into(),
+        ));
+    }
+    if body.password.chars().count() < 6 {
+        return Err(ApiError::Invalid(
+            "Password must be at least 6 characters".into(),
+        ));
+    }
+
+    let password = body.password;
+    let hash = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(anyhow::Error::from)?;
+
+    match users::register(&state.pool, Uuid::now_v7(), &username, &hash).await? {
+        Registration::Closed => Err(ApiError::Forbidden("Registration is closed")),
+        Registration::UsernameTaken => Err(ApiError::BadRequest("Username already taken".into())),
+        Registration::Created(user) => {
+            let token =
+                state
+                    .jwt
+                    .issue_access(user.id, &user.username, &user.role, user.token_version);
+            Ok(Json(json!({
+                "token": token,
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "role": user.role,
+                    "onboardingComplete": false,
+                },
+            })))
+        }
+    }
+}
+
+async fn complete(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
+    users::set_onboarding_complete(&state.pool, user.id).await?;
+    Ok(Json(json!({ "success": true })))
+}

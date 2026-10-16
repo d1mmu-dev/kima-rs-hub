@@ -34,3 +34,6 @@ Status: `open` (not yet reviewed) · `accepted` (keep, intended) ·
 | D-020 | Users | First-user check (`count == 0`) not serialised; two concurrent first sign-ups could both become admin | Registration runs under a Postgres advisory lock | Race fix | accepted |
 | D-021 | Health | `/health` reports db, redis, embedding write path, Lidarr and analyzer liveness | Reports `{"status","checks":{"db"}}` only; more checks are added as subsystems land | Only the DB exists in M0 | open |
 | D-022 | API errors | Validation failures return `details` as a zod issue array | `details` is a single human-readable string | No zod; simpler | open |
+| D-023 | Auth | Login does not trim the username; register does not trim either | Both trim surrounding whitespace | Avoids "ana " accounts that can never log in from a phone keyboard | open |
+| D-024 | Auth | 2FA login step, change-password, admin user management, stream tickets, API keys exist | Not in M0: user management + stream tickets arrive in M1, 2FA + API keys in M8 | Milestone order | open |
+| D-025 | Onboarding | `/onboarding/lidarr`, `/audiobookshelf`, `/soulseek`, `/enrichment` steps; `complete` re-initialises Lidarr/Audiobookshelf and syncs audiobooks | Only `status`, `register`, `complete` | Those integrations arrive in M6/M7 | open |

@@ -5,3 +5,9 @@ frontend/out
 .git
 .data
 .env
+**/target
+.claude
+.superpowers
+.idea
+.env.*
+**/.data

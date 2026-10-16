@@ -91,7 +91,7 @@ export function UserManagementSection() {
     const handleDelete = async (userId: string) => {
         setDeleteStatus("loading");
         try {
-            await api.delete(`/auth/users/${userId}`);
+            await api.delete(`/auth/users/${encodeURIComponent(userId)}`);
             closeDelete();
             loadUsers();
         } catch (error: unknown) {

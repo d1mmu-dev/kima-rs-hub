@@ -14,7 +14,7 @@ interface ContinueListeningProps {
 
 function imageFor(item: ListenedItem) {
     if (item.type === "audiobook") {
-        return api.getCoverArtUrl(`/audiobooks/${item.id}/cover`, 300);
+        return api.getCoverArtUrl(`/audiobooks/${encodeURIComponent(item.id)}/cover`, 300);
     }
     return item.coverArt ? api.getCoverArtUrl(item.coverArt, 300) : null;
 }

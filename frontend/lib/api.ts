@@ -664,7 +664,7 @@ class ApiClient {
             status: string;
             progress: number;
             result?: { tracksAdded: number; tracksUpdated: number; tracksMissing: number };
-        }>(`/library/scan/status/${jobId}`);
+        }>(`/library/scan/status/${encodeURIComponent(jobId)}`);
     }
 
     async getArtist(id: string) {
@@ -687,7 +687,7 @@ class ApiClient {
     }
 
     async getAlbum(id: string) {
-        return this.request<ApiData>(`/library/albums/${id}`);
+        return this.request<ApiData>(`/library/albums/${encodeURIComponent(id)}`);
     }
 
     async getTracks(params?: {
@@ -713,14 +713,14 @@ class ApiClient {
     }
 
     async deleteTrack(trackId: string) {
-        return this.request<{ message: string }>(`/library/tracks/${trackId}`, {
+        return this.request<{ message: string }>(`/library/tracks/${encodeURIComponent(trackId)}`, {
             method: "DELETE",
         });
     }
 
     async deleteAlbum(albumId: string) {
         return this.request<{ message: string; deletedFiles?: number }>(
-            `/library/albums/${albumId}`,
+            `/library/albums/${encodeURIComponent(albumId)}`,
             {
                 method: "DELETE",
             }
@@ -729,7 +729,7 @@ class ApiClient {
 
     async deleteArtist(artistId: string) {
         return this.request<{ message: string; deletedFiles?: number }>(
-            `/library/artists/${artistId}`,
+            `/library/artists/${encodeURIComponent(artistId)}`,
             {
                 method: "DELETE",
             }
@@ -737,7 +737,7 @@ class ApiClient {
     }
 
     async getTrack(id: string) {
-        return this.request<ApiData>(`/library/tracks/${id}`);
+        return this.request<ApiData>(`/library/tracks/${encodeURIComponent(id)}`);
     }
 
     async getTrackLyrics(trackId: string) {
@@ -745,7 +745,7 @@ class ApiClient {
             plainLyrics: string | null;
             syncedLyrics: string | null;
             source: string;
-        }>(`/library/tracks/${trackId}/lyrics`);
+        }>(`/library/tracks/${encodeURIComponent(trackId)}/lyrics`);
     }
 
     async getRadioTracks(type: string, value?: string, limit = 50) {
@@ -758,7 +758,7 @@ class ApiClient {
 
     // Streaming
     getStreamUrl(trackId: string): string {
-        return this.tokenizedUrl(`/api/library/tracks/${trackId}/stream`);
+        return this.tokenizedUrl(`/api/library/tracks/${encodeURIComponent(trackId)}/stream`);
     }
 
     /** `<audio>` cannot send headers, so the access token rides in the query; a token near expiry is refreshed in the background. */
@@ -773,7 +773,7 @@ class ApiClient {
     }
 
     prewarmTrack(trackId: string): void {
-        void this.request<{ ok: boolean }>(`/library/tracks/${trackId}/prewarm`, {
+        void this.request<{ ok: boolean }>(`/library/tracks/${encodeURIComponent(trackId)}/prewarm`, {
             method: "POST",
         }).catch(() => {});
     }
@@ -854,13 +854,13 @@ class ApiClient {
 
     async getSimilarArtists(seedArtistId: string, limit = 20) {
         return this.request<{ recommendations: ApiData[] }>(
-            `/recommendations?seedArtistId=${seedArtistId}&limit=${limit}`
+            `/recommendations?seedArtistId=${encodeURIComponent(seedArtistId)}&limit=${limit}`
         );
     }
 
     async getSimilarAlbums(seedAlbumId: string, limit = 20) {
         return this.request<{ recommendations: ApiData[] }>(
-            `/recommendations/albums?seedAlbumId=${seedAlbumId}&limit=${limit}`
+            `/recommendations/albums?seedAlbumId=${encodeURIComponent(seedAlbumId)}&limit=${limit}`
         );
     }
 
@@ -870,7 +870,7 @@ class ApiClient {
     }
 
     async getPlaylist(id: string) {
-        return this.request<ApiData>(`/playlists/${id}`);
+        return this.request<ApiData>(`/playlists/${encodeURIComponent(id)}`);
     }
 
     async createPlaylist(name: string, isPublic = false) {
@@ -881,20 +881,20 @@ class ApiClient {
     }
 
     async updatePlaylist(id: string, data: { name?: string; isPublic?: boolean }) {
-        return this.request<ApiData>(`/playlists/${id}`, {
+        return this.request<ApiData>(`/playlists/${encodeURIComponent(id)}`, {
             method: "PUT",
             body: JSON.stringify(data),
         });
     }
 
     async deletePlaylist(id: string) {
-        return this.request<void>(`/playlists/${id}`, {
+        return this.request<void>(`/playlists/${encodeURIComponent(id)}`, {
             method: "DELETE",
         });
     }
 
     async addTrackToPlaylist(playlistId: string, trackId: string) {
-        return this.request<ApiData>(`/playlists/${playlistId}/items`, {
+        return this.request<ApiData>(`/playlists/${encodeURIComponent(playlistId)}/items`, {
             method: "POST",
             body: JSON.stringify({ trackId }),
         });
@@ -906,21 +906,21 @@ class ApiClient {
             added: number;
             duplicates: number;
             rejected: string[];
-        }>(`/playlists/${playlistId}/items`, {
+        }>(`/playlists/${encodeURIComponent(playlistId)}/items`, {
             method: "POST",
             body: JSON.stringify({ trackIds }),
         });
     }
 
     async removeTrackFromPlaylist(playlistId: string, trackId: string) {
-        return this.request<void>(`/playlists/${playlistId}/items/${trackId}`, {
+        return this.request<void>(`/playlists/${encodeURIComponent(playlistId)}/items/${encodeURIComponent(trackId)}`, {
             method: "DELETE",
         });
     }
 
     async moveTrackInPlaylist(playlistId: string, itemId: string, afterItemId: string | null) {
         return this.request<{ success: boolean; rank: string }>(
-            `/playlists/${playlistId}/items/${itemId}/move`,
+            `/playlists/${encodeURIComponent(playlistId)}/items/${encodeURIComponent(itemId)}/move`,
             {
                 method: "PATCH",
                 body: JSON.stringify({ afterItemId }),
@@ -930,14 +930,14 @@ class ApiClient {
 
     async hidePlaylist(playlistId: string) {
         return this.request<{ message: string; isHidden: boolean }>(
-            `/playlists/${playlistId}/hide`,
+            `/playlists/${encodeURIComponent(playlistId)}/hide`,
             { method: "POST" }
         );
     }
 
     async unhidePlaylist(playlistId: string) {
         return this.request<{ message: string; isHidden: boolean }>(
-            `/playlists/${playlistId}/hide`,
+            `/playlists/${encodeURIComponent(playlistId)}/hide`,
             { method: "DELETE" }
         );
     }
@@ -948,7 +948,7 @@ class ApiClient {
             message: string;
             error?: string;
             filePath?: string;
-        }>(`/playlists/${playlistId}/pending/${pendingTrackId}/retry`, {
+        }>(`/playlists/${encodeURIComponent(playlistId)}/pending/${encodeURIComponent(pendingTrackId)}/retry`, {
             method: "POST",
         });
     }
@@ -958,14 +958,14 @@ class ApiClient {
             success: boolean;
             queued: number;
             message: string;
-        }>(`/playlists/${playlistId}/pending/retry-all`, {
+        }>(`/playlists/${encodeURIComponent(playlistId)}/pending/retry-all`, {
             method: "POST",
         });
     }
 
     async removePendingTrack(playlistId: string, pendingTrackId: string) {
         return this.request<{ message: string }>(
-            `/playlists/${playlistId}/pending/${pendingTrackId}`,
+            `/playlists/${encodeURIComponent(playlistId)}/pending/${encodeURIComponent(pendingTrackId)}`,
             { method: "DELETE" }
         );
     }
@@ -1109,7 +1109,7 @@ class ApiClient {
     }
 
     async deleteDownload(id: string) {
-        return this.request<{ success: boolean }>(`/downloads/${id}`, {
+        return this.request<{ success: boolean }>(`/downloads/${encodeURIComponent(id)}`, {
             method: "DELETE",
         });
     }
@@ -1258,7 +1258,7 @@ class ApiClient {
     }
 
     async getAudiobook(id: string) {
-        return this.request<ApiData>(`/audiobooks/${id}`);
+        return this.request<ApiData>(`/audiobooks/${encodeURIComponent(id)}`);
     }
 
     async getAudiobookSeries(seriesName: string) {
@@ -1268,7 +1268,7 @@ class ApiClient {
     }
 
     getAudiobookStreamUrl(id: string, trackIndex = 0): string {
-        const baseUrl = `${getApiBaseUrl()}/api/audiobooks/${id}/stream`;
+        const baseUrl = `${getApiBaseUrl()}/api/audiobooks/${encodeURIComponent(id)}/stream`;
         const token = this.getCurrentToken();
         if (this.tokenExpiresWithin60Min()) void this.ensureFreshToken();
         const params = new URLSearchParams();
@@ -1284,14 +1284,14 @@ class ApiClient {
         duration: number,
         isFinished: boolean = false
     ) {
-        return this.request<ApiData>(`/audiobooks/${id}/progress`, {
+        return this.request<ApiData>(`/audiobooks/${encodeURIComponent(id)}/progress`, {
             method: "POST",
             body: JSON.stringify({ currentTime, duration, isFinished }),
         });
     }
 
     async deleteAudiobookProgress(id: string) {
-        return this.request<ApiData>(`/audiobooks/${id}/progress`, {
+        return this.request<ApiData>(`/audiobooks/${encodeURIComponent(id)}/progress`, {
             method: "DELETE",
         });
     }
@@ -1310,7 +1310,7 @@ class ApiClient {
         if (params?.limit) query.set("limit", String(params.limit));
         if (params?.offset) query.set("offset", String(params.offset));
         const suffix = query.size > 0 ? `?${query}` : "";
-        return this.request<ApiData>(`/podcasts/${id}${suffix}`, {
+        return this.request<ApiData>(`/podcasts/${encodeURIComponent(id)}${suffix}`, {
             silent404: true,
         });
     }
@@ -1322,7 +1322,7 @@ class ApiClient {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 25000);
         try {
-            return await this.request<ApiData>(`/podcasts/preview/${itunesId}`, { signal: controller.signal });
+            return await this.request<ApiData>(`/podcasts/preview/${encodeURIComponent(itunesId)}`, { signal: controller.signal });
         } catch (err) {
             if (err instanceof DOMException && err.name === "AbortError") {
                 throw new Error("Podcast preview timed out. The feed may be slow or unreachable.");
@@ -1334,7 +1334,7 @@ class ApiClient {
     }
 
     getPodcastEpisodeStreamUrl(podcastId: string, episodeId: string): string {
-        return this.tokenizedUrl(`/api/podcasts/${podcastId}/episodes/${episodeId}/stream`);
+        return this.tokenizedUrl(`/api/podcasts/${encodeURIComponent(podcastId)}/episodes/${encodeURIComponent(episodeId)}/stream`);
     }
 
     /**
@@ -1353,7 +1353,7 @@ class ApiClient {
             cached: boolean;
             downloading: boolean;
             downloadProgress: number | null;
-        }>(`/podcasts/${podcastId}/episodes/${episodeId}/cache-status`);
+        }>(`/podcasts/${encodeURIComponent(podcastId)}/episodes/${encodeURIComponent(episodeId)}/cache-status`);
     }
 
     async updatePodcastEpisodeProgress(
@@ -1364,7 +1364,7 @@ class ApiClient {
         isFinished: boolean = false
     ) {
         return this.request<ApiData>(
-            `/podcasts/${podcastId}/episodes/${episodeId}/progress`,
+            `/podcasts/${encodeURIComponent(podcastId)}/episodes/${encodeURIComponent(episodeId)}/progress`,
             {
                 method: "POST",
                 body: JSON.stringify({ currentTime, duration, isFinished }),
@@ -1374,7 +1374,7 @@ class ApiClient {
 
     async deletePodcastEpisodeProgress(podcastId: string, episodeId: string) {
         return this.request<ApiData>(
-            `/podcasts/${podcastId}/episodes/${episodeId}/progress`,
+            `/podcasts/${encodeURIComponent(podcastId)}/episodes/${encodeURIComponent(episodeId)}/progress`,
             {
                 method: "DELETE",
             }
@@ -1382,7 +1382,7 @@ class ApiClient {
     }
 
     async getSimilarPodcasts(podcastId: string) {
-        return this.request<ApiData[]>(`/podcasts/${podcastId}/similar`);
+        return this.request<ApiData[]>(`/podcasts/${encodeURIComponent(podcastId)}/similar`);
     }
 
     async getTopPodcasts(limit = 20, genreId?: number) {
@@ -1401,7 +1401,7 @@ class ApiClient {
 
     async getPodcastsByGenrePaginated(genreId: number, limit = 20, offset = 0) {
         return this.request<ApiData[]>(
-            `/podcasts/discover/genre/${genreId}?limit=${limit}&offset=${offset}`
+            `/podcasts/discover/genre/${encodeURIComponent(genreId)}?limit=${limit}&offset=${offset}`
         );
     }
 
@@ -1414,7 +1414,7 @@ class ApiClient {
 
     async removePodcast(podcastId: string) {
         return this.request<{ success: boolean; message: string }>(
-            `/podcasts/${podcastId}/unsubscribe`,
+            `/podcasts/${encodeURIComponent(podcastId)}/unsubscribe`,
             {
                 method: "DELETE",
             }
@@ -1423,7 +1423,7 @@ class ApiClient {
 
     async refreshPodcast(podcastId: string) {
         return this.request<{ success: boolean; newEpisodesCount: number; totalEpisodes: number; message: string }>(
-            `/podcasts/${podcastId}/refresh`
+            `/podcasts/${encodeURIComponent(podcastId)}/refresh`
         );
     }
 
@@ -1577,7 +1577,7 @@ class ApiClient {
     }
 
     async getMix(id: string) {
-        return this.request<ApiData>(`/mixes/${id}`);
+        return this.request<ApiData>(`/mixes/${encodeURIComponent(id)}`);
     }
 
     async refreshMixes() {
@@ -1591,7 +1591,7 @@ class ApiClient {
 
     async saveMixAsPlaylist(mixId: string, customName?: string) {
         return this.request<{ id: string; name: string; trackCount: number }>(
-            `/mixes/${mixId}/save`,
+            `/mixes/${encodeURIComponent(mixId)}/save`,
             {
                 method: "POST",
                 body: customName
@@ -1626,7 +1626,7 @@ class ApiClient {
     }
 
     async getMoodBucketMix(mood: MoodType) {
-        return this.request<MoodBucketMix>(`/mixes/mood/buckets/${mood}`);
+        return this.request<MoodBucketMix>(`/mixes/mood/buckets/${encodeURIComponent(mood)}`);
     }
 
     // Pass the ids that were actually played, so the saved mix is the one the
@@ -1637,7 +1637,7 @@ class ApiClient {
             success: boolean;
             mix: MoodBucketMix & { generatedAt: string };
         }>(
-            `/mixes/mood/buckets/${mood}/save`,
+            `/mixes/mood/buckets/${encodeURIComponent(mood)}/save`,
             {
                 method: "POST",
                 body: JSON.stringify(trackIds ? { trackIds } : {}),
@@ -1850,7 +1850,7 @@ class ApiClient {
             heroUrl?: string;
         }
     ) {
-        return this.request<ApiData>(`/enrichment/artists/${artistId}/metadata`, {
+        return this.request<ApiData>(`/enrichment/artists/${encodeURIComponent(artistId)}/metadata`, {
             method: "PUT",
             body: JSON.stringify(data),
         });
@@ -1866,14 +1866,14 @@ class ApiClient {
             coverUrl?: string;
         }
     ) {
-        return this.request<ApiData>(`/enrichment/albums/${albumId}/metadata`, {
+        return this.request<ApiData>(`/enrichment/albums/${encodeURIComponent(albumId)}/metadata`, {
             method: "PUT",
             body: JSON.stringify(data),
         });
     }
 
     async updateTrackMetadata(trackId: string, data: ApiData) {
-        return this.request<ApiData>(`/enrichment/tracks/${trackId}/metadata`, {
+        return this.request<ApiData>(`/enrichment/tracks/${encodeURIComponent(trackId)}/metadata`, {
             method: "PUT",
             body: JSON.stringify(data),
         });
@@ -1881,21 +1881,21 @@ class ApiClient {
 
     async resetArtistMetadata(artistId: string) {
         return this.request<{ message: string; artist: ApiData }>(
-            `/enrichment/artists/${artistId}/reset`,
+            `/enrichment/artists/${encodeURIComponent(artistId)}/reset`,
             { method: "POST" }
         );
     }
 
     async resetAlbumMetadata(albumId: string) {
         return this.request<{ message: string; album: ApiData }>(
-            `/enrichment/albums/${albumId}/reset`,
+            `/enrichment/albums/${encodeURIComponent(albumId)}/reset`,
             { method: "POST" }
         );
     }
 
     async resetTrackMetadata(trackId: string) {
         return this.request<{ message: string; track: ApiData }>(
-            `/enrichment/tracks/${trackId}/reset`,
+            `/enrichment/tracks/${encodeURIComponent(trackId)}/reset`,
             { method: "POST" }
         );
     }
@@ -1929,7 +1929,7 @@ class ApiClient {
     }
 
     async revokeApiKey(id: string): Promise<{ message: string }> {
-        return this.delete(`/api-keys/${id}`);
+        return this.delete(`/api-keys/${encodeURIComponent(id)}`);
     }
 
     async getNotifications(): Promise<
@@ -1947,11 +1947,11 @@ class ApiClient {
         return this.get("/notifications");
     }
     async markNotificationAsRead(id: string): Promise<{ success: boolean }> {
-        return this.post(`/notifications/${id}/read`);
+        return this.post(`/notifications/${encodeURIComponent(id)}/read`);
     }
 
     async clearNotification(id: string): Promise<{ success: boolean }> {
-        return this.post(`/notifications/${id}/clear`);
+        return this.post(`/notifications/${encodeURIComponent(id)}/clear`);
     }
 
     async clearAllNotifications(): Promise<{ success: boolean }> {
@@ -1996,7 +1996,7 @@ class ApiClient {
     }
 
     async clearDownloadFromHistory(id: string): Promise<{ success: boolean }> {
-        return this.post(`/notifications/downloads/${id}/clear`);
+        return this.post(`/notifications/downloads/${encodeURIComponent(id)}/clear`);
     }
 
     async clearAllDownloadHistory(): Promise<{ success: boolean }> {
@@ -2006,7 +2006,7 @@ class ApiClient {
     // Vibe (CLAP Similarity) API
     async getVibeSimilarTracks(trackId: string, limit = 20, signal?: AbortSignal) {
         return this.request<{ sourceTrackId: string; tracks: VibeTrack[] }>(
-            `/vibe/similar/${trackId}?limit=${limit}`,
+            `/vibe/similar/${encodeURIComponent(trackId)}?limit=${limit}`,
             { signal }
         );
     }
@@ -2074,13 +2074,13 @@ class ApiClient {
             moodElectronic: number | null;
             moodTags: string[] | null;
             essentiaGenres: string[] | null;
-        }>(`/analysis/track/${trackId}`);
+        }>(`/analysis/track/${encodeURIComponent(trackId)}`);
     }
 
     async retryFailedDownload(
         id: string
     ): Promise<{ success: boolean; newJobId?: string }> {
-        return this.post(`/notifications/downloads/${id}/retry`);
+        return this.post(`/notifications/downloads/${encodeURIComponent(id)}/retry`);
     }
 
     // Share Links
@@ -2095,7 +2095,7 @@ class ApiClient {
     }
 
     async revokeShareLink(token: string): Promise<{ message: string }> {
-        return this.request<{ message: string }>(`/share/${token}`, {
+        return this.request<{ message: string }>(`/share/${encodeURIComponent(token)}`, {
             method: "DELETE",
         });
     }

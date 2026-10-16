@@ -72,7 +72,7 @@ function DeezerPlaylistDetailPageInner() {
             setError(null);
             try {
                 const data = await api.get<DeezerPlaylistFull>(
-                    `/browse/playlists/${playlistId}`
+                    `/browse/playlists/${encodeURIComponent(playlistId)}`
                 );
                 setPlaylist(data);
             } catch (err) {

@@ -102,7 +102,7 @@ export function WhatsNewWindow({
         setCloseError(null);
         try {
             if (onDismiss) await onDismiss();
-            else for (const r of releases) await api.post(`/whats-new/${r.version}/dismiss`, {});
+            else for (const r of releases) await api.post(`/whats-new/${encodeURIComponent(r.version)}/dismiss`, {});
         } catch {
             setClosing(false);
             setCloseError("Couldn't save. Try again.");
@@ -174,7 +174,7 @@ export function WhatsNewWindow({
     const answer = async (key: string, enabled: boolean) => {
         setChoices((c) => ({ ...c, [key]: enabled }));
         try {
-            await api.post(`/whats-new/${versionOf(key)}/choice`, { key, enabled });
+            await api.post(`/whats-new/${encodeURIComponent(versionOf(key))}/choice`, { key, enabled });
         } catch {
             setChoices((c) => {
                 const n = { ...c };

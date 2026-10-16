@@ -129,7 +129,7 @@ export function WhatsNewGate() {
     // Done closes every pending release in the queue, not just the heading's:
     // a window that shows two releases must record both closings.
     const dismissAll = async () => {
-        for (const r of queue) await api.post(`/whats-new/${r.version}/dismiss`, {});
+        for (const r of queue) await api.post(`/whats-new/${encodeURIComponent(r.version)}/dismiss`, {});
     };
 
     const defer = () => {

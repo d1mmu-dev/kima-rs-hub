@@ -23,7 +23,7 @@ export function SimilarArtistsGrid({
             style={cascadeStyle(Math.min(similarArtists.length, 6))}
         >
             {similarArtists.map((result, index) => {
-                const artistId = result.mbid || encodeURIComponent(result.name);
+                const artistId = result.mbid || result.name;
                 const imageUrl = result.image
                     ? api.getCoverArtUrl(result.image, 200)
                     : null;

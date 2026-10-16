@@ -30,5 +30,5 @@ ENV KIMA_DATA_DIR=/data \
 EXPOSE 3030
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
-  CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3030 && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '200' <&3"]
+  CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${PORT:-3030} && printf 'GET /health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -qE '^HTTP/1\\.[01] 200' <&3"]
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/kima-entrypoint"]

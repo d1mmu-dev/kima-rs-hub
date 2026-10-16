@@ -178,3 +178,60 @@ async fn stream_ends_when_shutdown_is_cancelled(pool: PgPool) {
     drop(body);
     assert_eq!(state.sse.open_streams(ana.id), 0, "slot released");
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn revoked_user_streams_end(pool: PgPool) {
+    let state = common::state(pool);
+    let (ana, _) = common::user_with_token(&state, "ana").await;
+    let (ben, _) = common::user_with_token(&state, "ben").await;
+    let app = kima_api::router(state.clone());
+
+    let mut ana_body = open_stream(&app, &state.sse.issue_ticket(ana.id))
+        .await
+        .into_body();
+    let mut ben_body = open_stream(&app, &state.sse.issue_ticket(ben.id))
+        .await
+        .into_body();
+    next_text(&mut ana_body).await;
+    next_text(&mut ben_body).await;
+
+    kima_api::revoke_sessions(&state, ana.id);
+    let end = tokio::time::timeout(Duration::from_secs(2), ana_body.frame())
+        .await
+        .expect("revoked stream ends within 2 s");
+    assert!(end.is_none(), "no revocation frame leaks to the client");
+    drop(ana_body);
+    assert_eq!(state.sse.open_streams(ana.id), 0);
+
+    state.events.publish(Event {
+        user_id: Some(ben.id),
+        data: json!({ "type": "still-here" }),
+    });
+    assert_eq!(
+        next_text(&mut ben_body).await,
+        "data: {\"type\":\"still-here\"}\n\n"
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn lagged_stream_gets_resync(pool: PgPool) {
+    let mut state = common::state(pool);
+    state.events = kima_core::events::EventBus::new(2);
+    let (ana, _) = common::user_with_token(&state, "ana").await;
+    let app = kima_api::router(state.clone());
+
+    let mut body = open_stream(&app, &state.sse.issue_ticket(ana.id))
+        .await
+        .into_body();
+    for n in 0..10 {
+        state.events.publish(Event {
+            user_id: None,
+            data: json!({ "type": "x", "n": n }),
+        });
+    }
+    let mut seen = String::new();
+    for _ in 0..4 {
+        seen.push_str(&next_text(&mut body).await);
+    }
+    assert!(seen.contains("data: {\"type\":\"resync\"}\n\n"), "{seen}");
+}

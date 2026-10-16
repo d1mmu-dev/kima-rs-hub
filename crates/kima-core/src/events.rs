@@ -14,6 +14,18 @@ impl Event {
     pub fn is_for(&self, user: Uuid) -> bool {
         self.user_id.is_none_or(|id| id == user)
     }
+
+    /// Tells a user's open event streams that their sessions were revoked.
+    pub fn revoke(user: Uuid) -> Self {
+        Self {
+            user_id: Some(user),
+            data: serde_json::json!({ "type": "session:revoked" }),
+        }
+    }
+
+    pub fn is_revocation(&self) -> bool {
+        self.data.get("type").and_then(|t| t.as_str()) == Some("session:revoked")
+    }
 }
 
 #[derive(Clone)]
@@ -67,6 +79,22 @@ mod tests {
                 data: json!({})
             }
             .is_for(ben)
+        );
+    }
+
+    #[test]
+    fn revocation_targets_one_user() {
+        let ana = Uuid::now_v7();
+        let event = Event::revoke(ana);
+        assert!(event.is_revocation());
+        assert!(event.is_for(ana));
+        assert!(!event.is_for(Uuid::now_v7()));
+        assert!(
+            !Event {
+                user_id: None,
+                data: json!({ "type": "x" })
+            }
+            .is_revocation()
         );
     }
 

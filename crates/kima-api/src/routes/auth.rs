@@ -19,6 +19,7 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/refresh", post(refresh))
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(me))
+        .route("/auth/stream-ticket", post(stream_ticket))
 }
 
 async fn login(
@@ -117,5 +118,22 @@ async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<Value>
         "onboardingComplete": user.onboarding_complete,
         "enrichmentSettings": null,
         "createdAt": created_at,
+    })))
+}
+
+/// A 4 h stream-scoped token for `<audio src>` URLs. `ticket` is upstream's key; `token` is what
+/// the kima-rs frontend client reads.
+async fn stream_ticket(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    let user = users::find_by_id(&state.pool, auth.id)
+        .await?
+        .ok_or(ApiError::Unauthorized("Not authenticated"))?;
+    let token = state.jwt.issue_stream(user.id, user.token_version);
+    Ok(Json(json!({
+        "token": token,
+        "ticket": token,
+        "expiresIn": kima_core::auth::STREAM_TTL_SECS,
     })))
 }

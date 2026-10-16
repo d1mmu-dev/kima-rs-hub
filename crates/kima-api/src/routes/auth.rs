@@ -34,6 +34,7 @@ async fn login(
 
     let found = users::find_by_username(&state.pool, &username).await?;
     let password = body.password;
+    let permit = state.password_permit().await?;
     let (found, valid) = tokio::task::spawn_blocking(move || {
         let valid = match &found {
             Some(user) => verify_password(&password, &user.password_hash),
@@ -46,6 +47,7 @@ async fn login(
     })
     .await
     .map_err(anyhow::Error::from)?;
+    drop(permit);
 
     let Some(user) = found.filter(|_| valid) else {
         return Err(ApiError::Unauthorized("Invalid credentials"));

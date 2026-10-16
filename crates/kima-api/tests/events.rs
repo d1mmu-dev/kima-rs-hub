@@ -154,3 +154,27 @@ async fn sixth_stream_is_refused_until_one_closes(pool: PgPool) {
     let res = open_stream(&app, &state.sse.issue_ticket(ana.id)).await;
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+/// Open streams must not hold graceful shutdown open.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stream_ends_when_shutdown_is_cancelled(pool: PgPool) {
+    let state = common::state(pool);
+    let (ana, _) = common::user_with_token(&state, "ana").await;
+    let app = kima_api::router(state.clone());
+
+    let res = open_stream(&app, &state.sse.issue_ticket(ana.id)).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let mut body = res.into_body();
+    assert_eq!(
+        next_text(&mut body).await,
+        "data: {\"type\":\"connected\"}\n\n"
+    );
+
+    state.shutdown.cancel();
+    let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .expect("stream ends within 2 s of shutdown");
+    assert!(frame.is_none(), "no further frames after shutdown");
+    drop(body);
+    assert_eq!(state.sse.open_streams(ana.id), 0, "slot released");
+}

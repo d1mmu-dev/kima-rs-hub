@@ -80,7 +80,7 @@ kima-rs/
 - Each integration is a cargo feature; the default build enables all of them.
 
 **Key dependencies.** axum, tower/tower-http, tokio, sqlx (postgres, migrate),
-pgvector, tower-sessions (+ sqlx store), argon2, totp-rs, chacha20poly1305,
+pgvector, jsonwebtoken, argon2, totp-rs, chacha20poly1305,
 reqwest, serde, tracing, lofty, symphonia, rubato, realfft, ebur128,
 rusty-chromaprint, ort, tokenizers, tokio-cron-scheduler, quick-xml, rss,
 fuzzy matching via strsim/rapidfuzz-style crate, image (artwork resize).
@@ -115,13 +115,19 @@ fuzzy matching via strsim/rapidfuzz-style crate, image (artwork resize).
 
 ## 5. Auth, sessions, events, secrets
 
-- Cookie sessions in Postgres (tower-sessions). `SECURE_COOKIES` and
-  `ALLOWED_ORIGINS` are honoured as upstream does.
+- JWT bearer auth, as upstream does, so the frontend's token handling stays
+  unchanged. HS256 signed with `SESSION_SECRET`. Access token 24h (claims
+  `userId, username, role, tokenVersion`), refresh token 30d (`type: "refresh"`),
+  stream ticket 4h (`scope: "stream"`, valid only on `/stream` paths). Bumping
+  a user's `token_version` revokes all of their tokens. Accepted from the
+  `Authorization: Bearer` header, `X-API-Key`, or `?token=` on media paths.
+  `ALLOWED_ORIGINS` is honoured as upstream does.
 - Passwords: argon2id. First registered user is admin (onboarding flow).
 - 2FA: TOTP (totp-rs) with QR provisioning.
 - API keys and per-app Subsonic tokens (revocable); Subsonic token+salt auth.
 - Events: in-process `tokio::sync::broadcast` bus feeds an SSE endpoint. A
-  short-lived ticket is used for SSE auth, as upstream does.
+  single-use ticket (30 s, held in memory) authenticates SSE, as upstream does.
+  At most 5 streams per user.
 - Settings secrets encrypted with XChaCha20-Poly1305. `SESSION_SECRET` and
   `SETTINGS_ENCRYPTION_KEY` are generated into `/data` on first start if unset.
 
@@ -192,19 +198,26 @@ that hides features not yet available through the `features` endpoint.
 | # | Milestone | Scope |
 |---|---|---|
 | M0 | Skeleton | Workspace, config/env, Postgres + migrations, job queue, sessions, users, first-admin onboarding, SSE, static frontend served by axum, Dockerfile |
-| M1 | Library & playback | Scanner (lofty), artwork, browse, tsvector search, streaming with range requests, ffmpeg transcode 320/192/128, plays, playlists, likes, playback state |
+| M1 | Library & playback | User management (admin create/list users, change password, registration toggle), scanner (lofty), artwork, browse, tsvector search, streaming with range requests, ffmpeg transcode 320/192/128, plays, playlists, likes, playback state |
 | M2 | Subsonic | OpenSubsonic API (XML+JSON), per-app tokens, snapshot-tested responses |
 | M3 | Identification | MusicBrainz, AcoustID via rusty-chromaprint, artist metadata enrichment, genres, lyrics (lrclib), enrichment stage tracking |
 | M4 | ML analysis | `kima-ml` (CLAP, musicnn, DSP) as enrichment stages, worker setting, progress UI |
 | M5 | Vibe engine | §7 in full |
 | M6 | Podcasts & audiobooks | RSS subscribe/stream/progress, Audiobookshelf |
 | M7 | Integrations | ListenBrainz (scrobble, similar artists), Deezer fallback, Lidarr, Soulseek/slskd, playlist import, weekly discovery |
-| M8 | Hardening | Rate limiting, share links, notifications, Prometheus metrics, GPU image, docs |
+| M8 | Hardening | TOTP 2FA + recovery codes, API keys and device linking, rate limiting, share links, notifications, Prometheus metrics, GPU image, docs |
 
 ## 9. Frontend
 
 - Fork upstream `frontend/` into this repo and build it with `output: "export"`.
   axum serves it with an SPA fallback.
+- Static export cannot serve arbitrary IDs on dynamic routes (`album/[id]` and
+  9 others). Those pages move to query parameters (`/album?id=…`), and axum
+  301-redirects the old path form (`/album/<id>` → `/album?id=<id>`), so old
+  links and share URLs keep working.
+- The Next.js route handlers (`app/api/events`, `app/api/events/ticket`,
+  `manifest.webmanifest`) are removed: axum serves `/api/events` directly and
+  the manifest becomes a static file.
 - In M0, audit the frontend for anything static export breaks (route handlers,
   middleware, rewrites, dynamic server rendering) and replace it with
   client-side equivalents.

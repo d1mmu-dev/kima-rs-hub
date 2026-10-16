@@ -11,6 +11,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 kima-core = { path = "crates/kima-core" }
 kima-db = { path = "crates/kima-db" }
+kima-jobs = { path = "crates/kima-jobs" }
 
 anyhow = "1"
 argon2 = "0.5"

@@ -8,5 +8,7 @@ services:
       - ${MUSIC_DIR:-./music}:/music:ro
       - kima_data:/data
     restart: unless-stopped
+    # kima drains for up to 10 s, then the bundled Postgres needs time to stop cleanly.
+    stop_grace_period: 30s
 volumes:
   kima_data: {}

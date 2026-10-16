@@ -58,10 +58,14 @@ async fn stream(
         std::future::ready(event)
     });
     // The slot lives as long as the stream; the client hanging up drops both.
-    let stream = connected.chain(events).map(move |item| {
-        let _held = &slot;
-        item
-    });
+    // Shutdown ends the stream so graceful shutdown is not held open by idle clients.
+    let stream = connected
+        .chain(events)
+        .map(move |item| {
+            let _held = &slot;
+            item
+        })
+        .take_until(state.shutdown.clone().cancelled_owned());
 
     let sse = Sse::new(stream).keep_alive(
         KeepAlive::new()

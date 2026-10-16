@@ -68,10 +68,18 @@ async fn register(
         ));
     }
 
+    // Cheap refusal before the expensive hash; `users::register` re-checks under its lock.
+    if users::count(&state.pool).await? > 0 && !users::registration_open(&state.pool).await? {
+        return Err(ApiError::Forbidden("Registration is closed"));
+    }
+
     let password = body.password;
-    let hash = tokio::task::spawn_blocking(move || hash_password(&password))
-        .await
-        .map_err(anyhow::Error::from)?;
+    let hash = {
+        let _permit = state.password_permit().await?;
+        tokio::task::spawn_blocking(move || hash_password(&password))
+            .await
+            .map_err(anyhow::Error::from)?
+    };
 
     match users::register(&state.pool, Uuid::now_v7(), &username, &hash).await? {
         Registration::Closed => Err(ApiError::Forbidden("Registration is closed")),

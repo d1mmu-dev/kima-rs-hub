@@ -29,11 +29,15 @@ Requirements: Rust 1.85+, Node.js, Docker (for the dev database).
    docker compose -f docker-compose.dev.yml up -d
    ```
 2. Copy the environment file: `cp .env.example .env`
-3. Run the server: `cargo run -p kima-server`
-   (migrations run on startup; it listens on port 3030 unless `PORT` is set).
+3. Run the server (nothing loads `.env` for you, so export it into the shell first):
+   ```bash
+   set -a; source .env; set +a; cargo run -p kima-server
+   ```
+   Migrations run on startup; it listens on port 3030 unless `PORT` is set.
+   `.env.example` sets `KIMA_DATA_DIR=./.data`, so a non-root run doesn't need a writable `/data`.
 4. Frontend dev loop: run the Rust server on another port and point the Next dev server at it.
    ```bash
-   PORT=3111 cargo run -p kima-server
+   set -a; source .env; set +a; PORT=3111 cargo run -p kima-server
    cd frontend && npm install && npm run dev
    ```
    `npm run dev` serves on port 3030 and rewrites `/api`, `/rest` and `/health` to the backend.
@@ -54,7 +58,7 @@ Upstream's names are kept.
 | Variable | Default | Meaning |
 |---|---|---|
 | `DATABASE_URL` | none | Postgres connection string. In the all-in-one image, setting it skips the bundled Postgres. |
-| `MUSIC_PATH` | none (`/music` in the image) | Music library directory. |
+| `MUSIC_PATH` | `/music` | Music library directory. |
 | `PORT` | `3030` | HTTP port. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` or `silent`. |
 | `ALLOWED_ORIGINS` | unset (any origin) | Comma-separated CORS origins. |

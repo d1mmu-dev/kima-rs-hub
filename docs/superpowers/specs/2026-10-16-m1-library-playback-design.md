@@ -100,9 +100,12 @@ The builder ports those helpers and their unit tests.
 
 - Artists are matched case-insensitively after Unicode normalization (NFC) and whitespace
   trimming. The best-capitalized spelling wins as the display name (as upstream does).
-- An album is identified by (album artist, normalized album title). The year is an
-  attribute, not part of the identity, so one album whose tracks carry different years stays
-  one album. It shows the most common year, and the conflict is reported (§4.5).
+- An album is identified by (album artist, normalized album title, album year), as decided in
+  §9. The album year is the most common year among that album's tracks within one folder. The
+  scanner computes it per (folder, album artist, album title) group before writing. So one
+  album folder whose tracks carry different years stays one album, and the conflict is
+  reported (§4.5). The same title in two folders with different years stays two albums
+  (remasters).
 - A track is identified by its file path. Rescans update rows in place by path; a file whose
   size and mtime are unchanged is skipped.
 - Files that disappear are marked missing, not deleted, so plays, likes and playlist entries

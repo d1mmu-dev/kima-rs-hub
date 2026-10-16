@@ -66,6 +66,9 @@ const nextConfig: NextConfig = {
     trailingSlash: true,
     ...(isDev
         ? {
+              // Next's trailing-slash redirect runs before rewrites and would send /api/x to
+              // /api/x/, which the rewrites below don't match. The export is unaffected.
+              skipTrailingSlashRedirect: true,
               async rewrites() {
                   return [
                       { source: "/api/:path*", destination: `${devBackend}/api/:path*` },

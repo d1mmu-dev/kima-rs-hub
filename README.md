@@ -36,8 +36,12 @@ Requirements: Rust 1.85+, Node.js, Docker (for the dev database).
    Migrations run on startup; it listens on port 3030 unless `PORT` is set.
    `.env.example` sets `KIMA_DATA_DIR=./.data`, so a non-root run doesn't need a writable `/data`.
 4. Frontend dev loop: run the Rust server on another port and point the Next dev server at it.
+   Use two terminals. In the first, start the server and leave it running:
    ```bash
    set -a; source .env; set +a; PORT=3111 cargo run -p kima-server
+   ```
+   In the second, start the frontend:
+   ```bash
    cd frontend && npm install && npm run dev
    ```
    `npm run dev` serves on port 3030 and rewrites `/api`, `/rest` and `/health` to the backend.

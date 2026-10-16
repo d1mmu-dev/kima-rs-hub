@@ -1,11 +1,12 @@
 //! The exported Next.js app, plus redirects from upstream's path-style page URLs (D-011).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use axum::Router;
-use axum::extract::Path as UrlPath;
-use axum::response::Redirect;
+use axum::extract::{Path as UrlPath, Request};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
+use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
 /// (old route, new page, query parameter name)
@@ -45,12 +46,24 @@ pub fn routes(dir: &Path) -> Router {
 
     let mut router = Router::new();
     for &(route, page, param) in LEGACY_ROUTES {
+        let files = files.clone();
+        let parent = dir.join(route.trim_start_matches('/').trim_end_matches("/{value}"));
         router = router.route(
             route,
-            get(move |UrlPath(value): UrlPath<String>| async move {
-                let encoded: String = form_urlencoded::byte_serialize(value.as_bytes()).collect();
-                Redirect::permanent(&format!("{page}?{param}={encoded}"))
-            }),
+            get(
+                move |UrlPath(value): UrlPath<String>, req: Request| async move {
+                    // The export has real files one segment below these prefixes (RSC payloads such
+                    // as `album/index.txt`, `__next.*.txt` segment files). Serve those; redirect the rest.
+                    let exists = match export_entry(&parent, &value) {
+                        Some(path) => tokio::fs::try_exists(path).await.unwrap_or(false),
+                        None => false,
+                    };
+                    if exists {
+                        return files.oneshot(req).await.into_response();
+                    }
+                    legacy_redirect(page, param, &value)
+                },
+            ),
         );
     }
     for &(from, to) in FIXED_REDIRECTS {
@@ -60,4 +73,18 @@ pub fn routes(dir: &Path) -> Router {
         router = router.route_service(page_dir, files.clone());
     }
     router.fallback_service(files)
+}
+
+/// `parent/segment`, or `None` when the decoded segment could step outside `parent`.
+fn export_entry(parent: &Path, segment: &str) -> Option<PathBuf> {
+    let unsafe_segment = segment.is_empty()
+        || segment == "."
+        || segment == ".."
+        || segment.contains(['/', '\\', '\0']);
+    (!unsafe_segment).then(|| parent.join(segment))
+}
+
+fn legacy_redirect(page: &str, param: &str, value: &str) -> Response {
+    let encoded: String = form_urlencoded::byte_serialize(value.as_bytes()).collect();
+    Redirect::permanent(&format!("{page}?{param}={encoded}")).into_response()
 }

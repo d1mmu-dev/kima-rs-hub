@@ -22,6 +22,12 @@ HTTP API, DB schema and behaviour may change wherever that simplifies things.
 The frontend is patched to match. Upstream code is reference material; upstream
 test cases are a source of test cases.
 
+**Divergence log.** Every difference from upstream (behaviour, data, API,
+numerics, dropped features) is recorded in `docs/DIVERGENCES.md` in the same
+commit that introduces it, with a status (`accepted`, `to-fix`, `to-decide`,
+`open`, `resolved`), so it can be revisited later. A milestone is not done
+until its divergences are logged.
+
 **Non-goals (v1).**
 - Migrating data from an existing Kima install (a possible later add-on).
 - Bit-exact parity with Essentia's BPM/key output.

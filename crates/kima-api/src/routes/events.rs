@@ -43,14 +43,18 @@ async fn stream(
     Query(query): Query<StreamQuery>,
 ) -> Result<Response, ApiError> {
     let ticket = query.ticket.ok_or(ApiError::Unauthorized("Unauthorized"))?;
+    // Order matters: subscribe -> redeem -> read version.
+    // - A revoke before the redeem clears the ticket, so the redeem fails (401).
+    // - A revoke after the redeem (even before the version read) is delivered on the receiver,
+    //   already subscribed, or shows up as a lag, which re-checks the DB.
+    // - A revoke before the version read is also reflected in the version we read.
+    // Subscribing after the redeem would leave a gap where the revoke event is missed while the
+    // stored version already matches.
+    let receiver = state.events.subscribe();
     let user = state
         .sse
         .redeem_ticket(&ticket)
         .ok_or(ApiError::Unauthorized("Invalid or expired ticket"))?;
-    // Subscribe first, then read the version. A bump + revoke before the read is reflected in the
-    // version; one after the subscribe arrives as an event (or a lag, which re-checks the DB).
-    // Reading first would leave a gap where the revoke event is missed and the version is stale.
-    let receiver = state.events.subscribe();
     let version = users::find_by_id(&state.pool, user)
         .await?
         .ok_or(ApiError::Unauthorized("Invalid or expired ticket"))?

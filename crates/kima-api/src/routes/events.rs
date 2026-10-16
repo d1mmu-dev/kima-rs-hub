@@ -47,7 +47,10 @@ async fn stream(
         .sse
         .redeem_ticket(&ticket)
         .ok_or(ApiError::Unauthorized("Invalid or expired ticket"))?;
-    // Read before subscribing so a bump after this point is always seen as an event or a lag.
+    // Subscribe first, then read the version. A bump + revoke before the read is reflected in the
+    // version; one after the subscribe arrives as an event (or a lag, which re-checks the DB).
+    // Reading first would leave a gap where the revoke event is missed and the version is stale.
+    let receiver = state.events.subscribe();
     let version = users::find_by_id(&state.pool, user)
         .await?
         .ok_or(ApiError::Unauthorized("Invalid or expired ticket"))?
@@ -64,7 +67,7 @@ async fn stream(
     // in the DB: revoked (or deleted) ends the stream, otherwise the client gets a resync hint.
     // A revocation event seen in time also ends the stream (the frame itself is never sent).
     let pool = state.pool.clone();
-    let events = BroadcastStream::new(state.events.subscribe())
+    let events = BroadcastStream::new(receiver)
         .then(move |message| {
             let pool = pool.clone();
             async move {

@@ -555,6 +555,11 @@ fn move_file(
     force_cross_fs: bool,
     after_copy: Option<&(dyn Fn(&Path) + Send + Sync)>,
 ) -> io::Result<Copied> {
+    // The deepest folder that already exists: every folder below it is created by this move.
+    let existing_top = dst
+        .parent()
+        .and_then(|p| p.ancestors().find(|a| exists(a)))
+        .map(Path::to_path_buf);
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -567,6 +572,20 @@ fn move_file(
     }
     match copy_verified(src, dst, sha, after_copy)? {
         Copied::Placed => {
+            // Power loss after the delete must not lose the only copy: make the new file and
+            // the folders created for it durable first, from its own folder up to the
+            // existing one.
+            if let Ok(f) = File::open(dst) {
+                let _ = f.sync_all();
+            }
+            let mut cur = dst.parent();
+            while let Some(d) = cur {
+                sync_dir(d);
+                if Some(d) == existing_top.as_deref() {
+                    break;
+                }
+                cur = d.parent();
+            }
             fs::remove_file(src)?;
             if let Some(parent) = src.parent() {
                 sync_dir(parent);

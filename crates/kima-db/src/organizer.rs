@@ -147,6 +147,24 @@ pub async fn transition(pool: &PgPool, id: Uuid, from: &[&str], to: &str) -> sql
     Ok(res.rows_affected() == 1)
 }
 
+/// Starts applying a `previewed` or `failed` run in one guarded statement: it refuses a run an
+/// undo has touched (any `undone`, `undo_staged` or `undo_failed` row), so a concurrent undo
+/// cannot slip in between a check and the update. False when nothing was updated.
+pub async fn start_apply(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let res = sqlx::query(
+        "UPDATE organizer_runs
+         SET state = 'applying', error = NULL, finished_at = NULL
+         WHERE id = $1 AND state IN ('previewed', 'failed')
+           AND NOT EXISTS (SELECT 1 FROM organizer_journal
+                           WHERE run_id = $1
+                             AND state IN ('undone', 'undo_staged', 'undo_failed'))",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() == 1)
+}
+
 /// A refused undo: the run goes back to the state it was undone from (`done` or `failed`),
 /// with the reason in `error`.
 pub async fn revert_undo(pool: &PgPool, id: Uuid, reason: &str) -> sqlx::Result<()> {

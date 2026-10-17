@@ -39,6 +39,18 @@ pub async fn enqueue_reconcile(pool: &PgPool) -> sqlx::Result<Option<Uuid>> {
     .await
 }
 
+/// Queues a reconcile, or returns the id of the one already waiting or running.
+pub async fn request_reconcile(pool: &PgPool) -> sqlx::Result<Uuid> {
+    queue::enqueue_or_pending(
+        pool,
+        QUEUE,
+        "reconcile",
+        serde_json::json!({ "kind": "reconcile" }),
+        MAX_ATTEMPTS,
+    )
+    .await
+}
+
 /// Queues a single-file update for `rel` (relative to the library root), unless an update for
 /// the same file is already waiting (not yet running). Returns the new id, if one was queued.
 pub async fn enqueue_path(pool: &PgPool, rel: &str) -> sqlx::Result<Option<Uuid>> {

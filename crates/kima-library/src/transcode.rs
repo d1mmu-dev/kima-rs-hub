@@ -302,10 +302,11 @@ impl Transcoder {
                 Err(msg) => TranscodeState::Failed(msg),
             });
             let ok = guard.state == Some(TranscodeState::Done);
-            drop(guard);
             if ok {
+                // Evict before publishing `Done`, so observers of `Done` see the trimmed cache.
                 let _ = tokio::task::spawn_blocking(move || evict(&inner)).await;
             }
+            drop(guard);
         });
         Ok(out)
     }

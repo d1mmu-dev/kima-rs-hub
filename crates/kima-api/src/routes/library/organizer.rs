@@ -298,12 +298,13 @@ async fn apply_run(
             "The library folder changed since this preview; preview again",
         ));
     }
-    if db::has_undo_rows(&state.pool, run.id).await? {
-        return Err(ApiError::Conflict(
-            "This run was partly undone; undo it fully or start a new preview",
-        ));
-    }
-    if !db::transition(&state.pool, run.id, &["previewed", "failed"], "applying").await? {
+    if !db::start_apply(&state.pool, run.id).await? {
+        // Nothing was updated; read once to say why.
+        if db::has_undo_rows(&state.pool, run.id).await? {
+            return Err(ApiError::Conflict(
+                "This run was partly undone; undo it fully or start a new preview",
+            ));
+        }
         return Err(ApiError::Conflict("This run cannot be applied now"));
     }
     let job = apply::enqueue(&state.pool, run.id, Action::Apply).await?;

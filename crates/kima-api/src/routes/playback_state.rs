@@ -1,10 +1,9 @@
 //! `/api/playback-state` (upstream `routes/playbackState.ts`): the signed-in user's resume point
 //! and queue, plus `GET /limit` and `POST /live`.
 
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use kima_core::events::Event;
 use kima_db::playback::{self, PlaybackState, QUEUE_LIMIT};
 use serde_json::{Map, Value, json};
 
@@ -19,6 +18,8 @@ pub fn routes() -> Router<AppState> {
         .route("/playback-state/limit", get(limit))
         .route("/playback-state", get(read).post(save).delete(clear))
         .route("/playback-state/live", post(live))
+        // Queues are big: upstream raises the JSON limit to 5 MB for this path.
+        .layer(DefaultBodyLimit::max(5 * 1024 * 1024))
 }
 
 fn state_json(s: &PlaybackState) -> Value {
@@ -173,59 +174,10 @@ async fn save(
     Ok(Json(state_json(&saved)))
 }
 
-/// Milliseconds as a whole number, or `None` for anything negative or not a number.
-fn millis(v: Option<&Value>) -> Option<i64> {
-    let f = v?.as_f64().filter(|f| f.is_finite() && *f >= 0.0)?;
-    Some(f.round() as i64)
-}
-
-/// The player's play/pause/seek/track changes. Upstream feeds a public "live trip" page; kima-rs
-/// has none, so the report goes to the same user's open event streams (their other tabs and
-/// devices) as a `playback:live` event.
-async fn live(
-    State(state): State<AppState>,
-    user: AuthUser,
-    ApiJson(body): ApiJson<Value>,
-) -> Result<Json<Value>, ApiError> {
-    let invalid =
-        || ApiError::BadRequest("status, trackId, position and duration are required".into());
-    let status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .filter(|s| matches!(*s, "playing" | "paused" | "stopped"))
-        .ok_or_else(invalid)?;
-    let track_id = body
-        .get("trackId")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(invalid)?;
-    let position = millis(body.get("position")).ok_or_else(invalid)?;
-    let duration = millis(body.get("duration")).ok_or_else(invalid)?;
-    let up_next: Vec<Value> = body
-        .get("queue")
-        .and_then(Value::as_array)
-        .map(|q| {
-            q.iter()
-                .filter_map(|e| {
-                    let id = e.get("trackId").and_then(Value::as_str)?;
-                    let d = millis(e.get("duration"))?;
-                    Some(json!({ "trackId": id, "duration": d }))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    state.events.publish(Event {
-        user_id: Some(user.id),
-        data: json!({
-            "type": "playback:live",
-            "status": status,
-            "trackId": track_id,
-            "position": position,
-            "duration": duration,
-            "queue": up_next,
-        }),
-    });
-    Ok(Json(json!({ "ok": true })))
+/// Upstream answers 404 for everyone but the public "live trip" user, and the web player stops
+/// reporting after a 404. kima-rs has no live trip (M5), so every caller gets that 404.
+async fn live(_user: AuthUser) -> ApiError {
+    ApiError::NotFound("Not available")
 }
 
 async fn clear(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {

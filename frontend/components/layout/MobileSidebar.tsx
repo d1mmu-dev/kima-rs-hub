@@ -11,6 +11,7 @@ import { notify } from "@/lib/notify";
 import { KimaMark } from "@/components/ui/KimaMark";
 import { APP_VERSION } from "@/lib/version";
 import { openWhatsNew } from "@/components/whats-new/WhatsNewGate";
+import { useFeatures } from "@/lib/features-context";
 
 interface MobileSidebarProps {
     isOpen: boolean;
@@ -20,6 +21,7 @@ interface MobileSidebarProps {
 export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
     const pathname = usePathname();
     const { logout } = useAuth();
+    const features = useFeatures();
     const [isSyncing, setIsSyncing] = useState(false);
     const isFirstRender = useRef(true);
     const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -108,7 +110,8 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                             Quick Links
                         </div>
 
-                        <Link
+                        {features.discover && (
+<Link
                             href="/discover"
                             aria-current={
                                 pathname === "/discover" ? "page" : undefined
@@ -126,8 +129,10 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                                 Discover
                             </span>
                         </Link>
+                        )}
 
-                        <Link
+                        {features.mixes && (
+<Link
                             href="/radio"
                             aria-current={
                                 pathname === "/radio" ? "page" : undefined
@@ -145,6 +150,7 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                                 Radio
                             </span>
                         </Link>
+                        )}
 
                         <Link
                             href="/stats"

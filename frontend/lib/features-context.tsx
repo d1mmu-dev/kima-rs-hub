@@ -8,6 +8,14 @@ interface FeaturesState {
     musicCNN: boolean;
     vibeEmbeddings: boolean;
     audiobookshelfEnabled: boolean;
+    /** Which app sections exist on this server (D-030); a section whose flag is false is hidden. */
+    library: boolean;
+    podcasts: boolean;
+    audiobooks: boolean;
+    discover: boolean;
+    mixes: boolean;
+    downloads: boolean;
+    imports: boolean;
     loading: boolean;
 }
 
@@ -15,6 +23,13 @@ const defaultState: FeaturesState = {
     musicCNN: false,
     vibeEmbeddings: false,
     audiobookshelfEnabled: false,
+    library: true,
+    podcasts: false,
+    audiobooks: false,
+    discover: false,
+    mixes: false,
+    downloads: false,
+    imports: false,
     loading: true,
 };
 
@@ -34,6 +49,13 @@ export function FeaturesProvider({ children }: { children: ReactNode }) {
                         musicCNN: features.musicCNN,
                         vibeEmbeddings: features.vibeEmbeddings,
                         audiobookshelfEnabled: features.audiobookshelfEnabled,
+                        library: features.library ?? true,
+                        podcasts: features.podcasts ?? false,
+                        audiobooks: features.audiobooks ?? false,
+                        discover: features.discover ?? false,
+                        mixes: features.mixes ?? false,
+                        downloads: features.downloads ?? false,
+                        imports: features.imports ?? false,
                         loading: false,
                     });
                 })
@@ -64,3 +86,5 @@ export function useFeatures(): FeaturesState {
     }
     return context;
 }
+
+export type SectionFlag = "podcasts" | "audiobooks" | "discover" | "mixes" | "downloads" | "imports";

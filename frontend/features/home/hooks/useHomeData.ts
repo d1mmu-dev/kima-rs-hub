@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth-context";
+import { useFeatures } from "@/lib/features-context";
 import { notify } from "@/lib/notify";
 import type {
     Artist,
@@ -49,6 +50,8 @@ export interface UseHomeDataReturn {
 /** Every Home section: continue listening, recently added, recommended, mixes, popular, podcasts, audiobooks. */
 export function useHomeData(): UseHomeDataReturn {
     const { isAuthenticated } = useAuth();
+    // Sections the server does not have are neither fetched nor shown (D-030).
+    const features = useFeatures();
     const queryClient = useQueryClient();
 
     // Listen for mixes-updated event (fired when user saves mood preferences)
@@ -70,16 +73,16 @@ export function useHomeData(): UseHomeDataReturn {
     const { data: recentlyAddedData, isLoading: isLoadingAdded } =
         useRecentlyAddedQuery(10);
     const { data: recommendedData, isLoading: isLoadingRecommended } =
-        useRecommendationsQuery(10);
-    const { data: mixesData, isLoading: isLoadingMixes } = useMixesQuery();
+        useRecommendationsQuery(10, features.discover);
+    const { data: mixesData, isLoading: isLoadingMixes } = useMixesQuery(features.mixes);
     const { data: popularData, isLoading: isLoadingPopular } =
-        usePopularArtistsQuery(20);
+        usePopularArtistsQuery(20, features.discover);
     const { data: podcastsData, isLoading: isLoadingPodcasts } =
-        useTopPodcastsQuery(10);
+        useTopPodcastsQuery(10, undefined, features.podcasts);
     const { data: audiobooksData, isLoading: isLoadingAudiobooks } =
-        useAudiobooksQuery();
+        useAudiobooksQuery(features.audiobooks);
     const { data: browseData, isLoading: isBrowseLoading } =
-        useBrowseAllQuery();
+        useBrowseAllQuery(features.discover);
 
     const { mutateAsync: refreshMixes, isPending: isRefreshingMixes } =
         useRefreshMixesMutation();

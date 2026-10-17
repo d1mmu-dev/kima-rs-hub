@@ -491,10 +491,17 @@ async fn collect(
 }
 
 /// (device, inode) of the library folder; it changes when a disk is unmounted and mounted again.
+#[cfg(unix)]
 fn identity(root: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(root).ok()?;
     Some((meta.dev(), meta.ino()))
+}
+
+/// Without device and inode numbers, only a missing folder is detected, not a replaced one.
+#[cfg(not(unix))]
+fn identity(root: &Path) -> Option<(u64, u64)> {
+    std::fs::metadata(root).ok().map(|_| (0, 0))
 }
 
 /// The audio files one event stands for: the file itself, every audio file under a folder

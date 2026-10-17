@@ -77,6 +77,10 @@ pub enum OrganizeError {
     Io(String),
     #[error("{0}")]
     Invalid(String),
+    /// The action was refused before anything was touched; the run is back in its earlier
+    /// state with the reason recorded.
+    #[error("{0}")]
+    Refused(String),
     /// A test hook stopped the run mid-way.
     #[error("stopped by a test hook")]
     Interrupted,
@@ -136,6 +140,10 @@ pub async fn run_job(ctx: &LibraryCtx, run_id: Uuid, action: Action) -> Result<(
     match run_action(ctx, run_id, action, &Hooks::default()).await {
         Ok(()) => Ok(()),
         Err(OrganizeError::Interrupted) => Err(OrganizeError::Interrupted),
+        Err(OrganizeError::Refused(reason)) => {
+            warn!(run = %run_id, ?action, %reason, "organizer action refused");
+            Ok(())
+        }
         Err(e) => {
             warn!(run = %run_id, ?action, error = %e, "organizer run failed");
             db::fail_run(&ctx.pool, run_id, &e.to_string()).await?;
@@ -589,6 +597,9 @@ fn symlinked_ancestor(root: &Path, path: &Path) -> bool {
 }
 
 const SYMLINK_NOTE: &str = "a folder on the target path is a symbolic link";
+/// A resumed row found its copy in place but the source no longer matches the journalled
+/// checksum: something wrote to it in between.
+const SOURCE_CHANGED: &str = "the source changed after it was copied; both files were kept";
 
 /// Removes `dir` and its parents while they are empty, stopping at `stop` (never removed).
 /// Returns the folders removed.
@@ -936,6 +947,8 @@ enum Step {
     CommitStaged,
     /// Staging was cut short between linking the staging name and dropping the old one.
     DropSourceStaged,
+    /// Something is wrong enough that no file may be touched: the row fails.
+    Fail(&'static str),
     Stage,
     Direct,
     Refuse(&'static str),
@@ -1088,9 +1101,16 @@ async fn move_one(
                 } else {
                     Step::Refuse("source file missing")
                 }
-            } else if started && exists(&stage) && (hard_link_pair(&src, &stage) || matches(&stage))
-            {
+            } else if started && exists(&stage) && hard_link_pair(&src, &stage) {
                 Step::DropSourceStaged
+            } else if started && exists(&stage) && matches(&stage) {
+                // A finished copy under the staging name. The old name may only go if it
+                // still holds what was copied.
+                if matches(&src) {
+                    Step::DropSourceStaged
+                } else {
+                    Step::Fail(SOURCE_CHANGED)
+                }
             } else if case_only {
                 Step::Stage
             } else if dst_ok {
@@ -1102,7 +1122,11 @@ async fn move_one(
                 } else if dst_waiting {
                     Step::Stage
                 } else if started && matches(&dst) {
-                    Step::DropSource
+                    if matches(&src) {
+                        Step::DropSource
+                    } else {
+                        Step::Fail(SOURCE_CHANGED)
+                    }
                 } else {
                     Step::Refuse("target exists")
                 }
@@ -1118,6 +1142,10 @@ async fn move_one(
     match step {
         Step::Refuse(note) => {
             refuse(r, row, dir, note).await?;
+            Ok(false)
+        }
+        Step::Fail(note) => {
+            r.commit(row, "failed", Some(note), None).await?;
             Ok(false)
         }
         Step::Commit => {
@@ -1312,7 +1340,7 @@ async fn finish(r: &Runner<'_>, dir: Dir) -> Result<()> {
                   failed = count("failed"), "organizer apply finished");
         }
         Dir::Back => {
-            let left = count("done") + count("staged") + count("undo_staged");
+            let left = count("done") + count("staged") + count("undo_staged") + count("failed");
             if left > 0 {
                 db::fail_run(
                     &r.ctx.pool,
@@ -1341,24 +1369,9 @@ async fn undo(ctx: &LibraryCtx, run: Run, hooks: &Hooks) -> Result<()> {
             run.state
         )));
     }
-    if run.switched_at.is_some() {
-        return Err(OrganizeError::Invalid(
-            "the library was switched to this copy; it cannot be undone".into(),
-        ));
-    }
-    let current = ctx.root.get();
-    if run.mode == db::MODE_MOVE && current != Path::new(&run.source_root) {
-        return Err(OrganizeError::Invalid(format!(
-            "the library root changed since this run ({} -> {})",
-            run.source_root,
-            current.display()
-        )));
-    }
-    let target = Path::new(&run.target_root);
-    if run.mode == db::MODE_COPY && (current.starts_with(target) || target.starts_with(&current)) {
-        return Err(OrganizeError::Invalid(
-            "the library uses this copy; it cannot be undone".into(),
-        ));
+    if let Some(reason) = undo_refusal(ctx, &run) {
+        db::revert_undo(&ctx.pool, run.id, &reason).await?;
+        return Err(OrganizeError::Refused(reason));
     }
     let mut r = Runner::new(ctx, run, hooks);
     let res = if r.is_move() {
@@ -1370,6 +1383,26 @@ async fn undo(ctx: &LibraryCtx, run: Run, hooks: &Hooks) -> Result<()> {
     res?;
     r.send_progress(true);
     finish(&r, Dir::Back).await
+}
+
+/// Why an undo of `run` may not start, if it may not.
+fn undo_refusal(ctx: &LibraryCtx, run: &Run) -> Option<String> {
+    if run.switched_at.is_some() {
+        return Some("the library was switched to this copy; it cannot be undone".into());
+    }
+    let current = ctx.root.get();
+    if run.mode == db::MODE_MOVE && current != Path::new(&run.source_root) {
+        return Some(format!(
+            "the library root changed since this run ({} -> {})",
+            run.source_root,
+            current.display()
+        ));
+    }
+    let target = Path::new(&run.target_root);
+    if run.mode == db::MODE_COPY && (current.starts_with(target) || target.starts_with(&current)) {
+        return Some("the library uses this copy; it cannot be undone".into());
+    }
+    None
 }
 
 /// Copy undo: deletes each copy whose checksum still matches, newest first.

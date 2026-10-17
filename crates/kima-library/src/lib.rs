@@ -2,6 +2,8 @@
 
 pub mod artwork;
 pub mod fingerprint;
+pub mod jobs;
 pub mod names;
 pub mod resolve;
+pub mod scan;
 pub mod tags;

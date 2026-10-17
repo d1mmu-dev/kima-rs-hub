@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use kima_db::PgPool;
 use kima_jobs::worker::{Handler, WorkerConfig, spawn_worker};
+use kima_library::jobs as library_jobs;
+use kima_library::scan::LibraryCtx;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -30,6 +32,12 @@ impl Registry {
 
     pub fn is_empty(&self) -> bool {
         self.queues.is_empty()
+    }
+
+    /// Registers the `library` queue (reconciles, single-file updates, organizer runs).
+    /// Concurrency 1: those jobs must never overlap.
+    pub fn register_library(&mut self, ctx: LibraryCtx) {
+        self.register(library_jobs::QUEUE, 1, library_jobs::handler(ctx));
     }
 }
 

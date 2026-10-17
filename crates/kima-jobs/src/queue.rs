@@ -131,3 +131,26 @@ pub fn backoff(attempts: i32) -> Duration {
     let exponent = (attempts.max(1) - 1).min(20) as u32;
     Duration::from_secs(5u64.saturating_mul(1 << exponent).min(3600))
 }
+
+/// Like [`enqueue`], unless a job with exactly this payload is already queued on `queue`.
+/// Returns the new job's id, or `None` when one was already waiting. Not atomic: two
+/// concurrent callers can both enqueue, which is harmless for idempotent jobs.
+pub async fn enqueue_unless_queued(
+    pool: &PgPool,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+) -> sqlx::Result<Option<Uuid>> {
+    let waiting = sqlx::query_scalar!(
+        r#"SELECT EXISTS (SELECT 1 FROM jobs WHERE queue = $1 AND state = 'queued' AND payload = $2)
+           AS "exists!""#,
+        queue,
+        payload
+    )
+    .fetch_one(pool)
+    .await?;
+    if waiting {
+        return Ok(None);
+    }
+    enqueue(pool, queue, payload, max_attempts).await.map(Some)
+}

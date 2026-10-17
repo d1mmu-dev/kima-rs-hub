@@ -295,3 +295,46 @@ async fn rename_refreshes_dependent_search_vectors(pool: PgPool) {
     assert_eq!(hits(&pool, "dummy").await, 0);
     assert_eq!(hits(&pool, "third").await, 2); // album + track
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn scan_index_filters_to_one_folder(pool: PgPool) {
+    upsert(&pool, &track("A", "B", Some(1999), "1", "A/B/01.flac")).await;
+    upsert(&pool, &track("A", "B", Some(1999), "2", "A/B/CD2/01.flac")).await;
+    upsert(&pool, &track("A", "C", None, "3", "A/BB/01.flac")).await;
+    upsert(&pool, &track("A", "D", None, "4", "root.flac")).await;
+    let paths = |rows: Vec<library::IndexedTrack>| {
+        let mut p: Vec<String> = rows.into_iter().map(|r| r.path).collect();
+        p.sort();
+        p
+    };
+    assert_eq!(
+        paths(library::scan_index(&pool, Some("A/B/")).await.unwrap()),
+        vec!["A/B/01.flac"]
+    );
+    assert_eq!(
+        paths(library::scan_index(&pool, Some("")).await.unwrap()),
+        vec!["root.flac"]
+    );
+    assert_eq!(library::scan_index(&pool, None).await.unwrap().len(), 4);
+    let row = &library::scan_index(&pool, Some("A/B/")).await.unwrap()[0];
+    assert_eq!(
+        (
+            row.artist_key.as_str(),
+            row.album_key.as_str(),
+            row.album_year
+        ),
+        ("a", "b", Some(1999))
+    );
+    assert!(!row.missing && !row.year_conflict);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn clear_missing_restores_rows(pool: PgPool) {
+    upsert(&pool, &track("A", "B", None, "1", "/m/1")).await;
+    let paths = vec!["/m/1".to_string()];
+    assert_eq!(library::mark_missing(&pool, &paths).await.unwrap(), 1);
+    assert!(library::scan_index(&pool, None).await.unwrap()[0].missing);
+    assert_eq!(library::clear_missing(&pool, &paths).await.unwrap(), 1);
+    assert_eq!(library::clear_missing(&pool, &paths).await.unwrap(), 0);
+    assert!(!library::scan_index(&pool, None).await.unwrap()[0].missing);
+}

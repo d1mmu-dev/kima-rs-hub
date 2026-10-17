@@ -45,6 +45,9 @@ async fn main() -> anyhow::Result<()> {
     // an organized copy changes it for all three.
     let library_root = kima_library::scan::LibraryRoot::new(library_root);
     let state = AppState::with_shutdown(pool.clone(), &secrets.session_secret, shutdown.clone())
+        .with_cipher(kima_core::cipher::Cipher::from_secret(
+            &secrets.settings_encryption_key,
+        ))
         .with_data_dir(config.data_dir.clone())
         .with_shared_library_root(library_root.clone())
         .with_organize_target(config.organize_target.clone())

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use kima_core::auth::JwtKeys;
+use kima_core::cipher::Cipher;
 use kima_core::events::EventBus;
 use kima_db::PgPool;
 use kima_library::scan::LibraryRoot;
@@ -51,6 +52,8 @@ pub struct AppState {
     pub library: LibraryServices,
     /// Cached mp3 transcodes for the stream endpoint. `None` serves every stream as the original.
     pub transcoder: Option<Transcoder>,
+    /// Encrypts secrets stored in the database. Random per process unless `with_cipher` is used.
+    pub cipher: Arc<Cipher>,
 }
 
 impl AppState {
@@ -72,7 +75,13 @@ impl AppState {
             organize_target: None,
             library: LibraryServices::default(),
             transcoder: None,
+            cipher: Arc::new(Cipher::random()),
         }
+    }
+
+    pub fn with_cipher(mut self, cipher: Cipher) -> Self {
+        self.cipher = Arc::new(cipher);
+        self
     }
 
     pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {

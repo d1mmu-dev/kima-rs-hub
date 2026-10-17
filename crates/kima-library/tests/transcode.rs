@@ -53,6 +53,11 @@ fn fake_ffmpeg(dir: &Path, name: &str, body: &str) -> PathBuf {
     p
 }
 
+fn set_mtime(path: &Path, t: std::time::SystemTime) {
+    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.set_modified(t).unwrap();
+}
+
 fn fake_source(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);
     std::fs::write(&p, b"fake").unwrap();
@@ -180,15 +185,17 @@ async fn cache_evicts_lru_over_cap() {
     let t = Transcoder::new(cache.path(), one * 5 / 2);
     let (a, b, c) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
     let pa = get_final(&t, a, &src, Quality::Low).await;
-    tokio::time::sleep(Duration::from_millis(20)).await;
     let pb = get_final(&t, b, &src, Quality::Low).await;
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    // Touch `a` so `b` is the least recently used.
+    // Explicit times (no sleeps, no reliance on timestamp resolution): a is older than b.
+    let ago = |secs| std::time::SystemTime::now() - Duration::from_secs(secs);
+    set_mtime(&pa, ago(100));
+    set_mtime(&pb, ago(50));
+    // A cache hit on `a` makes it more recent than `b`; pin it to a known time too.
     assert!(matches!(
         t.get(a, &src, Quality::Low).await.unwrap(),
         TranscodeOutput::Cached(_)
     ));
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    set_mtime(&pa, ago(10));
     let pc = get_final(&t, c, &src, Quality::Low).await;
     assert!(pa.exists(), "recently used entry kept");
     assert!(!pb.exists(), "LRU entry evicted");

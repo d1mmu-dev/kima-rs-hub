@@ -8,6 +8,7 @@ mod auth;
 mod cover_art;
 mod events;
 mod health;
+mod library;
 mod library_watch;
 mod onboarding;
 mod system;
@@ -23,6 +24,7 @@ pub fn router(state: AppState) -> Router {
         .merge(events::routes())
         .merge(cover_art::routes())
         .merge(library_watch::routes())
+        .merge(library::routes())
         .fallback(|| async { ApiError::NotFound("Not found") });
 
     Router::new()

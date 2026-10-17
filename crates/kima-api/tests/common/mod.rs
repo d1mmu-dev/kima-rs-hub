@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod library;
 
 use axum_test::TestServer;
 use kima_api::AppState;

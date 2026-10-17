@@ -215,6 +215,39 @@ pub async fn enqueue_unless_pending(
     Ok(id)
 }
 
+/// The id of a queued or running job on `queue` whose payload `kind` is `kind`, oldest first.
+pub async fn pending_id(pool: &PgPool, queue: &str, kind: &str) -> sqlx::Result<Option<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM jobs
+         WHERE queue = $1 AND state IN ('queued', 'running') AND payload ->> 'kind' = $2
+         ORDER BY created_at, id LIMIT 1",
+    )
+    .bind(queue)
+    .bind(kind)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Like [`enqueue_unless_pending`], but always returns a job id: the new job's, or the one
+/// already pending. Retries if the pending job finishes between the two steps.
+pub async fn enqueue_or_pending(
+    pool: &PgPool,
+    queue: &str,
+    kind: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+) -> sqlx::Result<Uuid> {
+    loop {
+        if let Some(id) = enqueue_unless_pending(pool, queue, payload.clone(), max_attempts).await?
+        {
+            return Ok(id);
+        }
+        if let Some(id) = pending_id(pool, queue, kind).await? {
+            return Ok(id);
+        }
+    }
+}
+
 /// Like [`enqueue`], unless a job still waiting (`queued`, not running) on `queue` has the same
 /// text in its payload's `key` field. A running job may already have read stale input, so it
 /// does not count. Returns the new id, or `None` for a duplicate. Serialised per queue.

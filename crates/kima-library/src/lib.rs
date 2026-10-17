@@ -7,3 +7,4 @@ pub mod names;
 pub mod resolve;
 pub mod scan;
 pub mod tags;
+pub mod watch;

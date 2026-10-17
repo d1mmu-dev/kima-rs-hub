@@ -8,7 +8,7 @@ mod routes;
 pub mod state;
 
 pub use routes::router;
-pub use state::AppState;
+pub use state::{AppState, LibraryServices};
 
 /// Ends a user's open event streams and pending tickets. Call after bumping their `token_version`.
 pub fn revoke_sessions(state: &AppState, user: uuid::Uuid) {

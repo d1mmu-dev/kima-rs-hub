@@ -43,20 +43,31 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     let state = AppState::with_shutdown(pool.clone(), &secrets.session_secret, shutdown.clone())
         .with_data_dir(config.data_dir.clone())
-        .with_library_root(library_root.clone());
-    let mut registry = kima_server::jobs::Registry::new();
-    registry.register_library(kima_library::scan::LibraryCtx {
+        .with_library_root(library_root.clone())
+        .with_library_services(kima_api::LibraryServices::new(config.watch_mode));
+    let library_ctx = kima_library::scan::LibraryCtx {
         pool: pool.clone(),
         root: library_root,
         events: state.events.clone(),
         data_dir: config.data_dir.clone(),
-    });
+    };
+    let mut registry = kima_server::jobs::Registry::new();
+    registry.register_library(library_ctx.clone());
     // Before any worker starts: recover library jobs a dead process left running, then queue
     // the safety-net reconcile (spec §4.4).
     kima_server::jobs::prepare_library_queue(&pool)
         .await
         .context("preparing the library job queue")?;
     let workers = kima_server::jobs::spawn_all(&pool, registry, shutdown.clone());
+    // Stopped by the shutdown token. With `KIMA_WATCH_MODE=off` this only records the status.
+    let watcher = kima_library::watch::spawn(
+        library_ctx,
+        config.watch_mode,
+        config.watch_poll_secs,
+        state.library.ignore.clone(),
+        state.library.watch_status.clone(),
+        shutdown.clone(),
+    );
     let app = kima_server::app(state, &config);
     let listener = TcpListener::bind(config.bind_addr)
         .await
@@ -86,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
     };
     // Runs whether serving ended by signal or by error, before the error is returned.
     shutdown.cancel();
+    watcher.join().await;
     kima_server::jobs::drain(workers, SHUTDOWN_GRACE).await;
     served?;
     Ok(())

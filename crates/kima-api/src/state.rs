@@ -4,10 +4,30 @@ use std::sync::Arc;
 use kima_core::auth::JwtKeys;
 use kima_core::events::EventBus;
 use kima_db::PgPool;
+use kima_library::watch::{IgnoreSet, SharedStatus, WatchStatus};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::events::SseRegistry;
+
+/// Library machinery the HTTP side shares with background tasks. Grows with later tasks (a
+/// transcoder in Task 13, the organizer's use of the ignore set in Task 17).
+#[derive(Clone, Default)]
+pub struct LibraryServices {
+    /// Written by the watcher, read by `GET /api/library/watch-status`.
+    pub watch_status: SharedStatus,
+    /// Paths the watcher must not react to (the organizer's own moves).
+    pub ignore: IgnoreSet,
+}
+
+impl LibraryServices {
+    pub fn new(mode: kima_core::config::WatchMode) -> Self {
+        Self {
+            watch_status: Arc::new(std::sync::RwLock::new(WatchStatus::new(mode))),
+            ignore: IgnoreSet::new(),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +43,7 @@ pub struct AppState {
     pub data_dir: Option<PathBuf>,
     /// The music library root that track paths are relative to. `None` until configured.
     pub library_root: Option<PathBuf>,
+    pub library: LibraryServices,
 }
 
 impl AppState {
@@ -41,6 +62,7 @@ impl AppState {
             password_work: Arc::new(Semaphore::new(cpus.max(1))),
             data_dir: None,
             library_root: None,
+            library: LibraryServices::default(),
         }
     }
 
@@ -51,6 +73,11 @@ impl AppState {
 
     pub fn with_library_root(mut self, root: PathBuf) -> Self {
         self.library_root = Some(root);
+        self
+    }
+
+    pub fn with_library_services(mut self, services: LibraryServices) -> Self {
+        self.library = services;
         self
     }
 

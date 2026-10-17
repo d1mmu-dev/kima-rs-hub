@@ -13,12 +13,13 @@ track() {
     local args=()
     for kv in "$@"; do args+=(-metadata "$kv"); done
     mkdir -p "$(dirname "$out/$rel")"
-    ffmpeg -nostdin -loglevel error -y -f lavfi -i "sine=frequency=${freq}:duration=6" \
+    ffmpeg -nostdin -loglevel error -y -f lavfi -i "sine=frequency=${freq}:duration=${DUR:-6}" \
         -map_metadata -1 -c:a libmp3lame -b:a 64k "${args[@]}" "$out/$rel"
 }
 
 # 1. Untagged: artist, year and album come from the folder names only.
-track "Untagged Artist/1999 - Plain Album/01 - First.mp3" 220
+# The first track is long, so a seek lands outside what the browser has buffered.
+DUR=900 track "Untagged Artist/1999 - Plain Album/01 - First.mp3" 220
 track "Untagged Artist/1999 - Plain Album/02 - Second.mp3" 240
 track "Untagged Artist/1999 - Plain Album/03 - Third.mp3" 260
 

@@ -8,17 +8,20 @@ use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-/// Which fields of a track came from fallbacks (folder names, file name) rather than tags.
+/// Which fields of a track came from fallbacks rather than tags. Shared by the scanner
+/// and the needs-attention report; serialised with camelCase keys.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Guessed {
-    pub album_artist: bool,
-    pub track_artist: bool,
-    pub album: bool,
-    pub year: bool,
-    pub title: bool,
-    pub track_no: bool,
-    pub disc: bool,
+    pub artist_from_path: bool,
+    pub album_from_path: bool,
+    pub year_from_path: bool,
+    pub track_from_name: bool,
+    pub title_from_name: bool,
+    pub unknown_artist: bool,
+    pub unknown_album: bool,
+    /// This track's own year differs from its album's chosen year.
+    pub year_conflict: bool,
 }
 
 /// A track with every field resolved, ready to store. The `*_key` fields are the
@@ -31,7 +34,10 @@ pub struct ResolvedTrack {
     pub track_artist: String,
     pub album: String,
     pub album_key: String,
-    pub year: Option<i32>,
+    /// The album's chosen year (part of album identity).
+    pub album_year: Option<i32>,
+    /// This track's own tagged or folder year.
+    pub track_year: Option<i32>,
     pub is_compilation: bool,
     pub disc: i32,
     pub track_no: i32,
@@ -52,6 +58,7 @@ pub struct TrackRow {
     pub album_id: Uuid,
     pub artist_name: String,
     pub title: String,
+    pub year: Option<i32>,
     pub disc: i32,
     pub track_no: i32,
     pub duration_secs: i32,
@@ -98,19 +105,19 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
         artist_id,
         t.album,
         t.album_key,
-        t.year,
+        t.album_year,
         t.is_compilation
     )
     .fetch_one(&mut *tx)
     .await?;
 
     sqlx::query_scalar!(
-        r#"INSERT INTO tracks (id, album_id, artist_name, title, disc, track_no, duration_secs,
+        r#"INSERT INTO tracks (id, album_id, artist_name, title, year, disc, track_no, duration_secs,
                                codec, bitrate, path, size, mtime, fingerprint, guessed)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
            ON CONFLICT (path) DO UPDATE
            SET album_id = EXCLUDED.album_id, artist_name = EXCLUDED.artist_name,
-               title = EXCLUDED.title, disc = EXCLUDED.disc, track_no = EXCLUDED.track_no,
+               title = EXCLUDED.title, year = EXCLUDED.year, disc = EXCLUDED.disc, track_no = EXCLUDED.track_no,
                duration_secs = EXCLUDED.duration_secs, codec = EXCLUDED.codec,
                bitrate = EXCLUDED.bitrate, size = EXCLUDED.size, mtime = EXCLUDED.mtime,
                fingerprint = EXCLUDED.fingerprint, guessed = EXCLUDED.guessed,
@@ -120,6 +127,7 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
         album_id,
         t.track_artist,
         t.title,
+        t.track_year,
         t.disc,
         t.track_no,
         t.duration_secs,
@@ -129,7 +137,7 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
         t.size,
         t.mtime,
         t.fingerprint.as_slice(),
-        serde_json::to_value(&t.guessed).expect("Guessed serialises"),
+        Json(&t.guessed) as Json<&Guessed>,
     )
     .fetch_one(&mut *tx)
     .await
@@ -138,7 +146,7 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
 pub async fn find_by_path(pool: &PgPool, path: &str) -> sqlx::Result<Option<TrackRow>> {
     sqlx::query_as!(
         TrackRow,
-        r#"SELECT id, album_id, artist_name, title, disc, track_no, duration_secs, codec,
+        r#"SELECT id, album_id, artist_name, title, year, disc, track_no, duration_secs, codec,
                   bitrate, path, size, mtime, fingerprint,
                   guessed AS "guessed: Json<Guessed>", missing_since
            FROM tracks WHERE path = $1"#,
@@ -162,7 +170,7 @@ pub async fn mark_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> 
 }
 
 /// Moves a missing track with this fingerprint to `new_path`, clearing its missing flag.
-/// Only missing tracks match. Returns the track id.
+/// Only missing tracks match, and nothing happens (`None`) if `new_path` already has a row. Returns the track id.
 pub async fn repoint_by_fingerprint(
     pool: &PgPool,
     fingerprint: &[u8; 32],
@@ -173,6 +181,7 @@ pub async fn repoint_by_fingerprint(
            WHERE id = (SELECT id FROM tracks
                        WHERE fingerprint = $1 AND missing_since IS NOT NULL
                        ORDER BY missing_since, id LIMIT 1 FOR UPDATE SKIP LOCKED)
+             AND NOT EXISTS (SELECT 1 FROM tracks WHERE path = $2)
            RETURNING id"#,
         fingerprint.as_slice(),
         new_path
@@ -194,7 +203,9 @@ pub async fn purge_missing(pool: &PgPool, older_than: Duration) -> sqlx::Result<
     Ok(r.rows_affected())
 }
 
-/// Deletes albums with no tracks, then artists with no albums.
+/// Deletes albums with no tracks, then artists with no albums, in one transaction.
+/// Must not run concurrently with upserts (the FKs are RESTRICT, so a race fails loudly
+/// instead of cascading); the `library` queue serialises it.
 pub async fn prune_empty(pool: &PgPool) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
     sqlx::query!(

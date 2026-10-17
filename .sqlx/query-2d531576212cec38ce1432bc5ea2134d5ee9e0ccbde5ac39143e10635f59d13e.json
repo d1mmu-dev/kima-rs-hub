@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tracks SET path = $2, missing_since = NULL, updated_at = now()\n           WHERE id = (SELECT id FROM tracks\n                       WHERE fingerprint = $1 AND missing_since IS NOT NULL\n                       ORDER BY missing_since, id LIMIT 1 FOR UPDATE SKIP LOCKED)\n             AND NOT EXISTS (SELECT 1 FROM tracks WHERE path = $2)\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2d531576212cec38ce1432bc5ea2134d5ee9e0ccbde5ac39143e10635f59d13e"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, album_id, artist_name, title, disc, track_no, duration_secs, codec,\n                  bitrate, path, size, mtime, fingerprint,\n                  guessed AS \"guessed: Json<Guessed>\", missing_since\n           FROM tracks WHERE path = $1",
+  "query": "SELECT id, album_id, artist_name, title, year, disc, track_no, duration_secs, codec,\n                  bitrate, path, size, mtime, fingerprint,\n                  guessed AS \"guessed: Json<Guessed>\", missing_since\n           FROM tracks WHERE path = $1",
   "describe": {
     "columns": [
       {
@@ -25,56 +25,61 @@
       },
       {
         "ordinal": 4,
-        "name": "disc",
+        "name": "year",
         "type_info": "Int4"
       },
       {
         "ordinal": 5,
-        "name": "track_no",
+        "name": "disc",
         "type_info": "Int4"
       },
       {
         "ordinal": 6,
-        "name": "duration_secs",
+        "name": "track_no",
         "type_info": "Int4"
       },
       {
         "ordinal": 7,
+        "name": "duration_secs",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
         "name": "codec",
         "type_info": "Text"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "bitrate",
         "type_info": "Int4"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "path",
         "type_info": "Text"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "size",
         "type_info": "Int8"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "mtime",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "fingerprint",
         "type_info": "Bytea"
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "guessed: Json<Guessed>",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "missing_since",
         "type_info": "Timestamptz"
       }
@@ -89,6 +94,7 @@
       false,
       false,
       false,
+      true,
       false,
       false,
       false,
@@ -102,5 +108,5 @@
       true
     ]
   },
-  "hash": "ab574fcd38909b14ebc019d136ea8b4b95cfa42d07317d2d254f463a89f60031"
+  "hash": "512bddc2742dbe51a7e5260db72e4fdac17e1251b6bb3d437a2bf0ae095704ae"
 }

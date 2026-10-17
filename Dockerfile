@@ -16,7 +16,7 @@ RUN cargo build --release -p kima-server
 # Postgres 17 + pgvector on Debian bookworm; adds the kima binary and the exported frontend.
 FROM pgvector/pgvector:pg17
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tini ca-certificates \
+ && apt-get install -y --no-install-recommends tini ca-certificates ffmpeg \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --home /data --shell /usr/sbin/nologin kima
 COPY --from=backend /src/target/release/kima /usr/local/bin/kima

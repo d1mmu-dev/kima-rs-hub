@@ -24,7 +24,9 @@ docker compose up
 ```
 
 Then open <http://localhost:3030> and register. The first account becomes the admin. The image
-bundles Postgres and the `kima` binary; state lives in the `kima_data` volume (`/data`). Put your
+bundles Postgres, `ffmpeg` and the `kima` binary; state lives in the `kima_data` volume (`/data`).
+The bundled Postgres gets a random password on first start (`/data/postgres-password`, readable by
+root only) and kima connects as an unprivileged `kima` role. Put your
 music in `./music` or set `MUSIC_DIR` to its location (mounted read-only at `/music`).
 
 ## Library
@@ -50,8 +52,8 @@ reconcile also runs at startup.
 
 **Streaming.** `GET /api/library/tracks/:id/stream?quality=...` supports `original` (the file as
 is, with range requests for seeking), `high` (MP3 320 kbps), `medium` (MP3 192 kbps) and `low`
-(MP3 128 kbps). Transcodes need `ffmpeg` on the `PATH` (the Docker image does not bundle it
-yet, so only `original` works there until it does) and are cached under `KIMA_DATA_DIR/transcode`, up to
+(MP3 128 kbps). Transcodes need `ffmpeg` on the `PATH` (the Docker image
+bundles it) and are cached under `KIMA_DATA_DIR/transcode`, up to
 `KIMA_TRANSCODE_CACHE_MB`.
 
 **Needs attention.** Settings > Library Tools > Needs attention (admin) lists albums whose

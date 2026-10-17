@@ -30,6 +30,15 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/users/{id}", delete(delete_user))
 }
 
+/// The longest username registration accepts.
+const MAX_USERNAME_CHARS: usize = 50;
+
+fn rate_limited(blocked: crate::login_limit::Blocked) -> ApiError {
+    ApiError::RateLimited {
+        retry_after_secs: blocked.retry_after_secs(),
+    }
+}
+
 async fn login(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
@@ -42,14 +51,33 @@ async fn login(
         ));
     }
 
-    // Before any lookup or hashing, so a blocked guess costs nothing.
-    if let Err(blocked) = state.login_limit.check(ip, &username, Instant::now()) {
-        return Err(ApiError::RateLimited {
-            retry_after_secs: blocked.retry_after_secs(),
-        });
+    // No account can have a name this long (registration allows 50), so refuse it before it
+    // becomes a limiter key or reaches the database.
+    if username.chars().count() > MAX_USERNAME_CHARS {
+        return Err(ApiError::Unauthorized("Invalid credentials"));
     }
 
+    // Before any lookup or hashing, so a blocked guess costs nothing. The attempt is counted as
+    // a failure now (parallel or abandoned requests cannot dodge the backoff) and cleared only
+    // on success.
+    let now = Instant::now();
+    let attempt = state
+        .login_limit
+        .begin(ip, &username, now)
+        .map_err(rate_limited)?;
+
     let found = users::find_by_username(&state.pool, &username).await?;
+    // The database folds case its own way (`lower()` under its locale), Rust another. Also
+    // count the attempt on the stored name's key, so no spelling gets a separate budget.
+    let stored_attempt = match &found {
+        Some(user) if user.username.to_lowercase() != username.to_lowercase() => Some(
+            state
+                .login_limit
+                .begin(ip, &user.username, now)
+                .map_err(rate_limited)?,
+        ),
+        _ => None,
+    };
     let password = body.password;
     let permit = state.password_permit().await?;
     let (found, valid) = tokio::task::spawn_blocking(move || {
@@ -68,12 +96,12 @@ async fn login(
     .map_err(anyhow::Error::from)?;
 
     let Some(user) = found.filter(|_| valid) else {
-        state
-            .login_limit
-            .record_failure(ip, &username, Instant::now());
         return Err(ApiError::Unauthorized("Invalid credentials"));
     };
-    state.login_limit.record_success(ip, &username);
+    attempt.success();
+    if let Some(stored) = stored_attempt {
+        stored.success();
+    }
     Ok(Json(json!({
         "token": state.jwt.issue_access(user.id, &user.username, &user.role, user.token_version),
         "refreshToken": state.jwt.issue_refresh(user.id, user.token_version),

@@ -14,9 +14,13 @@ fn server_from(state: &AppState, ip: [u8; 4]) -> TestServer {
 }
 
 async fn login(server: &TestServer, password: &str) -> axum_test::TestResponse {
+    login_as(server, "alice", password).await
+}
+
+async fn login_as(server: &TestServer, username: &str, password: &str) -> axum_test::TestResponse {
     server
         .post("/api/auth/login")
-        .json(&json!({ "username": "alice", "password": password }))
+        .json(&json!({ "username": username, "password": password }))
         .await
 }
 
@@ -72,5 +76,65 @@ async fn login_success_clears(pool: PgPool) {
         login(&server, "wrong-password")
             .await
             .assert_status_unauthorized();
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn concurrent_wrong_logins_are_capped_at_five(pool: PgPool) {
+    let state = common::state(pool);
+    common::user_with_token(&state, "alice").await;
+    let server = server_from(&state, [10, 0, 0, 1]);
+    let before = state.password_permits_issued();
+    let responses =
+        futures::future::join_all((0..10).map(|_| login(&server, "wrong-password"))).await;
+    let limited = responses
+        .iter()
+        .filter(|r| r.status_code() == axum::http::StatusCode::TOO_MANY_REQUESTS)
+        .count();
+    assert_eq!(limited, 5, "the other five were refused");
+    assert_eq!(state.password_permits_issued() - before, 5);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn overlong_username_is_401_without_hashing_or_limiting(pool: PgPool) {
+    let state = common::state(pool);
+    let server = server_from(&state, [10, 0, 0, 1]);
+    let long = "x".repeat(51);
+    for _ in 0..8 {
+        login_as(&server, &long, "whatever")
+            .await
+            .assert_status_unauthorized();
+    }
+    assert_eq!(state.password_permits_issued(), 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unknown_username_is_limited_too(pool: PgPool) {
+    let state = common::state(pool);
+    let server = server_from(&state, [10, 0, 0, 1]);
+    for _ in 0..5 {
+        login_as(&server, "ghost", "x")
+            .await
+            .assert_status_unauthorized();
+    }
+    login_as(&server, "ghost", "x")
+        .await
+        .assert_status(axum::http::StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn differently_cased_usernames_share_a_key(pool: PgPool) {
+    let state = common::state(pool);
+    common::user_with_token(&state, "alice").await;
+    let server = server_from(&state, [10, 0, 0, 1]);
+    for name in ["alice", "ALICE", "Alice", "alice", "aLiCe"] {
+        login_as(&server, name, "wrong-password")
+            .await
+            .assert_status_unauthorized();
+    }
+    for name in ["alice", "Alice"] {
+        login_as(&server, name, "password1")
+            .await
+            .assert_status(axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
 }

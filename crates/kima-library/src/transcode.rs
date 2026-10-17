@@ -1,18 +1,24 @@
 //! Cached mp3 transcoding via ffmpeg.
 //!
-//! One ffmpeg process runs per cache key (track, quality, source mtime). Concurrent requests for
-//! the same key join it through an in-process map. Output is written to a uniquely named
-//! `.part` file and renamed to `<key>.mp3` on success, so a cache entry is never half-written.
+//! One ffmpeg process runs per cache key (track, quality, source size and mtime). Concurrent
+//! requests for the same key join it through an in-process map. Output is written to a uniquely
+//! named `.part` file and renamed to `<key>.mp3` on success, so a cache entry is never
+//! half-written. A global semaphore bounds how many ffmpeg processes run at once, and every run
+//! has a deadline.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
+use lofty::file::AudioFile;
+use lofty::probe::Probe;
+use tempfile::NamedTempFile;
 use tokio::process::Command;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -65,7 +71,8 @@ impl Quality {
 pub enum TranscodeState {
     Running,
     Done,
-    /// ffmpeg failed or could not start; carries the reason. The partial file is already removed.
+    /// ffmpeg failed, timed out or could not start; carries the reason. The partial file is
+    /// already removed when this is observed.
     Failed(String),
 }
 
@@ -73,14 +80,37 @@ pub enum TranscodeState {
 pub enum TranscodeOutput {
     /// A finished file (the source itself for `Quality::Original`).
     Cached(PathBuf),
-    /// A transcode that is still running. `path` is the growing `.part` file. Open it right away:
-    /// when the transcode finishes the file is renamed, so an open handle keeps working but the
-    /// path stops existing. Wait on `done` for the outcome; on `Done` call `get` again for the
-    /// final `Cached` path.
+    /// A transcode that is still running. `path` is the growing `.part` file.
+    ///
+    /// Reader protocol (what the streaming handler must do):
+    /// - Open `path` right away. `NotFound` means the transcode finished (or failed) in the
+    ///   meantime: call `get` again.
+    /// - Read from the same file handle. At EOF while `done` is `Running`, wait (poll or
+    ///   `done.changed()`) and keep reading from the same handle; after `Done`, drain to EOF
+    ///   and finish. The rename on success does not disturb an open handle.
+    /// - On `Failed`, abort the response (the data read so far is not a valid file).
+    /// - There is no Content-Length and no range support: the final size is not known.
+    /// - ffmpeg may rewrite the Xing/Info header frame at offset 0 when it finishes, so bytes
+    ///   already sent from the start of the file can differ from the final file in that
+    ///   region. Players tolerate this.
     InProgress {
         path: PathBuf,
         done: watch::Receiver<TranscodeState>,
     },
+}
+
+/// Tunables; the defaults are what the server uses. The rest exist for tests.
+#[derive(Clone, Default)]
+pub struct TranscodeOptions {
+    /// The ffmpeg program (default `ffmpeg`).
+    pub ffmpeg: Option<PathBuf>,
+    /// Overrides the computed deadline of a run.
+    pub timeout: Option<Duration>,
+    /// Overrides the concurrent-process limit (default: half the CPUs, at least 1).
+    pub max_concurrent: Option<usize>,
+    /// Test hook: each transcode task takes (and keeps) a permit from this semaphore before it
+    /// does anything, so a test can hold transcodes back until it releases permits.
+    pub start_gate: Option<Arc<Semaphore>>,
 }
 
 struct Running {
@@ -91,7 +121,12 @@ struct Running {
 struct Inner {
     dir: PathBuf,
     max_bytes: u64,
+    ffmpeg: PathBuf,
+    timeout: Option<Duration>,
+    start_gate: Option<Arc<Semaphore>>,
+    permits: Semaphore,
     running: Mutex<HashMap<String, Running>>,
+    evict_lock: Mutex<()>,
     spawned: AtomicUsize,
 }
 
@@ -100,9 +135,50 @@ pub struct Transcoder {
     inner: Arc<Inner>,
 }
 
+/// Owns the cleanup of one transcode. When it drops (normally, on failure, on a timeout or while
+/// unwinding from a panic) it deletes the `.part` file first, then removes the map entry, then
+/// publishes the final state, so an observer of `Failed` never sees a leftover file.
+struct Guard {
+    inner: Arc<Inner>,
+    key: String,
+    tx: watch::Sender<TranscodeState>,
+    part: Option<NamedTempFile>,
+    state: Option<TranscodeState>,
+}
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        drop(self.part.take());
+        self.inner
+            .running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.key);
+        let state = self
+            .state
+            .take()
+            .unwrap_or_else(|| TranscodeState::Failed("transcode aborted".into()));
+        self.tx.send_replace(state);
+    }
+}
+
+enum Plan {
+    Join(TranscodeOutput),
+    Cached,
+    Start,
+}
+
 impl Transcoder {
     /// Creates the cache. Leftover `.part` files from an earlier run are removed.
     pub fn new(cache_dir: impl Into<PathBuf>, max_bytes: u64) -> Transcoder {
+        Self::with_options(cache_dir, max_bytes, TranscodeOptions::default())
+    }
+
+    pub fn with_options(
+        cache_dir: impl Into<PathBuf>,
+        max_bytes: u64,
+        options: TranscodeOptions,
+    ) -> Transcoder {
         let dir = cache_dir.into();
         let _ = std::fs::create_dir_all(&dir);
         if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -112,11 +188,21 @@ impl Transcoder {
                 }
             }
         }
+        let limit = options.max_concurrent.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get() / 2)
+                .unwrap_or(1)
+        });
         Transcoder {
             inner: Arc::new(Inner {
                 dir,
                 max_bytes,
+                ffmpeg: options.ffmpeg.unwrap_or_else(|| PathBuf::from("ffmpeg")),
+                timeout: options.timeout,
+                start_gate: options.start_gate,
+                permits: Semaphore::new(limit.max(1)),
                 running: Mutex::new(HashMap::new()),
+                evict_lock: Mutex::new(()),
                 spawned: AtomicUsize::new(0),
             }),
         }
@@ -132,7 +218,7 @@ impl Transcoder {
             .unwrap_or(false)
     }
 
-    /// How many ffmpeg processes this transcoder has started (a test hook).
+    /// How many ffmpeg runs this transcoder has registered (a test hook).
     pub fn spawn_count(&self) -> usize {
         self.inner.spawned.load(Ordering::SeqCst)
     }
@@ -146,80 +232,163 @@ impl Transcoder {
         let Some(kbps) = quality.bitrate_kbps() else {
             return Ok(TranscodeOutput::Cached(source.to_path_buf()));
         };
-        let mtime = tokio::fs::metadata(source)
-            .await?
+        let meta = tokio::fs::metadata(source).await?;
+        let mtime = meta
             .modified()?
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let key = format!("{track_id}-{}-{mtime}", quality.name());
+        let key = format!("{track_id}-{}-{}-{mtime}", quality.name(), meta.len());
         let final_path = self.inner.dir.join(format!("{key}.mp3"));
 
-        // Lookup and registration happen under one lock, so two callers cannot both start ffmpeg
-        // and a finished file is never missed between "task done" and "entry removed".
-        let (part, tx) = {
-            let mut running = self.inner.running.lock().unwrap();
-            if let Some(r) = running.get(&key) {
-                return Ok(TranscodeOutput::InProgress {
-                    path: r.path.clone(),
-                    done: r.done.clone(),
-                });
-            }
-            if final_path.is_file() {
+        // The lock only guards the map (plus one stat that closes the "finished just now" race);
+        // file creation and the touch happen outside it.
+        let plan = self.plan(&key, &final_path, None);
+        match plan {
+            Plan::Join(out) => return Ok(out),
+            Plan::Cached => {
                 touch(&final_path);
                 return Ok(TranscodeOutput::Cached(final_path));
             }
-            std::fs::create_dir_all(&self.inner.dir)?;
-            let part = tempfile::Builder::new()
-                .prefix(&format!("{key}-"))
-                .suffix(".part")
-                .tempfile_in(&self.inner.dir)?;
-            let (tx, rx) = watch::channel(TranscodeState::Running);
-            running.insert(
-                key.clone(),
-                Running {
-                    path: part.path().to_path_buf(),
-                    done: rx,
-                },
-            );
-            self.inner.spawned.fetch_add(1, Ordering::SeqCst);
-            (part, tx)
-        };
+            Plan::Start => {}
+        }
+        std::fs::create_dir_all(&self.inner.dir)?;
+        let part = tempfile::Builder::new()
+            .prefix(&format!("{key}-"))
+            .suffix(".part")
+            .tempfile_in(&self.inner.dir)?;
+        let (tx, rx) = watch::channel(TranscodeState::Running);
+        let part_path = part.path().to_path_buf();
+        match self.plan(&key, &final_path, Some((&part_path, rx))) {
+            Plan::Join(out) => return Ok(out), // `part` drops (and is deleted) here
+            Plan::Cached => {
+                touch(&final_path);
+                return Ok(TranscodeOutput::Cached(final_path));
+            }
+            Plan::Start => {}
+        }
+        self.inner.spawned.fetch_add(1, Ordering::SeqCst);
 
         let out = TranscodeOutput::InProgress {
-            path: part.path().to_path_buf(),
+            path: part_path,
             done: tx.subscribe(),
         };
         let inner = self.inner.clone();
         let source = source.to_path_buf();
         tokio::spawn(async move {
-            let state = match run_ffmpeg(&source, part.path(), kbps).await {
-                Ok(()) => match part.persist(&final_path) {
-                    Ok(_) => TranscodeState::Done,
-                    Err(e) => TranscodeState::Failed(format!("could not store result: {e}")),
-                },
-                // Dropping `part` removes the partial file.
-                Err(msg) => TranscodeState::Failed(msg),
+            let mut guard = Guard {
+                inner: inner.clone(),
+                key,
+                tx,
+                part: Some(part),
+                state: None,
             };
-            let ok = state == TranscodeState::Done;
-            inner.running.lock().unwrap().remove(&key);
-            let _ = tx.send(state);
+            if let Some(gate) = &inner.start_gate
+                && let Ok(p) = gate.acquire().await
+            {
+                p.forget();
+            }
+            let result =
+                transcode(&inner, &source, guard.part.as_ref().unwrap().path(), kbps).await;
+            guard.state = Some(match result {
+                Ok(()) => {
+                    let part = guard.part.take().unwrap();
+                    match part.persist(&final_path) {
+                        Ok(_) => TranscodeState::Done,
+                        // The error owns the temp file and deletes it as it drops here.
+                        Err(e) => TranscodeState::Failed(format!("could not store result: {e}")),
+                    }
+                }
+                Err(msg) => TranscodeState::Failed(msg),
+            });
+            let ok = guard.state == Some(TranscodeState::Done);
+            drop(guard);
             if ok {
                 let _ = tokio::task::spawn_blocking(move || evict(&inner)).await;
             }
         });
         Ok(out)
     }
+
+    /// Decides what a request does. With `register` it also inserts the new run when nobody else
+    /// has started one.
+    fn plan(
+        &self,
+        key: &str,
+        final_path: &Path,
+        register: Option<(&Path, watch::Receiver<TranscodeState>)>,
+    ) -> Plan {
+        let mut running = self.inner.running.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = running.get(key) {
+            return Plan::Join(TranscodeOutput::InProgress {
+                path: r.path.clone(),
+                done: r.done.clone(),
+            });
+        }
+        // A run persists the file before it leaves the map, so "not running" plus "file exists"
+        // means finished.
+        if final_path.is_file() {
+            return Plan::Cached;
+        }
+        if let Some((path, rx)) = register {
+            running.insert(
+                key.to_string(),
+                Running {
+                    path: path.to_path_buf(),
+                    done: rx,
+                },
+            );
+        }
+        Plan::Start
+    }
 }
 
-async fn run_ffmpeg(source: &Path, dest: &Path, kbps: u32) -> Result<(), String> {
-    let child = Command::new("ffmpeg")
+/// Waits for a process slot, then runs ffmpeg under a deadline.
+async fn transcode(inner: &Inner, source: &Path, dest: &Path, kbps: u32) -> Result<(), String> {
+    let _permit = inner
+        .permits
+        .acquire()
+        .await
+        .map_err(|_| "transcoder closed".to_string())?;
+    let deadline = match inner.timeout {
+        Some(t) => t,
+        None => {
+            let src = source.to_path_buf();
+            let secs = tokio::task::spawn_blocking(move || {
+                Probe::open(&src)
+                    .ok()?
+                    .read()
+                    .ok()
+                    .map(|f| f.properties().duration().as_secs())
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+            Duration::from_secs(600.max(secs.saturating_mul(3)))
+        }
+    };
+    // Dropping the future on timeout drops the child, and `kill_on_drop` kills it.
+    match tokio::time::timeout(deadline, run_ffmpeg(&inner.ffmpeg, source, dest, kbps)).await {
+        Ok(r) => r,
+        Err(_) => Err("transcode timed out".into()),
+    }
+}
+
+fn file_arg(path: &Path) -> OsString {
+    let mut s = OsString::from("file:");
+    s.push(path.as_os_str());
+    s
+}
+
+async fn run_ffmpeg(ffmpeg: &Path, source: &Path, dest: &Path, kbps: u32) -> Result<(), String> {
+    let child = Command::new(ffmpeg)
         .args(["-y", "-v", "error", "-nostdin", "-i"])
-        .arg(source)
+        .arg(file_arg(source))
         .args(["-vn", "-map", "0:a:0", "-c:a", "libmp3lame", "-b:a"])
         .arg(format!("{kbps}k"))
         .args(["-f", "mp3"])
-        .arg(dest)
+        .arg(file_arg(dest))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -253,8 +422,10 @@ fn touch(path: &Path) {
 }
 
 /// Deletes the least recently used finished entries until the cache fits `max_bytes`.
-/// `.part` files are never touched: they belong to running transcodes.
+/// `.part` files are never touched: they belong to running transcodes. Runs are serialised, and a
+/// file that is already gone counts as removed.
 fn evict(inner: &Inner) {
+    let _serial = inner.evict_lock.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(rd) = std::fs::read_dir(&inner.dir) else {
         return;
     };
@@ -272,8 +443,10 @@ fn evict(inner: &Inner) {
         if total <= inner.max_bytes {
             break;
         }
-        if std::fs::remove_file(&path).is_ok() {
-            total -= len;
+        match std::fs::remove_file(&path) {
+            Ok(()) => total -= len,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => total -= len,
+            Err(_) => {}
         }
     }
 }

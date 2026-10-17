@@ -35,3 +35,15 @@ pub async fn update(pool: &PgPool, patch: SettingsPatch) -> sqlx::Result<SystemS
     .fetch_one(pool)
     .await
 }
+
+/// Sets or clears (`None`) the library root. [`update`] cannot clear it.
+pub async fn set_library_root(
+    conn: impl sqlx::PgExecutor<'_>,
+    root: Option<&str>,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE system_settings SET library_root = $1")
+        .bind(root)
+        .execute(conn)
+        .await?;
+    Ok(())
+}

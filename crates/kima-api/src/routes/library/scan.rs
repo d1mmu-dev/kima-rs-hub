@@ -26,7 +26,7 @@ async fn start(State(state): State<AppState>, user: AuthUser) -> Result<Json<Val
     Ok(Json(json!({
         "message": "Library scan started",
         "jobId": job_id,
-        "musicPath": state.library_root.as_ref().map(|p| p.display().to_string()),
+        "musicPath": state.library_root().map(|p| p.display().to_string()),
     })))
 }
 

@@ -25,8 +25,8 @@ struct Harness {
 }
 
 impl Harness {
-    fn root(&self) -> &Path {
-        &self.ctx.root
+    fn root(&self) -> std::path::PathBuf {
+        self.ctx.root.get()
     }
 }
 
@@ -47,9 +47,10 @@ fn start(pool: &PgPool, mode: WatchMode, poll: Duration, debounce: Duration) -> 
     let root = dir.path().canonicalize().unwrap();
     let ctx = LibraryCtx {
         pool: pool.clone(),
-        root,
+        root: root.into(),
         events: EventBus::new(64),
         data_dir: dir.path().join(".kima-data"),
+        ignore: IgnoreSet::new(),
     };
     let ignore = IgnoreSet::new();
     let shutdown = CancellationToken::new();
@@ -78,9 +79,10 @@ fn start_on(pool: &PgPool, dir: tempfile::TempDir, mode: WatchMode, poll: Durati
     let root = dir.path().canonicalize().unwrap();
     let ctx = LibraryCtx {
         pool: pool.clone(),
-        root,
+        root: root.into(),
         events: EventBus::new(64),
         data_dir: dir.path().join(".kima-data"),
+        ignore: IgnoreSet::new(),
     };
     let ignore = IgnoreSet::new();
     let shutdown = CancellationToken::new();
@@ -194,9 +196,10 @@ async fn indexed_dir(pool: &PgPool, files: &[(&str, &str)]) -> tempfile::TempDir
     let dir = tempfile::tempdir().unwrap();
     let ctx = LibraryCtx {
         pool: pool.clone(),
-        root: dir.path().canonicalize().unwrap(),
+        root: dir.path().canonicalize().unwrap().into(),
         events: EventBus::new(8),
         data_dir: dir.path().join(".kima-data"),
+        ignore: IgnoreSet::new(),
     };
     for (rel, title) in files {
         make_audio(dir.path(), rel, tags(title));
@@ -220,7 +223,7 @@ async fn new_file_is_indexed(pool: PgPool) {
     let h = start(&pool, WatchMode::Auto, Duration::from_secs(60), DEBOUNCE);
     assert_eq!(h.handle.status().mode, "auto");
     assert!(h.handle.status().active);
-    make_audio(h.root(), "A/B/01.flac", tags("Fresh"));
+    make_audio(&h.root(), "A/B/01.flac", tags("Fresh"));
     wait_path_job(&pool, "A/B/01.flac").await;
     drain(&h.ctx).await;
     assert_eq!(
@@ -237,7 +240,7 @@ async fn modified_file_updates(pool: PgPool) {
     }
     let dir = indexed_dir(&pool, &[("A/B/01.flac", "Old")]).await;
     let h = start_on(&pool, dir, WatchMode::Auto, Duration::from_secs(60));
-    make_audio(h.root(), "A/B/01.flac", tags("New title"));
+    make_audio(&h.root(), "A/B/01.flac", tags("New title"));
     wait_path_job(&pool, "A/B/01.flac").await;
     drain(&h.ctx).await;
     assert_eq!(
@@ -333,9 +336,9 @@ async fn ignored_paths_not_enqueued(pool: PgPool) {
     let h = start(&pool, WatchMode::Auto, Duration::from_secs(60), DEBOUNCE);
     std::fs::create_dir_all(h.root().join("organizing")).unwrap();
     h.ignore.add(h.root().join("organizing"));
-    make_audio(h.root(), "organizing/skipped.flac", tags("Skipped"));
-    make_audio(h.root(), ".hidden/skipped.flac", tags("Hidden"));
-    make_audio(h.root(), "kept/kept.flac", tags("Kept"));
+    make_audio(&h.root(), "organizing/skipped.flac", tags("Skipped"));
+    make_audio(&h.root(), ".hidden/skipped.flac", tags("Hidden"));
+    make_audio(&h.root(), "kept/kept.flac", tags("Kept"));
     wait_path_job(&pool, "kept/kept.flac").await;
     // Long enough for anything wrongly watched to have settled too.
     tokio::time::sleep(DEBOUNCE * 4).await;
@@ -405,7 +408,7 @@ async fn poll_mode_sees_changes(pool: PgPool) {
     let h = start(&pool, WatchMode::Poll, Duration::from_secs(1), DEBOUNCE);
     assert_eq!(h.handle.status().mode, "poll");
     assert!(h.handle.status().active);
-    make_audio(h.root(), "P/Q/01.flac", tags("Polled"));
+    make_audio(&h.root(), "P/Q/01.flac", tags("Polled"));
     wait_path_job(&pool, "P/Q/01.flac").await;
     drain(&h.ctx).await;
     assert_eq!(
@@ -434,9 +437,10 @@ fn spawn_on_missing_root(
 ) -> (WatchHandle, CancellationToken, LibraryCtx) {
     let ctx = LibraryCtx {
         pool: pool.clone(),
-        root,
+        root: root.into(),
         events: EventBus::new(8),
         data_dir: data.join(".kima-data"),
+        ignore: IgnoreSet::new(),
     };
     let shutdown = CancellationToken::new();
     let handle = watch::spawn_with(

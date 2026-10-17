@@ -4,6 +4,7 @@ use std::sync::Arc;
 use kima_core::auth::JwtKeys;
 use kima_core::events::EventBus;
 use kima_db::PgPool;
+use kima_library::scan::LibraryRoot;
 use kima_library::transcode::Transcoder;
 use kima_library::watch::{IgnoreSet, SharedStatus, WatchStatus};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -43,7 +44,10 @@ pub struct AppState {
     /// Where kima keeps its own files (artwork cache, ...). `None` disables features that need it.
     pub data_dir: Option<PathBuf>,
     /// The music library root that track paths are relative to. `None` until configured.
-    pub library_root: Option<PathBuf>,
+    /// Shared with the job worker and the watcher, so switching it reaches all of them.
+    pub library_root: Option<LibraryRoot>,
+    /// `KIMA_ORGANIZE_TARGET`: where the organizer's copy mode writes. `None` disables copy mode.
+    pub organize_target: Option<PathBuf>,
     pub library: LibraryServices,
     /// Cached mp3 transcodes for the stream endpoint. `None` serves every stream as the original.
     pub transcoder: Option<Transcoder>,
@@ -65,6 +69,7 @@ impl AppState {
             password_work: Arc::new(Semaphore::new(cpus.max(1))),
             data_dir: None,
             library_root: None,
+            organize_target: None,
             library: LibraryServices::default(),
             transcoder: None,
         }
@@ -76,7 +81,23 @@ impl AppState {
     }
 
     pub fn with_library_root(mut self, root: PathBuf) -> Self {
+        self.library_root = Some(LibraryRoot::new(root));
+        self
+    }
+
+    /// Uses `root` itself, so a switch made elsewhere (the organizer job) shows here.
+    pub fn with_shared_library_root(mut self, root: LibraryRoot) -> Self {
         self.library_root = Some(root);
+        self
+    }
+
+    /// The current library root.
+    pub fn library_root(&self) -> Option<PathBuf> {
+        self.library_root.as_ref().map(LibraryRoot::get)
+    }
+
+    pub fn with_organize_target(mut self, target: Option<PathBuf>) -> Self {
+        self.organize_target = target;
         self
     }
 

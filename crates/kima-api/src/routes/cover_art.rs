@@ -53,7 +53,7 @@ async fn cover_art(
     };
     let not_found = || ApiError::NotFound("Cover art not found");
     let album: Uuid = id.parse().map_err(|_| not_found())?;
-    let (Some(data_dir), Some(root)) = (state.data_dir.clone(), state.library_root.clone()) else {
+    let (Some(data_dir), Some(root)) = (state.data_dir.clone(), state.library_root()) else {
         return Err(not_found());
     };
 

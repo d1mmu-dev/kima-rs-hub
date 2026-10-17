@@ -92,7 +92,7 @@ async fn stream(
     if missing_since.is_some() {
         return Err(unavailable());
     }
-    let root = state.library_root.clone().ok_or_else(unavailable)?;
+    let root = state.library_root().ok_or_else(unavailable)?;
     let rel = Path::new(&rel);
     // Paths come from our own scanner, but never walk out of the root.
     if !rel.components().all(|c| matches!(c, Component::Normal(_))) {

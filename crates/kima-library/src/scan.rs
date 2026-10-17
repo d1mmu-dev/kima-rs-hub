@@ -77,8 +77,8 @@ pub enum PathOutcome {
     MarkedMissing,
     /// Not an audio file, hidden, not under the root, or a vanished path kima never knew.
     Ignored,
-    /// The file is gone, but so is the library root (missing, unreadable or empty, as when a
-    /// disk is unmounted); nothing was changed.
+    /// The file is gone, but so is the library (root missing, unreadable or without any audio
+    /// file, as when a disk is unmounted); nothing was changed.
     RootUnavailable,
     Failed(String),
 }
@@ -538,9 +538,10 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
     }
 
     // Review Focus 2: an unmounted disk usually leaves an empty, readable mount point. If
-    // the walk found nothing while tracks are present, assume that rather than "the whole
-    // library was deleted": mark nothing missing and purge nothing.
-    report.root_empty_guard = walked.files.is_empty() && index.values().any(|t| !t.missing);
+    // the walk found no audio while the library has tracks, assume that rather than "the whole
+    // library was deleted": mark nothing missing and purge nothing. Missing rows count too, so
+    // single-file updates marking tracks missing one by one cannot defeat the guard.
+    report.root_empty_guard = walked.files.is_empty() && !index.is_empty();
     if report.root_empty_guard {
         warn!(
             root = %ctx.root.display(),
@@ -702,13 +703,27 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
     Ok(outcome)
 }
 
-/// The root is a readable directory with at least one entry. An unmounted disk usually
+/// The root is readable and holds at least one audio file. An unmounted disk usually
 /// leaves an empty mount point behind.
 async fn root_available(root: &Path) -> bool {
-    match tokio::fs::read_dir(root).await {
-        Ok(mut dir) => matches!(dir.next_entry().await, Ok(Some(_))),
-        Err(_) => false,
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || has_audio(&root))
+        .await
+        .unwrap_or(false)
+}
+
+/// The root holds at least one non-hidden audio file, by the same rules as the reconcile walk.
+/// Stops at the first hit. `.DS_Store`, `lost+found/` and other placeholders do not count.
+fn has_audio(root: &Path) -> bool {
+    if std::fs::read_dir(root).is_err() {
+        return false;
     }
+    walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !is_hidden(&e.file_name().to_string_lossy()))
+        .filter_map(Result::ok)
+        .any(|e| e.file_type().is_file() && tags::is_audio(e.path()))
 }
 
 #[cfg(test)]

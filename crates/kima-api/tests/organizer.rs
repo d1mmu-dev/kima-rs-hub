@@ -462,3 +462,50 @@ async fn move_apply_and_undo_over_http(pool: PgPool) {
         .await;
     missing.assert_status(StatusCode::NOT_FOUND);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn apply_refused_after_partial_undo(pool: PgPool) {
+    let s = setup(pool.clone(), false).await;
+    let res = post(
+        &s,
+        "/api/library/organizer/preview",
+        json!({"mode": "move"}),
+    )
+    .await;
+    let run = res.json::<Value>()["runId"].as_str().unwrap().to_string();
+    run_jobs(&s.ctx).await;
+    assert_eq!(get_run(&s, &run).await["lastAction"], "apply");
+    post(
+        &s,
+        &format!("/api/library/organizer/runs/{run}/apply"),
+        json!({}),
+    )
+    .await
+    .assert_status(StatusCode::ACCEPTED);
+    run_jobs(&s.ctx).await;
+    // An undo got part way and failed.
+    sqlx::query(
+        "UPDATE organizer_journal SET state = 'undo_failed'
+         WHERE id = (SELECT min(id) FROM organizer_journal WHERE run_id = $1::uuid AND state = 'done')",
+    )
+    .bind(&run)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE organizer_runs SET state = 'failed' WHERE id = $1::uuid")
+        .bind(&run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(get_run(&s, &run).await["lastAction"], "undo");
+    let res = post(
+        &s,
+        &format!("/api/library/organizer/runs/{run}/apply"),
+        json!({}),
+    )
+    .await;
+    res.assert_status(StatusCode::CONFLICT);
+    res.assert_json(&json!({
+        "error": "This run was partly undone; undo it fully or start a new preview"
+    }));
+}

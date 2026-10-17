@@ -14,6 +14,7 @@ import {
     VolumeX,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { useFeatures } from "@/lib/features-context";
 import { usePreview } from "@/hooks/usePreview";
 import { notify } from "@/lib/notify";
 import { cn } from "@/lib/cn";
@@ -60,6 +61,7 @@ function DeezerPlaylistDetailPageInner() {
     const [playlist, setPlaylist] = useState<DeezerPlaylistFull | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const { imports } = useFeatures();
     const { isMuted } = useAudioState();
     const { toggleMute } = useAudioControls();
     const preview = usePreview();
@@ -205,10 +207,12 @@ function DeezerPlaylistDetailPageInner() {
             <div className="relative page-shell pb-4">
                 <div>
                     <div className="flex items-center gap-3">
-                        <Button variant="primary" onClick={handleImport}>
-                            <Download className="w-4 h-4" />
-                            <span>Import Playlist</span>
-                        </Button>
+                        {imports && (
+                            <Button variant="primary" onClick={handleImport}>
+                                <Download className="w-4 h-4" />
+                                <span>Import Playlist</span>
+                            </Button>
+                        )}
 
                         {playingTrackId && (
                             <div className="flex items-center gap-2">

@@ -111,17 +111,17 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                         </div>
 
                         {features.discover && (
-<Link
-                            href="/discover"
-                            aria-current={
-                                pathname === "/discover" ? "page" : undefined
-                            }
-                            aria-label="Discover"
-                            className={cn(
-                                "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200",
-                                pathname === "/discover" ?
-                                    "bg-white/10 text-white"
-                                :   "text-[var(--text-secondary)] hover:text-white hover:bg-white/5",
+                            <Link
+                                href="/discover"
+                                aria-current={
+                                    pathname === "/discover" ? "page" : undefined
+                                }
+                                aria-label="Discover"
+                                className={cn(
+                                    "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200",
+                                    pathname === "/discover" ?
+                                        "bg-white/10 text-white"
+                                    :   "text-[var(--text-secondary)] hover:text-white hover:bg-white/5",
                             )}
                         >
                             <Compass className="w-5 h-5" />
@@ -132,17 +132,17 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                         )}
 
                         {features.mixes && (
-<Link
-                            href="/radio"
-                            aria-current={
-                                pathname === "/radio" ? "page" : undefined
-                            }
-                            aria-label="Radio"
-                            className={cn(
-                                "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200",
-                                pathname === "/radio" ?
-                                    "bg-white/10 text-white"
-                                :   "text-[var(--text-secondary)] hover:text-white hover:bg-white/5",
+                            <Link
+                                href="/radio"
+                                aria-current={
+                                    pathname === "/radio" ? "page" : undefined
+                                }
+                                aria-label="Radio"
+                                className={cn(
+                                    "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200",
+                                    pathname === "/radio" ?
+                                        "bg-white/10 text-white"
+                                    :   "text-[var(--text-secondary)] hover:text-white hover:bg-white/5",
                             )}
                         >
                             <Radio className="w-5 h-5" />

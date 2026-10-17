@@ -12,6 +12,8 @@ import { GradientSpinner } from "@/components/ui/GradientSpinner";
 import { PreviewTable } from "@/features/organizer/components/PreviewTable";
 import { ProgressBar } from "@/features/organizer/components/ProgressBar";
 import { NotAvailable } from "@/features/organizer/components/NotAvailable";
+import { runActions } from "@/features/organizer/runActions";
+import { clearLibraryProgress } from "@/features/organizer/progress";
 import type { OrganizerMode } from "@/features/organizer/types";
 
 const PAGE = 200;
@@ -60,6 +62,7 @@ export default function OrganizePage() {
     };
 
     const start = useMutation({
+        onMutate: () => clearLibraryProgress(qc, "organize"),
         mutationFn: async (action: "preview" | "apply" | "undo" | "switch") => {
             if (action === "preview") return api.previewOrganizer(mode);
             const id = run.data!.id;
@@ -85,9 +88,7 @@ export default function OrganizePage() {
     const d = run.data;
     const busy = !!d && BUSY.includes(d.state);
     const modeOk = mode === "copy" ? c?.copyAvailable : c?.moveAvailable;
-    const canApply = !!d && !busy && (d.state === "previewed" || d.state === "failed") && !d.switchedAt;
-    const canUndo = !!d && !busy && (d.state === "done" || d.state === "failed") && !d.switchedAt;
-    const canSwitch = !!d && !busy && d.mode === "copy" && d.state === "done" && !d.switchedAt;
+    const act = d ? runActions(d, busy) : null;
     const progressJob = "organize" as const;
 
     return (
@@ -172,17 +173,17 @@ export default function OrganizePage() {
                         {busy && <ProgressBar job={progressJob} label={d.state === "planning" ? "Planning" : "Organizing"} />}
 
                         <div className="flex flex-wrap gap-3">
-                            <Button variant="primary" onClick={() => start.mutate("apply")} disabled={!canApply || start.isPending}>
-                                {d.state === "failed" ? "Resume apply" : "Apply"}
+                            <Button variant="primary" onClick={() => start.mutate("apply")} disabled={!act?.canApply || start.isPending}>
+                                {act?.applyLabel}
                             </Button>
-                            <Button variant="secondary" onClick={() => start.mutate("undo")} disabled={!canUndo || start.isPending}>
-                                Undo
+                            <Button variant="secondary" onClick={() => start.mutate("undo")} disabled={!act?.canUndo || start.isPending}>
+                                {act?.undoLabel}
                             </Button>
                             {d.mode === "copy" && (
                                 <Button
                                     variant="secondary"
                                     onClick={() => start.mutate("switch")}
-                                    disabled={!canSwitch || start.isPending}
+                                    disabled={!act?.canSwitch || start.isPending}
                                 >
                                     Switch library to the organized copy
                                 </Button>

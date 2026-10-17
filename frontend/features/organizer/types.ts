@@ -19,6 +19,8 @@ export interface OrganizerRun {
     switchedAt: string | null;
     summary: unknown;
     error: string | null;
+    /** Whether the last journal activity was an apply or an undo (run detail only). */
+    lastAction?: "apply" | "undo";
 }
 
 export interface OrganizerRow {

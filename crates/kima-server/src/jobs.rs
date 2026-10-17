@@ -64,11 +64,17 @@ impl Registry {
 /// running yet; otherwise a killed reconcile would block the startup one for its 6 h lease),
 /// then queues a reconcile unless one is already pending.
 pub async fn prepare_library_queue(pool: &PgPool) -> sqlx::Result<()> {
-    let requeued = kima_jobs::queue::requeue_running(pool, library_jobs::QUEUE).await?;
-    if requeued > 0 {
+    let recovered = kima_jobs::queue::requeue_running(pool, library_jobs::QUEUE).await?;
+    if recovered.requeued > 0 {
         tracing::info!(
-            requeued,
+            requeued = recovered.requeued,
             "requeued library jobs left running by a previous process"
+        );
+    }
+    if recovered.failed > 0 {
+        warn!(
+            failed = recovered.failed,
+            "failed library jobs that were on their final attempt when the previous process died"
         );
     }
     library_jobs::enqueue_reconcile(pool).await?;

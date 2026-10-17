@@ -241,7 +241,13 @@ async fn requeue_running_recovers_jobs_of_a_dead_process(pool: PgPool) {
     let other = queue::enqueue(&pool, "other", json!({}), 3).await.unwrap();
     queue::claim(&pool, "other", 1, LEASE).await.unwrap();
 
-    assert_eq!(queue::requeue_running(&pool, "q").await.unwrap(), 1);
+    assert_eq!(
+        queue::requeue_running(&pool, "q").await.unwrap(),
+        queue::Recovered {
+            requeued: 1,
+            failed: 0
+        }
+    );
     let (state, attempts, _, delayed) = state_of(&pool, stuck).await;
     assert_eq!((state.as_str(), attempts, delayed), ("queued", 1, false));
     let unlocked: bool = sqlx::query_scalar("SELECT locked_until IS NULL FROM jobs WHERE id = $1")
@@ -257,6 +263,63 @@ async fn requeue_running_recovers_jobs_of_a_dead_process(pool: PgPool) {
     let again = queue::claim(&pool, "q", 10, LEASE).await.unwrap();
     let job = again.iter().find(|j| j.id == stuck).unwrap();
     assert_eq!(job.attempts, 2);
+}
+
+/// A job that kills the process on every run must not be retried on every restart.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn requeue_running_fails_exhausted_jobs(pool: PgPool) {
+    let poison = queue::enqueue(&pool, "q", json!({"kind": "poison"}), 1)
+        .await
+        .unwrap();
+    let retryable = queue::enqueue(&pool, "q", json!({"kind": "ok"}), 2)
+        .await
+        .unwrap();
+    // Both claimed once: `poison` is at attempts == max_attempts, `retryable` is below it.
+    assert_eq!(queue::claim(&pool, "q", 10, LEASE).await.unwrap().len(), 2);
+
+    assert_eq!(
+        queue::requeue_running(&pool, "q").await.unwrap(),
+        queue::Recovered {
+            requeued: 1,
+            failed: 1
+        }
+    );
+    let (state, attempts, error, _) = state_of(&pool, poison).await;
+    assert_eq!(
+        (state.as_str(), attempts, error.as_deref()),
+        ("failed", 1, Some("process died on the final attempt"))
+    );
+    let finished: bool = sqlx::query_scalar(
+        "SELECT finished_at IS NOT NULL AND locked_until IS NULL FROM jobs WHERE id = $1",
+    )
+    .bind(poison)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(finished);
+    assert_eq!(state_of(&pool, retryable).await.0, "queued");
+    let again = queue::claim(&pool, "q", 10, LEASE).await.unwrap();
+    assert_eq!(
+        again.iter().map(|j| j.id).collect::<Vec<_>>(),
+        vec![retryable]
+    );
+}
+
+/// Backstop: a queued job that is somehow already out of attempts is never claimed.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn claim_skips_queued_jobs_out_of_attempts(pool: PgPool) {
+    let id = queue::enqueue(&pool, "q", json!({}), 2).await.unwrap();
+    sqlx::query("UPDATE jobs SET attempts = 2 WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        queue::claim(&pool, "q", 10, LEASE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 async fn pending(

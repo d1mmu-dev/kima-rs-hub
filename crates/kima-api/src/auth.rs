@@ -77,6 +77,22 @@ pub async fn authenticate(
     }))
 }
 
+/// An authenticated admin. A missing or bad token is 401 (from `AuthUser`), a non-admin is 403.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdminUser(pub AuthUser);
+
+impl FromRequestParts<AppState> for AdminUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        let user = AuthUser::from_request_parts(parts, state).await?;
+        if user.role != users::ROLE_ADMIN {
+            return Err(ApiError::Forbidden("Admin access required"));
+        }
+        Ok(Self(user))
+    }
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 

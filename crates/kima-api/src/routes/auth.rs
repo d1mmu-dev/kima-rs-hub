@@ -9,7 +9,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use super::onboarding::Credentials;
-use crate::auth::AuthUser;
+use crate::auth::{AdminUser, AuthUser};
 use crate::error::ApiError;
 use crate::extract::ApiJson;
 use crate::revoke_sessions;
@@ -144,13 +144,6 @@ async fn stream_ticket(
     })))
 }
 
-fn require_admin(user: &AuthUser) -> Result<(), ApiError> {
-    if user.role != users::ROLE_ADMIN {
-        return Err(ApiError::Forbidden("Admin access required"));
-    }
-    Ok(())
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChangePassword {
@@ -207,9 +200,8 @@ async fn change_password(
 
 async fn list_users(
     State(state): State<AppState>,
-    auth: AuthUser,
+    _admin: AdminUser,
 ) -> Result<Json<Value>, ApiError> {
-    require_admin(&auth)?;
     let rows = users::list(&state.pool).await?;
     let mut out = Vec::with_capacity(rows.len());
     for user in rows {
@@ -235,10 +227,9 @@ struct CreateUser {
 
 async fn create_user(
     State(state): State<AppState>,
-    auth: AuthUser,
+    _admin: AdminUser,
     ApiJson(body): ApiJson<CreateUser>,
 ) -> Result<Json<Value>, ApiError> {
-    require_admin(&auth)?;
     let username = body.username.trim().to_string();
     if username.is_empty() || body.password.is_empty() {
         return Err(ApiError::BadRequest(
@@ -278,10 +269,9 @@ async fn create_user(
 
 async fn delete_user(
     State(state): State<AppState>,
-    auth: AuthUser,
+    AdminUser(auth): AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    require_admin(&auth)?;
     let id: Uuid = id
         .parse()
         .map_err(|_| ApiError::NotFound("User not found"))?;

@@ -2,24 +2,16 @@ use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use kima_db::settings::{self, SettingsPatch, SystemSettings};
-use kima_db::users;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::auth::AuthUser;
+use crate::auth::AdminUser;
 use crate::error::ApiError;
 use crate::extract::ApiJson;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/system-settings", get(show).post(update))
-}
-
-fn require_admin(user: &AuthUser) -> Result<(), ApiError> {
-    if user.role != users::ROLE_ADMIN {
-        return Err(ApiError::Forbidden("Admin access required"));
-    }
-    Ok(())
 }
 
 fn body(settings: SystemSettings) -> Json<Value> {
@@ -29,8 +21,7 @@ fn body(settings: SystemSettings) -> Json<Value> {
     }))
 }
 
-async fn show(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    require_admin(&user)?;
+async fn show(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Value>, ApiError> {
     Ok(body(settings::get(&state.pool).await?))
 }
 
@@ -42,10 +33,9 @@ struct Patch {
 
 async fn update(
     State(state): State<AppState>,
-    user: AuthUser,
+    _admin: AdminUser,
     ApiJson(patch): ApiJson<Patch>,
 ) -> Result<Json<Value>, ApiError> {
-    require_admin(&user)?;
     let patch = SettingsPatch {
         registration_open: patch.registration_open,
         library_root: None,

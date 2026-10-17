@@ -15,14 +15,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use kima_db::attention;
 use kima_db::organizer::{self as db, RowView, Run};
-use kima_db::users;
 use kima_library::organize::apply::{self, Action};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::{Paging, parse_id};
-use crate::auth::AuthUser;
+use crate::auth::AdminUser;
 use crate::error::ApiError;
 use crate::extract::ApiJson;
 use crate::state::AppState;
@@ -42,13 +41,6 @@ pub fn routes() -> Router<AppState> {
 }
 
 const READ_ONLY: &str = "Library folder is read-only; use copy mode";
-
-fn admin(user: &AuthUser) -> Result<(), ApiError> {
-    if user.role != users::ROLE_ADMIN {
-        return Err(ApiError::Forbidden("Admin access required"));
-    }
-    Ok(())
-}
 
 fn rfc3339(t: time::OffsetDateTime) -> Option<String> {
     t.format(&time::format_description::well_known::Rfc3339)
@@ -149,9 +141,8 @@ async fn copy_target(state: &AppState) -> Option<PathBuf> {
 /// folder, tested with a probe file (a read-only mount keeps its mode bits).
 async fn capabilities(
     State(state): State<AppState>,
-    user: AuthUser,
+    _admin: AdminUser,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&user)?;
     let root = state.library_root();
     let move_ok = match &root {
         Some(r) => cached(r.clone(), |d| d.is_dir() && apply::writable(&d)).await,
@@ -186,10 +177,9 @@ async fn busy(state: &AppState) -> Result<bool, ApiError> {
 /// Creates a run and queues its planning. `202 {runId, jobId}`.
 async fn preview(
     State(state): State<AppState>,
-    user: AuthUser,
+    AdminUser(user): AdminUser,
     ApiJson(body): ApiJson<PreviewBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&user)?;
     let root = state
         .library_root()
         .ok_or(ApiError::Conflict("Library folder is not configured"))?;
@@ -233,8 +223,7 @@ async fn preview(
 }
 
 /// The newest 20 runs.
-async fn list(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    admin(&user)?;
+async fn list(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Value>, ApiError> {
     let runs = db::list_runs(&state.pool, 20).await?;
     Ok(Json(
         json!({ "runs": runs.iter().map(run_json).collect::<Vec<_>>() }),
@@ -251,11 +240,10 @@ async fn load(state: &AppState, id: &str) -> Result<Run, ApiError> {
 /// The run, plus one page of its journal (`rows`, `total`, `offset`, `limit`).
 async fn detail(
     State(state): State<AppState>,
-    user: AuthUser,
+    _admin: AdminUser,
     Path(id): Path<String>,
     Query(paging): Query<Paging>,
 ) -> Result<Json<Value>, ApiError> {
-    admin(&user)?;
     let run = load(&state, &id).await?;
     let (offset, limit) = (paging.offset(), paging.limit(200));
     let (rows, total) = db::rows(&state.pool, run.id, offset, limit).await?;
@@ -282,10 +270,9 @@ fn accepted(run: Uuid, job: Uuid) -> (StatusCode, Json<Value>) {
 /// Starts (or, for a failed run, resumes) applying a preview.
 async fn apply_run(
     State(state): State<AppState>,
-    user: AuthUser,
+    _admin: AdminUser,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&user)?;
     let run = load(&state, &id).await?;
     if run.switched_at.is_some() {
         return Err(ApiError::Conflict("This run was already switched to"));
@@ -314,10 +301,9 @@ async fn apply_run(
 /// Undoes an applied (or partly applied) run.
 async fn undo_run(
     State(state): State<AppState>,
-    user: AuthUser,
+    _admin: AdminUser,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&user)?;
     let run = load(&state, &id).await?;
     if run.switched_at.is_some() {
         return Err(ApiError::Conflict(
@@ -354,10 +340,9 @@ async fn undo_run(
 /// Switches the library to a finished copy run's target.
 async fn switch_root(
     State(state): State<AppState>,
-    user: AuthUser,
+    _admin: AdminUser,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    admin(&user)?;
     let run = load(&state, &id).await?;
     if run.mode != db::MODE_COPY {
         return Err(ApiError::Conflict("Only a copy run can become the library"));

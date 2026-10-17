@@ -4,7 +4,7 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum_test::TestServer;
-use kima_api::auth::AuthUser;
+use kima_api::auth::{AdminUser, AuthUser};
 use kima_db::PgPool;
 use serde_json::{Value, json};
 
@@ -18,6 +18,10 @@ fn probe(state: kima_api::AppState) -> TestServer {
         .route(
             "/media/stream",
             get(|user: AuthUser| async move { user.username }),
+        )
+        .route(
+            "/admin-probe",
+            get(|AdminUser(user): AdminUser| async move { user.username }),
         )
         .with_state(state.clone());
     TestServer::new(kima_api::router(state).merge(probes)).unwrap()
@@ -207,4 +211,36 @@ async fn bad_header_falls_through_to_query_token(pool: PgPool) {
         .authorization_bearer("garbage")
         .await
         .assert_status_ok();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn admin_user_rejects_anonymous_401(pool: PgPool) {
+    let res = probe(common::state(pool)).get("/admin-probe").await;
+    res.assert_status(StatusCode::UNAUTHORIZED);
+    res.assert_json(&json!({ "error": "Not authenticated" }));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn admin_user_rejects_user_403(pool: PgPool) {
+    let state = common::state(pool);
+    let (_admin, _) = common::user_with_token(&state, "root").await;
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let res = probe(state)
+        .get("/admin-probe")
+        .authorization_bearer(&token)
+        .await;
+    res.assert_status(StatusCode::FORBIDDEN);
+    res.assert_text(r#"{"error":"Admin access required"}"#);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn admin_user_admits_admin(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "root").await;
+    let res = probe(state)
+        .get("/admin-probe")
+        .authorization_bearer(&token)
+        .await;
+    res.assert_status_ok();
+    res.assert_text("root");
 }

@@ -974,7 +974,7 @@ async fn move_rows(r: &mut Runner<'_>, dir: Dir) -> Result<()> {
             // staging name.
             let mut done: Vec<JournalRow> = all
                 .iter()
-                .filter(|x| x.state == "done" || x.state == "staged")
+                .filter(|x| matches!(x.state.as_str(), "done" | "staged" | "undo_failed"))
                 .cloned()
                 .collect();
             done.sort_by_key(|x| std::cmp::Reverse((x.applied_seq.unwrap_or(i64::MAX), x.id)));
@@ -1145,7 +1145,15 @@ async fn move_one(
             Ok(false)
         }
         Step::Fail(note) => {
-            r.commit(row, "failed", Some(note), None).await?;
+            // An undo failure is its own state: apply-time `failed` rows are never undone, and
+            // must not keep the run from reaching `undone`. A row still parked from the apply
+            // stays `staged`, so a retry finds its file under the staging name.
+            let state = match dir {
+                Dir::Forward => "failed",
+                Dir::Back if row.state == "staged" => "staged",
+                Dir::Back => "undo_failed",
+            };
+            r.commit(row, state, Some(note), None).await?;
             Ok(false)
         }
         Step::Commit => {
@@ -1340,7 +1348,8 @@ async fn finish(r: &Runner<'_>, dir: Dir) -> Result<()> {
                   failed = count("failed"), "organizer apply finished");
         }
         Dir::Back => {
-            let left = count("done") + count("staged") + count("undo_staged") + count("failed");
+            let left =
+                count("done") + count("staged") + count("undo_staged") + count("undo_failed");
             if left > 0 {
                 db::fail_run(
                     &r.ctx.pool,

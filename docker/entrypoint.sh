@@ -22,9 +22,19 @@ pg_sql() {
 }
 
 if [ -z "${DATABASE_URL:-}" ]; then
-    mkdir -p "$PGDATA"
-    chown -R -h postgres:postgres "$PGDATA"
-    chmod 700 "$PGDATA"
+    if [ -e "$PGDATA" ]; then
+        # kima owns /data and could have planted its own cluster (with a crafted postgresql.conf)
+        # here; only accept a directory that postgres itself owns.
+        if [ -L "$PGDATA" ] || [ ! -d "$PGDATA" ] || [ "$(stat -c '%U:%G %a' "$PGDATA")" != "postgres:postgres 700" ]; then
+            echo "kima-entrypoint: refusing to start: $PGDATA must be a directory owned by postgres:postgres with mode 700" >&2
+            echo "kima-entrypoint: found: $(stat -c '%F %U:%G %a' "$PGDATA")" >&2
+            exit 1
+        fi
+    else
+        mkdir "$PGDATA"
+        chown -h postgres:postgres "$PGDATA"
+        chmod 700 "$PGDATA"
+    fi
     if [ ! -s "$PGDATA/PG_VERSION" ]; then
         gosu postgres initdb -D "$PGDATA" --username=postgres --auth-local=peer --auth-host=scram-sha-256 \
             --encoding=UTF8 >/dev/null

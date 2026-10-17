@@ -52,7 +52,7 @@ pub struct TrackRow {
     pub album_artist_name: String,
 }
 
-const TRACK_SELECT: &str = "SELECT t.id, t.title, t.artist_name, t.duration_secs, t.disc, t.track_no,
+pub(crate) const TRACK_SELECT: &str = "SELECT t.id, t.title, t.artist_name, t.duration_secs, t.disc, t.track_no,
         t.codec, t.bitrate, t.year, al.id AS album_id, al.title AS album_title, al.year AS album_year,
         ar.id AS album_artist_id, ar.name AS album_artist_name
     FROM tracks t
@@ -60,7 +60,8 @@ const TRACK_SELECT: &str = "SELECT t.id, t.title, t.artist_name, t.duration_secs
     JOIN artists ar ON ar.id = al.artist_id
     WHERE t.missing_since IS NULL";
 
-const ALBUM_SELECT: &str = "SELECT al.id, al.title, al.year, al.is_compilation, al.created_at,
+pub(crate) const ALBUM_SELECT: &str =
+    "SELECT al.id, al.title, al.year, al.is_compilation, al.created_at,
         ar.id AS artist_id, ar.name AS artist_name,
         count(t.id) AS track_count, COALESCE(sum(t.duration_secs), 0)::bigint AS duration_secs
     FROM albums al

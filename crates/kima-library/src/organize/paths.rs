@@ -101,6 +101,8 @@ fn scrub(s: &str) -> String {
 /// `.` or `..`, and never a string containing a separator.
 pub fn sanitize_component(s: &str) -> String {
     let mut out = scrub(s);
+    // A leading dot would make the name hidden, and the scanner and watcher skip hidden names.
+    out = out.trim_start_matches(['.', ' ']).to_string();
     trim_tail(&mut out);
     truncate_bytes(&mut out, MAX_COMPONENT);
     trim_tail(&mut out);
@@ -426,6 +428,26 @@ mod tests {
         assert_eq!(sanitize_component("name. . "), "name");
         assert_eq!(sanitize_component("a\u{0}b\nc"), "a_b_c");
         assert_eq!(sanitize_component(""), "_");
+        assert_eq!(
+            sanitize_component("...And You Will Know Us"),
+            "And You Will Know Us"
+        );
+        assert_eq!(sanitize_component("..."), "_");
+        assert_eq!(sanitize_component(". .x"), "x");
+        assert_eq!(file_name(".hidden", "flac"), "hidden.flac");
+        assert_eq!(file_name("...", "flac"), "_.flac");
+        let t = target(&f(
+            "...And You Will Know Us by the Trail of Dead",
+            ".hidden",
+            None,
+            1,
+            ".t",
+        ));
+        assert!(
+            t.components()
+                .all(|c| !c.as_os_str().to_string_lossy().starts_with('.')),
+            "{t:?}"
+        );
         assert_eq!(sanitize_component("e\u{301}"), sanitize_component("\u{e9}"));
 
         let long = "é".repeat(300);

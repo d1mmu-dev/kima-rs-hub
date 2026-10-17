@@ -88,9 +88,10 @@ async fn cover_art_serves_resized_folder_image(pool: PgPool) {
         .await;
     res.assert_status_ok();
     assert_eq!(res.header("content-type"), "image/jpeg");
-    assert_eq!(res.header("cache-control"), "public, max-age=86400");
+    assert_eq!(res.header("cache-control"), "private, max-age=86400");
     let img = image::load_from_memory(res.as_bytes()).unwrap();
-    assert_eq!((img.width(), img.height()), (100, 50));
+    // 100 snaps up to the 128 bucket.
+    assert_eq!((img.width(), img.height()), (128, 64));
 
     let orig = server
         .get(&format!("/api/library/cover-art/{album}"))
@@ -131,4 +132,66 @@ async fn cover_art_404_without_data_dir_or_art(pool: PgPool) {
         .authorization_bearer(&token)
         .await
         .assert_status(StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn sizes_share_a_bucket_and_cache_file(pool: PgPool) {
+    let music = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(music.path().join("A/B")).unwrap();
+    std::fs::write(music.path().join("A/B/cover.png"), png(1200, 600)).unwrap();
+    let album = album_with_track(&pool, "A/B/01.mp3").await;
+    let state = common::state(pool)
+        .with_data_dir(data.path().into())
+        .with_library_root(music.path().into());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    for size in [300, 400] {
+        let res = server
+            .get(&format!("/api/library/cover-art/{album}?size={size}"))
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+        let img = image::load_from_memory(res.as_bytes()).unwrap();
+        assert_eq!((img.width(), img.height()), (512, 256));
+    }
+    let files: Vec<_> = std::fs::read_dir(data.path().join(format!("artwork/{album}")))
+        .unwrap()
+        .collect();
+    assert_eq!(files.len(), 1);
+    assert!(
+        data.path()
+            .join(format!("artwork/{album}/512.jpg"))
+            .is_file()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn all_corrupt_is_404(pool: PgPool) {
+    let music = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(music.path().join("A/B")).unwrap();
+    std::fs::write(music.path().join("A/B/cover.jpg"), b"not a jpeg").unwrap();
+    let album = album_with_track(&pool, "A/B/01.mp3").await;
+    let state = common::state(pool)
+        .with_data_dir(data.path().into())
+        .with_library_root(music.path().into());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    server
+        .get(&format!("/api/library/cover-art/{album}"))
+        .authorization_bearer(&token)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn query_token_is_rejected_on_non_media_routes(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    server
+        .get(&format!("/api/system/features?token={token}"))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
 }

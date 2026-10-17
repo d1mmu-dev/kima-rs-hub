@@ -22,8 +22,6 @@ pub fn routes() -> Router<AppState> {
         .route("/library/cover-art/{id}", get(cover_art))
 }
 
-/// Upstream's largest accepted size is not documented; clamp to something sane.
-const MAX_SIZE: u32 = 2000;
 /// How many of an album's tracks to probe for embedded art before giving up.
 const PROBE_TRACKS: usize = 5;
 
@@ -45,7 +43,7 @@ async fn cover_art(
     let size = match params.size.as_deref() {
         None | Some("") => None,
         Some(s) => match s.parse::<u32>() {
-            Ok(n) if n > 0 => Some(n.min(MAX_SIZE)),
+            Ok(n) if n > 0 => Some(artwork::bucket(n)),
             _ => {
                 return Err(ApiError::BadRequest(
                     "size must be a positive integer".into(),
@@ -67,15 +65,22 @@ async fn cover_art(
             if cached.is_file() {
                 return Ok(Some(cached));
             }
+            let mut failed = 0;
             for rel in paths.iter().take(PROBE_TRACKS) {
                 let rel = Path::new(rel);
                 // Track paths come from our own scanner, but never walk out of the root.
                 if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
                     continue;
                 }
-                if let Some(source) = artwork::find_cover(&root.join(rel)) {
-                    return Ok(Some(artwork::cached(&data_dir, &key, size, &source)?));
+                let candidates = artwork::candidates(&root.join(rel));
+                let (file, bad) = artwork::cached_from(&data_dir, &key, size, candidates)?;
+                if file.is_some() {
+                    return Ok(file);
                 }
+                failed += bad;
+            }
+            if failed > 0 {
+                tracing::warn!(album = %key, failed, "cover art found but none of it could be decoded");
             }
             Ok(None)
         })
@@ -91,7 +96,7 @@ async fn cover_art(
     Ok((
         [
             (CONTENT_TYPE, "image/jpeg"),
-            (CACHE_CONTROL, "public, max-age=86400"),
+            (CACHE_CONTROL, "private, max-age=86400"),
         ],
         bytes,
     ))

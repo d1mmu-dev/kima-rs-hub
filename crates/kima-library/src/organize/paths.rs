@@ -40,6 +40,9 @@ pub struct PlannedMove {
     /// Another track wanted the same target, or something already sits there.
     pub collision: bool,
     pub unchanged: bool,
+    /// `to` differs from `from` only in letter case: on a case-insensitive filesystem this
+    /// needs a two-step move.
+    pub case_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +50,7 @@ pub struct SidecarMove {
     pub from: PathBuf,
     pub to: PathBuf,
     pub collision: bool,
+    pub unchanged: bool,
 }
 
 fn is_reserved(name: &str) -> bool {
@@ -146,10 +150,10 @@ pub fn target(f: &Fields) -> PathBuf {
         &f.album_artist
     };
     let album = match f.year {
-        Some(y) => format!("{y} - {}", scrub(&f.album)),
-        None => f.album.clone(), // sanitised below
+        Some(y) if y > 0 => format!("{y} - {}", scrub(&f.album)),
+        _ => f.album.clone(), // sanitised below
     };
-    let num = if f.disc_total > 1 {
+    let num = if f.disc_total > 1 || f.disc > 1 {
         format!("{}-{:02}", f.disc, f.track_no)
     } else {
         format!("{:02}", f.track_no)
@@ -194,9 +198,21 @@ pub fn plan(tracks: &[(Uuid, Fields, PathBuf)], existing: &HashSet<PathBuf>) -> 
         .collect();
     let existing_hit = claimed.clone();
 
+    // An album's disc count is the largest of the given totals and the discs actually present,
+    // so a missing total still gives every disc the `D-NN` prefix.
+    let album_key = |f: &Fields| (names::key(&f.album_artist), names::key(&f.album), f.year);
+    let mut discs: HashMap<(String, String, Option<i32>), u32> = HashMap::new();
+    for (_, f, _) in tracks {
+        let e = discs.entry(album_key(f)).or_default();
+        *e = (*e).max(f.disc_total).max(f.disc);
+    }
     let mut items: Vec<(PathBuf, Uuid, &PathBuf)> = tracks
         .iter()
-        .map(|(id, f, from)| (target(f), *id, from))
+        .map(|(id, f, from)| {
+            let mut f = f.clone();
+            f.disc_total = discs[&album_key(&f)];
+            (target(&f), *id, from)
+        })
         .collect();
     items.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
 
@@ -220,8 +236,9 @@ pub fn plan(tracks: &[(Uuid, Fields, PathBuf)], existing: &HashSet<PathBuf>) -> 
                     track_id,
                     from: from.clone(),
                     to: base,
-                    collision: shared,
+                    collision: false,
                     unchanged: true,
+                    case_only: false,
                 };
             }
             let mut to = base.clone();
@@ -231,12 +248,17 @@ pub fn plan(tracks: &[(Uuid, Fields, PathBuf)], existing: &HashSet<PathBuf>) -> 
                 n += 1;
             }
             claimed.insert(path_key(&to));
+            let unchanged = &to == from;
             PlannedMove {
                 track_id,
                 from: from.clone(),
-                collision: shared || to != base || existing_hit.contains(&key),
+                // A file that stays where it is has nothing to warn about, so a re-plan of an
+                // organized library reports no collisions.
+                collision: !unchanged && (shared || to != base || existing_hit.contains(&key)),
+                case_only: !unchanged
+                    && to.to_string_lossy().to_lowercase() == from.to_string_lossy().to_lowercase(),
                 to,
-                unchanged: false,
+                unchanged,
             }
         })
         .collect()
@@ -306,9 +328,11 @@ pub fn plan_sidecars(
             n += 1;
         }
         claimed.insert(path_key(&to));
+        let unchanged = &to == from;
         out.push(SidecarMove {
             from: from.clone(),
-            collision: to != base,
+            collision: !unchanged && to != base,
+            unchanged,
             to,
         });
     }
@@ -526,6 +550,119 @@ mod tests {
             assert!(!s.collision);
         }
         assert!(out.iter().any(|s| s.to.ends_with("folder.jpg")));
+    }
+
+    #[test]
+    fn disc_prefix_without_total() {
+        let mut x = f("A", "B", None, 5, "T");
+        x.disc = 2;
+        x.disc_total = 0;
+        assert_eq!(target(&x), PathBuf::from("A/B/2-05 - T.flac"));
+
+        // Discs 1 and 2 present, no totals: both get the prefix in `plan`.
+        let mut d1 = f("A", "B", Some(2000), 1, "One");
+        d1.disc = 1;
+        d1.disc_total = 0;
+        let mut d2 = f("A", "B", Some(2000), 1, "Two");
+        d2.disc = 2;
+        d2.disc_total = 0;
+        let out = plan(
+            &[
+                (id(1), d1, PathBuf::from("in/1.flac")),
+                (id(2), d2, PathBuf::from("in/2.flac")),
+            ],
+            &HashSet::new(),
+        );
+        assert_eq!(out[0].to, PathBuf::from("A/2000 - B/1-01 - One.flac"));
+        assert_eq!(out[1].to, PathBuf::from("A/2000 - B/2-01 - Two.flac"));
+    }
+
+    #[test]
+    fn replan_of_organized_library_is_all_unchanged() {
+        let a = f("Abba", "Gold", Some(1992), 1, "Same");
+        let b = f("ABBA", "gold", Some(1992), 1, "same");
+        let c = f("Abba", "Gold", Some(1992), 2, "Other");
+        let input = vec![
+            (id(1), a, PathBuf::from("m/1.flac")),
+            (id(2), b, PathBuf::from("m/2.flac")),
+            (id(3), c, PathBuf::from("m/3.flac")),
+        ];
+        let first = plan(&input, &HashSet::new());
+        assert!(first.iter().any(|m| m.collision));
+        let moved: HashMap<Uuid, PathBuf> =
+            first.iter().map(|m| (m.track_id, m.to.clone())).collect();
+        let applied: Vec<_> = input
+            .iter()
+            .map(|(i, fl, _)| (*i, fl.clone(), moved[i].clone()))
+            .collect();
+        // The organized files all exist now.
+        let existing: HashSet<PathBuf> = moved.values().cloned().collect();
+        for ex in [HashSet::new(), existing] {
+            let second = plan(&applied, &ex);
+            assert!(
+                second.iter().all(|m| m.unchanged && !m.collision),
+                "{second:?}"
+            );
+            for m in &second {
+                assert_eq!(m.to, moved[&m.track_id]);
+            }
+        }
+    }
+
+    #[test]
+    fn case_only_rename_is_flagged() {
+        let x = f("Abba", "Gold", None, 1, "T");
+        let out = plan(
+            &[(id(1), x, PathBuf::from("abba/gold/01 - T.flac"))],
+            &HashSet::new(),
+        );
+        assert!(!out[0].unchanged && out[0].case_only);
+        assert_eq!(out[0].to, PathBuf::from("Abba/Gold/01 - T.flac"));
+    }
+
+    #[test]
+    fn long_title_with_suffix_and_odd_extension_stay_valid() {
+        let mut x = f("A", "B", None, 1, &"é".repeat(300));
+        x.ext = "MP3".into();
+        let out = plan(
+            &[
+                (id(1), x.clone(), PathBuf::from("in/1.mp3")),
+                (id(2), x, PathBuf::from("in/2.mp3")),
+            ],
+            &HashSet::new(),
+        );
+        let name = out[1].to.file_name().unwrap().to_str().unwrap();
+        assert!(name.len() <= 120, "{}", name.len());
+        assert!(name.ends_with(" (2).mp3"), "{name}");
+        assert!(out[0].to.to_str().unwrap().ends_with(".mp3"));
+    }
+
+    #[test]
+    fn nfd_and_nfc_collide_in_plan() {
+        let nfd = f("Beyonce\u{301}", "B", None, 1, "T");
+        let nfc = f("Beyonc\u{e9}", "B", None, 1, "T");
+        let out = plan(
+            &[
+                (id(1), nfd, PathBuf::from("in/1.flac")),
+                (id(2), nfc, PathBuf::from("in/2.flac")),
+            ],
+            &HashSet::new(),
+        );
+        assert_eq!(out[0].to.parent(), Some(Path::new("Beyonc\u{e9}/B")));
+        assert_eq!(out[1].to.file_name().unwrap(), "01 - T (2).flac");
+        assert!(out.iter().all(|m| m.collision));
+    }
+
+    #[test]
+    fn nonpositive_year_is_no_year() {
+        assert_eq!(
+            target(&f("A", "B", Some(0), 1, "T")),
+            PathBuf::from("A/B/01 - T.flac")
+        );
+        assert_eq!(
+            target(&f("A", "B", Some(-5), 1, "T")),
+            PathBuf::from("A/B/01 - T.flac")
+        );
     }
 
     #[test]

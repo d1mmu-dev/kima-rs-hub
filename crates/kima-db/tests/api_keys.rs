@@ -24,7 +24,7 @@ fn hash_of(n: u32) -> [u8; 32] {
 }
 
 async fn add(pool: &PgPool, user: Uuid, name: &str, n: u32) -> api_keys::ApiKey {
-    api_keys::create(pool, Uuid::now_v7(), user, name, &hash_of(n), b"enc")
+    api_keys::create(pool, Uuid::now_v7(), user, 0, name, &hash_of(n), b"enc")
         .await
         .unwrap()
         .unwrap()
@@ -65,7 +65,7 @@ async fn fifty_first_is_too_many(pool: PgPool) {
     for n in 0..MAX_PER_USER as u32 {
         add(&pool, ana.id, "k", n).await;
     }
-    let refused = api_keys::create(&pool, Uuid::now_v7(), ana.id, "k", &hash_of(999), b"e")
+    let refused = api_keys::create(&pool, Uuid::now_v7(), ana.id, 0, "k", &hash_of(999), b"e")
         .await
         .unwrap();
     assert!(refused.is_err());
@@ -169,6 +169,84 @@ async fn stale_version_keeps_tokens(pool: PgPool) {
     assert_eq!(
         api_keys::list_for_user(&pool, ana.id).await.unwrap().len(),
         1
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stale_session_version_is_refused(pool: PgPool) {
+    use api_keys::Refused;
+    let ana = user(&pool, "ana").await;
+    let mut conn = pool.acquire().await.unwrap();
+    users::set_password(&mut conn, ana.id, "new", None)
+        .await
+        .unwrap();
+    drop(conn);
+
+    // A session that saw version 0 must not mint a token after the change to version 1.
+    let stale = api_keys::create(&pool, Uuid::now_v7(), ana.id, 0, "k", &hash_of(1), b"e")
+        .await
+        .unwrap();
+    assert_eq!(stale.unwrap_err(), Refused::StaleSession);
+    assert!(
+        api_keys::list_for_user(&pool, ana.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // The current version works.
+    api_keys::create(&pool, Uuid::now_v7(), ana.id, 1, "k", &hash_of(2), b"e")
+        .await
+        .unwrap()
+        .unwrap();
+    // A user who is gone is a stale session too, not a foreign-key error.
+    let gone = api_keys::create(
+        &pool,
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        0,
+        "k",
+        &hash_of(3),
+        b"e",
+    )
+    .await
+    .unwrap();
+    assert_eq!(gone.unwrap_err(), Refused::StaleSession);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn concurrent_creates_respect_the_cap(pool: PgPool) {
+    let ana = user(&pool, "ana").await;
+    for n in 0..(MAX_PER_USER as u32 - 1) {
+        add(&pool, ana.id, "k", n).await;
+    }
+    let handles: Vec<_> = (0..5u32)
+        .map(|i| {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                api_keys::create(
+                    &pool,
+                    Uuid::now_v7(),
+                    ana.id,
+                    0,
+                    "k",
+                    &hash_of(500 + i),
+                    b"e",
+                )
+                .await
+                .unwrap()
+            })
+        })
+        .collect();
+    let mut created = 0;
+    for handle in handles {
+        if handle.await.unwrap().is_ok() {
+            created += 1;
+        }
+    }
+    assert_eq!(created, 1);
+    assert_eq!(
+        api_keys::list_for_user(&pool, ana.id).await.unwrap().len() as i64,
+        MAX_PER_USER
     );
 }
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, secret_enc FROM api_keys WHERE user_id = $1\n         ORDER BY created_at ASC, id ASC LIMIT 50",
+  "query": "SELECT id, secret_enc FROM api_keys WHERE user_id = $1\n         ORDER BY created_at ASC, id ASC LIMIT $2",
   "describe": {
     "columns": [
       {
@@ -16,7 +16,8 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Int8"
       ]
     },
     "nullable": [
@@ -24,5 +25,5 @@
       false
     ]
   },
-  "hash": "491b2b8cf84eb32cdd2ce248fbf93711939eecbdf3d0aea0a82959385bcf0556"
+  "hash": "e17de28f170cbff6d601ffc15bf299ccf094c7412bdf049528798795ab37ced5"
 }

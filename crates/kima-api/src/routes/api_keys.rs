@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get};
 use axum::{Json, Router};
 use kima_core::app_token;
-use kima_db::api_keys::{self, TooMany};
+use kima_db::api_keys::{self, Refused};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -55,12 +55,17 @@ async fn create(
         &state.pool,
         id,
         auth.id,
+        auth.token_version,
         name,
         &app_token::hash(&token),
         &secret_enc,
     )
     .await?
-    .map_err(|TooMany| ApiError::BadRequest("Too many app tokens; revoke one first".into()))?;
+    .map_err(|refused| match refused {
+        Refused::TooMany => ApiError::BadRequest("Too many app tokens; revoke one first".into()),
+        // The password changed after this request was authenticated: same answer as a stale session.
+        Refused::StaleSession => ApiError::Unauthorized("Not authenticated"),
+    })?;
 
     Ok((
         StatusCode::CREATED,

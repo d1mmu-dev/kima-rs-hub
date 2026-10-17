@@ -19,25 +19,38 @@ pub struct ApiKey {
     pub last_used_at: Option<OffsetDateTime>,
 }
 
-/// The user already holds [`MAX_PER_USER`] tokens.
+/// Why [`create`] stored nothing.
 #[derive(Debug, PartialEq, Eq)]
-pub struct TooMany;
+pub enum Refused {
+    /// The user already holds [`MAX_PER_USER`] tokens.
+    TooMany,
+    /// The user is gone, or their password changed after the requesting session was issued.
+    StaleSession,
+}
 
-/// Stores a token. The cap is checked and the row inserted under a lock on the user's row, so
-/// concurrent creates cannot overshoot it.
+/// Stores a token for a session that was issued at `session_version`. Under a lock on the
+/// user's row it checks that version is still current (a password change bumps it and revokes
+/// all tokens, so a revoked session must not mint one afterwards), then the cap, then inserts.
+/// Concurrent creates are serialised by the lock and cannot overshoot the cap.
 pub async fn create(
     pool: &PgPool,
     id: Uuid,
     user: Uuid,
+    session_version: i32,
     name: &str,
     key_hash: &[u8; 32],
     secret_enc: &[u8],
-) -> sqlx::Result<Result<ApiKey, TooMany>> {
+) -> sqlx::Result<Result<ApiKey, Refused>> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT id FROM users WHERE id = $1 FOR UPDATE")
-        .bind(user)
-        .fetch_optional(&mut *tx)
-        .await?;
+    let current = sqlx::query_scalar!(
+        "SELECT token_version FROM users WHERE id = $1 FOR UPDATE",
+        user
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current != Some(session_version) {
+        return Ok(Err(Refused::StaleSession));
+    }
     let held = sqlx::query_scalar!(
         r#"SELECT count(*) AS "count!" FROM api_keys WHERE user_id = $1"#,
         user
@@ -45,7 +58,7 @@ pub async fn create(
     .fetch_one(&mut *tx)
     .await?;
     if held >= MAX_PER_USER {
-        return Ok(Err(TooMany));
+        return Ok(Err(Refused::TooMany));
     }
     let key = sqlx::query_as!(
         ApiKey,
@@ -125,8 +138,9 @@ pub async fn find_by_hash(pool: &PgPool, hash: &[u8; 32]) -> sqlx::Result<Option
 pub async fn secrets_for_user(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<(Uuid, Vec<u8>)>> {
     let rows = sqlx::query!(
         "SELECT id, secret_enc FROM api_keys WHERE user_id = $1
-         ORDER BY created_at ASC, id ASC LIMIT 50",
-        user
+         ORDER BY created_at ASC, id ASC LIMIT $2",
+        user,
+        MAX_PER_USER
     )
     .fetch_all(pool)
     .await?;

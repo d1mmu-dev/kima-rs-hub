@@ -89,13 +89,26 @@ impl LoginLimiter {
         }
     }
 
-    pub fn record_failure(&self, ip: IpAddr, username: &str, now: Instant) {
+    /// Starts one password attempt. Under a single lock it refuses a blocked key, and otherwise
+    /// counts the attempt as a failure right away, so parallel or abandoned guesses cannot
+    /// slip past the backoff. Call [`Attempt::success`] when the password was right; dropping
+    /// the attempt (wrong password, client hang-up, error) leaves the failure counted.
+    ///
+    /// A blocked key may still be evicted when the store is full (oldest failure first): making
+    /// blocked keys permanent would let junk keys fill the store and disable the limiter.
+    pub fn begin(&self, ip: IpAddr, username: &str, now: Instant) -> Result<Attempt<'_>, Blocked> {
         let key = Self::key(ip, username);
         let mut entries = self.lock();
-        if let Some(entry) = entries.get(&key)
-            && now.saturating_duration_since(entry.last_failure) >= FORGET_AFTER
-        {
-            entries.remove(&key);
+        if let Some(entry) = entries.get(&key) {
+            if now.saturating_duration_since(entry.last_failure) >= FORGET_AFTER {
+                entries.remove(&key);
+            } else if let Some(until) = entry.blocked_until
+                && until > now
+            {
+                return Err(Blocked {
+                    retry_after: until - now,
+                });
+            }
         }
         if !entries.contains_key(&key) && entries.len() >= self.max_keys {
             let oldest = entries
@@ -106,7 +119,7 @@ impl LoginLimiter {
                 entries.remove(&oldest);
             }
         }
-        let entry = entries.entry(key).or_insert(Entry {
+        let entry = entries.entry(key.clone()).or_insert(Entry {
             failures: 0,
             last_failure: now,
             blocked_until: None,
@@ -118,10 +131,25 @@ impl LoginLimiter {
             let block = Duration::from_secs(1u64 << exponent).min(MAX_BLOCK);
             entry.blocked_until = Some(now + block);
         }
+        Ok(Attempt { limiter: self, key })
     }
 
-    pub fn record_success(&self, ip: IpAddr, username: &str) {
-        self.lock().remove(&Self::key(ip, username));
+    fn clear(&self, key: &Key) {
+        self.lock().remove(key);
+    }
+}
+
+/// One counted password attempt (see [`LoginLimiter::begin`]).
+#[must_use = "call success() when the password was right"]
+pub struct Attempt<'a> {
+    limiter: &'a LoginLimiter,
+    key: Key,
+}
+
+impl Attempt<'_> {
+    /// The password was right: forget the key.
+    pub fn success(self) {
+        self.limiter.clear(&self.key);
     }
 }
 
@@ -134,10 +162,15 @@ mod tests {
     const IP: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     const OTHER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
-    fn fail(limiter: &LoginLimiter, user: &str, times: u32, now: Instant) {
+    /// Fails `times` attempts, waiting out any block in between. Returns the time of the last.
+    fn fail(limiter: &LoginLimiter, user: &str, times: u32, mut now: Instant) -> Instant {
         for _ in 0..times {
-            limiter.record_failure(IP, user, now);
+            if let Err(blocked) = limiter.check(IP, user, now) {
+                now += blocked.retry_after;
+            }
+            drop(limiter.begin(IP, user, now).unwrap());
         }
+        now
     }
 
     fn secs(limiter: &LoginLimiter, user: &str, now: Instant) -> Option<u64> {
@@ -151,29 +184,35 @@ mod tests {
     fn five_failures_are_free() {
         let (limiter, now) = (LoginLimiter::new(), Instant::now());
         for _ in 0..4 {
-            limiter.record_failure(IP, "alice", now);
+            drop(limiter.begin(IP, "alice", now).unwrap());
             assert!(limiter.check(IP, "alice", now).is_ok());
         }
-        limiter.record_failure(IP, "alice", now);
+        // The 5th attempt still goes ahead, but the key is blocked from then on.
+        drop(limiter.begin(IP, "alice", now).unwrap());
         let blocked = limiter.check(IP, "alice", now).unwrap_err();
         assert_eq!(blocked.retry_after, Duration::from_secs(2));
         assert_eq!(blocked.retry_after_secs(), 2);
+        assert!(limiter.begin(IP, "alice", now).is_err(), "6th is refused");
     }
 
     #[test]
     fn backoff_doubles_and_caps() {
         let now = Instant::now();
-        for (failures, expected) in [(5, 2), (6, 4), (7, 8), (13, 512), (14, 900), (40, 900)] {
+        for (failures, expected) in [(5, 2), (6, 4), (7, 8), (13, 512), (14, 900)] {
             let limiter = LoginLimiter::new();
-            fail(&limiter, "alice", failures, now);
-            assert_eq!(secs(&limiter, "alice", now), Some(expected), "f={failures}");
+            let last = fail(&limiter, "alice", failures, now);
+            assert_eq!(
+                secs(&limiter, "alice", last),
+                Some(expected),
+                "f={failures}"
+            );
         }
     }
 
     #[test]
     fn block_expires() {
         let (limiter, now) = (LoginLimiter::new(), Instant::now());
-        fail(&limiter, "alice", 5, now);
+        let now = fail(&limiter, "alice", 5, now);
         let blocked = limiter.check(IP, "alice", now).unwrap_err();
         assert!(
             limiter
@@ -183,28 +222,28 @@ mod tests {
     }
 
     #[test]
-    fn blocked_check_does_not_extend() {
+    fn blocked_begin_does_not_extend_or_count() {
         let (limiter, now) = (LoginLimiter::new(), Instant::now());
-        fail(&limiter, "alice", 5, now);
+        let now = fail(&limiter, "alice", 5, now);
         for _ in 0..50 {
+            assert!(limiter.begin(IP, "alice", now).is_err());
             assert!(limiter.check(IP, "alice", now).is_err());
         }
         let later = now + Duration::from_millis(1500);
         let blocked = limiter.check(IP, "alice", later).unwrap_err();
         assert_eq!(blocked.retry_after, Duration::from_millis(500));
         assert_eq!(blocked.retry_after_secs(), 1);
-        assert!(
-            limiter
-                .check(IP, "alice", now + Duration::from_secs(2))
-                .is_ok()
-        );
+        // The next attempt is the 6th failure (4 s), so the 50 refused ones were not counted.
+        let after = now + Duration::from_secs(2);
+        drop(limiter.begin(IP, "alice", after).unwrap());
+        assert_eq!(secs(&limiter, "alice", after), Some(4));
     }
 
     #[test]
     fn success_clears() {
         let (limiter, now) = (LoginLimiter::new(), Instant::now());
-        fail(&limiter, "alice", 5, now);
-        limiter.record_success(IP, "alice");
+        fail(&limiter, "alice", 4, now);
+        limiter.begin(IP, "alice", now).unwrap().success();
         assert!(limiter.check(IP, "alice", now).is_ok());
         fail(&limiter, "alice", 4, now);
         assert!(limiter.check(IP, "alice", now).is_ok());
@@ -214,16 +253,16 @@ mod tests {
     fn other_ip_and_other_user_unaffected() {
         let (limiter, now) = (LoginLimiter::new(), Instant::now());
         fail(&limiter, "alice", 5, now);
-        assert!(limiter.check(OTHER_IP, "alice", now).is_ok());
-        assert!(limiter.check(IP, "bob", now).is_ok());
+        assert!(limiter.begin(OTHER_IP, "alice", now).is_ok());
+        assert!(limiter.begin(IP, "bob", now).is_ok());
     }
 
     #[test]
     fn username_is_case_insensitive() {
         let (limiter, now) = (LoginLimiter::new(), Instant::now());
         fail(&limiter, "Alice", 5, now);
-        assert!(limiter.check(IP, "alice", now).is_err());
-        assert!(limiter.check(IP, "ALICE", now).is_err());
+        assert!(limiter.begin(IP, "alice", now).is_err());
+        assert!(limiter.begin(IP, "ALICE", now).is_err());
     }
 
     #[test]
@@ -232,18 +271,19 @@ mod tests {
         fail(&limiter, "alice", 5, now);
         let later = now + Duration::from_secs(901);
         assert!(limiter.check(IP, "alice", later).is_ok());
-        limiter.record_failure(IP, "alice", later);
+        drop(limiter.begin(IP, "alice", later).unwrap());
         assert!(limiter.check(IP, "alice", later).is_ok(), "count restarted");
     }
 
     #[test]
     fn full_store_evicts_oldest_failure() {
         let (limiter, now) = (LoginLimiter::with_capacity(3), Instant::now());
-        fail(&limiter, "a", 7, now + Duration::from_secs(1));
-        fail(&limiter, "b", 7, now);
-        fail(&limiter, "c", 7, now + Duration::from_secs(2));
-        fail(&limiter, "d", 7, now + Duration::from_secs(3));
-        let at = now + Duration::from_secs(3);
+        let ms = Duration::from_millis;
+        fail(&limiter, "a", 5, now + ms(100));
+        fail(&limiter, "b", 5, now);
+        fail(&limiter, "c", 5, now + ms(200));
+        fail(&limiter, "d", 5, now + ms(300));
+        let at = now + ms(300);
         assert!(limiter.check(IP, "b", at).is_ok(), "oldest evicted");
         for kept in ["a", "c", "d"] {
             assert!(limiter.check(IP, kept, at).is_err(), "{kept} kept");

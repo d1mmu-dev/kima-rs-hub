@@ -122,9 +122,19 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         // The extractor also honours `MockConnectInfo`, which tests layer on.
-        let ip = ConnectInfo::<SocketAddr>::from_request_parts(parts, state)
-            .await
-            .map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |info| info.0.ip());
+        let ip = match ConnectInfo::<SocketAddr>::from_request_parts(parts, state).await {
+            Ok(info) => info.0.ip(),
+            Err(_) => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        "no connect info: every client shares one address; serve with \
+                         into_make_service_with_connect_info"
+                    );
+                });
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+            }
+        };
         Ok(Self(ip))
     }
 }

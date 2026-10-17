@@ -11,7 +11,8 @@ fn track(artist: &str, album: &str, year: Option<i32>, title: &str, path: &str) 
         track_artist: artist.to_string(),
         album: album.to_string(),
         album_key: album.to_lowercase(),
-        year,
+        album_year: year,
+        track_year: year,
         is_compilation: false,
         disc: 1,
         track_no: 1,
@@ -214,4 +215,83 @@ async fn search_vector_updates(pool: PgPool) {
         .unwrap();
     assert_eq!(hits(&pool, "glory").await, 0);
     assert_eq!(hits(&pool, "roads").await, 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn repoint_skips_when_path_taken(pool: PgPool) {
+    upsert(&pool, &track("A", "X", None, "T", "/m/old")).await;
+    let mut other = track("A", "X", None, "U", "/m/taken");
+    other.fingerprint = [9; 32];
+    upsert(&pool, &other).await;
+    library::mark_missing(&pool, &["/m/old".to_string()])
+        .await
+        .unwrap();
+    assert_eq!(
+        library::repoint_by_fingerprint(&pool, &[7; 32], "/m/taken")
+            .await
+            .unwrap(),
+        None
+    );
+    let row = library::find_by_path(&pool, "/m/old")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.missing_since.is_some());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn repoint_moves_one_of_several_same_fingerprint(pool: PgPool) {
+    let a = upsert(&pool, &track("A", "X", None, "T1", "/m/a")).await;
+    let b = upsert(&pool, &track("A", "X", None, "T2", "/m/b")).await;
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '2 days' WHERE id = $1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '1 day' WHERE id = $1")
+        .bind(b)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let fp = [7u8; 32];
+    // Oldest-missing first.
+    assert_eq!(
+        library::repoint_by_fingerprint(&pool, &fp, "/m/n1")
+            .await
+            .unwrap(),
+        Some(a)
+    );
+    assert_eq!(
+        library::repoint_by_fingerprint(&pool, &fp, "/m/n2")
+            .await
+            .unwrap(),
+        Some(b)
+    );
+    assert_eq!(
+        library::repoint_by_fingerprint(&pool, &fp, "/m/n3")
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn rename_refreshes_dependent_search_vectors(pool: PgPool) {
+    upsert(
+        &pool,
+        &track("Portishead", "Dummy", None, "Glory Box", "/m/1"),
+    )
+    .await;
+    sqlx::query("UPDATE artists SET name = 'Beth Gibbons'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(hits(&pool, "portishead").await, 1); // only the track, which keeps its own artist_name
+    assert_eq!(hits(&pool, "gibbons").await, 2); // artist + album (track carries its own artist_name)
+    sqlx::query("UPDATE albums SET title = 'Third'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(hits(&pool, "dummy").await, 0);
+    assert_eq!(hits(&pool, "third").await, 2); // album + track
 }

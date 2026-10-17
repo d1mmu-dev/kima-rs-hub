@@ -222,17 +222,25 @@ async fn listen_is_retried_after_failure(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn listen_is_retried_when_the_first_attempt_fails(pool: PgPool) {
-    // A pool whose connections are all taken makes the first LISTEN time out.
+    // A pool whose connections are all taken makes the first LISTEN time out. The pool is lazy
+    // and the two connections are taken with a retry: establishing a connection counts against
+    // the short acquire timeout, which a loaded machine can exceed.
     let small = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .acquire_timeout(Duration::from_millis(300))
-        .connect_with((*pool.connect_options()).clone())
-        .await
-        .unwrap();
-    let held = (
-        small.acquire().await.unwrap(),
-        small.acquire().await.unwrap(),
-    );
+        .connect_lazy_with((*pool.connect_options()).clone());
+    let mut taken = Vec::new();
+    for _ in 0..100 {
+        match small.acquire().await {
+            Ok(conn) => taken.push(conn),
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+        if taken.len() == 2 {
+            break;
+        }
+    }
+    assert_eq!(taken.len(), 2, "could not take both pool connections");
+    let held = taken;
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();

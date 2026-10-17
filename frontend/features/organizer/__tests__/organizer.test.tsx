@@ -12,7 +12,7 @@ import type { OrganizerRow } from "../types";
 
 function row(over: Partial<OrganizerRow>): OrganizerRow {
     return {
-        id: "r",
+        id: 1,
         trackId: "t",
         from: "/a/1.flac",
         to: "/b/1.flac",
@@ -29,24 +29,24 @@ function row(over: Partial<OrganizerRow>): OrganizerRow {
 
 describe("organizer table filters", () => {
     const rows = [
-        row({ id: "same", state: "unchanged", to: "/a/1.flac" }),
-        row({ id: "moved" }),
-        row({ id: "clash", collision: true }),
-        row({ id: "guess", guessed: ["missingYear"] }),
+        row({ id: 2, state: "unchanged", to: "/a/1.flac" }),
+        row({ id: 3 }),
+        row({ id: 4, collision: true }),
+        row({ id: 5, guessed: ["missingYear"] }),
     ];
     const ids = (f: Partial<typeof NO_FILTERS>) => filterRows(rows, { ...NO_FILTERS, ...f }).map((r) => r.id);
 
     it("shows everything with no filter", () => {
-        expect(ids({})).toEqual(["same", "moved", "clash", "guess"]);
+        expect(ids({})).toEqual([2, 3, 4, 5]);
     });
     it("only changes drops unchanged rows", () => {
-        expect(ids({ onlyChanges: true })).toEqual(["moved", "clash", "guess"]);
+        expect(ids({ onlyChanges: true })).toEqual([3, 4, 5]);
     });
     it("collisions keeps only collisions", () => {
-        expect(ids({ collisions: true })).toEqual(["clash"]);
+        expect(ids({ collisions: true })).toEqual([4]);
     });
     it("guessed keeps only rows with attention codes", () => {
-        expect(ids({ guessed: true })).toEqual(["guess"]);
+        expect(ids({ guessed: true })).toEqual([5]);
     });
     it("filters combine", () => {
         expect(ids({ collisions: true, guessed: true })).toEqual([]);

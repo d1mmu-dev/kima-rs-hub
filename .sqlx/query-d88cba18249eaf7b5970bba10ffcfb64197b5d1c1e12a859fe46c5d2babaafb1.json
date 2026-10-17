@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT path FROM tracks\n         WHERE album_id = $1 AND missing_since IS NULL\n         ORDER BY disc, track_no, path",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "path",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d88cba18249eaf7b5970bba10ffcfb64197b5d1c1e12a859fe46c5d2babaafb1"
+}

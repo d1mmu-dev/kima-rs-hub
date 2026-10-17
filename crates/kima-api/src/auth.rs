@@ -31,7 +31,11 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 /// The `?token=` value, only on media paths (`.../stream`, `/api/library/cover-art...`), where
 /// `<audio>`/`<img>` cannot send headers.
 fn query_token(parts: &Parts) -> Option<String> {
-    let path = parts.uri.path();
+    // Inside `nest("/api", ..)` the request URI has the prefix stripped; the original keeps it.
+    let path = parts
+        .extensions
+        .get::<axum::extract::OriginalUri>()
+        .map_or_else(|| parts.uri.path(), |original| original.0.path());
     if !(path.ends_with("/stream") || path.starts_with("/api/library/cover-art")) {
         return None;
     }

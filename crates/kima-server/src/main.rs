@@ -37,7 +37,9 @@ async fn main() -> anyhow::Result<()> {
         .context("running migrations")?;
 
     let shutdown = CancellationToken::new();
-    let state = AppState::with_shutdown(pool.clone(), &secrets.session_secret, shutdown.clone());
+    let state = AppState::with_shutdown(pool.clone(), &secrets.session_secret, shutdown.clone())
+        .with_data_dir(config.data_dir.clone())
+        .with_library_root(config.music_path.clone());
     // Task 8 registers the `library` handler; until then no workers run.
     let workers =
         kima_server::jobs::spawn_all(&pool, kima_server::jobs::Registry::new(), shutdown.clone());

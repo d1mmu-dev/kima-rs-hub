@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id, t.path, t.size, t.mtime,\n                  t.missing_since IS NOT NULL AS \"missing!\",\n                  t.year AS track_year, b.year AS album_year,\n                  b.title_key AS album_key, a.name_key AS artist_key,\n                  COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS \"year_conflict!\"\n           FROM tracks t\n           JOIN albums b ON b.id = t.album_id\n           JOIN artists a ON a.id = b.artist_id\n           WHERE $1::text IS NULL\n              OR (starts_with(t.path, $1) AND strpos(substr(t.path, length($1) + 1), '/') = 0)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "mtime",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "missing!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "track_year",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "album_year",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "album_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "artist_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "year_conflict!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "e11262442f09166a7bb2fd2f7f2f8dc8e619c6e0b6bd88f28c03e55941124fea"
+}

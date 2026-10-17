@@ -1090,12 +1090,21 @@ name = "kima-library"
 version = "0.1.0"
 dependencies = [
  "image",
+ "kima-core",
  "kima-db",
+ "kima-jobs",
  "lofty",
+ "serde",
+ "serde_json",
  "sha2 0.11.0",
+ "sqlx",
  "tempfile",
  "thiserror",
+ "time",
+ "tokio",
+ "tracing",
  "unicode-normalization",
+ "uuid",
  "walkdir",
 ]
 
@@ -1111,6 +1120,7 @@ dependencies = [
  "kima-core",
  "kima-db",
  "kima-jobs",
+ "kima-library",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -1120,6 +1130,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

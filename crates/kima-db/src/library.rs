@@ -232,3 +232,58 @@ pub async fn album_track_paths(pool: &PgPool, album_id: Uuid) -> sqlx::Result<Ve
     .fetch_all(pool)
     .await
 }
+
+/// What the scanner needs to know about a stored track to decide whether its file changed
+/// and which album group it belongs to.
+#[derive(Debug, Clone)]
+pub struct IndexedTrack {
+    pub id: Uuid,
+    pub path: String,
+    pub size: i64,
+    pub mtime: OffsetDateTime,
+    pub missing: bool,
+    /// The track's own year.
+    pub track_year: Option<i32>,
+    /// The year of the album the track is on.
+    pub album_year: Option<i32>,
+    pub album_key: String,
+    pub artist_key: String,
+    pub year_conflict: bool,
+}
+
+/// Every track (`dir_prefix = None`), or only the tracks directly inside one folder:
+/// `Some("Artist/Album/")`, or `Some("")` for files at the library root.
+pub async fn scan_index(
+    pool: &PgPool,
+    dir_prefix: Option<&str>,
+) -> sqlx::Result<Vec<IndexedTrack>> {
+    sqlx::query_as!(
+        IndexedTrack,
+        r#"SELECT t.id, t.path, t.size, t.mtime,
+                  t.missing_since IS NOT NULL AS "missing!",
+                  t.year AS track_year, b.year AS album_year,
+                  b.title_key AS album_key, a.name_key AS artist_key,
+                  COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS "year_conflict!"
+           FROM tracks t
+           JOIN albums b ON b.id = t.album_id
+           JOIN artists a ON a.id = b.artist_id
+           WHERE $1::text IS NULL
+              OR (starts_with(t.path, $1) AND strpos(substr(t.path, length($1) + 1), '/') = 0)"#,
+        dir_prefix
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// Clears the missing flag of tracks whose file is back at the same path, unchanged.
+/// Returns how many rows changed.
+pub async fn clear_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> {
+    let r = sqlx::query!(
+        "UPDATE tracks SET missing_since = NULL, updated_at = now()
+         WHERE path = ANY($1) AND missing_since IS NOT NULL",
+        paths
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}

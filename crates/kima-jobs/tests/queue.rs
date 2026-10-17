@@ -228,3 +228,38 @@ async fn stale_fail_is_ignored(pool: PgPool) {
     assert!(queue::fail(&pool, &fresh, "fresh boom").await.unwrap());
     assert_eq!(state_of(&pool, id).await.0, "queued");
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_unless_queued_skips_a_waiting_duplicate(pool: PgPool) {
+    let x = || json!({"kind": "x"});
+    let first = queue::enqueue_unless_queued(&pool, "q", x(), 3)
+        .await
+        .unwrap();
+    assert!(first.is_some());
+    let dup = queue::enqueue_unless_queued(&pool, "q", x(), 3)
+        .await
+        .unwrap();
+    assert_eq!(dup, None);
+    // A different payload or queue is not a duplicate.
+    let other = json!({"kind": "y"});
+    assert!(
+        queue::enqueue_unless_queued(&pool, "q", other, 3)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        queue::enqueue_unless_queued(&pool, "r", x(), 3)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Once the waiting one is claimed, a new one may be queued.
+    queue::claim(&pool, "q", 10, LEASE).await.unwrap();
+    assert!(
+        queue::enqueue_unless_queued(&pool, "q", x(), 3)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

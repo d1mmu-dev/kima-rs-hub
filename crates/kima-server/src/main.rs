@@ -36,13 +36,26 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("running migrations")?;
 
+    let library_root = kima_library::scan::effective_root(&pool, &config.music_path)
+        .await
+        .context("reading the library root from system settings")?;
+    info!(root = %library_root.display(), "library root");
     let shutdown = CancellationToken::new();
     let state = AppState::with_shutdown(pool.clone(), &secrets.session_secret, shutdown.clone())
         .with_data_dir(config.data_dir.clone())
-        .with_library_root(config.music_path.clone());
-    // Task 8 registers the `library` handler; until then no workers run.
-    let workers =
-        kima_server::jobs::spawn_all(&pool, kima_server::jobs::Registry::new(), shutdown.clone());
+        .with_library_root(library_root.clone());
+    let mut registry = kima_server::jobs::Registry::new();
+    registry.register_library(kima_library::scan::LibraryCtx {
+        pool: pool.clone(),
+        root: library_root,
+        events: state.events.clone(),
+        data_dir: config.data_dir.clone(),
+    });
+    let workers = kima_server::jobs::spawn_all(&pool, registry, shutdown.clone());
+    // Safety-net reconcile on every start (spec §4.4); skipped if one is already queued.
+    kima_library::jobs::enqueue_reconcile(&pool)
+        .await
+        .context("queueing the startup library reconcile")?;
     let app = kima_server::app(state, &config);
     let listener = TcpListener::bind(config.bind_addr)
         .await

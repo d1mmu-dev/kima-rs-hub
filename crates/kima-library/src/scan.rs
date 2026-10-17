@@ -1,0 +1,671 @@
+//! The scanner: a full incremental reconcile of the library root, and single-file updates.
+//!
+//! Both run on the `library` job queue (concurrency 1), so they never overlap with each other
+//! or with organizer runs. A file whose size and mtime match its row is never read. Changed
+//! files are grouped by folder so the album year (the mode of the tracks' own years within one
+//! folder, album artist and album title) is decided before anything is written. Every file is
+//! written in its own transaction.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+
+use kima_core::events::{Event, EventBus};
+use kima_db::PgPool;
+use kima_db::library::{self, IndexedTrack, ResolvedTrack};
+use time::OffsetDateTime;
+use tracing::warn;
+use uuid::Uuid;
+
+use crate::resolve::{Resolved, resolve};
+use crate::tags::{self, RawTags};
+use crate::{fingerprint, names};
+
+/// Tracks missing for longer than this are deleted (spec §4.3).
+pub const MISSING_GRACE: Duration = Duration::from_secs(7 * 24 * 3600);
+/// At most four progress events per second.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
+const MARK_CHUNK: usize = 1000;
+
+#[derive(Clone)]
+pub struct LibraryCtx {
+    pub pool: PgPool,
+    /// The library root that track paths are relative to (see [`effective_root`]).
+    pub root: PathBuf,
+    pub events: EventBus,
+    pub data_dir: PathBuf,
+}
+
+/// `system_settings.library_root` when set, else `MUSIC_PATH`.
+pub async fn effective_root(pool: &PgPool, music_path: &Path) -> sqlx::Result<PathBuf> {
+    let settings = kima_db::settings::get(pool).await?;
+    Ok(settings
+        .library_root
+        .filter(|r| !r.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| music_path.to_path_buf()))
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ScanReport {
+    pub added: usize,
+    /// Changed files re-read, plus unchanged files moved to a different album year.
+    pub updated: usize,
+    pub repointed: usize,
+    /// Tracks newly marked missing by this run (and not re-pointed in it).
+    pub missing: usize,
+    pub purged: usize,
+    /// Missing tracks whose file is back, unchanged, at the same path.
+    pub restored: usize,
+    /// Files skipped because size and mtime matched.
+    pub unchanged: usize,
+    /// How many files had their tags read.
+    pub tags_read: usize,
+    /// (relative path, reason) for files or folders that could not be read.
+    pub failed: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathOutcome {
+    Added,
+    Updated,
+    Unchanged,
+    Repointed,
+    MarkedMissing,
+    /// Not an audio file, not under the root, or a vanished path kima never knew.
+    Ignored,
+    Failed(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScanError {
+    #[error("library root {path} is not readable: {source}")]
+    Root {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("scan task failed: {0}")]
+    Task(#[from] tokio::task::JoinError),
+}
+
+/// A file found on disk.
+#[derive(Debug, Clone)]
+struct DiskFile {
+    rel: String,
+    size: i64,
+    mtime: OffsetDateTime,
+}
+
+/// A changed file, read and resolved, not yet stored.
+struct Prepared {
+    disk: DiskFile,
+    raw: RawTags,
+    resolved: Resolved,
+    fingerprint: [u8; 32],
+}
+
+type GroupKey = (String, String);
+
+/// The album year of a group: the most common of its tracks' years, ties to the earliest.
+fn mode_year(years: impl IntoIterator<Item = Option<i32>>) -> Option<i32> {
+    let mut counts: BTreeMap<i32, usize> = BTreeMap::new();
+    for y in years.into_iter().flatten() {
+        *counts.entry(y).or_default() += 1;
+    }
+    // BTreeMap iterates ascending; keep the first year that reaches the top count.
+    let mut best: Option<(i32, usize)> = None;
+    for (y, n) in counts {
+        if best.is_none_or(|(_, b)| n > b) {
+            best = Some((y, n));
+        }
+    }
+    best.map(|(y, _)| y)
+}
+
+fn conflicts(own: Option<i32>, album: Option<i32>) -> bool {
+    own.is_some() && own != album
+}
+
+fn folder_of(rel: &str) -> &str {
+    rel.rsplit_once('/').map_or("", |(d, _)| d)
+}
+
+fn dir_prefix(folder: &str) -> String {
+    if folder.is_empty() {
+        String::new()
+    } else {
+        format!("{folder}/")
+    }
+}
+
+/// Postgres keeps microseconds; compare at that precision.
+fn to_db_time(t: SystemTime) -> OffsetDateTime {
+    let t = OffsetDateTime::from(t);
+    t.replace_nanosecond(t.nanosecond() / 1000 * 1000)
+        .unwrap_or(t)
+}
+
+fn disk_file(rel: String, meta: &std::fs::Metadata) -> DiskFile {
+    DiskFile {
+        rel,
+        size: i64::try_from(meta.len()).unwrap_or(i64::MAX),
+        mtime: to_db_time(meta.modified().unwrap_or(SystemTime::UNIX_EPOCH)),
+    }
+}
+
+/// Only constraint and data errors are a problem with one file; anything else (connection,
+/// pool, protocol) means the database is unwell and the job should stop and retry.
+fn per_file_db_error(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(_))
+}
+
+struct Progress<'a> {
+    events: &'a EventBus,
+    total: usize,
+    done: usize,
+    last: Option<Instant>,
+}
+
+impl<'a> Progress<'a> {
+    fn new(events: &'a EventBus, total: usize) -> Self {
+        Self {
+            events,
+            total,
+            done: 0,
+            last: None,
+        }
+    }
+
+    fn send(&mut self) {
+        self.last = Some(Instant::now());
+        self.events.publish(Event {
+            user_id: None,
+            data: serde_json::json!({
+                "type": "library:progress",
+                "job": "scan",
+                "done": self.done,
+                "total": self.total,
+            }),
+        });
+    }
+
+    fn advance(&mut self, n: usize) {
+        self.done = (self.done + n).min(self.total);
+        if self.last.is_none_or(|t| t.elapsed() >= PROGRESS_INTERVAL) {
+            self.send();
+        }
+    }
+
+    fn finish(&mut self) {
+        self.done = self.total;
+        self.send();
+    }
+}
+
+struct Walk {
+    files: Vec<DiskFile>,
+    /// Folders that could not be read; tracks under them are not marked missing.
+    unreadable: Vec<String>,
+    failed: Vec<(String, String)>,
+}
+
+fn rel_of(root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let s = rel.to_str()?;
+    Some(s.replace('\\', "/"))
+}
+
+fn walk(root: &Path) -> Result<Walk, ScanError> {
+    std::fs::read_dir(root).map_err(|source| ScanError::Root {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let mut out = Walk {
+        files: Vec::new(),
+        unreadable: Vec::new(),
+        failed: Vec::new(),
+    };
+    for entry in walkdir::WalkDir::new(root).follow_links(true) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                let rel = e.path().and_then(|p| rel_of(root, p)).unwrap_or_default();
+                out.failed.push((rel.clone(), e.to_string()));
+                out.unreadable.push(rel);
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() || !tags::is_audio(entry.path()) {
+            continue;
+        }
+        let Some(rel) = rel_of(root, entry.path()) else {
+            out.failed.push((
+                entry.path().to_string_lossy().into_owned(),
+                "path is not valid UTF-8".to_string(),
+            ));
+            continue;
+        };
+        match entry.metadata() {
+            Ok(meta) => out.files.push(disk_file(rel, &meta)),
+            Err(e) => out.failed.push((rel, e.to_string())),
+        }
+    }
+    Ok(out)
+}
+
+fn under_any(rel: &str, prefixes: &[String]) -> bool {
+    prefixes.iter().any(|p| {
+        p.is_empty() || rel == p || (rel.starts_with(p.as_str()) && rel[p.len()..].starts_with('/'))
+    })
+}
+
+async fn prepare(root: &Path, disk: DiskFile) -> Result<Prepared, String> {
+    let full = root.join(&disk.rel);
+    let rel = disk.rel.clone();
+    let read = tokio::task::spawn_blocking(move || {
+        let raw = tags::read(&full).map_err(|e| e.to_string())?;
+        let fp = fingerprint::of(&full).map_err(|e| e.to_string())?;
+        Ok::<_, String>((raw, fp))
+    })
+    .await
+    .map_err(|e| format!("reading tags panicked: {e}"))?;
+    let (raw, fingerprint) = read?;
+    let resolved = resolve(&raw, Path::new(&rel));
+    Ok(Prepared {
+        disk,
+        raw,
+        resolved,
+        fingerprint,
+    })
+}
+
+fn group_key(r: &Resolved) -> GroupKey {
+    (names::key(&r.album_artist), names::key(&r.album))
+}
+
+fn to_track(p: &Prepared, album_year: Option<i32>) -> ResolvedTrack {
+    let r = &p.resolved;
+    let mut guessed = r.guessed.clone();
+    guessed.year_conflict = conflicts(r.year, album_year);
+    ResolvedTrack {
+        album_artist: r.album_artist.clone(),
+        album_artist_key: names::key(&r.album_artist),
+        track_artist: r.track_artist.clone(),
+        album: r.album.clone(),
+        album_key: names::key(&r.album),
+        album_year,
+        track_year: r.year,
+        is_compilation: r.is_compilation,
+        disc: i32::try_from(r.disc).unwrap_or(0),
+        track_no: i32::try_from(r.track).unwrap_or(0),
+        title: r.title.clone(),
+        duration_secs: p.raw.duration_secs.round() as i32,
+        codec: p.raw.codec.clone().unwrap_or_else(|| "unknown".to_string()),
+        bitrate: p.raw.bitrate.and_then(|b| i32::try_from(b).ok()),
+        path: p.disk.rel.clone(),
+        size: p.disk.size,
+        mtime: p.disk.mtime,
+        fingerprint: p.fingerprint,
+        guessed,
+    }
+}
+
+async fn store(pool: &PgPool, t: &ResolvedTrack) -> sqlx::Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    let id = library::upsert_track(&mut tx, t).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stored {
+    Added,
+    Updated,
+    /// Took over a missing track's row; carries that track's id.
+    Repointed(Uuid),
+}
+
+#[derive(Default)]
+struct FolderResult {
+    stored: Vec<(String, Stored)>,
+    failed: Vec<(String, String)>,
+    tags_read: usize,
+}
+
+/// Reads and stores the changed files of one folder. `siblings` are the folder's other
+/// present rows, unchanged on disk; they count towards the album year, and any whose album
+/// year or conflict flag changes is re-read and stored too. `known` holds every row at a path
+/// of `changed`.
+async fn process_folder(
+    ctx: &LibraryCtx,
+    changed: Vec<DiskFile>,
+    siblings: &[&IndexedTrack],
+    known: &HashMap<String, IndexedTrack>,
+) -> Result<FolderResult, ScanError> {
+    let mut out = FolderResult::default();
+    let mut prepared = Vec::with_capacity(changed.len());
+    for disk in changed {
+        out.tags_read += 1;
+        let rel = disk.rel.clone();
+        match prepare(&ctx.root, disk).await {
+            Ok(p) => prepared.push(p),
+            Err(e) => out.failed.push((rel, e)),
+        }
+    }
+
+    let mut groups: HashMap<GroupKey, Vec<Option<i32>>> = HashMap::new();
+    for p in &prepared {
+        groups
+            .entry(group_key(&p.resolved))
+            .or_default()
+            .push(p.resolved.year);
+    }
+    for s in siblings {
+        groups
+            .entry((s.artist_key.clone(), s.album_key.clone()))
+            .or_default()
+            .push(s.track_year);
+    }
+    let years: HashMap<GroupKey, Option<i32>> = groups
+        .into_iter()
+        .map(|(k, ys)| (k, mode_year(ys)))
+        .collect();
+
+    for p in &prepared {
+        let year = years.get(&group_key(&p.resolved)).copied().flatten();
+        let track = to_track(p, year);
+        let rel = p.disk.rel.clone();
+        let result = async {
+            if known.contains_key(&rel) {
+                store(&ctx.pool, &track).await?;
+                return Ok(Stored::Updated);
+            }
+            match library::repoint_by_fingerprint(&ctx.pool, &p.fingerprint, &rel).await? {
+                Some(id) => {
+                    // Refresh the re-pointed row's metadata in place (same id).
+                    store(&ctx.pool, &track).await?;
+                    Ok(Stored::Repointed(id))
+                }
+                None => {
+                    store(&ctx.pool, &track).await?;
+                    Ok(Stored::Added)
+                }
+            }
+        }
+        .await;
+        match result {
+            Ok(s) => out.stored.push((rel, s)),
+            Err(e) if per_file_db_error(&e) => out.failed.push((rel, e.to_string())),
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    // Unchanged siblings whose album year or conflict flag moved with the group.
+    for s in siblings {
+        let year = years
+            .get(&(s.artist_key.clone(), s.album_key.clone()))
+            .copied()
+            .flatten();
+        if s.album_year == year && s.year_conflict == conflicts(s.track_year, year) {
+            continue;
+        }
+        let full = ctx.root.join(&s.path);
+        let meta = match tokio::fs::metadata(&full).await {
+            Ok(m) => m,
+            Err(e) => {
+                out.failed.push((s.path.clone(), e.to_string()));
+                continue;
+            }
+        };
+        out.tags_read += 1;
+        let p = match prepare(&ctx.root, disk_file(s.path.clone(), &meta)).await {
+            Ok(p) => p,
+            Err(e) => {
+                out.failed.push((s.path.clone(), e));
+                continue;
+            }
+        };
+        // Re-read tags may have moved it to another group; use that group's year if known.
+        let year = years.get(&group_key(&p.resolved)).copied().unwrap_or(year);
+        match store(&ctx.pool, &to_track(&p, year)).await {
+            Ok(_) => out.stored.push((s.path.clone(), Stored::Updated)),
+            Err(e) if per_file_db_error(&e) => out.failed.push((s.path.clone(), e.to_string())),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(out)
+}
+
+/// Walks the whole library: indexes new and changed files, re-points moved ones, marks
+/// vanished ones missing, purges tracks missing past the grace period and prunes empty
+/// albums and artists. A missing or unreadable root is an error and changes nothing.
+pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
+    let root = ctx.root.clone();
+    let walked = tokio::task::spawn_blocking(move || walk(&root)).await??;
+    let mut report = ScanReport {
+        failed: walked.failed,
+        ..Default::default()
+    };
+    let mut progress = Progress::new(&ctx.events, walked.files.len());
+    progress.send();
+
+    let index: HashMap<String, IndexedTrack> = library::scan_index(&ctx.pool, None)
+        .await?
+        .into_iter()
+        .map(|t| (t.path.clone(), t))
+        .collect();
+
+    let on_disk: HashSet<&str> = walked.files.iter().map(|f| f.rel.as_str()).collect();
+    let mut restore = Vec::new();
+    let mut changed: BTreeMap<String, Vec<DiskFile>> = BTreeMap::new();
+    // Rows that are present, on disk and unchanged after this run, per folder.
+    let mut settled: HashMap<&str, Vec<&IndexedTrack>> = HashMap::new();
+    for f in &walked.files {
+        match index.get(&f.rel) {
+            Some(row) if row.size == f.size && row.mtime == f.mtime => {
+                if row.missing {
+                    restore.push(f.rel.clone());
+                } else {
+                    report.unchanged += 1;
+                }
+                settled.entry(folder_of(&row.path)).or_default().push(row);
+            }
+            _ => changed
+                .entry(folder_of(&f.rel).to_string())
+                .or_default()
+                .push(f.clone()),
+        }
+    }
+
+    // Mark vanished files missing first, so a moved file's old row can be re-pointed below.
+    let vanished: Vec<String> = index
+        .values()
+        .filter(|t| !t.missing && !on_disk.contains(t.path.as_str()))
+        .filter(|t| !under_any(&t.path, &walked.unreadable))
+        .map(|t| t.path.clone())
+        .collect();
+    for chunk in vanished.chunks(MARK_CHUNK) {
+        report.missing += library::mark_missing(&ctx.pool, chunk).await? as usize;
+    }
+    let vanished_ids: HashSet<Uuid> = vanished.iter().map(|p| index[p].id).collect();
+    for chunk in restore.chunks(MARK_CHUNK) {
+        report.restored += library::clear_missing(&ctx.pool, chunk).await? as usize;
+    }
+    progress.advance(report.unchanged + restore.len());
+
+    for (folder, files) in changed {
+        let n = files.len();
+        let siblings = settled.get(folder.as_str()).map_or(&[][..], Vec::as_slice);
+        let result = process_folder(ctx, files, siblings, &index).await?;
+        report.tags_read += result.tags_read;
+        report.failed.extend(result.failed);
+        for (_, stored) in result.stored {
+            match stored {
+                Stored::Added => report.added += 1,
+                Stored::Updated => report.updated += 1,
+                Stored::Repointed(id) => {
+                    report.repointed += 1;
+                    if vanished_ids.contains(&id) {
+                        report.missing = report.missing.saturating_sub(1);
+                    }
+                }
+            }
+        }
+        progress.advance(n);
+    }
+
+    report.purged = library::purge_missing(&ctx.pool, MISSING_GRACE).await? as usize;
+    library::prune_empty(&ctx.pool).await?;
+    progress.finish();
+    if !report.failed.is_empty() {
+        warn!(
+            failed = report.failed.len(),
+            "some library files could not be read"
+        );
+    }
+    Ok(report)
+}
+
+/// A relative path made only of normal components, or `None`.
+fn clean_rel(rel: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    for c in Path::new(rel).components() {
+        match c {
+            Component::Normal(s) => parts.push(s.to_str()?),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// Brings one file's row up to date: adds, re-reads, re-points or marks it missing. Used for
+/// watcher events. Directories are not expanded here.
+pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, ScanError> {
+    let Some(rel) = clean_rel(rel) else {
+        return Ok(PathOutcome::Ignored);
+    };
+    if !tags::is_audio(Path::new(&rel)) {
+        return Ok(PathOutcome::Ignored);
+    }
+    let meta = match tokio::fs::metadata(ctx.root.join(&rel)).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(match library::find_by_path(&ctx.pool, &rel).await? {
+                None => PathOutcome::Ignored,
+                Some(row) if row.missing_since.is_some() => PathOutcome::Unchanged,
+                Some(_) => {
+                    library::mark_missing(&ctx.pool, std::slice::from_ref(&rel)).await?;
+                    PathOutcome::MarkedMissing
+                }
+            });
+        }
+        Err(e) => return Ok(PathOutcome::Failed(e.to_string())),
+    };
+    if !meta.is_file() {
+        return Ok(PathOutcome::Ignored);
+    }
+    let disk = disk_file(rel.clone(), &meta);
+
+    let folder: HashMap<String, IndexedTrack> =
+        library::scan_index(&ctx.pool, Some(&dir_prefix(folder_of(&rel))))
+            .await?
+            .into_iter()
+            .map(|t| (t.path.clone(), t))
+            .collect();
+    let mut known = HashMap::new();
+    if let Some(row) = folder.get(&rel) {
+        if row.size == disk.size && row.mtime == disk.mtime {
+            if row.missing {
+                library::clear_missing(&ctx.pool, std::slice::from_ref(&rel)).await?;
+                return Ok(PathOutcome::Updated);
+            }
+            return Ok(PathOutcome::Unchanged);
+        }
+        known.insert(rel.clone(), row.clone());
+    }
+    let siblings: Vec<&IndexedTrack> = folder
+        .values()
+        .filter(|t| t.path != rel && !t.missing)
+        .collect();
+
+    let result = process_folder(ctx, vec![disk], &siblings, &known).await?;
+    let mine = result
+        .stored
+        .iter()
+        .find(|(p, _)| *p == rel)
+        .map(|(_, s)| *s);
+    let outcome = match mine {
+        Some(Stored::Added) => PathOutcome::Added,
+        Some(Stored::Updated) => PathOutcome::Updated,
+        Some(Stored::Repointed(_)) => PathOutcome::Repointed,
+        None => {
+            let reason = result
+                .failed
+                .iter()
+                .find(|(p, _)| *p == rel)
+                .map_or_else(|| "not stored".to_string(), |(_, e)| e.clone());
+            PathOutcome::Failed(reason)
+        }
+    };
+    if !result.stored.is_empty() {
+        // Album years may have moved, leaving an album empty.
+        library::prune_empty(&ctx.pool).await?;
+    }
+    Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_year_prefers_most_common_then_earliest() {
+        assert_eq!(mode_year([Some(1999), Some(1999), Some(2001)]), Some(1999));
+        assert_eq!(mode_year([Some(2005), Some(2003)]), Some(2003));
+        assert_eq!(mode_year([None, Some(2001), None]), Some(2001));
+        assert_eq!(mode_year([None, None]), None);
+        assert_eq!(mode_year([]), None);
+        assert_eq!(
+            mode_year([Some(2001), Some(1990), Some(2001), Some(1990)]),
+            Some(1990)
+        );
+    }
+
+    #[test]
+    fn conflict_needs_an_own_year() {
+        assert!(conflicts(Some(2001), Some(1999)));
+        assert!(conflicts(Some(2001), None));
+        assert!(!conflicts(None, Some(1999)));
+        assert!(!conflicts(Some(1999), Some(1999)));
+    }
+
+    #[test]
+    fn rel_paths_must_stay_under_root() {
+        assert_eq!(clean_rel("A/B/x.mp3").as_deref(), Some("A/B/x.mp3"));
+        assert_eq!(clean_rel("../x.mp3"), None);
+        assert_eq!(clean_rel("/etc/x.mp3"), None);
+        assert_eq!(clean_rel("A/./x.mp3").as_deref(), Some("A/x.mp3"));
+        assert_eq!(clean_rel("A//x.mp3/").as_deref(), Some("A/x.mp3"));
+        assert_eq!(clean_rel("A/../x.mp3"), None);
+        assert_eq!(clean_rel(""), None);
+    }
+
+    #[test]
+    fn prefixes_match_whole_components() {
+        let p = vec!["A/B".to_string()];
+        assert!(under_any("A/B/x.mp3", &p));
+        assert!(!under_any("A/BB/x.mp3", &p));
+        assert!(under_any("anything", &[String::new()]));
+    }
+
+    #[test]
+    fn folders() {
+        assert_eq!(folder_of("A/B/x.mp3"), "A/B");
+        assert_eq!(folder_of("x.mp3"), "");
+        assert_eq!(dir_prefix(""), "");
+        assert_eq!(dir_prefix("A/B"), "A/B/");
+    }
+}

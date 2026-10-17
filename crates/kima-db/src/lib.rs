@@ -7,6 +7,7 @@ pub use sqlx::PgPool;
 pub mod attention;
 pub mod browse;
 pub mod library;
+pub mod organizer;
 pub mod playback;
 pub mod playlists;
 pub mod plays;

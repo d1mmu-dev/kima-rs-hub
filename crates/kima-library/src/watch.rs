@@ -7,7 +7,6 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -79,17 +78,18 @@ fn set_status(status: &SharedStatus, f: impl FnOnce(&mut WatchStatus)) {
 /// Paths kima itself is changing (the organizer's moves). Events for them, or for anything
 /// below them, are dropped. Cheap to clone; all clones share one set.
 #[derive(Clone, Default)]
-pub struct IgnoreSet(Arc<Mutex<HashSet<PathBuf>>>);
+pub struct IgnoreSet(Arc<Mutex<HashMap<PathBuf, Option<Instant>>>>);
 
 impl IgnoreSet {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Absolute paths (under the library root), as the watcher sees them.
+    /// Absolute paths (under the library root), as the watcher sees them. Held until
+    /// [`remove`](Self::remove)d or [`release`](Self::release)d.
     pub fn add(&self, path: impl Into<PathBuf>) {
         if let Ok(mut set) = self.0.lock() {
-            set.insert(path.into());
+            set.insert(path.into(), None);
         }
     }
 
@@ -99,11 +99,26 @@ impl IgnoreSet {
         }
     }
 
+    /// Keeps ignoring `path` for `grace` more, then forgets it. File events reach the watcher
+    /// only after its debounce, so a path removed right after kima touched it would still
+    /// trigger an update.
+    pub fn release(&self, path: &Path, grace: Duration) {
+        if let Ok(mut set) = self.0.lock()
+            && let Some(until) = set.get_mut(path)
+        {
+            *until = Some(Instant::now() + grace);
+        }
+    }
+
     /// `path` is in the set, or below a folder that is.
     pub fn contains(&self, path: &Path) -> bool {
+        let now = Instant::now();
         self.0
             .lock()
-            .map(|set| set.iter().any(|p| path.starts_with(p)))
+            .map(|mut set| {
+                set.retain(|_, until| until.is_none_or(|t| t > now));
+                set.keys().any(|p| path.starts_with(p))
+            })
             .unwrap_or(false)
     }
 }
@@ -127,7 +142,7 @@ impl WatchHandle {
     }
 }
 
-/// Starts watching `ctx.root` per `mode`, with the production debounce. `status` is shared
+/// Starts watching `ctx.root` (and follows it when it is switched) per `mode`, with the production debounce. `status` is shared
 /// with whoever serves the watch-status endpoint.
 pub fn spawn(
     ctx: LibraryCtx,
@@ -176,7 +191,7 @@ pub fn spawn_with(
         retry,
         tx,
     };
-    let guard = watcher.try_start(&ctx.root, &status);
+    let guard = watcher.try_start(&ctx.root.get(), &status);
     let task = tokio::spawn(run(
         ctx,
         rx,
@@ -336,7 +351,10 @@ async fn run(
 ) {
     let debounce = watcher.debounce;
     let mut pending: HashMap<String, Pending> = HashMap::new();
-    let mut root_id = identity(&ctx.root);
+    // The root can be switched at runtime (to an organized copy); the watch follows it.
+    let mut root_rx = ctx.root.subscribe();
+    let mut root = root_rx.borrow_and_update().clone();
+    let mut root_id = identity(&root);
     let mut tick = tokio::time::interval((debounce / 4).max(Duration::from_millis(25)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let retry = watcher.retry.max(Duration::from_millis(10));
@@ -345,20 +363,32 @@ async fn run(
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
+            Ok(()) = root_rx.changed() => {
+                let new_root = root_rx.borrow_and_update().clone();
+                if new_root != root {
+                    info!(from = %root.display(), to = %new_root.display(), "library root switched; watching the new one");
+                    // Stop the old watch first; its queued events no longer map to the root.
+                    drop(guard.take());
+                    pending.clear();
+                    root = new_root;
+                    guard = watcher.try_start(&root, &status);
+                    root_id = identity(&root);
+                }
+            }
             _ = retry_tick.tick() => {
-                if guard.is_some() && identity(&ctx.root) != root_id {
+                if guard.is_some() && identity(&root) != root_id {
                     // Unmounted, or unmounted and mounted again: the watch is dead even
                     // though the watcher does not say so.
-                    warn!(root = %ctx.root.display(), "library folder became unavailable");
+                    warn!(root = %root.display(), "library folder became unavailable");
                     guard = None;
                     set_status(&status, |s| {
                         s.active = false;
                         s.last_error = Some("library folder became unavailable".to_string());
                     });
                 } else if guard.is_none() {
-                    guard = watcher.try_start(&ctx.root, &status);
+                    guard = watcher.try_start(&root, &status);
                     if guard.is_some() {
-                        root_id = identity(&ctx.root);
+                        root_id = identity(&root);
                         // Changes made while the folder was unavailable were not seen.
                         queue_reconcile(&ctx).await;
                     }
@@ -431,6 +461,7 @@ async fn collect(
     events: Vec<DebouncedEvent>,
     pending: &mut HashMap<String, Pending>,
 ) -> bool {
+    let root = ctx.root.get();
     let mut reconcile = false;
     let mut root_gone = false;
     // Path -> whether a folder at that path should be expanded to its files.
@@ -446,7 +477,7 @@ async fn collect(
         if matches!(
             event.kind,
             EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
-        ) && event.paths.contains(&ctx.root)
+        ) && event.paths.contains(&root)
         {
             root_gone = true;
         }
@@ -473,11 +504,15 @@ async fn collect(
         if ignore.contains(&path) {
             continue;
         }
-        let Some(rel) = rel_of(&ctx.root, &path) else {
+        let Some(rel) = rel_of(&root, &path) else {
             continue;
         };
         for rel in expand(ctx, &path, rel, expand_dirs).await {
-            let stat = stat(&ctx.root.join(&rel));
+            // A folder that appeared stands for its files; the organizer may be placing some.
+            if ignore.contains(&root.join(&rel)) {
+                continue;
+            }
+            let stat = stat(&root.join(&rel));
             pending.insert(
                 rel,
                 Pending {
@@ -510,7 +545,7 @@ async fn expand(ctx: &LibraryCtx, path: &Path, rel: String, expand_dirs: bool) -
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_dir() && !expand_dirs => Vec::new(),
         Ok(meta) if meta.is_dir() => {
-            let root = ctx.root.clone();
+            let root = ctx.root.get();
             let dir = path.to_path_buf();
             tokio::task::spawn_blocking(move || {
                 walkdir::WalkDir::new(&dir)
@@ -562,9 +597,9 @@ async fn flush(
         .collect();
     // Vanished paths go first. A moved file is re-pointed by its fingerprint only while its old
     // row is flagged missing, so the old place must be handled before the new one.
-    due.sort_by_key(|rel| (stat(&ctx.root.join(rel)).is_some(), rel.clone()));
+    due.sort_by_key(|rel| (stat(&ctx.root.get().join(rel)).is_some(), rel.clone()));
     for rel in due {
-        let current = stat(&ctx.root.join(&rel));
+        let current = stat(&ctx.root.get().join(&rel));
         let Some(p) = pending.get_mut(&rel) else {
             continue;
         };

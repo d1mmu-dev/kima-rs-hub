@@ -13,9 +13,10 @@ use uuid::Uuid;
 fn ctx(pool: &PgPool, root: &Path) -> LibraryCtx {
     LibraryCtx {
         pool: pool.clone(),
-        root: root.to_path_buf(),
+        root: root.to_path_buf().into(),
         events: EventBus::new(64),
         data_dir: root.join(".kima-data"),
+        ignore: Default::default(),
     }
 }
 

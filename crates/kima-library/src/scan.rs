@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use kima_core::events::{Event, EventBus};
@@ -27,13 +28,52 @@ pub const MISSING_GRACE: Duration = Duration::from_secs(7 * 24 * 3600);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 const MARK_CHUNK: usize = 1000;
 
+/// The library root that track paths are relative to. Shared by the HTTP side, the job
+/// worker and the watcher; switching the library to an organized copy changes it for all of
+/// them at once. Cheap to clone; all clones share one value.
+#[derive(Clone)]
+pub struct LibraryRoot(Arc<tokio::sync::watch::Sender<PathBuf>>);
+
+impl LibraryRoot {
+    pub fn new(root: PathBuf) -> Self {
+        Self(Arc::new(tokio::sync::watch::Sender::new(root)))
+    }
+
+    pub fn get(&self) -> PathBuf {
+        self.0.borrow().clone()
+    }
+
+    pub fn set(&self, root: PathBuf) {
+        self.0.send_replace(root);
+    }
+
+    /// Notified on every [`set`](Self::set).
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<PathBuf> {
+        self.0.subscribe()
+    }
+}
+
+impl From<PathBuf> for LibraryRoot {
+    fn from(root: PathBuf) -> Self {
+        Self::new(root)
+    }
+}
+
+impl std::fmt::Debug for LibraryRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("LibraryRoot").field(&self.get()).finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct LibraryCtx {
     pub pool: PgPool,
     /// The library root that track paths are relative to (see [`effective_root`]).
-    pub root: PathBuf,
+    pub root: LibraryRoot,
     pub events: EventBus,
     pub data_dir: PathBuf,
+    /// Paths the watcher must not react to; the organizer adds the files it moves.
+    pub ignore: crate::watch::IgnoreSet,
 }
 
 /// `system_settings.library_root` when set, else `MUSIC_PATH`.
@@ -419,7 +459,7 @@ async fn process_folder(
     for disk in changed {
         out.tags_read += 1;
         let rel = disk.rel.clone();
-        match prepare(&ctx.root, disk).await {
+        match prepare(&ctx.root.get(), disk).await {
             Ok(p) => prepared.push(p),
             Err(e) => out.failed.push((rel, e)),
         }
@@ -466,7 +506,7 @@ async fn process_folder(
         if s.album_year == year && s.year_conflict == conflicts(s.track_year, year) {
             continue;
         }
-        let full = ctx.root.join(&s.path);
+        let full = ctx.root.get().join(&s.path);
         let meta = match tokio::fs::metadata(&full).await {
             Ok(m) => m,
             Err(e) => {
@@ -475,7 +515,7 @@ async fn process_folder(
             }
         };
         out.tags_read += 1;
-        let p = match prepare(&ctx.root, disk_file(s.path.clone(), &meta)).await {
+        let p = match prepare(&ctx.root.get(), disk_file(s.path.clone(), &meta)).await {
             Ok(p) => p,
             Err(e) => {
                 out.failed.push((s.path.clone(), e));
@@ -500,7 +540,7 @@ async fn process_folder(
 /// vanished ones missing, purges tracks missing past the grace period and prunes empty
 /// albums and artists. A missing or unreadable root is an error and changes nothing.
 pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
-    let root = ctx.root.clone();
+    let root = ctx.root.get();
     let walked = tokio::task::spawn_blocking(move || walk(&root)).await??;
     let mut report = ScanReport {
         failed: walked.failed,
@@ -544,7 +584,7 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
     report.root_empty_guard = walked.files.is_empty() && !index.is_empty();
     if report.root_empty_guard {
         warn!(
-            root = %ctx.root.display(),
+            root = %ctx.root.get().display(),
             "library root has no audio files but the library has tracks; is the disk mounted? \
              Not marking anything missing"
         );
@@ -633,13 +673,13 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
     if !tags::is_audio(Path::new(&rel)) {
         return Ok(PathOutcome::Ignored);
     }
-    let meta = match tokio::fs::metadata(ctx.root.join(&rel)).await {
+    let meta = match tokio::fs::metadata(ctx.root.get().join(&rel)).await {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(match library::find_by_path(&ctx.pool, &rel).await? {
                 None => PathOutcome::Ignored,
                 Some(row) if row.missing_since.is_some() => PathOutcome::Unchanged,
-                Some(_) if !root_available(&ctx.root).await => PathOutcome::RootUnavailable,
+                Some(_) if !root_available(&ctx.root.get()).await => PathOutcome::RootUnavailable,
                 Some(_) => {
                     library::mark_missing(&ctx.pool, std::slice::from_ref(&rel)).await?;
                     PathOutcome::MarkedMissing

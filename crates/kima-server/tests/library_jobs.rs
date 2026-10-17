@@ -34,9 +34,10 @@ async fn library_queue_runs_reconcile_and_path_jobs(pool: PgPool) {
     let mut registry = Registry::new();
     registry.register_library(LibraryCtx {
         pool: pool.clone(),
-        root: root.path().to_path_buf(),
+        root: root.path().to_path_buf().into(),
         events,
         data_dir: root.path().join(".data"),
+        ignore: Default::default(),
     });
     let shutdown = CancellationToken::new();
     let workers = spawn_all(&pool, registry, shutdown.clone());
@@ -57,7 +58,8 @@ async fn library_queue_runs_reconcile_and_path_jobs(pool: PgPool) {
     assert_eq!(wait_for_state(&pool, path, "done").await.0, "done");
     let (state, error) = wait_for_state(&pool, organize, "failed").await;
     assert_eq!(state, "failed");
-    assert!(error.unwrap().contains("organize"));
+    // An organize payload without a run id is malformed.
+    assert!(error.unwrap().contains("invalid library job payload"));
 
     let ev = rx.recv().await.unwrap();
     assert_eq!(ev.data["type"], "library:progress");
@@ -153,12 +155,56 @@ async fn library_queue_is_serial_with_a_long_lease(pool: PgPool) {
     let mut registry = Registry::new();
     registry.register_library(LibraryCtx {
         pool: pool.clone(),
-        root: "/music".into(),
+        root: std::path::PathBuf::from("/music").into(),
         events: EventBus::new(4),
         data_dir: "/data".into(),
+        ignore: Default::default(),
     });
     let config = registry.config("library").unwrap();
     assert_eq!(config.concurrency, 1);
     assert_eq!(config.lease, kima_server::jobs::LIBRARY_LEASE);
     assert_eq!(config.lease, Duration::from_secs(6 * 3600));
+}
+
+/// Review Focus 4, at startup: a run left `applying` whose job is gone (it died on its final
+/// attempt) gets a new apply job; one whose job was merely requeued does not get a second.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn startup_resumes_interrupted_organizer_runs(pool: PgPool) {
+    use kima_db::organizer;
+    use kima_library::organize::apply::{self, Action};
+    let orphan = organizer::create_run(&pool, Uuid::now_v7(), "move", "/m", "/m", None)
+        .await
+        .unwrap();
+    let with_job = organizer::create_run(&pool, Uuid::now_v7(), "move", "/m", "/m", None)
+        .await
+        .unwrap();
+    for run in [orphan.id, with_job.id] {
+        assert!(
+            organizer::transition(&pool, run, &["planning"], "applying")
+                .await
+                .unwrap()
+        );
+    }
+    apply::enqueue(&pool, with_job.id, Action::Apply)
+        .await
+        .unwrap();
+    kima_server::jobs::prepare_library_queue(&pool)
+        .await
+        .unwrap();
+    kima_server::jobs::prepare_library_queue(&pool)
+        .await
+        .unwrap();
+    let jobs: Vec<(String, String)> = sqlx::query_as(
+        "SELECT payload ->> 'runId', payload ->> 'action' FROM jobs
+         WHERE payload ->> 'kind' = 'organize' ORDER BY payload ->> 'runId'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut want = vec![
+        (orphan.id.to_string(), "apply".to_string()),
+        (with_job.id.to_string(), "apply".to_string()),
+    ];
+    want.sort();
+    assert_eq!(jobs, want);
 }

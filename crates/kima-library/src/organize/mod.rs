@@ -1,3 +1,4 @@
-//! The organizer: pure path planning (this task); the journaled mover comes later.
+//! The organizer: pure path planning ([`paths`]) and the journaled mover ([`apply`]).
 
+pub mod apply;
 pub mod paths;

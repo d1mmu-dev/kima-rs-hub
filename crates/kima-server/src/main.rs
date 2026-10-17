@@ -41,9 +41,13 @@ async fn main() -> anyhow::Result<()> {
         .context("reading the library root from system settings")?;
     info!(root = %library_root.display(), "library root");
     let shutdown = CancellationToken::new();
+    // One handle for the HTTP side, the job worker and the watcher: switching the library to
+    // an organized copy changes it for all three.
+    let library_root = kima_library::scan::LibraryRoot::new(library_root);
     let state = AppState::with_shutdown(pool.clone(), &secrets.session_secret, shutdown.clone())
         .with_data_dir(config.data_dir.clone())
-        .with_library_root(library_root.clone())
+        .with_shared_library_root(library_root.clone())
+        .with_organize_target(config.organize_target.clone())
         .with_transcoder(kima_library::transcode::Transcoder::new(
             config.data_dir.join("transcode"),
             config.transcode_cache_mb * 1024 * 1024,
@@ -54,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
         root: library_root,
         events: state.events.clone(),
         data_dir: config.data_dir.clone(),
+        ignore: state.library.ignore.clone(),
     };
     let mut registry = kima_server::jobs::Registry::new();
     registry.register_library(library_ctx.clone());

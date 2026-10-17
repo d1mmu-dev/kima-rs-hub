@@ -77,6 +77,11 @@ pub async fn prepare_library_queue(pool: &PgPool) -> sqlx::Result<()> {
             "failed library jobs that were on their final attempt when the previous process died"
         );
     }
+    // Organizer runs whose job is gone (it died on its final attempt) resume from the journal.
+    let resumed = kima_library::organize::apply::resume_interrupted(pool).await?;
+    if resumed > 0 {
+        tracing::info!(resumed, "queued interrupted organizer runs");
+    }
     library_jobs::enqueue_reconcile(pool).await?;
     Ok(())
 }

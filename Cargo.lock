@@ -1065,6 +1065,7 @@ dependencies = [
  "image",
  "kima-core",
  "kima-db",
+ "kima-jobs",
  "kima-library",
  "serde",
  "serde_json",

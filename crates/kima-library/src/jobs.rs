@@ -1,6 +1,6 @@
-//! Jobs on the `library` queue (concurrency 1): reconciles, single-file updates and, from
-//! Task 17, organizer runs. Payloads are `{"kind":"reconcile"}`, `{"kind":"path","path":"<rel>"}`
-//! and `{"kind":"organize", ...}`.
+//! Jobs on the `library` queue (concurrency 1): reconciles, single-file updates and organizer
+//! runs. Payloads are `{"kind":"reconcile"}`, `{"kind":"path","path":"<rel>"}` and
+//! `{"kind":"organize","runId":"<uuid>","action":"preview"|"apply"|"undo"|"switch-root"}`.
 
 use std::sync::Arc;
 
@@ -11,6 +11,7 @@ use serde::Deserialize;
 use tracing::info;
 use uuid::Uuid;
 
+use crate::organize::apply::{self as organize, Action};
 use crate::scan::{self, LibraryCtx, PathOutcome};
 
 pub const QUEUE: &str = "library";
@@ -24,8 +25,11 @@ pub enum LibraryJob {
     Path {
         path: String,
     },
-    /// Task 17.
-    Organize {},
+    Organize {
+        #[serde(rename = "runId")]
+        run_id: Uuid,
+        action: Action,
+    },
 }
 
 /// Queues a reconcile unless one is already waiting.
@@ -101,7 +105,9 @@ pub async fn run(ctx: &LibraryCtx, payload: &serde_json::Value) -> Result<(), St
             }
             Ok(())
         }
-        LibraryJob::Organize {} => Err("organize jobs are not supported yet".to_string()),
+        LibraryJob::Organize { run_id, action } => organize::run_job(ctx, run_id, action)
+            .await
+            .map_err(|e| e.to_string()),
     }
 }
 
@@ -129,9 +135,17 @@ mod tests {
                 path: "A/b.mp3".into()
             }
         );
+        let run = Uuid::nil();
         assert_eq!(
-            parse(json!({"kind": "organize", "run": "x"})),
-            LibraryJob::Organize {}
+            parse(json!({"kind": "organize", "runId": run, "action": "switch-root"})),
+            LibraryJob::Organize {
+                run_id: run,
+                action: Action::SwitchRoot
+            }
+        );
+        assert!(
+            serde_json::from_value::<LibraryJob>(json!({"kind": "organize", "runId": run}))
+                .is_err()
         );
         assert!(serde_json::from_value::<LibraryJob>(json!({"kind": "nope"})).is_err());
         assert!(serde_json::from_value::<LibraryJob>(json!({"kind": "path"})).is_err());

@@ -4,6 +4,7 @@ pub mod artwork;
 pub mod fingerprint;
 pub mod jobs;
 pub mod names;
+pub mod organize;
 pub mod resolve;
 pub mod scan;
 pub mod tags;

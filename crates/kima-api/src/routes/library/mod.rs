@@ -13,6 +13,7 @@ use crate::state::AppState;
 
 mod albums;
 pub(super) mod artists;
+mod attention;
 mod scan;
 mod stream;
 mod tracks;
@@ -23,6 +24,7 @@ pub fn routes() -> Router<AppState> {
         .merge(albums::routes())
         .merge(tracks::routes())
         .merge(scan::routes())
+        .merge(attention::routes())
         .merge(stream::routes())
 }
 

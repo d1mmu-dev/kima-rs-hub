@@ -11,6 +11,8 @@ mod health;
 mod library;
 mod library_watch;
 mod onboarding;
+mod playback_state;
+mod plays;
 mod search;
 mod system;
 mod system_settings;
@@ -27,6 +29,8 @@ pub fn router(state: AppState) -> Router {
         .merge(library_watch::routes())
         .merge(library::routes())
         .merge(search::routes())
+        .merge(plays::routes())
+        .merge(playback_state::routes())
         .fallback(|| async { ApiError::NotFound("Not found") });
 
     Router::new()

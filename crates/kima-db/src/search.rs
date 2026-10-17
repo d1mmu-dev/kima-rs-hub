@@ -6,14 +6,19 @@ use sqlx::PgPool;
 use crate::browse::{ALBUM_SELECT, AlbumRow, ArtistRow, TRACK_SELECT, TrackRow};
 
 /// Turns user text into a prefix tsquery string: `websearch_to_tsquery('simple', unaccent(q))`
-/// with `:*` on the last term. `None` when the text has no searchable term.
+/// with `:*` on the last term when it is a plain lexeme. `None` when the text has no searchable term.
 pub async fn prefix_query(pool: &PgPool, q: &str) -> sqlx::Result<Option<String>> {
     let text: String =
         sqlx::query_scalar("SELECT websearch_to_tsquery('simple', unaccent($1))::text")
             .bind(q)
             .fetch_one(pool)
             .await?;
-    Ok((!text.is_empty()).then(|| format!("{text}:*")))
+    // `:*` is only valid right after a lexeme; a query ending in `)` is used as is.
+    Ok(match text {
+        t if t.is_empty() => None,
+        t if t.ends_with('\'') => Some(format!("{t}:*")),
+        t => Some(t),
+    })
 }
 
 pub async fn artists(pool: &PgPool, query: &str, limit: i64) -> sqlx::Result<Vec<ArtistRow>> {

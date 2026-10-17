@@ -1,7 +1,7 @@
 # M2: Subsonic — Design
 
 Date: 2026-10-17
-Status: Draft, pending owner approval
+Status: Draft, builder-checked (rulings R-A to R-E folded in), pending owner approval
 Parent spec: `docs/superpowers/specs/2026-10-16-kima-rust-design.md` (§2 `kima-subsonic`, §5 auth, §8 row M2,
 §10 error mapping, §11 snapshot tests)
 Roadmap: `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` (rows M1 and M2, "Notes carried forward")
@@ -58,8 +58,12 @@ Carried forward (roadmap M1 row, both must land in M2):
 - A periodic scheduler in `kima-jobs` that queues a safety-net library reconcile (§9.1).
 - An `AdminUser` extractor that replaces the seven copies of the admin check in `kima-api` (§9.2).
 
+Added by the builder-check rulings (`.superpowers/sdd/m2/builder-check.md`):
+- A failed-login limiter for `/rest` password auth and `/api/auth/login` (§5.7).
+- App tokens act only for their own user: Subsonic user-management writes refuse token auth (§5.3).
+- Changing or resetting a password revokes all of that user's app tokens (§5.1).
+
 Folded in from the M1 final review, because they touch what Subsonic serves (§9.3):
-- watcher and stream symlink handling made consistent with the reconcile;
 - a cover-art cache that notices changed art and has a size cap;
 - `ETag`/`Last-Modified`/conditional requests on streams;
 - ffmpeg-dependent tests that fail rather than pass silently when CI lacks ffmpeg.
@@ -71,8 +75,8 @@ Non-goals (M2):
   stubs (§4) until their milestones.
 - 2FA. kima-rs has no 2FA until M8. When it lands, the password path in §5.3 refuses 2FA accounts, as upstream
   does.
-- Rate limiting. Upstream limits `/rest` to 1500 requests a minute per IP. kima-rs has no rate limiter until M8
-  (D-089).
+- General request rate limiting. Upstream limits `/rest` to 1500 requests a minute per IP. kima-rs has no
+  request-rate limiter until M8 (D-089). M2 does add the failed-login limiter (§5.7), which is narrower.
 - `X-API-Key` auth on `/api` with the same tokens. That is M8 (roadmap note R4). In M2 an app token works only on
   `/rest` (§5.1).
 - Device linking (upstream `deviceLink.ts`). M8.
@@ -122,7 +126,7 @@ notes what kima-rs does where it differs from upstream. Each difference has a DI
 | # | Endpoint | Status | Upstream file | Answer / notes |
 |---|---|---|---|---|
 | 8 | `getArtists` | full | library.ts | `artists ignoredArticles="The A An Le La Les Los Las Die Der Das"`, `index name=X` buckets keyed on the first letter of `sort_name` (§7.4), A–Z, else `#`; only artists with present tracks; each `artist` has `id name albumCount coverArt="ar-<id>" starred? userRating?` |
-| 9 | `getIndexes` | full | library.ts | same data under `indexes`, plus `lastModified` (epoch ms of the newest track change). With `ifModifiedSince` ≥ `lastModified` it answers an empty `indexes` (DSub polls this way; upstream ignores the parameter) |
+| 9 | `getIndexes` | full | library.ts | same data under `indexes`, plus `lastModified` = the current time in epoch ms. `ifModifiedSince` is ignored, as upstream: the full index is always returned. No reliable "library changed" watermark exists (missing-marking, purges and renames do not bump `tracks.updated_at`), and a wrong watermark would leave DSub showing stale artists forever |
 | 10 | `getArtist` | full | library.ts | artist plus its `album` list (year newest first, then title); 70 "Artist not found" |
 | 11 | `getMusicDirectory` | full | library.ts | `id=1` lists artists as `child isDir=true`; an artist id (bare, `ar-`, `artist:`) lists its albums; an album id (bare, `al-`, `album:`) lists its songs; 70 "Directory not found" |
 | 12 | `getAlbum` | full | library.ts | album plus `song` list, ordered by disc, track number, title; 70 "Album not found" |
@@ -197,10 +201,10 @@ notes what kima-rs does where it differs from upstream. Each difference has a DI
 |---|---|---|---|---|
 | 52 | `getUser` | full | profile.ts | the caller; another `username` needs admin (50); roles as upstream `mapSubsonicUser` (`adminRole` from the role, `stream/download/playlist/settings` true, the rest false, `folder` 1) |
 | 53 | `getUsers` | full | userManagement.ts | admin only; ordered by username |
-| 54 | `createUser` | full | userManagement.ts | admin only; `username`, `password` (`enc:` hex allowed), `adminRole`; `email` and the other role flags are ignored; same validation as `POST /api/auth/users`; 0 "Username already exists" |
-| 55 | `updateUser` | full | userManagement.ts | admin only; `adminRole`, `password`; refuses removing your own admin role (50), and removing the last admin (50, D-037) |
-| 56 | `deleteUser` | full | userManagement.ts | admin only; not yourself (50), not the last admin (50) |
-| 57 | `changePassword` | full | userManagement.ts | yourself, or anyone as admin. A self-change made with an app token is refused (50 "Change your password on the web, not with an app key."), as upstream. Bumps `token_version` and calls `kima_api::revoke_sessions` |
+| 54 | `createUser` | full | userManagement.ts | admin with `p=` password auth only (an app token, even an admin's, gets 50; §5.3); `username`, `password` (`enc:` hex allowed), `adminRole`; `email` and the other role flags are ignored; same validation as `POST /api/auth/create-user`; 0 "Username already exists" |
+| 55 | `updateUser` | full | userManagement.ts | admin with `p=` password auth only (token auth gets 50); `adminRole`, `password` (a new password bumps `token_version`, calls `revoke_sessions` and revokes the target's app tokens, §5.1); refuses removing your own admin role (50), and removing the last admin (50, D-037) |
+| 56 | `deleteUser` | full | userManagement.ts | admin with `p=` password auth only (token auth gets 50); not yourself (50), not the last admin (50) |
+| 57 | `changePassword` | full | userManagement.ts | password auth (`p=`) only: yourself, or anyone as an admin. Any request authenticated by an app token (`apiKey`, `t`/`s`, or a token sent as `p=`) is refused with 50 "Change your password on the web, not with an app key.", for yourself and for others, even as an admin (upstream refuses only the self-change). Bumps `token_version`, calls `kima_api::revoke_sessions`, and revokes all of the target's app tokens (§5.1) |
 
 ### 4.9 Later-milestone stubs
 
@@ -255,8 +259,16 @@ token+salt auth, and it is what the settings page tells people to use.
   - A user can hold at most 50 tokens; the 51st is refused with 400 "Too many app tokens; revoke one first".
 - **Revocation:** deleting the row revokes the token. Nothing caches token validity, so the next request with it
   fails.
-- **Password changes:** a token survives the owner's password change, as upstream, because each token is revoked
-  on its own. Deleting the user deletes their tokens (cascade).
+- **Password changes revoke tokens:** every path that sets a user's password deletes all of that user's
+  `api_keys` rows in the same transaction as the password update. The paths are `POST /api/auth/change-password`,
+  Subsonic `changePassword`, and Subsonic `updateUser` with `password`. `/api` has no admin password reset today;
+  any that is added later must do the same, which is why the deletion lives in `kima_db` next to
+  `users::set_password` and not in a handler. Changing the password is the usual response to a compromise, and a token an intruder minted must
+  not outlive it. Upstream keeps the keys (D-097). The settings UI warns about this (§11). Deleting the user also
+  deletes their tokens (cascade).
+- **A token acts only for its own user:** it can read and write the user's own library state (playlists, queue,
+  stars, plays), and an admin's token can run `startScan`. It can never change anyone's password or create,
+  update or delete users, even when the owner is an admin (§5.3, D-098).
 - **Scope:** in M2 an app token authenticates `/rest` only. `kima-api` does not accept it. M8 decides whether
   `X-API-Key` on `/api` accepts the same tokens, as upstream does (D-073).
 
@@ -285,8 +297,14 @@ What this protects against:
 - **A leaked database dump or backup alone** reveals no token. `key_hash` cannot be reversed (256-bit random
   input), and `secret_enc` needs the key in `/data/secrets.json` or the environment.
 - **An attacker with both the database and the key** can recover the tokens, and so can call the Subsonic API
-  as those users until the tokens are revoked. That is the price of supporting token+salt, and it stays within
-  `/rest`, because tokens do not work on `/api` (§5.1).
+  as those users until the tokens are revoked. That is the price of supporting token+salt. Three rules keep the
+  damage within `/rest` and within each token's own user:
+  - Tokens do not work on `/api` (§5.1), and `/api/api-keys` itself needs a JWT session.
+  - A token cannot reach any Subsonic user-management write (`createUser`, `updateUser`, `deleteUser`,
+    `changePassword`), even an admin's (§5.3). So a recovered token cannot mint an admin, set a password, or turn
+    itself into a web login.
+  - The owner can end it all by changing the password, which revokes every token of that user (§5.1), as well as
+    by revoking tokens one at a time.
 - **A changed or lost `SETTINGS_ENCRYPTION_KEY`** makes `secret_enc` unreadable. Token+salt then fails with 40 for
   those tokens, while `apiKey=` and `p=` keep working through `key_hash`. The server logs one warning per token
   that fails to decrypt (at most once an hour per token), naming the token id and not its value.
@@ -317,13 +335,23 @@ reads the merged parameters (§4) and tries these, in order:
    - Decode `enc:` as upstream `decodeSubsonicPassword`.
    - First try it as an app token: `key_hash = sha256(value)` belonging to user `u`. A token that belongs to
      someone else falls through, as upstream.
+   - Before any password hashing, ask the failed-login limiter (§5.7) about (client IP, `u`). If that key is
+     blocked, answer 41 "Too many failed sign-in attempts. Try again in N seconds." at once: no argon2, and no
+     `password_work` permit.
    - Then try the account password: argon2id verify through `AppState::password_permit`, with
      `verify_dummy` for an unknown user, as `POST /api/auth/login` does.
-   - Failure: 40 "Wrong username or password".
+   - Failure: record it with the limiter and answer 40 "Wrong username or password". Success clears the key.
 5. **Nothing usable:** 10 "Required parameter is missing: p, t or apiKey".
 
-Result: `SubsonicUser { user: AuthUser, method: Password | AppToken(token_id) }`. `changePassword` reads `method`
-(§4.8), and `SubsonicUser::require_admin()` answers 50 "Admin privileges required".
+Result: `SubsonicUser { user: AuthUser, method: Password | AppToken(token_id) }`. Two guards read it:
+- `SubsonicUser::require_admin()` answers 50 "Admin privileges required" for a non-admin. It is used by
+  `startScan`, `getUsers` and `getUser` for another user.
+- `SubsonicUser::require_password_auth()` answers 50 "This needs your account password, not an app key." when
+  `method` is `AppToken`. It runs first in `createUser`, `updateUser`, `deleteUser` and `changePassword` (for
+  yourself and for others), before `require_admin`. A token sent through `p=` counts as `AppToken`.
+
+So user-management writes need an admin signed in with their password, and a self password change needs your own
+password. A token, however it is presented, acts only for its own user (§5.1).
 
 A token match records `last_used_at = now()`, at most once a minute per token (an in-memory map of token id →
 last write), as upstream `touchApiKey`.
@@ -351,11 +379,11 @@ From the parent spec §10 and the OpenSubsonic error list; `kima-subsonic` maps 
 | 10 | Required parameter missing | missing or unparsable required parameter (upstream also uses 10 for invalid values such as `position`) |
 | 20 / 30 | Client / server too old | never (the `v` parameter is not enforced, as upstream) |
 | 40 | Wrong username or password | every failed `u`+`p`/`t` check, token+salt with no matching token, `apiKey` with a mismatched `u` |
-| 41 | Token auth not supported | never: kima-rs supports token+salt (upstream always answers 41) |
+| 41 | Token auth not supported | never for its listed meaning: kima-rs supports token+salt (upstream always answers 41). Reused, by the owner's ruling, for a password attempt blocked by the failed-login limiter (§5.7), with the message "Too many failed sign-in attempts. Try again in N seconds." Subsonic has no "slow down" code, and clients show the message |
 | 42 | Auth mechanism not supported | never |
 | 43 | Conflicting auth mechanisms | `apiKey` together with `p`, `t` or `s` |
 | 44 | Invalid API key | `apiKey` not found (also `tokenInfo`) |
-| 50 | Not authorized | admin-only endpoints, others' playlists for writes, self-change of password with a token, last-admin and self-demotion rules |
+| 50 | Not authorized | admin-only endpoints, others' playlists for writes, any user-management write or password change made with an app token, last-admin and self-demotion rules |
 | 70 | Not found | unknown or non-UUID id, missing track, no cover art, another user's private playlist |
 
 Domain errors are mapped in one place (`kima_subsonic::error::SubsonicError`, with `From<sqlx::Error>` and
@@ -381,6 +409,48 @@ Every Subsonic credential travels in the query string. `kima-server`'s `TraceLay
 records `method` and `path` only for requests under `/rest`, never the query string. The same applies to any
 `tracing` field `kima-subsonic` writes. A unit test checks that a request with `p=`, `t=`, `s=` and `apiKey=`
 produces no log line containing those values.
+
+### 5.7 Failed-login limiter
+
+Without a limiter, anyone can guess account passwords through `/rest` without limit. Every wrong guess misses the
+password cache and holds a `password_work` permit, so unauthenticated traffic could also starve web logins. M2
+therefore adds one limiter, shared by Subsonic password auth (§5.3 step 4) and `POST /api/auth/login`.
+
+- **Where:** `kima_api::login_limit::LoginLimiter`, an in-memory store held in `AppState` and used by both
+  crates.
+- **Key:** (client IP, lower-cased username as sent). The username need not exist, and unknown names are limited
+  the same way, so the limiter reveals nothing.
+- **Client IP:** the TCP peer address (`ConnectInfo<SocketAddr>`, which `kima-server` enables). `X-Forwarded-For`
+  is not trusted in M2.
+- **Rule:**
+  - Count consecutive failures per key.
+  - The first 5 are free.
+  - From the 6th, the key is blocked for `2^(failures − 5)` seconds after each failure (2 s, 4 s, 8 s, …), capped
+    at 15 minutes.
+  - A success clears the key. A key with no failure for 15 minutes is forgotten.
+- **Blocked request:** the check runs before any user lookup or password hashing. A blocked request answers at
+  once: Subsonic error 41 (§5.4), and on `/api/auth/login` HTTP 429
+  `{"error":"Too many failed login attempts. Try again in N seconds."}` with a `Retry-After` header. A blocked
+  attempt does not count as a new failure, so it does not extend the block.
+- **Memory bound:** at most 100 000 keys. When full, the entry with the oldest last failure is evicted first. A
+  restart clears the store, which is accepted: the cap and the backoff still bound the guessing rate.
+- **What it does not cover:**
+  - App-token checks (`apiKey`, `t`/`s`, and the token lookup in `p=`) are not limited. A token is 256 random
+    bits, and a token check does no expensive hashing.
+  - `/api/onboarding/register` and `/api/auth/refresh` are not covered either. They do no password guessing
+    against an existing account.
+- **Upstream:**
+  - `/api/auth/login` (and refresh and register) allows 20 failed attempts per IP per 15 minutes (`authLimiter`).
+  - `/rest` has only the general 1500 requests a minute per IP, with no failed-auth limit (D-089).
+  - kima-rs differs in both places (D-093).
+
+Tests:
+- 5 failures pass; the 6th attempt within the backoff is refused, and no argon2 runs (asserted through a counter
+  on the verify path).
+- The backoff doubles and stops at 15 minutes; a success resets it.
+- Another IP, or another username, is not affected.
+- `/api/auth/login` answers 429 with `Retry-After`; Subsonic answers 41.
+- App-token auth works while that user's password key is blocked.
 
 ## 6. Behaviour details
 
@@ -575,8 +645,9 @@ one-line change per query, left for when the frontend wants it.
 - `subsonic` (read models for Subsonic), all user-aware for `starred`/`userRating`:
   - `artists_sorted`, `artist_with_albums`, `album_with_tracks`, `track`;
   - `album_list(kind, size, offset)`, `random_tracks(size, years)`, `top_tracks(artist, count)`;
-  - `tracks_by_ids(ids)` (keeps the input order), `search_all(page)` (the empty query);
-  - `index_last_modified`.
+  - `tracks_by_ids(ids)` (keeps the input order), `search_all(page)` (the empty query).
+- `api_keys::delete_all_for_user(tx, user)`: called inside every password-setting transaction (§5.1).
+  `users::set_password` takes the transaction, so the password and the token deletion commit together.
 - `search::{artists, albums, tracks}` gain an `offset`.
 - `playlists::replace_items` (for `createPlaylist` with `playlistId`), and `playlists::remove_at_indexes`, which
   works under the playlist row lock, over present items in order.
@@ -621,7 +692,8 @@ The M1 stream handler (`routes/library/stream.rs`) and cover handler (`routes/co
 serving core becomes a public module that both APIs call:
 
 - `media::resolve_track(state, id) -> Result<ResolvedTrack, MediaError>`: looks up the path, refuses missing
-  tracks, and applies the path rules (§9.3).
+  tracks, and applies the M1 path rule (only `Component::Normal` parts, joined to the library root). The symlink
+  handling stays as in M1 (§9.3).
 - `media::serve_track(state, &ResolvedTrack, quality, &HeaderMap) -> Result<Response, MediaError>`: picks the
   transcoder, serves the file or a growing transcode, and handles ranges and conditional headers (§9.3). The
   retry loop moves here unchanged.
@@ -717,17 +789,10 @@ events never arrive, or edits made while kima was stopped and then left for week
 
 ### 9.3 M1 review minors
 
-The M1 final review left minors open. M2 takes the ones Subsonic would otherwise inherit, and parks the rest.
+The M1 final review left minors open. M2 takes the ones Subsonic would otherwise inherit and that are safe to
+change, and parks the rest.
 
 Folded into M2:
-- **Minor 2, symlinks.**
-  - `scan::update_path` uses `symlink_metadata` and treats a symlink like a non-audio file: it is never indexed,
-    and an existing track at that path is marked missing.
-  - `watch::expand` does not descend into a symlinked folder.
-  - `media::resolve_track` refuses a path whose final component is a symlink: it opens with `O_NOFOLLOW` and
-    answers 70 / 404.
-  - It also refuses a source whose canonical path is not under the canonical library root.
-  - The watcher, the reconcile and both stream APIs then agree that symlinks are not part of the library (D-093).
 - **Minor 10, cover-art cache.**
   - Each `<data>/artwork/<album>/` entry gets a `source.json`: the chosen source's path relative to the library
     root, its size and mtime (ns), and the mtime of the album's folder when the entry was made.
@@ -750,6 +815,19 @@ Folded into M2:
   failures.
 
 Parked, with where they go:
+- **Minor 2, symlinks (removed from M2 by the builder-check ruling).** M1's mixed behaviour stays in M2:
+  - the watcher and single-file updates follow symlinks (`fs::metadata`);
+  - the reconcile walk does not (`follow_links(false)`);
+  - the stream and cover endpoints serve the link target.
+
+  M2 changes no code path that could mark an already-indexed track missing.
+
+  The reason it is parked: M1's watcher may already have indexed symlinked tracks. Refusing symlinks would mark
+  them missing, and after the 7-day grace period the purge would cascade and delete their plays, playlist entries,
+  stars, ratings and bookmarks without warning.
+
+  The later fix (not before M3) must come with an upgrade path: list affected tracks in the needs-attention report
+  (D-068), and never purge a track whose only fault is being a symlink.
 - Minor 3 (`listen_is_retried_after_failure` passes for the wrong reason, and claiming after a reconnect) and
   Minor 4 (the watcher test timing ratio): job and watcher test hygiene, unrelated to Subsonic. They go to M3,
   which adds job lease renewal.
@@ -803,7 +881,9 @@ setting (D-096).
 | `noDuplicateRoutes.test.ts` | the count test above |
 | `scrobble.route.test.ts` | `submission=true&time=1700000000000` writes one `SUBSONIC` play at that time; `submission=false` writes none and shows in `getNowPlaying`; a repeat inside the window writes nothing. Plus: two `id`/`time` pairs in one call write two plays. The public live-trip cases are dropped (D-062) |
 | `library.sort.route.test.ts` | "The Beatles" is under `<index name="B">` and "La Roux" under `R`, never T or L; `ignoredArticles` contains every article in §7.4; `getMusicDirectory id=1`, `alphabeticalByArtist`, `alphabeticalByName` and `starred` order by `sort_name` (asserted on the output order, not on the query). The `displayName` case is dropped (kima-rs has no display-name override). `byGenre` answers an empty list |
-| `subsonicAuth2fa.test.ts` | An app token as `p=` is accepted; another user's token as `p=` is refused (40); a `p=` that is neither token nor password is refused (40). `startScan` as a non-admin gives 50, as admin it does not. A self `changePassword` with an app token via `apiKey`, via `p=` and via `t`/`s` gives 50, and the password is unchanged; a self change with the password works; an admin with a token changes another user's password. The 2FA cases are noted for M8 |
+| `subsonicAuth2fa.test.ts` | An app token as `p=` is accepted; another user's token as `p=` is refused (40); a `p=` that is neither token nor password is refused (40). `startScan` as a non-admin gives 50, as admin it does not. A self `changePassword` with an app token via `apiKey`, via `p=` and via `t`/`s` gives 50, and the password is unchanged; a self change with the password works. Reversed from upstream by ruling R-A: an admin with a token changing another user's password gets 50, and the target's password is unchanged. The 2FA cases are noted for M8 |
+| (new, ruling R-A) | For each of `createUser`, `updateUser` (role and password), `deleteUser`, and `changePassword` for another user: an admin authenticated by `apiKey`, by `t`/`s`, and by a token sent as `p=` gets 50, and nothing changes in the database (no new user, same role, same password hash, user still present). The same admin with `p=<password>` succeeds. `createUser adminRole=true` with an admin's token creates no user, and a following `/api/auth/login` with the intended credentials fails |
+| (new, ruling R-C) | After `POST /api/auth/change-password`, after Subsonic `changePassword`, and after `updateUser password=…`, the user's `api_keys` rows are gone, and a `ping` with each old token (`apiKey`, `t`/`s`, `p=`) gives 40 (44 for `apiKey`). Another user's tokens are untouched. A forced failure after the password update rolls back both the password and the token deletion |
 | `updatePlaylist.route.test.ts` | Removing index 1 of [a,b,c] and adding [d,e] gives [a,c,d,e] with dense, unique `sort`; four concurrent `updatePlaylist` adds of three songs each keep all 13 songs with unique order. Plus: indexes skip a missing track |
 | `artistInfo.route.test.ts` | dropped until M3 (similar artists); the stub is snapshotted instead |
 
@@ -833,6 +913,9 @@ library is a fixture library of ffmpeg-generated tones that the real scanner has
 7. `savePlayQueue` with 3 ids, then `getPlayQueue`, then `GET /api/playback-state`, which shows the same queue.
 8. `star albumId=…`, then `getStarred2` lists it; `setRating`, then `userRating` appears on `getAlbum`.
 9. `DELETE /api/api-keys/:id`, then `ping` with the same `t`/`s` gives 40.
+10. Create a second token, and change the password through `/api/auth/change-password`. A `ping` with the second
+    token gives 40, and `GET /api/api-keys` is empty.
+11. Six wrong `p=` passwords: the sixth answers 41 at once. A `ping` with a fresh token still works.
 
 A third-party client library was considered. The Rust ones (`sunk`, `submarine`) are unmaintained or incomplete,
 and a Python one would add a runtime to CI for one test.
@@ -863,6 +946,9 @@ Page changes (`frontend/features/settings/components/sections/SubsonicSection.ts
   hashed passwords (token and salt) and with apps that have an API key field."
 - The guide, the token box and the token list are shown always, not only after generating.
 - A token's row shows "Never used" when `lastUsed` is null.
+- A warning under the token list: "Changing your password signs out every app that uses these tokens. You will
+  need to create new ones." The same sentence goes under the change-password form in `AccountSection.tsx`.
+- After a password change succeeds, the page refetches `/api/api-keys`, so the list shows empty.
 - No other layout change. The page stays a mirror of upstream's.
 
 Docs: `docs/subsonic.md` is ported from upstream and edited for kima-rs. It covers token+salt support, the
@@ -876,7 +962,7 @@ Each row goes into `docs/DIVERGENCES.md` in the commit that introduces it. Statu
 | ID | Area | Upstream | kima-rs |
 |---|---|---|---|
 | D-072 | Subsonic auth | `t`/`s` always refused with 41; tokens stored as SHA-256 only | `t`/`s` accepted for app tokens (§5.3); each token stored as SHA-256 plus an XChaCha20-Poly1305 ciphertext under a key derived from `SETTINGS_ENCRYPTION_KEY`; the account password still cannot be used with `t`/`s`; the settings cipher arrives in M2 instead of M3 |
-| D-073 | Subsonic auth | API keys also work as `X-API-Key` on the REST API; no per-user cap; `lastUsed` defaults to creation time | App tokens work on `/rest` only until M8 decides; 50 per user; names 1–100 characters; `lastUsed` null until first use |
+| D-073 | Subsonic auth | API keys also work as `X-API-Key` on the REST API; no per-user cap; `lastUsed` defaults to creation time | App tokens work on `/rest` only until M8 decides; 50 per user; names 1–100 characters; `lastUsed` null until first use; revoked by a password change (D-097) |
 | D-074 | Subsonic auth | `apiKey` requires `u`; `apiKey` with `p` is not checked | `apiKey` alone is accepted; with `u` it must match the owner; with `p`/`t`/`s` it is 43 |
 | D-075 | Subsonic API | `getOpenSubsonicExtensions` needs auth; advertises `apiKeyAuthentication`, `songLyrics`, `indexBasedQueue`, `getPodcastEpisode`; parameters only in the query string | No auth; advertises `apiKeyAuthentication`, `formPost`, `indexBasedQueue`; POST form bodies accepted |
 | D-076 | Subsonic API | `star` stores songs in `LikedTrack`, ignores album and artist ids; `starred` appears only in `getStarred*`; `getAlbumList type=starred` lists albums containing a liked song | `stars` table for songs, albums and artists; `starred` on every item for the caller; `type=starred` lists starred albums. The web app still has no likes (D-071, text amended: upstream's `LikedTrack` exists but only Subsonic writes it) |
@@ -891,15 +977,17 @@ Each row goes into `docs/DIVERGENCES.md` in the commit that introduces it. Statu
 | D-085 | Subsonic API | `maxBitRate` ≥ 320 or 0 is original, ≥ 192 is the 320 kbps transcode, ≥ 128 is 192 kbps | The highest of 320/192/128 not above `maxBitRate`; original when `maxBitRate` is at least the source bitrate |
 | D-086 | Subsonic API | Genres, lyrics, artist info, similar songs, podcasts and shares backed by real data | Stubs until M3 (genres, lyrics, artist info), M5 (similar songs), M6 (podcasts), M8 (shares), as listed in §4; artist cover art answers 70 until M3 |
 | D-087 | Subsonic API | `getScanStatus count` = queued scan jobs | `count` = present tracks; `scanning` from the reconcile job state |
-| D-088 | Subsonic API | Play queue entries echo the stored JSON; playlists: another user's private one is 50; `songIndexToRemove` counts all items; `createBookmark` on an unknown track fails generically | Queue entries rebuilt from current rows; another user's private playlist is 70 (as D-063); indexes count visible items (D-065); unknown bookmark track is 70; `getIndexes` honours `ifModifiedSince` |
-| D-089 | Subsonic API | `/rest` rate-limited to 1500 requests a minute per IP | No rate limit until M8 (`to-fix`) |
+| D-088 | Subsonic API | Play queue entries echo the stored JSON; playlists: another user's private one is 50; `songIndexToRemove` counts all items; `createBookmark` on an unknown track fails generically | Queue entries rebuilt from current rows; another user's private playlist is 70 (as D-063); indexes count visible items (D-065); unknown bookmark track is 70; `getIndexes` sends `lastModified` = now (upstream sends none); `ifModifiedSince` is ignored, as upstream |
+| D-089 | Subsonic API | `/rest` rate-limited to 1500 requests a minute per IP | No general request-rate limit until M8 (`to-fix`); failed password logins are limited (D-093) |
 | D-090 | Subsonic API | CORS as for the whole app | `/rest` always sends `Access-Control-Allow-Origin: *` (credentials ride in the URL, never cookies) |
 | D-091 | Library | Scheduled rescans | Watcher primary; plus a daily incremental reconcile, `KIMA_LIBRARY_SYNC_CRON` (default `0 4 * * *` UTC, `off` disables); `watch-status` reports `nextSyncAt`. Amends D-044 and D-047 ("never on a schedule") |
 | D-092 | Streaming | No `ETag`; ranges always honoured | `ETag`/`Last-Modified` on originals and finished transcodes, `If-None-Match` → 304, `If-Range` honoured; on `/api` and `/rest` |
-| D-093 | Library | Follows symlinks when scanning | Symlinked files and folders are never indexed (watcher and reconcile agree); streams refuse a symlinked file or a source outside the canonical root |
+| D-093 | Auth | `/api/auth/login` (and refresh, register): 20 failed attempts per IP per 15 min (`authLimiter`); `/rest` has no failed-auth limit | One in-memory failed-login limiter for `/api/auth/login` and `/rest` password auth, keyed by (client IP, username): 5 free failures, then a block of 2, 4, 8 s … up to 15 min, cleared by a success; checked before any hashing; blocked answers are HTTP 429 with `Retry-After` on `/api` and Subsonic error 41 on `/rest`; refresh, register and app-token checks are not limited |
 | D-094 | Library | Covers are stored under a content-derived name (`coverUrl`), so new art gets a new cache key; M1 cached by album id and never invalidated | Cache entries checked against their source and the album folder, rebuilt when either changes, capped by `KIMA_ARTWORK_CACHE_MB` (default 512), deleted with the album. Amends D-043 |
 | D-095 | Playback | Plays have a `ListenSource` with four values | `plays.source` is `LIBRARY` or `SUBSONIC`; `GET /api/plays` returns it (resolves the `source` half of D-057) |
 | D-096 | Settings | `publicUrl` is an admin system setting, read by `/system-settings/public-config` | Read from env `KIMA_PUBLIC_URL` (the name M11 uses); no setting |
+| D-097 | Auth | API keys survive a password change | Every password change (web, Subsonic `changePassword`, Subsonic `updateUser password`) deletes all of that user's app tokens in the same transaction; the settings page warns about it |
+| D-098 | Subsonic auth | An API key can do whatever its owner can, except a self `changePassword`; an admin's key can create, update and delete users and change other users' passwords | An app token acts only for its own user: `createUser`, `updateUser`, `deleteUser` and `changePassword` (self or others) answer 50 under token auth (`apiKey`, `t`/`s`, or a token as `p=`), even for an admin; they need `p=` password auth |
 
 D-057 gets its `source` clause marked resolved by D-095, and D-024 notes that API keys exist from M2 for Subsonic
 only.
@@ -908,11 +996,13 @@ only.
 
 | Risk | Mitigation |
 |---|---|
-| Recoverable token secrets widen the blast radius of a full server compromise | Encrypted at rest with a key kept outside the database (§5.2); tokens scoped to `/rest`; one-click revoke; the threat model written down in `docs/subsonic.md` |
+| Recoverable token secrets widen the blast radius of a full server compromise | Encrypted at rest with a key kept outside the database (§5.2); tokens scoped to `/rest` and to their own user, with no user-management writes (§5.3); a password change revokes them all; one-click revoke; the threat model written down in `docs/subsonic.md` |
+| Behind a reverse proxy every client shares one peer IP, so the limiter key degenerates to the username, and a stranger's wrong guesses can block the owner's password logins | The block is capped at 15 min and cleared by any success; app tokens are never blocked, so Subsonic apps keep working; `docs/subsonic.md` says so; trusting `X-Forwarded-For` from configured proxies is a small later addition (call 33) |
+| Owners are surprised that a password change disconnects every app | The warning on the settings and account pages (§11); `docs/subsonic.md` says so |
 | Client quirks the spec does not cover (id prefixes, missing `.view`, `getIndexes` polling, empty-query sync, JSON array expectations) | §5.5 checks named clients against the design; the integration test exercises the same flows; the structural XML/JSON test; prefixes accepted where upstream accepts them |
 | The stream refactor (§8.2) breaks the web player | The M1 stream and cover-art HTTP tests must pass unchanged before Subsonic uses the module; the Playwright smoke still plays a track |
 | `starred`/`userRating` joins slow big listings (a 10k-song `search3` sync page) | Partial unique indexes on `(user_id, track_id)` etc.; joins scoped to one user; `search_all` pages capped at 500; a timing check in the test suite on a 10k-track generated fixture (not a CI gate) |
-| Argon2 per request for clients that send the account password | The 10-minute password cache (§5.3); the settings page points people at tokens |
+| Argon2 per request for clients that send the account password, and unauthenticated guesses starving the hashing pool | The 10-minute password cache (§5.3) for correct passwords; the failed-login limiter (§5.7) answers blocked guesses before any hashing; the settings page points people at tokens |
 | Credentials leak into logs or traces | The path-only span for `/rest` and its test (§5.6) |
 | Losing `SETTINGS_ENCRYPTION_KEY` silently breaks token+salt clients | `apiKey`/`p=` keep working; a rate-limited warning names the affected token; `docs/subsonic.md` says that rotating the key needs new tokens for t+s apps |
 | The scheduled reconcile surprises an owner who wanted none | It is incremental and dedupes; `KIMA_LIBRARY_SYNC_CRON=off`; documented next to the watch modes (D-091) |
@@ -920,7 +1010,10 @@ only.
 
 ## 14. Design calls
 
-These are calls I made; none is an owner decision. Each says what it costs if it turns out wrong.
+These are calls I made. Each says what it costs if it turns out wrong. Calls 4, 29 and 30 and the symlink part of
+22 were overruled in the builder check (`.superpowers/sdd/m2/builder-check.md`). They are kept here, marked
+"Ruled", with the owner's ruling in their place, so the numbering stays stable. Calls 33–35 are new calls I made
+while folding the rulings in.
 
 1. **Token+salt works for app tokens only, with the secret encrypted at rest (XChaCha20-Poly1305) next to a
    SHA-256 lookup hash.** If wrong (the owner prefers upstream's hash-only storage): drop `secret_enc`, answer 41
@@ -932,12 +1025,14 @@ These are calls I made; none is an owner decision. Each says what it costs if it
 3. **App tokens reuse upstream's `api_keys` table and `/api/api-keys` endpoints, and are Subsonic-only until M8.**
    If wrong (M8 wants separate Subsonic and API credentials): add a `scope` column then, and every existing row
    defaults to `subsonic`. Cheap.
-4. **Token format 64 hex characters; at most 50 per user; tokens survive a password change.** If wrong: the cap
-   and the format are constants. Making a password change revoke tokens is a one-line `DELETE` in the change
-   paths, but it disconnects every app.
-5. **A plain `p=` account password is accepted, with a 10-minute in-memory verified-password cache.** If wrong
-   (the cache is judged risky): remove it, and pay one argon2 verify per request for password-mode clients, which
-   is slow but correct.
+4. **Token format 64 hex characters; at most 50 per user.** Ruled (R-C): changing or resetting a password
+   revokes all of that user's app tokens, in the same transaction, and the settings UI warns about it (§5.1,
+   D-097). This replaces my call that tokens survive a password change. Cost of the ruling: every app has to be
+   reconnected after a password change. The cap and the format are constants.
+5. **A plain `p=` account password is accepted, with a 10-minute in-memory verified-password cache.** The cache
+   helps only correct passwords; wrong guesses are bounded by the limiter (R-D, §5.7). If wrong (the cache is
+   judged risky): remove it, and pay one argon2 verify per request for password-mode clients, which is slow but
+   correct.
 6. **`apiKey` without `u` is accepted, `apiKey` with `u` must match, and `apiKey` with `p`/`t`/`s` is 43.** If
    wrong (a client sends both and breaks): relax 43 to "ignore `p`". One branch.
 7. **Stars live in a new `stars` table for songs, albums and artists, and show as `starred` everywhere; the web
@@ -973,8 +1068,11 @@ These are calls I made; none is an owner decision. Each says what it costs if it
     `/rest` locked to origins): apply `ALLOWED_ORIGINS` there too. Browser Subsonic clients then need listing.
 21. **`/rest` request logs carry the path only.** If wrong (debugging needs parameters): log the query with the
     credential keys redacted.
-22. **M2 folds in M1 minors 2, 9 and 10 plus `ETag`, and parks 3–8 for M3.** If wrong: the parked items are small
-    and listed with their target in §9.3.
+22. **M2 folds in M1 minors 9 and 10 plus `ETag`, and parks 3–8 for M3.** Ruled (R-E): minor 2 (symlinks) is
+    removed from M2, M1's mixed behaviour stays, and no M2 change may mark already-indexed tracks missing. It is
+    parked with the upgrade-path note in §9.3. Cost of the ruling: symlinked files keep flip-flopping between the
+    watcher and the reconcile, and streams keep following links, until the parked fix lands. The other parked
+    items are small and listed with their target in §9.3.
 23. **The integration test uses a hand-written t+s client, not a third-party library.** If wrong (a real
     client's quirk is missed): add a Python `py-opensonic` job to CI later.
 24. **The snapshot fixture is seeded by SQL with fixed UUIDs, not by the scanner.** If wrong (the snapshots miss a
@@ -987,11 +1085,28 @@ These are calls I made; none is an owner decision. Each says what it costs if it
     newest album cover instead. A few lines.
 28. **Legacy `getAlbumList` answers the Child shape.** If wrong: send only the ID3 shape, as upstream (one mapper
     choice).
-29. **`getIndexes` honours `ifModifiedSince`, using the newest track `updated_at`.** If wrong (a client stops
-    refreshing): ignore the parameter, as upstream.
-30. **There is no rate limiting on `/rest` in M2.** If wrong (brute force on `p=` passwords is a concern before
-    M8): add a per-IP failed-auth limiter in the extractor, about half a day.
+29. **Ruled (R-B):** `getIndexes` ignores `ifModifiedSince` and always returns the full index, with
+    `lastModified` = now. This replaces my call to honour it from `tracks.updated_at`, which the builder showed is
+    no reliable watermark (missing-marking, purges and renames do not bump it). Cost of the ruling: DSub downloads
+    the full artist index on every refresh. That is bandwidth only, a few hundred KB for a large library. A real
+    library-generation counter can bring the parameter back later.
+30. **Ruled (R-D):** M2 adds the failed-login limiter for `/rest` password auth and `/api/auth/login` (§5.7):
+    keyed per (client IP, username), in memory, 5 free failures, then exponential backoff capped at 15 minutes,
+    checked before any hashing, answering Subsonic 41 or HTTP 429. This replaces my call to leave all limiting to
+    M8. A general request-rate limit stays in M8 (D-089). The divergence is D-093.
 31. **Invalid parameter values answer 10, as upstream; unknown endpoints answer 0, as upstream (not HTTP 404).**
     If wrong: both are single mapping sites.
 32. **Stars, ratings and bookmarks of a missing track are kept (hidden) until the purge.** If wrong: delete them
     when the track is marked missing; a returning file would then lose them.
+33. **The limiter uses the TCP peer address and does not trust `X-Forwarded-For`.** Trusting the header without
+    a configured proxy list would let any client pick its own key and bypass the limiter. If wrong (most installs
+    sit behind a proxy, so the key degenerates to the username; §13): add `KIMA_TRUSTED_PROXIES`, and take the
+    client IP from the header only when the peer is listed. About half a day.
+34. **The limiter covers only password checks. App-token checks, `/api/auth/refresh` and
+    `/api/onboarding/register` are not limited, and the store is capped at 100 000 keys with oldest-first
+    eviction.** Upstream's `authLimiter` also covers refresh and register. If wrong: more call sites can use the
+    same limiter (one line each); an attacker who fills the store evicts real keys, which only weakens the limit
+    back to its 5 free tries.
+35. **Ruling R-A is enforced by a single `require_password_auth()` guard that runs before `require_admin()`, and
+    a token sent as `p=` counts as token auth.** If wrong (an owner wants admin-by-token for scripts): that is a
+    deliberate reversal of R-A, not a bug fix, and it means removing the guard from those four handlers.

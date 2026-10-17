@@ -214,3 +214,45 @@ pub async fn enqueue_unless_pending(
     tx.commit().await?;
     Ok(id)
 }
+
+/// Like [`enqueue`], unless a job still waiting (`queued`, not running) on `queue` has the same
+/// text in its payload's `key` field. A running job may already have read stale input, so it
+/// does not count. Returns the new id, or `None` for a duplicate. Serialised per queue.
+pub async fn enqueue_unless_queued_with_key(
+    pool: &PgPool,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+    key: &str,
+) -> sqlx::Result<Option<Uuid>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('kima_jobs_enqueue:' || $1))")
+        .bind(queue)
+        .execute(&mut *tx)
+        .await?;
+    let id = Uuid::now_v7();
+    let inserted: Option<Uuid> = sqlx::query_scalar(
+        "INSERT INTO jobs (id, queue, payload, max_attempts)
+         SELECT $1::uuid, $2::text, $3::jsonb, $4::int4
+         WHERE NOT EXISTS (SELECT 1 FROM jobs
+                           WHERE queue = $2 AND state = 'queued'
+                             AND payload ->> $5 IS NOT DISTINCT FROM $3::jsonb ->> $5)
+         RETURNING id",
+    )
+    .bind(id)
+    .bind(queue)
+    .bind(&payload)
+    .bind(max_attempts)
+    .bind(key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if inserted.is_some() {
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(NOTIFY_CHANNEL)
+            .bind(queue)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(inserted)
+}

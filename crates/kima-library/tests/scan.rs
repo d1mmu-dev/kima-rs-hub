@@ -440,13 +440,51 @@ async fn update_path_root_unavailable(pool: PgPool) {
         scan::update_path(&c, "A/B/01.flac").await.unwrap(),
         PathOutcome::RootUnavailable
     );
+    // Placeholders left on an unmounted mount point do not count as a library.
+    std::fs::write(root.join(".DS_Store"), "x").unwrap();
+    std::fs::create_dir(root.join("lost+found")).unwrap();
+    std::fs::write(root.join("lost+found/notes.txt"), "x").unwrap();
+    make_audio(&root, ".Trash/old.flac", tags("A", "B", "x", "2000", "9"));
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::RootUnavailable
+    );
     assert_eq!(missing_count(&pool).await, 0);
-    // A root with other content: the file really is gone.
-    std::fs::create_dir(root.join("Other")).unwrap();
+    // A root with other audio: the file really is gone.
+    make_audio(&root, "Other/x.flac", tags("O", "O", "x", "2000", "1"));
     assert_eq!(
         scan::update_path(&c, "A/B/01.flac").await.unwrap(),
         PathOutcome::MarkedMissing
     );
+}
+
+/// Single-file updates (or an older run) already marked the whole library missing; the root
+/// is now empty. The guard still trips, so the grace period never starts the purge.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn guard_holds_when_everything_is_already_missing(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("music");
+    let c = ctx(&pool, &root);
+    make_audio(&root, "A/B/01.flac", tags("A", "B", "one", "2000", "1"));
+    make_audio(&root, "C/D/01.flac", tags("C", "D", "two", "2001", "1"));
+    scan::reconcile(&c).await.unwrap();
+    let id = track_id(&pool, "A/B/01.flac").await;
+    add_play(&pool, id).await;
+
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '30 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert!(report.root_empty_guard, "{report:?}");
+    assert_eq!(report.purged, 0, "{report:?}");
+    assert_eq!(count(&pool, "tracks").await, 2);
+    assert_eq!(plays_of(&pool, id).await, 1);
 }
 
 /// The re-point and the metadata upsert share one transaction: when the upsert fails, the
@@ -624,6 +662,13 @@ async fn update_path_single_file(pool: PgPool) {
     );
     assert_eq!(track_id(&pool, rel).await, id);
 
+    // Another audio file keeps the root "available" (an audio-less root is treated as
+    // unmounted; see update_path_root_unavailable).
+    make_audio(
+        dir.path(),
+        "Z/keep.flac",
+        tags("Z", "Z", "keep", "2000", "1"),
+    );
     std::fs::remove_file(&p).unwrap();
     assert_eq!(
         scan::update_path(&c, rel).await.unwrap(),

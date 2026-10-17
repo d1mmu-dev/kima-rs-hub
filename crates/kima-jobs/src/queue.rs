@@ -57,7 +57,7 @@ pub async fn claim(
            WHERE id IN (
                SELECT id FROM jobs
                WHERE queue = $1
-                 AND ((state = 'queued' AND run_at <= now())
+                 AND ((state = 'queued' AND run_at <= now() AND attempts < max_attempts)
                       OR (state = 'running' AND locked_until < now() AND attempts < max_attempts))
                ORDER BY run_at, id
                LIMIT $2
@@ -132,15 +132,39 @@ pub async fn reap(pool: &PgPool) -> sqlx::Result<u64> {
 ///
 /// Assumes a single kima process owns the queue (true for M1; running several instances
 /// against one database is a non-goal). With several processes this would steal live jobs.
-pub async fn requeue_running(pool: &PgPool, queue: &str) -> sqlx::Result<u64> {
-    let result = sqlx::query!(
-        "UPDATE jobs SET state = 'queued', locked_until = NULL, run_at = now()
-         WHERE queue = $1 AND state = 'running'",
+///
+/// A job already on its final attempt is failed instead of requeued: if it is what killed
+/// the process, requeueing it would crash kima again on every restart (a poison pill).
+pub async fn requeue_running(pool: &PgPool, queue: &str) -> sqlx::Result<Recovered> {
+    let mut tx = pool.begin().await?;
+    let failed = sqlx::query!(
+        "UPDATE jobs SET state = 'failed', locked_until = NULL, finished_at = now(),
+                         last_error = 'process died on the final attempt'
+         WHERE queue = $1 AND state = 'running' AND attempts >= max_attempts",
         queue
     )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    let requeued = sqlx::query!(
+        "UPDATE jobs SET state = 'queued', locked_until = NULL, run_at = now()
+         WHERE queue = $1 AND state = 'running' AND attempts < max_attempts",
+        queue
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    Ok(Recovered { requeued, failed })
+}
+
+/// What [`requeue_running`] did with the jobs it found running.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Recovered {
+    /// Put back in the queue, due now.
+    pub requeued: u64,
+    /// Out of attempts; failed with "process died on the final attempt".
+    pub failed: u64,
 }
 
 /// Delay before retrying after attempt `attempts`: 5 s, 10 s, 20 s, ... at most 1 h.

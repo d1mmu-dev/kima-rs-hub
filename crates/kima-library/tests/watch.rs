@@ -506,6 +506,39 @@ async fn watcher_recovers_when_root_appears(pool: PgPool) {
     shutdown.cancel();
 }
 
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn watcher_restarts_after_root_replaced(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("music");
+    std::fs::create_dir_all(&root).unwrap();
+    let (handle, shutdown, ctx) =
+        spawn_on_missing_root(&pool, root.clone(), dir.path(), Duration::from_millis(100));
+    assert!(handle.status().active);
+
+    // A new directory at the same path has a new inode, like a disk mounted again.
+    std::fs::rename(&root, dir.path().join("music-old")).unwrap();
+    make_audio(&root, "A/B/01.flac", tags("Remounted"));
+    // The restart queues a reconcile; nothing else here does.
+    wait_for("the watcher to restart", 10, || async {
+        count_kind(&pool, "reconcile").await >= 1 && handle.status().active
+    })
+    .await;
+    assert_eq!(handle.status().last_error, None);
+    drain(&ctx).await;
+    assert_eq!(
+        title_of(&pool, "A/B/01.flac").await.as_deref(),
+        Some("Remounted")
+    );
+
+    // And it watches the new folder.
+    make_audio(&root, "A/B/02.flac", tags("Later"));
+    wait_path_job(&pool, "A/B/02.flac").await;
+    shutdown.cancel();
+}
+
 #[test]
 fn ignore_set_covers_paths_below() {
     let set = IgnoreSet::new();

@@ -24,7 +24,7 @@ export interface OrganizerRun {
 }
 
 export interface OrganizerRow {
-    id: string;
+    id: number;
     trackId: string | null;
     from: string;
     to: string;

@@ -58,6 +58,7 @@ fn start(pool: &PgPool, mode: WatchMode, poll: Duration, debounce: Duration) -> 
         mode,
         poll,
         debounce,
+        Duration::from_secs(30),
         ignore.clone(),
         Arc::new(RwLock::new(WatchStatus::default())),
         shutdown.clone(),
@@ -88,6 +89,7 @@ fn start_on(pool: &PgPool, dir: tempfile::TempDir, mode: WatchMode, poll: Durati
         mode,
         poll,
         DEBOUNCE,
+        Duration::from_secs(30),
         ignore.clone(),
         Arc::new(RwLock::new(WatchStatus::default())),
         shutdown.clone(),
@@ -424,30 +426,83 @@ async fn off_mode_watches_nothing(pool: PgPool) {
     assert!(path_jobs(&pool).await.is_empty());
 }
 
-#[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn missing_root_reports_an_error_and_falls_back(pool: PgPool) {
-    let dir = tempfile::tempdir().unwrap();
-    let gone = dir.path().join("not-there");
+fn spawn_on_missing_root(
+    pool: &PgPool,
+    root: std::path::PathBuf,
+    data: &Path,
+    retry: Duration,
+) -> (WatchHandle, CancellationToken, LibraryCtx) {
     let ctx = LibraryCtx {
         pool: pool.clone(),
-        root: gone,
+        root,
         events: EventBus::new(8),
-        data_dir: dir.path().join(".kima-data"),
+        data_dir: data.join(".kima-data"),
     };
     let shutdown = CancellationToken::new();
     let handle = watch::spawn_with(
-        ctx,
+        ctx.clone(),
         WatchMode::Auto,
         Duration::from_secs(60),
         DEBOUNCE,
+        retry,
         IgnoreSet::new(),
         Arc::new(RwLock::new(WatchStatus::default())),
         shutdown.clone(),
     );
+    (handle, shutdown, ctx)
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn missing_root_reports_an_error_and_keeps_retrying(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let (handle, shutdown, _) = spawn_on_missing_root(
+        &pool,
+        dir.path().join("not-there"),
+        dir.path(),
+        Duration::from_millis(100),
+    );
+    tokio::time::sleep(Duration::from_millis(450)).await;
     let status = handle.status();
     assert!(!status.active);
     assert!(status.last_error.is_some());
     assert_eq!(count_kind(&pool, "reconcile").await, 0);
+    // Shutdown still ends the task while it is retrying.
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), handle.join())
+        .await
+        .expect("watcher task stops on shutdown");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn watcher_recovers_when_root_appears(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("music");
+    let (handle, shutdown, ctx) =
+        spawn_on_missing_root(&pool, root.clone(), dir.path(), Duration::from_millis(100));
+    assert!(!handle.status().active);
+
+    std::fs::create_dir_all(&root).unwrap();
+    wait_for("the watcher to become active", 10, || async {
+        handle.status().active
+    })
+    .await;
+    assert_eq!(handle.status().last_error, None);
+    // The outage may have hidden changes, so a reconcile is queued.
+    wait_for("the recovery reconcile", 10, || async {
+        count_kind(&pool, "reconcile").await == 1
+    })
+    .await;
+
+    make_audio(&root, "A/B/01.flac", tags("Back"));
+    wait_path_job(&pool, "A/B/01.flac").await;
+    drain(&ctx).await;
+    assert_eq!(
+        title_of(&pool, "A/B/01.flac").await.as_deref(),
+        Some("Back")
+    );
     shutdown.cancel();
 }
 

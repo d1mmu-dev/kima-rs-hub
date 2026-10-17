@@ -365,3 +365,28 @@ async fn enqueue_unless_pending_is_race_safe(pool: PgPool) {
         .unwrap();
     assert_eq!(n, 1);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_unless_queued_with_key_skips_only_queued_duplicates(pool: PgPool) {
+    let add = |path: &'static str| {
+        let pool = pool.clone();
+        async move {
+            queue::enqueue_unless_queued_with_key(
+                &pool,
+                "q",
+                json!({"kind": "path", "path": path}),
+                3,
+                "path",
+            )
+            .await
+            .unwrap()
+        }
+    };
+    assert!(add("a.flac").await.is_some());
+    assert_eq!(add("a.flac").await, None);
+    assert!(add("b.flac").await.is_some());
+    // A running job may have read stale input, so a new one is queued behind it.
+    queue::claim(&pool, "q", 10, LEASE).await.unwrap();
+    assert!(add("a.flac").await.is_some());
+    assert_eq!(add("a.flac").await, None);
+}

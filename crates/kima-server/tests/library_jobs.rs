@@ -47,7 +47,8 @@ async fn library_queue_runs_reconcile_and_path_jobs(pool: PgPool) {
         .expect("nothing queued yet");
     let path = kima_library::jobs::enqueue_path(&pool, "gone.mp3")
         .await
-        .unwrap();
+        .unwrap()
+        .expect("queued");
     let organize = queue::enqueue(&pool, "library", json!({"kind": "organize"}), 1)
         .await
         .unwrap();

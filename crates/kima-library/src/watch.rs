@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use kima_core::config::WatchMode;
+use notify_debouncer_full::notify::event::ModifyKind;
 use notify_debouncer_full::notify::{
     self, Config, EventKind, PollWatcher, RecommendedWatcher, RecursiveMode,
 };
@@ -30,6 +31,8 @@ use crate::tags;
 
 /// How long a path must be quiet before its job is queued.
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_secs(2);
+/// How often an unavailable library folder is tried again.
+pub const DEFAULT_RETRY: Duration = Duration::from_secs(30);
 
 /// What the settings page shows about the watcher.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -139,18 +142,23 @@ pub fn spawn(
         mode,
         Duration::from_secs(poll_secs.max(1)),
         DEFAULT_DEBOUNCE,
+        DEFAULT_RETRY,
         ignore,
         status,
         shutdown,
     )
 }
 
-/// [`spawn`] with an explicit poll interval and debounce (tests use short ones).
+/// [`spawn`] with an explicit poll interval, debounce and retry interval (tests use short
+/// ones). While the library folder cannot be watched (an unmounted disk), the task keeps
+/// running and tries again every `retry`.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_with(
     ctx: LibraryCtx,
     mode: WatchMode,
     poll_interval: Duration,
     debounce: Duration,
+    retry: Duration,
     ignore: IgnoreSet,
     status: SharedStatus,
     shutdown: CancellationToken,
@@ -161,36 +169,66 @@ pub fn spawn_with(
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<DebounceEventResult>();
-    let started = start_debouncer(&ctx.root, mode, poll_interval, debounce / 2, tx);
-    let guard: Box<dyn Any + Send> = match started {
-        Ok((guard, effective, note)) => {
-            set_status(&status, |s| {
-                s.mode = mode_name(effective).to_string();
-                s.active = true;
-                s.last_error = note;
-            });
-            info!(root = %ctx.root.display(), mode = mode_name(effective), "watching the library");
-            guard
-        }
-        Err(message) => {
-            warn!(root = %ctx.root.display(), error = %message, "cannot watch the library");
-            set_status(&status, |s| s.last_error = Some(message));
-            return WatchHandle { status, task: None };
-        }
+    let watcher = Watcher {
+        mode,
+        poll_interval,
+        debounce,
+        retry,
+        tx,
     };
-
+    let guard = watcher.try_start(&ctx.root, &status);
     let task = tokio::spawn(run(
         ctx,
         rx,
         ignore,
         status.clone(),
-        debounce,
+        watcher,
         shutdown,
         guard,
     ));
     WatchHandle {
         status,
         task: Some(task),
+    }
+}
+
+/// What it takes to (re)start the debouncer.
+struct Watcher {
+    mode: WatchMode,
+    poll_interval: Duration,
+    debounce: Duration,
+    retry: Duration,
+    tx: mpsc::UnboundedSender<DebounceEventResult>,
+}
+
+impl Watcher {
+    /// Starts the debouncer and records the outcome in `status`.
+    fn try_start(&self, root: &Path, status: &SharedStatus) -> Option<Box<dyn Any + Send>> {
+        match start_debouncer(
+            root,
+            self.mode,
+            self.poll_interval,
+            self.debounce / 2,
+            self.tx.clone(),
+        ) {
+            Ok((guard, effective, note)) => {
+                set_status(status, |s| {
+                    s.mode = mode_name(effective).to_string();
+                    s.active = true;
+                    s.last_error = note;
+                });
+                info!(root = %root.display(), mode = mode_name(effective), "watching the library");
+                Some(guard)
+            }
+            Err(message) => {
+                warn!(root = %root.display(), error = %message, "cannot watch the library; will retry");
+                set_status(status, |s| {
+                    s.active = false;
+                    s.last_error = Some(message);
+                });
+                None
+            }
+        }
     }
 }
 
@@ -292,16 +330,27 @@ async fn run(
     mut rx: mpsc::UnboundedReceiver<DebounceEventResult>,
     ignore: IgnoreSet,
     status: SharedStatus,
-    debounce: Duration,
+    watcher: Watcher,
     shutdown: CancellationToken,
-    _guard: Box<dyn Any + Send>,
+    mut guard: Option<Box<dyn Any + Send>>,
 ) {
+    let debounce = watcher.debounce;
     let mut pending: HashMap<String, Pending> = HashMap::new();
     let mut tick = tokio::time::interval((debounce / 4).max(Duration::from_millis(25)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let retry = watcher.retry.max(Duration::from_millis(10));
+    let mut retry_tick = tokio::time::interval_at(tokio::time::Instant::now() + retry, retry);
+    retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
+            _ = retry_tick.tick(), if guard.is_none() => {
+                guard = watcher.try_start(&ctx.root, &status);
+                if guard.is_some() {
+                    // Changes made while the folder was unavailable were not seen.
+                    queue_reconcile(&ctx).await;
+                }
+            }
             msg = rx.recv() => {
                 let Some(msg) = msg else { break };
                 match msg {
@@ -317,6 +366,7 @@ async fn run(
             _ = tick.tick() => flush(&ctx, &status, debounce, &mut pending).await,
         }
     }
+    drop(guard);
     set_status(&status, |s| s.active = false);
 }
 
@@ -354,7 +404,8 @@ async fn collect(
     pending: &mut HashMap<String, Pending>,
 ) {
     let mut reconcile = false;
-    let mut paths: Vec<PathBuf> = Vec::new();
+    // Path -> whether a folder at that path should be expanded to its files.
+    let mut paths: HashMap<PathBuf, bool> = HashMap::new();
     for event in events {
         if event.need_rescan() {
             reconcile = true;
@@ -363,27 +414,33 @@ async fn collect(
             });
             continue;
         }
-        match event.kind {
-            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
-                paths.extend(event.paths.iter().cloned());
+        // A folder's own mtime changes whenever a file in it does; only a folder that
+        // appeared, was renamed or went away stands for the files in it.
+        let folder_counts = match event.kind {
+            EventKind::Create(_) | EventKind::Remove(_) => Some(true),
+            EventKind::Modify(ModifyKind::Name(_)) => Some(true),
+            EventKind::Modify(_) => Some(false),
+            EventKind::Access(_) | EventKind::Any | EventKind::Other => None,
+        };
+        // `None`: reads of a file and events the backend cannot classify change nothing.
+        if let Some(expand_dirs) = folder_counts {
+            for p in &event.paths {
+                *paths.entry(p.clone()).or_default() |= expand_dirs;
             }
-            // Reads of a file, and events the backend cannot classify, change nothing.
-            EventKind::Access(_) | EventKind::Any | EventKind::Other => {}
         }
     }
     if reconcile {
         warn!("library watcher overflow; queueing a reconcile");
         queue_reconcile(ctx).await;
     }
-    paths.dedup();
-    for path in paths {
+    for (path, expand_dirs) in paths {
         if ignore.contains(&path) {
             continue;
         }
         let Some(rel) = rel_of(&ctx.root, &path) else {
             continue;
         };
-        for rel in expand(ctx, &path, rel).await {
+        for rel in expand(ctx, &path, rel, expand_dirs).await {
             let stat = stat(&ctx.root.join(&rel));
             pending.insert(
                 rel,
@@ -398,8 +455,9 @@ async fn collect(
 
 /// The audio files one event stands for: the file itself, every audio file under a folder
 /// that appeared, or every indexed track under a folder that vanished.
-async fn expand(ctx: &LibraryCtx, path: &Path, rel: String) -> Vec<String> {
+async fn expand(ctx: &LibraryCtx, path: &Path, rel: String, expand_dirs: bool) -> Vec<String> {
     match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() && !expand_dirs => Vec::new(),
         Ok(meta) if meta.is_dir() => {
             let root = ctx.root.clone();
             let dir = path.to_path_buf();

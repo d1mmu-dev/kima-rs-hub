@@ -126,6 +126,23 @@ pub async fn reap(pool: &PgPool) -> sqlx::Result<u64> {
     Ok(result.rows_affected())
 }
 
+/// Puts every `running` job on `queue` back to `queued`, due now, keeping its attempt count.
+/// Call at startup, before any worker starts: jobs left `running` belong to a process that
+/// died, and would otherwise wait out their lease (6 h on the `library` queue).
+///
+/// Assumes a single kima process owns the queue (true for M1; running several instances
+/// against one database is a non-goal). With several processes this would steal live jobs.
+pub async fn requeue_running(pool: &PgPool, queue: &str) -> sqlx::Result<u64> {
+    let result = sqlx::query!(
+        "UPDATE jobs SET state = 'queued', locked_until = NULL, run_at = now()
+         WHERE queue = $1 AND state = 'running'",
+        queue
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Delay before retrying after attempt `attempts`: 5 s, 10 s, 20 s, ... at most 1 h.
 pub fn backoff(attempts: i32) -> Duration {
     let exponent = (attempts.max(1) - 1).min(20) as u32;

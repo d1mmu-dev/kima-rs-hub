@@ -82,6 +82,45 @@ async fn startup_reconcile_is_not_queued_twice(pool: PgPool) {
     );
 }
 
+/// A reconcile left `running` by a killed process must not block the startup reconcile for
+/// its 6 h lease: startup requeues it (instead of adding a second one).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn startup_requeues_a_reconcile_left_running(pool: PgPool) {
+    let stuck = kima_library::jobs::enqueue_reconcile(&pool)
+        .await
+        .unwrap()
+        .unwrap();
+    queue::claim(&pool, "library", 1, kima_server::jobs::LIBRARY_LEASE)
+        .await
+        .unwrap();
+    kima_server::jobs::prepare_library_queue(&pool)
+        .await
+        .unwrap();
+    let rows: Vec<(Uuid, String, bool)> =
+        sqlx::query_as("SELECT id, state, run_at <= now() FROM jobs WHERE queue = 'library'")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![(stuck, "queued".to_string(), true)]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn startup_queues_a_reconcile_when_none_is_pending(pool: PgPool) {
+    kima_server::jobs::prepare_library_queue(&pool)
+        .await
+        .unwrap();
+    kima_server::jobs::prepare_library_queue(&pool)
+        .await
+        .unwrap();
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE queue = 'library' AND payload->>'kind' = 'reconcile'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1);
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn library_root_setting_overrides_music_path(pool: PgPool) {
     let music = std::path::Path::new("/music");

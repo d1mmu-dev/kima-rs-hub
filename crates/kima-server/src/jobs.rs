@@ -59,6 +59,22 @@ impl Registry {
     }
 }
 
+/// Startup step for the `library` queue; call before [`spawn_all`]. Requeues jobs left
+/// `running` by a process that died (kima runs as a single process, so nothing can really be
+/// running yet; otherwise a killed reconcile would block the startup one for its 6 h lease),
+/// then queues a reconcile unless one is already pending.
+pub async fn prepare_library_queue(pool: &PgPool) -> sqlx::Result<()> {
+    let requeued = kima_jobs::queue::requeue_running(pool, library_jobs::QUEUE).await?;
+    if requeued > 0 {
+        tracing::info!(
+            requeued,
+            "requeued library jobs left running by a previous process"
+        );
+    }
+    library_jobs::enqueue_reconcile(pool).await?;
+    Ok(())
+}
+
 /// Starts one worker per registered queue. All stop when `shutdown` fires.
 pub fn spawn_all(
     pool: &PgPool,

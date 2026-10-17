@@ -43,6 +43,20 @@ pub async fn enqueue_reconcile(pool: &PgPool) -> sqlx::Result<Option<Uuid>> {
     .await
 }
 
+/// Queues a reconcile for the watcher's safety net (overflow, error, root back). Dedupes against
+/// queued reconciles only: a running one walked the tree before the lost events, so it still
+/// gets one follow-up.
+pub async fn enqueue_reconcile_followup(pool: &PgPool) -> sqlx::Result<Option<Uuid>> {
+    queue::enqueue_unless_queued_with_key(
+        pool,
+        QUEUE,
+        serde_json::json!({ "kind": "reconcile" }),
+        MAX_ATTEMPTS,
+        "kind",
+    )
+    .await
+}
+
 /// Queues a reconcile, or returns the id of the one already waiting or running.
 pub async fn request_reconcile(pool: &PgPool) -> sqlx::Result<Uuid> {
     queue::enqueue_or_pending(

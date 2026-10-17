@@ -553,3 +553,32 @@ fn ignore_set_covers_paths_below() {
     set.remove(Path::new("/lib/a"));
     assert!(!set.contains(Path::new("/lib/a")));
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn watcher_reconcile_queued_behind_a_running_one(pool: PgPool) {
+    let first = jobs::enqueue_reconcile(&pool).await.unwrap().unwrap();
+    sqlx::query("UPDATE jobs SET state = 'running' WHERE id = $1")
+        .bind(first)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        jobs::enqueue_reconcile_followup(&pool)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        jobs::enqueue_reconcile_followup(&pool)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let queued: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE payload ->> 'kind' = 'reconcile' AND state = 'queued'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(queued, 1);
+}

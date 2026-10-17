@@ -429,7 +429,7 @@ async fn run(
 }
 
 async fn queue_reconcile(ctx: &LibraryCtx) {
-    if let Err(e) = jobs::enqueue_reconcile(&ctx.pool).await {
+    if let Err(e) = jobs::enqueue_reconcile_followup(&ctx.pool).await {
         warn!(error = %e, "could not queue a library reconcile");
     }
 }

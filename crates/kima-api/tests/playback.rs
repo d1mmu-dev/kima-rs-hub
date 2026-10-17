@@ -229,59 +229,62 @@ async fn open_stream(app: &axum::Router, ticket: &str) -> Body {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn live_update_reaches_other_tab(pool: PgPool) {
+    // Live reporting belongs to the public vibe (M5): every user gets upstream's 404, and
+    // nothing is published to anyone's event stream.
     let state = common::state(pool);
     let (ana, token) = common::user_with_token(&state, "ana").await;
-    let (ben, _) = common::user_with_token(&state, "ben").await;
     let app = kima_api::router(state.clone());
     let mut other_tab = open_stream(&app, &state.sse.issue_ticket(ana.id)).await;
-    let mut strangers = open_stream(&app, &state.sse.issue_ticket(ben.id)).await;
 
     let server = axum_test::TestServer::new(app).unwrap();
     let res = server
         .post("/api/playback-state/live")
         .authorization_bearer(&token)
         .json(&json!({
-            "status": "playing",
-            "trackId": "t1",
-            "position": 1500.4,
-            "duration": 180000,
-            "queue": [{ "trackId": "t2", "duration": 1000 }, { "trackId": 3 }, "junk"],
+            "status": "playing", "trackId": "t1", "position": 1500, "duration": 180000, "queue": [],
         }))
         .await;
-    res.assert_status_ok();
-    assert_eq!(res.json::<Value>(), json!({ "ok": true }));
-
-    let text = next_text(&mut other_tab).await;
-    let event: Value = serde_json::from_str(text.strip_prefix("data: ").unwrap().trim()).unwrap();
-    assert_eq!(
-        event,
-        json!({
-            "type": "playback:live",
-            "status": "playing",
-            "trackId": "t1",
-            "position": 1500,
-            "duration": 180000,
-            "queue": [{ "trackId": "t2", "duration": 1000 }],
-        })
-    );
-    // It is not broadcast to other users.
+    res.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(res.json::<Value>(), json!({ "error": "Not available" }));
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), strangers.frame())
+        tokio::time::timeout(Duration::from_millis(300), other_tab.frame())
             .await
-            .is_err()
+            .is_err(),
+        "no event published"
     );
+    server
+        .post("/api/playback-state/live")
+        .json(&json!({}))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+}
 
-    for body in [
-        json!({ "status": "dancing", "trackId": "t1", "position": 0, "duration": 0 }),
-        json!({ "status": "paused", "trackId": "", "position": 0, "duration": 0 }),
-        json!({ "status": "paused", "trackId": "t1", "position": -1, "duration": 0 }),
-        json!({ "status": "paused", "trackId": "t1", "position": 0 }),
-    ] {
-        server
-            .post("/api/playback-state/live")
-            .authorization_bearer(&token)
-            .json(&body)
-            .await
-            .assert_status(StatusCode::BAD_REQUEST);
-    }
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn big_queue_bodies_up_to_5mb(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    // About 3 MB: over axum's 2 MB default, under 5 MB.
+    let pad = "x".repeat(300);
+    let queue: Vec<Value> = (0..9000)
+        .map(|n| json!({ "id": format!("t{n}"), "title": "x", "pad": pad }))
+        .collect();
+    let body = json!({ "playbackType": "track", "queue": queue });
+    let len = serde_json::to_vec(&body).unwrap().len();
+    assert!((2 * 1024 * 1024..5 * 1024 * 1024).contains(&len), "{len}");
+    server
+        .post("/api/playback-state")
+        .authorization_bearer(&token)
+        .json(&body)
+        .await
+        .assert_status_ok();
+
+    let huge = json!({ "playbackType": "track", "pad": "x".repeat(5 * 1024 * 1024 + 1) });
+    let res = server
+        .post("/api/playback-state")
+        .authorization_bearer(&token)
+        .json(&huge)
+        .await;
+    res.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(res.json::<Value>()["error"], "Request body too large");
 }

@@ -18,6 +18,12 @@ where
         Json::<T>::from_request(req, state)
             .await
             .map(|Json(value)| ApiJson(value))
-            .map_err(|rejection| ApiError::Invalid(rejection.body_text()))
+            .map_err(|rejection| {
+                if rejection.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+                    ApiError::PayloadTooLarge
+                } else {
+                    ApiError::Invalid(rejection.body_text())
+                }
+            })
     }
 }

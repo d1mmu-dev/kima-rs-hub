@@ -20,6 +20,8 @@ pub enum ApiError {
     Conflict(&'static str),
     #[error("{0}")]
     TooManyRequests(&'static str),
+    #[error("Request body too large")]
+    PayloadTooLarge,
     #[error("Internal error")]
     Internal(#[from] anyhow::Error),
 }
@@ -39,6 +41,7 @@ impl IntoResponse for ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Internal(error) => {
                 tracing::error!(error = ?error, "internal error");
                 StatusCode::INTERNAL_SERVER_ERROR

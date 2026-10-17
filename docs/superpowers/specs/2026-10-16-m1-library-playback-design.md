@@ -24,7 +24,7 @@ sources. So M1 has two jobs beyond what the parent spec lists:
 
 Success: after M1, the owner can run `docker compose up`, scan their real library, find any
 artist/album/song, play it in the browser (seeking works, low-bandwidth transcodes work), build
-playlists and likes, and get a preview of how their files would be organized, then apply it.
+playlists, and get a preview of how their files would be organized, then apply it.
 
 ## 2. Goals
 
@@ -33,7 +33,7 @@ From the parent spec's M1 row:
   any user changes their own password (bumps `token_version`).
 - Scanner (lofty) that keeps the library current by watching for changes; artwork; browse; tsvector search.
 - Streaming with HTTP range requests; ffmpeg transcode at 320/192/128 kbps.
-- Plays (listening history), playlists, likes, playback state (resume/queue sync).
+- Plays (listening history), playlists, playback state (resume/queue sync).
 
 Added for the messy library:
 - The clean *Artist → Year – Album → songs* view (§4).
@@ -197,8 +197,9 @@ It proposes a target path for every track, from the same fields the library view
    - **Move (opt-in).** Files are renamed in place inside `MUSIC_PATH`. This needs the mount
      to be writable, and the page says so plainly. After a move, kima updates track paths
      directly (no full rescan needed), and plays/likes/playlists keep pointing at the same tracks.
-3. **Journal and undo.** Every apply writes a journal (old path, new path, checksum) under
-   `KIMA_DATA_DIR`. A move can be undone from the journal. A copy can be undone by deleting
+3. **Journal and undo.** Every apply writes a journal (old path, new path, checksum) in
+   Postgres (`organizer_runs`, `organizer_journal`; decided in Task 17, so the track path and the
+   journal row change in one transaction; see D-069), not a file under `KIMA_DATA_DIR`. A move can be undone from the journal. A copy can be undone by deleting
    the target, which the page offers.
 
 Safety rules, all of them tested:

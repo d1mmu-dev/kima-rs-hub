@@ -336,6 +336,7 @@ async fn run(
 ) {
     let debounce = watcher.debounce;
     let mut pending: HashMap<String, Pending> = HashMap::new();
+    let mut root_id = identity(&ctx.root);
     let mut tick = tokio::time::interval((debounce / 4).max(Duration::from_millis(25)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let retry = watcher.retry.max(Duration::from_millis(10));
@@ -344,21 +345,48 @@ async fn run(
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
-            _ = retry_tick.tick(), if guard.is_none() => {
-                guard = watcher.try_start(&ctx.root, &status);
-                if guard.is_some() {
-                    // Changes made while the folder was unavailable were not seen.
-                    queue_reconcile(&ctx).await;
+            _ = retry_tick.tick() => {
+                if guard.is_some() && identity(&ctx.root) != root_id {
+                    // Unmounted, or unmounted and mounted again: the watch is dead even
+                    // though the watcher does not say so.
+                    warn!(root = %ctx.root.display(), "library folder became unavailable");
+                    guard = None;
+                    set_status(&status, |s| {
+                        s.active = false;
+                        s.last_error = Some("library folder became unavailable".to_string());
+                    });
+                } else if guard.is_none() {
+                    guard = watcher.try_start(&ctx.root, &status);
+                    if guard.is_some() {
+                        root_id = identity(&ctx.root);
+                        // Changes made while the folder was unavailable were not seen.
+                        queue_reconcile(&ctx).await;
+                    }
                 }
             }
             msg = rx.recv() => {
                 let Some(msg) = msg else { break };
                 match msg {
-                    Ok(events) => collect(&ctx, &ignore, &status, events, &mut pending).await,
+                    Ok(events) => {
+                        if collect(&ctx, &ignore, &status, events, &mut pending).await {
+                            warn!("library folder removed; restarting the watcher");
+                            guard = None;
+                            set_status(&status, |s| {
+                                s.active = false;
+                                s.last_error =
+                                    Some("library folder became unavailable".to_string());
+                            });
+                        }
+                    }
                     Err(errors) => {
                         let text = errors.iter().map(describe).collect::<Vec<_>>().join("; ");
-                        warn!(error = %text, "library watcher error; queueing a reconcile");
-                        set_status(&status, |s| s.last_error = Some(text));
+                        warn!(error = %text, "library watcher error; restarting it");
+                        // Restarted on the next retry tick, which also queues a reconcile.
+                        guard = None;
+                        set_status(&status, |s| {
+                            s.active = false;
+                            s.last_error = Some(text);
+                        });
                         queue_reconcile(&ctx).await;
                     }
                 }
@@ -402,8 +430,9 @@ async fn collect(
     status: &SharedStatus,
     events: Vec<DebouncedEvent>,
     pending: &mut HashMap<String, Pending>,
-) {
+) -> bool {
     let mut reconcile = false;
+    let mut root_gone = false;
     // Path -> whether a folder at that path should be expanded to its files.
     let mut paths: HashMap<PathBuf, bool> = HashMap::new();
     for event in events {
@@ -413,6 +442,13 @@ async fn collect(
                 s.last_error = Some("the file event queue overflowed; reconciling".to_string());
             });
             continue;
+        }
+        if matches!(
+            event.kind,
+            EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+        ) && event.paths.contains(&ctx.root)
+        {
+            root_gone = true;
         }
         // A folder's own mtime changes whenever a file in it does; only a folder that
         // appeared, was renamed or went away stands for the files in it.
@@ -451,6 +487,14 @@ async fn collect(
             );
         }
     }
+    root_gone
+}
+
+/// (device, inode) of the library folder; it changes when a disk is unmounted and mounted again.
+fn identity(root: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(root).ok()?;
+    Some((meta.dev(), meta.ino()))
 }
 
 /// The audio files one event stands for: the file itself, every audio file under a folder

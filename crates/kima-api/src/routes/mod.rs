@@ -5,6 +5,7 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 mod auth;
+mod cover_art;
 mod events;
 mod health;
 mod onboarding;
@@ -19,6 +20,7 @@ pub fn router(state: AppState) -> Router {
         .merge(system::routes())
         .merge(system_settings::routes())
         .merge(events::routes())
+        .merge(cover_art::routes())
         .fallback(|| async { ApiError::NotFound("Not found") });
 
     Router::new()

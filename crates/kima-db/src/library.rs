@@ -220,3 +220,15 @@ pub async fn prune_empty(pool: &PgPool) -> sqlx::Result<()> {
     .await?;
     tx.commit().await
 }
+
+/// Paths (relative to the library root) of the album's present tracks, in play order.
+pub async fn album_track_paths(pool: &PgPool, album_id: Uuid) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar!(
+        "SELECT path FROM tracks
+         WHERE album_id = $1 AND missing_since IS NULL
+         ORDER BY disc, track_no, path",
+        album_id
+    )
+    .fetch_all(pool)
+    .await
+}

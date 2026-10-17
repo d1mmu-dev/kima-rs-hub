@@ -150,6 +150,27 @@ mod tests {
     }
 
     #[test]
+    fn from_secret_key_is_pinned() {
+        let c = Cipher::from_secret("kima-test-secret");
+        assert_eq!(
+            hex::encode(c.key),
+            "c94dc075476e5fa21324053b713341e300095c94ba1d49b01cb619be0369b5be"
+        );
+    }
+
+    #[test]
+    fn tampered_ciphertext_or_tag_fails() {
+        let c = Cipher::random();
+        let blob = c.encrypt(b"hello world", b"aad");
+        let mut ct = blob.clone();
+        ct[1 + 24] ^= 1;
+        assert!(c.decrypt(&ct, b"aad").is_err());
+        let mut tag = blob.clone();
+        *tag.last_mut().unwrap() ^= 1;
+        assert!(c.decrypt(&tag, b"aad").is_err());
+    }
+
+    #[test]
     fn hkdf_matches_rfc5869_case_3() {
         let okm = hkdf_sha256(&[0x0b; 22], &[], &[]);
         assert_eq!(

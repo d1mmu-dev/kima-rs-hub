@@ -277,36 +277,35 @@ async fn preview(ctx: &LibraryCtx, run: Run) -> Result<()> {
     };
     let mut rows = Vec::new();
     let (mut unchanged, mut collisions, mut sidecar_rows) = (0usize, 0usize, 0usize);
+    // Files already in place are journalled as `unchanged`, so the preview can list them;
+    // apply and undo never touch them.
     for m in &moves {
-        if m.unchanged {
-            unchanged += 1;
-            continue;
-        }
         let (Some(from), Some(to)) = (strip(&m.from), rel_string(&m.to)) else {
             continue;
         };
+        unchanged += usize::from(m.unchanged);
         collisions += usize::from(m.collision);
         rows.push(NewRow {
             track_id: Some(m.track_id),
             from_path: from,
             to_path: to,
             collision: m.collision,
+            unchanged: m.unchanged,
         });
     }
     for s in &sidecar_moves {
-        if s.unchanged {
-            continue;
-        }
         let (Some(from), Some(to)) = (strip(&s.from), rel_string(&s.to)) else {
             continue;
         };
-        sidecar_rows += 1;
+        sidecar_rows += usize::from(!s.unchanged);
+        unchanged += usize::from(s.unchanged);
         collisions += usize::from(s.collision);
         rows.push(NewRow {
             track_id: None,
             from_path: from,
             to_path: to,
             collision: s.collision,
+            unchanged: s.unchanged,
         });
     }
     db::replace_rows(&ctx.pool, run.id, &rows).await?;
@@ -315,7 +314,7 @@ async fn preview(ctx: &LibraryCtx, run: Run) -> Result<()> {
         run.id,
         &json!({
             "tracks": tracks.len(),
-            "planned": rows.len(),
+            "planned": rows.len() - unchanged,
             "sidecars": sidecar_rows,
             "unchanged": unchanged,
             "collisions": collisions,
@@ -323,7 +322,7 @@ async fn preview(ctx: &LibraryCtx, run: Run) -> Result<()> {
     )
     .await?;
     db::transition(&ctx.pool, run.id, &["planning"], "previewed").await?;
-    info!(run = %run.id, planned = rows.len(), unchanged, collisions, "organizer preview ready");
+    info!(run = %run.id, planned = rows.len() - unchanged, unchanged, collisions, "organizer preview ready");
     Ok(())
 }
 
@@ -420,21 +419,59 @@ fn place_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
             Ok(())
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists || crosses_devices(&e) => Err(e),
-        // No hard links here (FAT, some network shares): check, then rename.
-        Err(_) => {
-            if exists(dst) {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "target exists",
-                ));
+        // No hard links here (FAT, some network shares): an atomic no-replace rename where the
+        // kernel and filesystem offer one, else check, then rename.
+        Err(_) => match rename_noreplace(src, dst)? {
+            true => Ok(()),
+            false => {
+                if exists(dst) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "target exists",
+                    ));
+                }
+                fs::rename(src, dst)
             }
-            fs::rename(src, dst)
-        }
+        },
     }?;
     if let Some(parent) = dst.parent() {
         sync_dir(parent);
     }
     Ok(())
+}
+
+/// `renameat2(RENAME_NOREPLACE)`. `Ok(false)` when the kernel or filesystem does not support
+/// it (EINVAL, ENOSYS); an existing `dst` is `AlreadyExists`.
+#[cfg(target_os = "linux")]
+fn rename_noreplace(src: &Path, dst: &Path) -> io::Result<bool> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let invalid = |_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte");
+    let s = CString::new(src.as_os_str().as_bytes()).map_err(invalid)?;
+    let d = CString::new(dst.as_os_str().as_bytes()).map_err(invalid)?;
+    // SAFETY: both pointers are valid NUL-terminated strings that outlive the call.
+    let r = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            s.as_ptr(),
+            libc::AT_FDCWD,
+            d.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if r == 0 {
+        return Ok(true);
+    }
+    let e = io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EINVAL) | Some(libc::ENOSYS) => Ok(false),
+        _ => Err(e),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_noreplace(_src: &Path, _dst: &Path) -> io::Result<bool> {
+    Ok(false)
 }
 
 fn part_path(dst: &Path) -> PathBuf {
@@ -532,6 +569,27 @@ fn move_file(
     }
 }
 
+/// Some existing folder between `root` (exclusive) and `path` (exclusive) is a symbolic link,
+/// or `path` is not under `root`. Writing through such a folder could land outside the root.
+fn symlinked_ancestor(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return true;
+    };
+    let parts: Vec<_> = rel.components().collect();
+    let mut cur = root.to_path_buf();
+    for c in &parts[..parts.len().saturating_sub(1)] {
+        cur.push(c);
+        match fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    false
+}
+
+const SYMLINK_NOTE: &str = "a folder on the target path is a symbolic link";
+
 /// Removes `dir` and its parents while they are empty, stopping at `stop` (never removed).
 /// Returns the folders removed.
 fn remove_empty_dirs(dir: &Path, stop: &Path) -> Vec<PathBuf> {
@@ -595,6 +653,7 @@ impl Dir {
 /// Where one row's file is, where it goes, and its staging name.
 struct Op {
     src: PathBuf,
+    src_rel: String,
     dst: PathBuf,
     dst_rel: String,
     stage: PathBuf,
@@ -769,11 +828,14 @@ async fn apply(ctx: &LibraryCtx, run: Run, hooks: &Hooks) -> Result<()> {
         )));
     }
     let mut r = Runner::new(ctx, run, hooks);
-    if r.is_move() {
-        move_rows(&mut r, Dir::Forward).await?;
+    let res = if r.is_move() {
+        move_rows(&mut r, Dir::Forward).await
     } else {
-        copy_rows(&mut r).await?;
-    }
+        copy_rows(&mut r).await
+    };
+    // Whatever happened, the watcher stops ignoring the paths (after the grace period).
+    r.release();
+    res?;
     r.send_progress(true);
     finish(&r, Dir::Forward).await
 }
@@ -834,6 +896,12 @@ async fn copy_rows(r: &mut Runner<'_>) -> Result<()> {
             r.row_finished();
             continue;
         }
+        let (root, d) = (r.target.clone(), dst.clone());
+        if blocking(move || Ok(symlinked_ancestor(&root, &d))).await? {
+            r.commit(&row, "skipped", Some(SYMLINK_NOTE), None).await?;
+            r.row_finished();
+            continue;
+        }
         let sha = r.sha_for(&row, &src).await?;
         let hook = r.hooks.after_copy.clone();
         let (s, d) = (src.clone(), dst.clone());
@@ -866,6 +934,8 @@ enum Step {
     Commit,
     /// It already sits under its staging name: commit `staged`.
     CommitStaged,
+    /// Staging was cut short between linking the staging name and dropping the old one.
+    DropSourceStaged,
     Stage,
     Direct,
     Refuse(&'static str),
@@ -920,6 +990,7 @@ async fn move_rows(r: &mut Runner<'_>, dir: Dir) -> Result<()> {
         let stage_rel = stage_name(row, &dst_rel, dir);
         Ok(Op {
             src: join_rel(&root, &src_rel)?,
+            src_rel: src_rel.clone(),
             dst: join_rel(&root, &dst_rel)?,
             stage: join_rel(&root, &stage_rel)?,
             dst_rel,
@@ -989,6 +1060,15 @@ async fn move_one(
     dir: Dir,
     waiting: &HashSet<(u64, u64)>,
 ) -> Result<bool> {
+    // An undo only moves a file the library still expects where the apply put it.
+    if dir == Dir::Back
+        && let Some(track) = row.track_id
+        && db::track_path(&r.ctx.pool, track).await?.as_deref() != Some(&op.src_rel)
+    {
+        let note = "could not undo: the track moved since the apply";
+        r.commit(row, "skipped", Some(note), None).await?;
+        return Ok(false);
+    }
     let case_only = op.src != op.dst && lower(&op.src) == lower(&op.dst);
     let known_sha = row.sha256.clone();
     // A stat; cheap enough to do here.
@@ -1008,6 +1088,9 @@ async fn move_one(
                 } else {
                     Step::Refuse("source file missing")
                 }
+            } else if started && exists(&stage) && (hard_link_pair(&src, &stage) || matches(&stage))
+            {
+                Step::DropSourceStaged
             } else if case_only {
                 Step::Stage
             } else if dst_ok {
@@ -1047,6 +1130,16 @@ async fn move_one(
                 .await?;
             Ok(true)
         }
+        Step::DropSourceStaged => {
+            r.hold(&[&op.src, &op.stage]);
+            let src = op.src.clone();
+            blocking(move || fs::remove_file(&src)).await?;
+            r.crash_point()?;
+            r.commit(row, staged_state, None, Some(&op.stage_rel))
+                .await?;
+            r.tidy(&op.src, &r.source.clone()).await;
+            Ok(true)
+        }
         Step::DropSource => {
             r.hold(&[&op.src, &op.dst]);
             let src = op.src.clone();
@@ -1074,6 +1167,11 @@ async fn move_one(
             };
             if !stage && r.track_conflict(row, &op.dst_rel).await? {
                 refuse(r, row, dir, "another track is recorded at the target").await?;
+                return Ok(false);
+            }
+            let (root, d) = (r.source.clone(), op.dst.clone());
+            if blocking(move || Ok(symlinked_ancestor(&root, &d))).await? {
+                refuse(r, row, dir, SYMLINK_NOTE).await?;
                 return Ok(false);
             }
             let sha = r.sha_for(row, &op.src).await?;
@@ -1130,12 +1228,10 @@ async fn place_staged(r: &mut Runner<'_>, row: &JournalRow, op: &Op, dir: Dir) -
         }
         return Ok(());
     }
-    if dst_ok || r.track_conflict(row, &op.dst_rel).await? {
-        // The target was taken after all. Leave the file under its staging name, recorded on
-        // the row and the track, so nothing is lost.
-        let note = format!("target exists; the file is parked at {}", op.stage_rel);
-        r.commit(row, &row.state, Some(&note), None).await?;
-        return Ok(());
+    let (root, d) = (r.source.clone(), op.dst.clone());
+    let symlinked = blocking(move || Ok(symlinked_ancestor(&root, &d))).await?;
+    if dst_ok || symlinked || r.track_conflict(row, &op.dst_rel).await? {
+        return park(r, row, op, dir).await;
     }
     r.hold(&[&op.stage, &op.dst]);
     let (s, d) = (op.stage.clone(), op.dst.clone());
@@ -1152,6 +1248,42 @@ async fn place_staged(r: &mut Runner<'_>, row: &JournalRow, op: &Op, dir: Dir) -
     r.commit(row, dir.done_state(), None, Some(&op.dst_rel))
         .await?;
     Ok(())
+}
+
+/// The target of a staged file was taken after all. The file goes back where it came from
+/// when that place is free, and the track with it. Otherwise it stays under its staging name
+/// (the row stays staged, the run ends failed, and scans do not flag the track missing).
+async fn park(r: &mut Runner<'_>, row: &JournalRow, op: &Op, dir: Dir) -> Result<()> {
+    // Back where it came from: the source of a forward row, the applied place of an undo.
+    let home = match dir {
+        Dir::Forward => true,
+        Dir::Back => op.src_rel == row.to_path,
+    };
+    let (root, src) = (r.source.clone(), op.src.clone());
+    let free = home
+        && blocking(move || Ok(!exists(&src) && !symlinked_ancestor(&root, &src))).await?
+        && !r.track_conflict(row, &op.src_rel).await?;
+    if free {
+        r.hold(&[&op.stage, &op.src]);
+        let (s, d) = (op.stage.clone(), op.src.clone());
+        let back = blocking_io(move || {
+            if let Some(parent) = d.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            place_no_replace(&s, &d)
+        })
+        .await?;
+        if back.is_ok() {
+            r.crash_point()?;
+            let (state, note) = match dir {
+                Dir::Forward => ("skipped", "target exists; the file was left where it was"),
+                Dir::Back => ("done", "could not undo: the original path is taken"),
+            };
+            return r.commit(row, state, Some(note), Some(&op.src_rel)).await;
+        }
+    }
+    let note = format!("target exists; the file is parked at {}", op.stage_rel);
+    r.commit(row, &row.state, Some(&note), None).await
 }
 
 /// Ends an apply or undo: `done` / `undone`, or `failed` when rows are left mid-way.
@@ -1194,6 +1326,8 @@ async fn finish(r: &Runner<'_>, dir: Dir) -> Result<()> {
             info!(run = %r.run.id, undone = count("undone"), left, "organizer undo finished");
         }
     }
+    // A safety net: anything the run could not account for is picked up by a scan.
+    jobs::enqueue_reconcile(&r.ctx.pool).await?;
     Ok(())
 }
 
@@ -1212,12 +1346,28 @@ async fn undo(ctx: &LibraryCtx, run: Run, hooks: &Hooks) -> Result<()> {
             "the library was switched to this copy; it cannot be undone".into(),
         ));
     }
-    let mut r = Runner::new(ctx, run, hooks);
-    if r.is_move() {
-        move_rows(&mut r, Dir::Back).await?;
-    } else {
-        uncopy_rows(&mut r).await?;
+    let current = ctx.root.get();
+    if run.mode == db::MODE_MOVE && current != Path::new(&run.source_root) {
+        return Err(OrganizeError::Invalid(format!(
+            "the library root changed since this run ({} -> {})",
+            run.source_root,
+            current.display()
+        )));
     }
+    let target = Path::new(&run.target_root);
+    if run.mode == db::MODE_COPY && (current.starts_with(target) || target.starts_with(&current)) {
+        return Err(OrganizeError::Invalid(
+            "the library uses this copy; it cannot be undone".into(),
+        ));
+    }
+    let mut r = Runner::new(ctx, run, hooks);
+    let res = if r.is_move() {
+        move_rows(&mut r, Dir::Back).await
+    } else {
+        uncopy_rows(&mut r).await
+    };
+    r.release();
+    res?;
     r.send_progress(true);
     finish(&r, Dir::Back).await
 }
@@ -1236,8 +1386,11 @@ async fn uncopy_rows(r: &mut Runner<'_>) -> Result<()> {
         r.checkpoint()?;
         let dst = join_rel(&r.target, &row.to_path)?;
         let sha = row.sha256.clone().unwrap_or_default();
-        let d = dst.clone();
+        let (d, root) = (dst.clone(), r.target.clone());
         let outcome = blocking(move || {
+            if symlinked_ancestor(&root, &d) {
+                return Ok("symlink");
+            }
             if !exists(&d) {
                 return Ok("gone");
             }
@@ -1265,6 +1418,7 @@ async fn uncopy_rows(r: &mut Runner<'_>) -> Result<()> {
                 r.commit(&row, "undone", Some("the copy was already gone"), None)
                     .await?
             }
+            "symlink" => r.commit(&row, "skipped", Some(SYMLINK_NOTE), None).await?,
             _ => r.commit(&row, "undone", None, None).await?,
         }
         let target = r.target.clone();
@@ -1331,6 +1485,39 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read(&a).unwrap(), b"one");
         assert_eq!(fs::read(&b).unwrap(), b"two");
+    }
+
+    #[test]
+    fn rename_noreplace_refuses_an_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b, c) = (
+            dir.path().join("a"),
+            dir.path().join("b"),
+            dir.path().join("c"),
+        );
+        fs::write(&a, b"one").unwrap();
+        fs::write(&b, b"two").unwrap();
+        if rename_noreplace(&a, &c).unwrap() {
+            assert_eq!(fs::read(&c).unwrap(), b"one");
+            let err = rename_noreplace(&c, &b).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(fs::read(&b).unwrap(), b"two");
+        }
+    }
+
+    #[test]
+    fn symlinked_ancestors_are_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("real/sub")).unwrap();
+        assert!(!symlinked_ancestor(root, &root.join("real/sub/x.flac")));
+        assert!(!symlinked_ancestor(root, &root.join("new/dir/x.flac")));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+            assert!(symlinked_ancestor(root, &root.join("link/sub/x.flac")));
+        }
+        assert!(symlinked_ancestor(root, Path::new("/elsewhere/x.flac")));
     }
 
     #[test]

@@ -34,10 +34,11 @@ CREATE TABLE organizer_journal (
     sha256      bytea,
     -- staged: parked under a temporary name in the target folder (swap cycles, case-only
     -- renames); failed: the copy did not verify, nothing was left at `to_path`; undo_staged:
-    -- the same on the way back during an undo.
+    -- the same on the way back during an undo; unchanged: already in place, listed so the
+    -- preview can show it, never touched.
     state       text NOT NULL DEFAULT 'planned'
-                CHECK (state IN ('planned', 'staged', 'done', 'skipped', 'failed', 'undo_staged',
-                                 'undone')),
+                CHECK (state IN ('planned', 'unchanged', 'staged', 'done', 'skipped', 'failed',
+                                 'undo_staged', 'undone')),
     note        text,
     collision   boolean NOT NULL DEFAULT false,
     -- Order in which rows reached `done`; undo walks it backwards.

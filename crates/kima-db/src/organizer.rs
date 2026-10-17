@@ -45,6 +45,22 @@ pub struct NewRow {
     pub from_path: String,
     pub to_path: String,
     pub collision: bool,
+    /// Already at its target: stored as `unchanged`, never applied.
+    pub unchanged: bool,
+}
+
+/// A journal row with what the preview shows about its track (all `None` for a sidecar or a
+/// track that is gone).
+#[derive(Debug, Clone, FromRow)]
+pub struct RowView {
+    #[sqlx(flatten)]
+    pub row: JournalRow,
+    pub album_id: Option<Uuid>,
+    pub album: Option<String>,
+    pub artist: Option<String>,
+    pub album_year: Option<i32>,
+    pub track_no: Option<i32>,
+    pub guessed: Option<sqlx::types::Json<crate::library::Guessed>>,
 }
 
 /// What a non-missing track contributes to path planning.
@@ -170,11 +186,15 @@ pub async fn replace_rows(pool: &PgPool, run_id: Uuid, rows: &[NewRow]) -> sqlx:
         let froms: Vec<&str> = chunk.iter().map(|r| r.from_path.as_str()).collect();
         let tos: Vec<&str> = chunk.iter().map(|r| r.to_path.as_str()).collect();
         let collisions: Vec<bool> = chunk.iter().map(|r| r.collision).collect();
+        let states: Vec<&str> = chunk
+            .iter()
+            .map(|r| if r.unchanged { "unchanged" } else { "planned" })
+            .collect();
         sqlx::query(
-            "INSERT INTO organizer_journal (run_id, track_id, from_path, to_path, collision)
-             SELECT $1, t, f, p, c
-             FROM UNNEST($2::uuid[], $3::text[], $4::text[], $5::bool[])
-                  WITH ORDINALITY AS u(t, f, p, c, n)
+            "INSERT INTO organizer_journal (run_id, track_id, from_path, to_path, collision, state)
+             SELECT $1, t, f, p, c, s
+             FROM UNNEST($2::uuid[], $3::text[], $4::text[], $5::bool[], $6::text[])
+                  WITH ORDINALITY AS u(t, f, p, c, s, n)
              ORDER BY n",
         )
         .bind(run_id)
@@ -182,23 +202,32 @@ pub async fn replace_rows(pool: &PgPool, run_id: Uuid, rows: &[NewRow]) -> sqlx:
         .bind(&froms)
         .bind(&tos)
         .bind(&collisions)
+        .bind(&states)
         .execute(&mut *tx)
         .await?;
     }
     tx.commit().await
 }
 
-/// One page of the journal, in plan order, plus the total row count.
+/// One page of the journal, in plan order, with track details, plus the total row count.
 pub async fn rows(
     pool: &PgPool,
     run_id: Uuid,
     offset: i64,
     limit: i64,
-) -> sqlx::Result<(Vec<JournalRow>, i64)> {
-    let rows = sqlx::query_as(&format!(
-        "SELECT {ROW_COLUMNS} FROM organizer_journal WHERE run_id = $1
-         ORDER BY id OFFSET $2 LIMIT $3"
-    ))
+) -> sqlx::Result<(Vec<RowView>, i64)> {
+    let rows = sqlx::query_as(
+        "SELECT j.id, j.run_id, j.track_id, j.from_path, j.to_path, j.sha256, j.state, j.note,
+                j.collision, j.applied_seq,
+                al.id AS album_id, al.title AS album, ar.name AS artist, al.year AS album_year,
+                t.track_no, t.guessed
+         FROM organizer_journal j
+         LEFT JOIN tracks t ON t.id = j.track_id
+         LEFT JOIN albums al ON al.id = t.album_id
+         LEFT JOIN artists ar ON ar.id = al.artist_id
+         WHERE j.run_id = $1
+         ORDER BY j.id OFFSET $2 LIMIT $3",
+    )
     .bind(run_id)
     .bind(offset)
     .bind(limit)
@@ -231,11 +260,14 @@ pub async fn state_counts(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Vec<(Stri
     .await
 }
 
-/// How many of the run's track rows are not `done`.
+/// How many present tracks (not flagged missing) have no `done` row in the run: tracks that
+/// were not copied, or arrived after the preview. Switching to the copy would lose them.
 pub async fn tracks_not_done(pool: &PgPool, run_id: Uuid) -> sqlx::Result<i64> {
     sqlx::query_scalar(
-        "SELECT count(*) FROM organizer_journal
-         WHERE run_id = $1 AND track_id IS NOT NULL AND state <> 'done'",
+        "SELECT count(*) FROM tracks t
+         WHERE t.missing_since IS NULL
+           AND NOT EXISTS (SELECT 1 FROM organizer_journal j
+                           WHERE j.run_id = $1 AND j.track_id = t.id AND j.state = 'done')",
     )
     .bind(run_id)
     .fetch_one(pool)
@@ -351,4 +383,15 @@ pub async fn switch_root(pool: &PgPool, run_id: Uuid, target_root: &str) -> sqlx
     crate::settings::set_library_root(&mut *tx, Some(target_root)).await?;
     tx.commit().await?;
     Ok(moved)
+}
+
+/// Track paths that are staging names of rows left parked mid-run (`staged`, `undo_staged`).
+/// The files are hidden, so a scan would not see them; it must not flag those tracks missing.
+pub async fn parked_paths(pool: &PgPool) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT t.path FROM organizer_journal j JOIN tracks t ON t.id = j.track_id
+         WHERE j.state IN ('staged', 'undo_staged')",
+    )
+    .fetch_all(pool)
+    .await
 }

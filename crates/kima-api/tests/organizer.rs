@@ -264,6 +264,13 @@ async fn copy_preview_apply_and_switch_root_over_http(pool: PgPool) {
         ]
     );
     assert!(!s.target.join("Alpha").exists(), "preview wrote files");
+    // Rows carry what the preview table groups and warns by.
+    let row = &body["rows"][0];
+    assert_eq!(row["album"], "First");
+    assert_eq!(row["artist"], "Alpha");
+    assert!(row["albumId"].is_string());
+    assert_eq!(row["guessed"], json!([]));
+    assert_eq!(row["state"], "planned");
     // Switching before the copy is done is refused.
     post(
         &s,
@@ -297,6 +304,24 @@ async fn copy_preview_apply_and_switch_root_over_http(pool: PgPool) {
     );
     assert!(s.root.join("Alpha/First/1-1 One.mp3").exists());
 
+    // A track that arrived after the preview has no copy: switching would lose it.
+    let late = seed(&pool, Seed::new("Late", "Comer", None, "New")).await;
+    let res = post(
+        &s,
+        &format!("/api/library/organizer/runs/{run}/switch-root"),
+        json!({}),
+    )
+    .await;
+    res.assert_status(StatusCode::CONFLICT);
+    res.assert_json(&json!({
+        "error": "Some tracks were not copied; switching would leave them missing"
+    }));
+    sqlx::query("DELETE FROM tracks WHERE id = $1")
+        .bind(late.track)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     let res = post(
         &s,
         &format!("/api/library/organizer/runs/{run}/switch-root"),
@@ -326,6 +351,40 @@ async fn copy_preview_apply_and_switch_root_over_http(pool: PgPool) {
         .await
         .json();
     assert_eq!(list["runs"][0]["id"], run);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn preview_rows_carry_attention_codes(pool: PgPool) {
+    let s = setup(pool.clone(), false).await;
+    let t = seed(
+        &pool,
+        Seed::new("Gamma", "Nameless", None, "Untitled").at(1, 0),
+    )
+    .await;
+    std::fs::create_dir_all(s.root.join("Gamma/Nameless")).unwrap();
+    std::fs::write(s.root.join("Gamma/Nameless/1-0 Untitled.mp3"), b"x").unwrap();
+    let res = post(
+        &s,
+        "/api/library/organizer/preview",
+        json!({"mode": "move"}),
+    )
+    .await;
+    let run = res.json::<Value>()["runId"].as_str().unwrap().to_string();
+    run_jobs(&s.ctx).await;
+    let body = get_run(&s, &run).await;
+    let row = body["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["trackId"] == json!(t.track))
+        .unwrap()
+        .clone();
+    assert_eq!(row["album"], "Nameless");
+    assert_eq!(row["albumId"], json!(t.album));
+    assert_eq!(
+        row["guessed"],
+        json!(["missingYear", "missingTrackNumbers"])
+    );
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -359,6 +418,20 @@ async fn move_apply_and_undo_over_http(pool: PgPool) {
     )
     .await
     .assert_status(StatusCode::CONFLICT);
+
+    // With the library root switched elsewhere, a move cannot be undone.
+    s.ctx.root.set(s.target.clone());
+    let res = post(
+        &s,
+        &format!("/api/library/organizer/runs/{run}/undo"),
+        json!({}),
+    )
+    .await;
+    res.assert_status(StatusCode::CONFLICT);
+    res.assert_json(&json!({
+        "error": "The library folder changed since this run; it cannot be undone"
+    }));
+    s.ctx.root.set(s.root.clone());
 
     post(
         &s,

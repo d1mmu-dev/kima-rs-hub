@@ -4,13 +4,17 @@
 //! Previews, applies, undos and root switches run as `library` jobs; these endpoints validate,
 //! move the run to its next state and queue the job.
 
+use std::collections::HashMap;
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use kima_db::organizer::{self as db, JournalRow, Run};
+use kima_db::attention;
+use kima_db::organizer::{self as db, RowView, Run};
 use kima_db::users;
 use kima_library::organize::apply::{self, Action};
 use serde::Deserialize;
@@ -66,7 +70,14 @@ fn run_json(r: &Run) -> Value {
     })
 }
 
-fn row_json(r: &JournalRow) -> Value {
+/// A journal row as the preview table shows it: paths, state, and for a track its album and
+/// the attention codes it raises by itself (`guessed`). Sidecars carry `null` album fields.
+fn row_json(v: &RowView) -> Value {
+    let r = &v.row;
+    let guessed: Vec<&str> = match (&v.guessed, v.track_no) {
+        (Some(g), Some(no)) => attention::track_codes(&g.0, v.album_year, no),
+        _ => Vec::new(),
+    };
     json!({
         "id": r.id,
         "trackId": r.track_id,
@@ -75,12 +86,41 @@ fn row_json(r: &JournalRow) -> Value {
         "state": r.state,
         "note": r.note,
         "collision": r.collision,
+        "albumId": v.album_id,
+        "album": v.album,
+        "artist": v.artist,
+        "guessed": guessed,
     })
 }
 
 /// `a` lies inside `b` or the other way round.
 fn overlaps(a: &FsPath, b: &FsPath) -> bool {
     a.starts_with(b) || b.starts_with(a)
+}
+
+/// How long a capabilities probe result is reused.
+const PROBE_TTL: Duration = Duration::from_secs(60);
+
+type ProbeCache = Mutex<HashMap<PathBuf, (Instant, bool)>>;
+
+/// Probe results per folder, so polling the capabilities does not write a probe file per call.
+static PROBES: LazyLock<ProbeCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+async fn cached(dir: PathBuf, probe: impl FnOnce(PathBuf) -> bool + Send + 'static) -> bool {
+    if let Ok(cache) = PROBES.lock()
+        && let Some((at, ok)) = cache.get(&dir)
+        && at.elapsed() < PROBE_TTL
+    {
+        return *ok;
+    }
+    let d = dir.clone();
+    let ok = tokio::task::spawn_blocking(move || probe(d))
+        .await
+        .unwrap_or(false);
+    if let Ok(mut cache) = PROBES.lock() {
+        cache.insert(dir, (Instant::now(), ok));
+    }
+    ok
 }
 
 async fn writable(dir: PathBuf) -> bool {
@@ -110,10 +150,18 @@ async fn capabilities(
     admin(&user)?;
     let root = state.library_root();
     let move_ok = match &root {
-        Some(r) => writable(r.clone()).await,
+        Some(r) => cached(r.clone(), |d| d.is_dir() && apply::writable(&d)).await,
         None => false,
     };
-    let copy_ok = root.is_some() && copy_target(&state).await.is_some();
+    let copy_ok = match (&root, &state.organize_target) {
+        (Some(_), Some(t)) => {
+            cached(t.clone(), |d| {
+                std::fs::create_dir_all(&d).is_ok() && apply::writable(&d)
+            })
+            .await
+        }
+        _ => false,
+    };
     Ok(Json(json!({
         "copyAvailable": copy_ok,
         "moveAvailable": move_ok,
@@ -261,8 +309,25 @@ async fn undo_run(
             "The library was switched to this copy; it cannot be undone",
         ));
     }
-    if run.mode == db::MODE_MOVE && !writable(PathBuf::from(&run.source_root)).await {
-        return Err(ApiError::Conflict(READ_ONLY));
+    let current = state.library_root();
+    match run.mode.as_str() {
+        db::MODE_MOVE => {
+            if current.as_deref() != Some(FsPath::new(&run.source_root)) {
+                return Err(ApiError::Conflict(
+                    "The library folder changed since this run; it cannot be undone",
+                ));
+            }
+            if !writable(PathBuf::from(&run.source_root)).await {
+                return Err(ApiError::Conflict(READ_ONLY));
+            }
+        }
+        _ => {
+            if current.is_some_and(|c| overlaps(&c, FsPath::new(&run.target_root))) {
+                return Err(ApiError::Conflict(
+                    "The library uses this copy; it cannot be undone",
+                ));
+            }
+        }
     }
     if !db::transition(&state.pool, run.id, &["done", "failed"], "undoing").await? {
         return Err(ApiError::Conflict("This run cannot be undone now"));

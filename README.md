@@ -38,10 +38,11 @@ without a full rescan; a file still being copied is read once it stops changing.
 reconcile also runs at startup.
 
 - `KIMA_WATCH_MODE=auto` (default) uses native file events and falls back to polling if they
-  fail. `poll` always polls, every `KIMA_WATCH_POLL_SECS` seconds (default `60`). `off` watches
-  nothing.
-- On Linux, native watching can hit the inotify limit on large libraries (the watcher status, `GET /api/library/watch-status`,
-  then names `fs.inotify.max_user_watches`). Raise it on the host, for example
+  fail. `poll` always polls, every `KIMA_WATCH_POLL_SECS` seconds (default `60`, must be
+  greater than 0). `off` watches nothing.
+- On Linux, native watching can hit the inotify limit on large libraries (the watcher status,
+  `GET /api/library/watch-status`, then
+  names `fs.inotify.max_user_watches`). Raise it on the host, for example
   `sudo sysctl fs.inotify.max_user_watches=524288`, or use `poll`. Network mounts (SMB/NFS)
   usually do not deliver events, so use `poll` there.
 - Files that disappear are flagged missing, not deleted, and are purged only after 7 days, so
@@ -49,8 +50,8 @@ reconcile also runs at startup.
 
 **Streaming.** `GET /api/library/tracks/:id/stream?quality=...` supports `original` (the file as
 is, with range requests for seeking), `high` (MP3 320 kbps), `medium` (MP3 192 kbps) and `low`
-(MP3 128 kbps). Transcodes need `ffmpeg` on the `PATH` (the Docker image does not bundle it yet, so only
-`original` works there until it does) and are cached under `KIMA_DATA_DIR/transcode`, up to
+(MP3 128 kbps). Transcodes need `ffmpeg` on the `PATH` (the Docker image does not bundle it
+yet, so only `original` works there until it does) and are cached under `KIMA_DATA_DIR/transcode`, up to
 `KIMA_TRANSCODE_CACHE_MB`.
 
 **Needs attention.** Settings > Library Tools > Needs attention (admin) lists albums whose
@@ -59,7 +60,7 @@ conflicting years, missing or duplicate track numbers.
 
 ### Organizer
 
-Settings > Library Tools > Organize (admin) previews and applies a clean layout:
+Settings > Library Tools > Organize library (admin) previews and applies a clean layout:
 `Album artist/Year - Album/NN - Title.ext` (multi-disc `D-NN`, compilations under
 `Various Artists`). Nothing is changed until you apply a previewed run, files are never
 overwritten, and every step is journaled in Postgres, so a run resumes after a crash.
@@ -130,7 +131,7 @@ New in kima-rs:
 | `KIMA_FRONTEND_DIR` | unset | Directory of the exported frontend. Unset means the server serves the API only. |
 | `KIMA_BIND_HOST` | `0.0.0.0` | Address to bind. |
 | `KIMA_WATCH_MODE` | `auto` | Library watching: `auto` (native events, fall back to polling), `poll` or `off`. |
-| `KIMA_WATCH_POLL_SECS` | `60` | Poll interval in seconds for `poll` mode and the `auto` fallback. |
+| `KIMA_WATCH_POLL_SECS` | `60` | Poll interval in seconds (must be > 0) for `poll` mode and the `auto` fallback. |
 | `KIMA_ORGANIZE_TARGET` | unset | Writable directory for the organizer's copy mode. Unset means copy mode is unavailable. |
 | `KIMA_TRANSCODE_CACHE_MB` | `2048` | Size cap of the transcode cache under `KIMA_DATA_DIR`, in MB. |
 

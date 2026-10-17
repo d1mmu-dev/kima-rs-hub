@@ -108,7 +108,7 @@ The builder ports those helpers and their unit tests.
   (remasters).
 - A track is identified by its file path. Rescans update rows in place by path; a file whose
   size and mtime are unchanged is skipped.
-- Files that disappear are marked missing, not deleted, so plays, likes and playlist entries
+- Files that disappear are marked missing, not deleted, so plays and playlist entries
   survive a temporarily unmounted drive. They are removed after a grace period (builder's call:
   keep the upstream behaviour if it has one, else 7 days).
 
@@ -192,11 +192,11 @@ It proposes a target path for every track, from the same fields the library view
      works with the default compose setup, which mounts `/music` read-only. When the copy is
      verified, the page offers **"Switch library to the organized copy"**. That re-points every
      copied track to its new path using the journal, and stores the new library root in system
-     settings (overriding `MUSIC_PATH`), so plays, likes and playlists carry over. The owner can
+     settings (overriding `MUSIC_PATH`), so plays and playlists carry over. The owner can
      unmount the old folder afterwards. The library has one root at a time.
    - **Move (opt-in).** Files are renamed in place inside `MUSIC_PATH`. This needs the mount
      to be writable, and the page says so plainly. After a move, kima updates track paths
-     directly (no full rescan needed), and plays/likes/playlists keep pointing at the same tracks.
+     directly (no full rescan needed), and plays/playlists keep pointing at the same tracks.
 3. **Journal and undo.** Every apply writes a journal (old path, new path, checksum) in
    Postgres (`organizer_runs`, `organizer_journal`; decided in Task 17, so the track path and the
    journal row change in one transaction; see D-069), not a file under `KIMA_DATA_DIR`. A move can be undone from the journal. A copy can be undone by deleting
@@ -239,7 +239,7 @@ minimum, from `frontend/lib/api.ts`:
 - streaming and cover-art endpoints
 - `/search` (library search only; the `discover` variants stay gated)
 - `/playlists…` (CRUD, items, move, hide; "pending" items belong to M7 imports and stay gated)
-- plays, likes, playback state
+- plays, playback state
 - user management, registration toggle, change password
 
 The builder confirms the exact list by reading which calls the M1 pages make, and gates
@@ -249,7 +249,7 @@ everything else via `/api/system/features` and the frontend nav (D-030).
 
 `artists`, `albums`, `tracks` (path, size, mtime, duration, codec, bitrate, disc/track numbers,
 year, title, the source of each guessed field, missing-since), `artwork` cache metadata, `plays`,
-`likes`, `playlists` and `playlist_items`, `playback_state`, `organizer_runs` and
+`playlists` and `playlist_items`, `playback_state`, `organizer_runs` and
 `organizer_journal`. tsvector columns with triggers and GIN indexes on artist/album/track, per
 the parent spec §3. Exact columns are the builder's call, following upstream's Prisma models
 where the frontend depends on a field.
@@ -277,7 +277,7 @@ where the frontend depends on a field.
 - **Moved files keep their history.** Each track stores a content fingerprint: size plus a hash
   of the first and last 64 KiB, which is cheap and needs no full-file read. When a scan finds a
   new path whose fingerprint matches a track marked missing, it re-points that track instead of
-  creating a new one. This covers external moves and crashes mid-move, and keeps plays, likes
+  creating a new one. This covers external moves and crashes mid-move, and keeps plays
   and playlists attached.
 - **Watcher updates, reconciles and organizer runs never overlap.** They share one
   single-concurrency job queue (`library`), so a single-file update waits while an organizer

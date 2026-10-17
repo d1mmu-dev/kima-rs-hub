@@ -44,6 +44,10 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::with_shutdown(pool.clone(), &secrets.session_secret, shutdown.clone())
         .with_data_dir(config.data_dir.clone())
         .with_library_root(library_root.clone())
+        .with_transcoder(kima_library::transcode::Transcoder::new(
+            config.data_dir.join("transcode"),
+            config.transcode_cache_mb * 1024 * 1024,
+        ))
         .with_library_services(kima_api::LibraryServices::new(config.watch_mode));
     let library_ctx = kima_library::scan::LibraryCtx {
         pool: pool.clone(),

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use kima_core::auth::JwtKeys;
 use kima_core::events::EventBus;
 use kima_db::PgPool;
+use kima_library::transcode::Transcoder;
 use kima_library::watch::{IgnoreSet, SharedStatus, WatchStatus};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -44,6 +45,8 @@ pub struct AppState {
     /// The music library root that track paths are relative to. `None` until configured.
     pub library_root: Option<PathBuf>,
     pub library: LibraryServices,
+    /// Cached mp3 transcodes for the stream endpoint. `None` serves every stream as the original.
+    pub transcoder: Option<Transcoder>,
 }
 
 impl AppState {
@@ -63,6 +66,7 @@ impl AppState {
             data_dir: None,
             library_root: None,
             library: LibraryServices::default(),
+            transcoder: None,
         }
     }
 
@@ -73,6 +77,11 @@ impl AppState {
 
     pub fn with_library_root(mut self, root: PathBuf) -> Self {
         self.library_root = Some(root);
+        self
+    }
+
+    pub fn with_transcoder(mut self, transcoder: Transcoder) -> Self {
+        self.transcoder = Some(transcoder);
         self
     }
 

@@ -4,6 +4,7 @@ pub mod auth;
 pub mod error;
 pub mod events;
 pub mod extract;
+pub mod range;
 mod routes;
 pub mod state;
 

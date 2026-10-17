@@ -101,72 +101,134 @@ fn all_digits(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
 }
 
-/// Artist name from a folder name: `Artist - Album (Year)` gives `Artist`; the scene format
-/// `Artist.Name-Album.Name-FLAC-2023` gives `Artist.Name` (as upstream: its dash rule wins over
-/// the scene rule, which only applies when the first part is too short). Port of `parseArtistFromPath`.
+const SPACED_SEPS: [&str; 3] = [" - ", " \u{2013} ", " \u{2014} "];
+const GENERIC_FOLDERS: [&str; 6] = ["music", "songs", "audio", "media", "downloads", "library"];
+
+/// Splits `Left - Right` on the earliest spaced separator (hyphen, en dash or em dash with a
+/// space on each side). A bare `-` as in `Jay-Z` never splits.
+fn split_spaced(s: &str) -> Option<(&str, &str)> {
+    SPACED_SEPS
+        .iter()
+        .filter_map(|sep| s.find(sep).map(|i| (i, sep.len())))
+        .min_by_key(|&(i, _)| i)
+        .map(|(i, len)| (s[..i].trim(), s[i + len..].trim()))
+}
+
+/// Artist name from a folder name. Only a spaced separator splits artist from album:
+/// `Artist - Album (Year)` gives `Artist`, while `Jay-Z` and `Re-Load` are left alone. The
+/// scene format (no spaces, at least two hyphens), `Artist.Name-Album.Name-2003-GRP`, gives
+/// `Artist Name`. Narrower than upstream's `parseArtistFromPath` (see D-042).
 pub fn parse_artist_from_path(folder: &str) -> Option<String> {
     let folder = folder.trim();
-    let (first, rest) = folder.split_once('-')?;
-    let artist = first.trim();
-    if !rest.is_empty() && artist.chars().count() >= 2 && !all_digits(artist) {
-        return Some(artist.to_string());
+    if let Some((artist, rest)) = split_spaced(folder) {
+        if artist.chars().count() >= 2 && !all_digits(artist) && !rest.is_empty() {
+            return Some(artist.to_string());
+        }
+        return None;
     }
-    // Scene format. (Upstream would accept an all-digit part here, returning "1997" for
-    // "1997-Album"; rejected, see DIVERGENCES.)
-    let artist = artist.replace('.', " ");
-    let artist = artist.trim();
-    let meta = ["flac", "mp3", "wav", "24bit", "web", "cd"];
-    if artist.chars().count() >= 2
-        && !all_digits(artist)
-        && !meta.contains(&artist.to_lowercase().as_str())
-    {
-        return Some(artist.to_string());
+    if !folder.contains(char::is_whitespace) && folder.matches('-').count() >= 2 {
+        let first = folder.split('-').next().unwrap_or("");
+        let artist = first.replace('.', " ");
+        let artist = artist.trim();
+        let meta = ["flac", "mp3", "wav", "24bit", "web", "cd"];
+        if artist.chars().count() >= 2
+            && !all_digits(artist)
+            && !meta.contains(&artist.to_lowercase().as_str())
+        {
+            return Some(artist.to_string());
+        }
     }
     None
 }
 
-fn path_parts(rel: &str) -> Vec<&str> {
-    rel.split(['/', '\\']).collect()
+/// The number of a disc subfolder such as `CD1`, `Disc 2`, `disk_3` (case-insensitive).
+fn disc_folder_number(folder: &str) -> Option<u32> {
+    let lower = folder.trim().to_lowercase();
+    let rest = ["disc", "disk", "cd"]
+        .iter()
+        .find_map(|p| lower.strip_prefix(p))?;
+    let digits = rest.trim_start_matches([' ', '_', '.', '-']);
+    if all_digits(digits) {
+        digits.parse().ok()
+    } else {
+        None
+    }
 }
 
-/// Artist from a relative path: the album folder name, then the grandparent folder, then an
-/// `Artist - Album - Track - Title` file name. Port of `extractArtistFromRelativePath`.
-pub fn extract_artist_from_relative_path(rel: &str) -> Option<String> {
-    let parts = path_parts(rel);
-    let n = parts.len();
-    if n < 2 {
-        return None;
+/// What the path says about a file, after skipping a disc subfolder.
+struct PathInfo<'a> {
+    /// The folder holding the album (None when the file's folder is the artist's, or at root).
+    album_folder: Option<&'a str>,
+    artist: Option<String>,
+    disc: Option<u32>,
+}
+
+fn analyze(rel: &str) -> PathInfo<'_> {
+    let mut parts: Vec<&str> = rel.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    let file = parts.pop().unwrap_or("");
+    let mut disc = None;
+    if let Some(n) = parts.last().and_then(|p| disc_folder_number(p)) {
+        disc = Some(n);
+        parts.pop();
     }
-    if let Some(a) = parse_artist_from_path(parts[n - 2]) {
-        return Some(a);
-    }
-    if n >= 3 {
-        let gp = parts[n - 3];
-        let generic = ["music", "songs", "audio", "media", "downloads", "library"];
-        if !gp.is_empty() && !generic.contains(&gp.to_lowercase().as_str()) {
-            return Some(gp.to_string());
-        }
-    }
-    let file = parts[n - 1];
+    let dirs = parts;
+    let generic = |f: &str| GENERIC_FOLDERS.contains(&f.to_lowercase().as_str());
     let base = file.rsplit_once('.').map_or(file, |(b, _)| b);
     let segs: Vec<&str> = base.split(" - ").collect();
-    if segs.len() >= 3 {
-        let a = segs[0].trim();
-        if a.chars().count() >= 2 && !all_digits(a) {
-            return Some(a.to_string());
-        }
+    let from_file = || {
+        let a = segs.first().map(|a| a.trim()).unwrap_or("");
+        (segs.len() >= 3 && a.chars().count() >= 2 && !all_digits(a)).then(|| a.to_string())
+    };
+    let album_folder = dirs.last().copied();
+    let folder_artist = album_folder.and_then(parse_artist_from_path);
+    let grand = (dirs.len() >= 2)
+        .then(|| dirs[dirs.len() - 2])
+        .filter(|g| !generic(g));
+    // The standard Artist/Album/track layout wins over a split of the album folder name.
+    if let Some(g) = grand {
+        return PathInfo {
+            album_folder,
+            artist: Some(g.to_string()),
+            disc,
+        };
     }
-    None
+    if let Some(a) = folder_artist.or_else(from_file) {
+        return PathInfo {
+            album_folder,
+            artist: Some(a),
+            disc,
+        };
+    }
+    // Artist/01.mp3: the only folder is the artist's.
+    if dirs.len() == 1 && album_folder.is_some_and(|f| !generic(f)) {
+        return PathInfo {
+            album_folder: None,
+            artist: album_folder.map(str::to_string),
+            disc,
+        };
+    }
+    PathInfo {
+        album_folder,
+        artist: None,
+        disc,
+    }
 }
 
-/// Album folder (the parent folder), or None at the root. Port of `extractAlbumFromRelativePath`.
+/// Artist from a relative path (either separator). Port of `extractArtistFromRelativePath`,
+/// with the narrowed dash rule and disc-folder skipping of D-042.
+pub fn extract_artist_from_relative_path(rel: &str) -> Option<String> {
+    analyze(rel).artist
+}
+
+/// Album folder (the parent folder, skipping a disc subfolder), or None at the root. Port of
+/// `extractAlbumFromRelativePath`.
 pub fn extract_album_from_relative_path(rel: &str) -> Option<String> {
-    let parts = path_parts(rel);
-    let n = parts.len();
-    if n < 2 || parts[n - 2].is_empty() {
-        return None;
+    let parts: Vec<&str> = rel.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    let mut dirs = &parts[..parts.len().saturating_sub(1)];
+    if dirs.last().is_some_and(|p| disc_folder_number(p).is_some()) {
+        dirs = &dirs[..dirs.len() - 1];
     }
-    Some(parts[n - 2].to_string())
+    dirs.last().map(|s| s.to_string())
 }
 
 fn four_digit_year(s: &str) -> Option<i32> {
@@ -179,8 +241,8 @@ fn four_digit_year(s: &str) -> Option<i32> {
 }
 
 /// Splits an album folder into (album title, year): `1997 - OK Computer`, `OK Computer (1997)`
-/// or `[1997]`. When the folder reads `Artist - Album`, the artist part is dropped.
-fn album_from_folder(folder: &str) -> (String, Option<i32>) {
+/// or `[1997]`. A leading `Artist - ` is dropped only when it names one of `artist_keys`.
+fn album_from_folder(folder: &str, artist_keys: &[String]) -> (String, Option<i32>) {
     let mut name = folder.trim();
     let mut year = None;
     let mut had_prefix = false;
@@ -190,7 +252,7 @@ fn album_from_folder(folder: &str) -> (String, Option<i32>) {
         && let Some(y) = four_digit_year(&name[..4])
     {
         let rest = name[4..].trim_start();
-        let stripped = rest.trim_start_matches(['-', '\u{2013}', '.', '_']);
+        let stripped = rest.trim_start_matches(['-', '\u{2013}', '\u{2014}', '.', '_']);
         if stripped.len() < rest.len() && !stripped.trim().is_empty() {
             year = Some(y);
             name = stripped.trim();
@@ -210,13 +272,13 @@ fn album_from_folder(folder: &str) -> (String, Option<i32>) {
             }
         }
     }
-    // "Artist - Album" folders: the artist part is not the album.
+    // "Artist - Album" folders: drop the artist part, but only if it is the resolved artist.
     if !had_prefix
-        && let Some((artist, album)) = name.split_once(" - ")
-        && parse_artist_from_path(name).as_deref() == Some(artist.trim())
-        && !album.trim().is_empty()
+        && let Some((artist, album)) = split_spaced(name)
+        && !album.is_empty()
+        && artist_keys.contains(&crate::names::key(artist))
     {
-        name = album.trim();
+        name = album;
     }
     (name.to_string(), year)
 }
@@ -228,9 +290,18 @@ fn number_len(s: &str) -> usize {
 }
 
 /// Disc and track numbers from a file stem, plus the title left after them.
-/// `03 - Title` is (None, 3, "Title"); `1-03 Title` is (Some(1), 3, "Title").
+/// `03 - Title` is (None, 3, "Title"); `1-03 Title` is (Some(1), 3, "Title"); `Track 03` is
+/// (None, 3, "Track 03").
 fn number_from_stem(stem: &str) -> (Option<u32>, Option<u32>, String) {
     let seps: &[char] = &[' ', '.', '-', '_', ')'];
+    if let Some(head) = stem.get(..5)
+        && head.eq_ignore_ascii_case("track")
+    {
+        let digits = stem[5..].trim_start_matches([' ', '_']);
+        if number_len(digits) > 0 && number_len(digits) == digits.len() {
+            return (None, digits.parse().ok(), stem.to_string());
+        }
+    }
     let n1 = number_len(stem);
     if n1 == 0 {
         return (None, None, stem.to_string());
@@ -258,6 +329,7 @@ fn number_from_stem(stem: &str) -> (Option<u32>, Option<u32>, String) {
 pub fn resolve(raw: &RawTags, rel_path: &Path) -> Resolved {
     let rel = rel_path.to_string_lossy().replace('\\', "/");
     let mut g = Guessed::default();
+    let info = analyze(&rel);
 
     let tag_credit = |s: &Option<String>| {
         s.as_deref()
@@ -266,7 +338,7 @@ pub fn resolve(raw: &RawTags, rel_path: &Path) -> Resolved {
     };
     let mut album_artist = tag_credit(&raw.album_artist).or_else(|| tag_credit(&raw.artist));
     if album_artist.is_none()
-        && let Some(a) = extract_artist_from_relative_path(&rel)
+        && let Some(a) = info.artist.clone()
     {
         g.artist_from_path = true;
         album_artist = Some(a);
@@ -281,6 +353,7 @@ pub fn resolve(raw: &RawTags, rel_path: &Path) -> Resolved {
         .map(|a| canonical_various(a).unwrap_or(a).to_string())
         .unwrap_or_else(|| album_artist.clone());
 
+    let artist_keys = [crate::names::key(&album_artist)];
     let is_compilation = raw.compilation || canonical_various(&album_artist).is_some();
     let album_artist = if is_compilation {
         VARIOUS_ARTISTS.to_string()
@@ -288,7 +361,9 @@ pub fn resolve(raw: &RawTags, rel_path: &Path) -> Resolved {
         album_artist
     };
 
-    let folder_parts = extract_album_from_relative_path(&rel).map(|f| album_from_folder(&f));
+    let folder_parts = info
+        .album_folder
+        .map(|f| album_from_folder(f, &artist_keys));
     let album = match raw.album.as_deref() {
         Some(a) => a.to_string(),
         None => match folder_parts.as_ref().filter(|(a, _)| !a.is_empty()) {
@@ -328,7 +403,16 @@ pub fn resolve(raw: &RawTags, rel_path: &Path) -> Resolved {
             None => 0,
         },
     };
-    let disc = raw.disc.filter(|&d| d > 0).or(name_disc).unwrap_or(0);
+    let disc = match raw.disc.filter(|&d| d > 0) {
+        Some(d) => d,
+        None => match name_disc.or(info.disc) {
+            Some(d) => {
+                g.track_from_name = true;
+                d
+            }
+            None => 0,
+        },
+    };
 
     Resolved {
         album_artist,
@@ -371,7 +455,7 @@ mod tests {
         assert_eq!(parse_artist_from_path("Unknown"), None);
         assert_eq!(
             parse_artist_from_path("Artist.Name-Album.Name-24BIT-FLAC-2023-GROUP").as_deref(),
-            Some("Artist.Name")
+            Some("Artist Name")
         );
     }
 
@@ -463,6 +547,127 @@ mod tests {
         }
         assert_eq!(parse_credit("", None).primary, "");
         assert!(parse_credit("", None).featured.is_empty());
+    }
+
+    // --- narrowed dash rule, disc folders, numbering (fix round 1) ---
+
+    fn aa(p: &str) -> (String, String) {
+        let x = res(&raw(), p);
+        (x.album_artist, x.album)
+    }
+
+    #[test]
+    fn hyphenated_names_are_not_split() {
+        assert_eq!(
+            aa("Sleater-Kinney/Dig Me Out/01.mp3"),
+            ("Sleater-Kinney".into(), "Dig Me Out".into())
+        );
+        assert_eq!(aa("Sleater-Kinney/01.mp3").0, "Sleater-Kinney");
+        assert_eq!(aa("AC-DC/Back in Black/01.mp3").0, "AC-DC");
+        assert_eq!(aa("Jay-Z/01.mp3").0, "Jay-Z");
+        assert_eq!(
+            aa("Metallica/Re-Load/01.mp3"),
+            ("Metallica".into(), "Re-Load".into())
+        );
+        assert_eq!(
+            aa("Artist/Half-Life/01.mp3"),
+            ("Artist".into(), "Half-Life".into())
+        );
+        assert_eq!(
+            aa("Radiohead/Kid A - Special Edition/01.mp3"),
+            ("Radiohead".into(), "Kid A - Special Edition".into())
+        );
+    }
+
+    #[test]
+    fn spaced_separator_folder_with_year() {
+        let x = res(&raw(), "Jay-Z - Reasonable Doubt (1996)/01.mp3");
+        assert_eq!(x.album_artist, "Jay-Z");
+        assert_eq!(x.album, "Reasonable Doubt");
+        assert_eq!(x.year, Some(1996));
+        let x = res(&raw(), "Tool \u{2013} Lateralus/01.mp3");
+        assert_eq!(
+            (x.album_artist.as_str(), x.album.as_str()),
+            ("Tool", "Lateralus")
+        );
+    }
+
+    #[test]
+    fn album_prefix_only_stripped_when_it_is_the_artist() {
+        let r = RawTags {
+            artist: Some("Someone Else".into()),
+            ..raw()
+        };
+        let x = res(&r, "Radiohead - OK Computer/01.mp3");
+        assert_eq!(x.album, "Radiohead - OK Computer");
+        let r = RawTags {
+            artist: Some("radiohead".into()),
+            ..raw()
+        };
+        assert_eq!(
+            res(&r, "Radiohead - OK Computer/01.mp3").album,
+            "OK Computer"
+        );
+    }
+
+    #[test]
+    fn scene_folder_case_kept() {
+        let x = res(&raw(), "Artist.Name-Album.Name-24BIT-FLAC-2023-GRP/01.mp3");
+        assert_eq!(x.album_artist, "Artist Name");
+    }
+
+    #[test]
+    fn disc_subfolders() {
+        let x = res(&raw(), "Artist/Album/Disc 2/05.mp3");
+        assert_eq!(
+            (x.album_artist.as_str(), x.album.as_str()),
+            ("Artist", "Album")
+        );
+        assert_eq!((x.disc, x.track), (2, 5));
+        assert!(x.guessed.track_from_name);
+        let x = res(&raw(), "Artist/Album/CD1/01.mp3");
+        assert_eq!(
+            (x.album_artist.as_str(), x.album.as_str()),
+            ("Artist", "Album")
+        );
+        assert_eq!(x.disc, 1);
+        let x = res(&raw(), "Artist/Album/disc_3/01.mp3");
+        assert_eq!(x.disc, 3);
+        let x = res(&raw(), "Artist/CD1/01.mp3");
+        assert_eq!(x.album_artist, "Artist");
+        assert_eq!(x.album, "Unknown Album");
+        assert!(x.guessed.unknown_album);
+        // A disc tag beats the folder.
+        let r = RawTags {
+            disc: Some(4),
+            ..raw()
+        };
+        assert_eq!(res(&r, "Artist/Album/CD1/01.mp3").disc, 4);
+        // Not a disc folder.
+        assert_eq!(res(&raw(), "Artist/Discovery/01.mp3").album, "Discovery");
+    }
+
+    #[test]
+    fn depth_two_folder_is_artist() {
+        let x = res(&raw(), "Artist/01.mp3");
+        assert_eq!(x.album_artist, "Artist");
+        assert_eq!(x.album, "Unknown Album");
+        assert!(x.guessed.artist_from_path && x.guessed.unknown_album);
+    }
+
+    #[test]
+    fn track_number_edge_cases() {
+        let x = res(&raw(), "A/B/103 Title.mp3");
+        assert_eq!((x.disc, x.track), (0, 103));
+        assert_eq!(x.title, "Title");
+        let x = res(&raw(), "A/B/Track 03.mp3");
+        assert_eq!(x.track, 3);
+        assert_eq!(x.title, "Track 03");
+        let x = res(&raw(), "A/B/Track03.mp3");
+        assert_eq!(x.track, 3);
+        assert_eq!(x.title, "Track03");
+        let x = res(&raw(), "A/B/Tracking Down.mp3");
+        assert_eq!(x.track, 0);
     }
 
     // --- spec cases ---

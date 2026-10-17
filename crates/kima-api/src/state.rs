@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use kima_core::auth::JwtKeys;
 use kima_core::cipher::Cipher;
@@ -12,6 +13,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::events::SseRegistry;
+use crate::login_limit::LoginLimiter;
 
 /// Library machinery the HTTP side shares with background tasks. Grows with later tasks (a
 /// transcoder in Task 13, the organizer's use of the ignore set in Task 17).
@@ -54,6 +56,10 @@ pub struct AppState {
     pub transcoder: Option<Transcoder>,
     /// Encrypts secrets stored in the database. Random per process unless `with_cipher` is used.
     pub cipher: Arc<Cipher>,
+    /// Failed password sign-ins, per (client IP, username).
+    pub login_limit: Arc<LoginLimiter>,
+    /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
+    password_permits: Arc<AtomicU64>,
 }
 
 impl AppState {
@@ -76,6 +82,8 @@ impl AppState {
             library: LibraryServices::default(),
             transcoder: None,
             cipher: Arc::new(Cipher::random()),
+            login_limit: Arc::new(LoginLimiter::new()),
+            password_permits: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -124,6 +132,12 @@ impl AppState {
     /// `spawn_blocking` closure: held by the handler, it would be freed when a client hangs
     /// up while the blocking work keeps running.
     pub async fn password_permit(&self) -> anyhow::Result<OwnedSemaphorePermit> {
+        self.password_permits.fetch_add(1, Ordering::Relaxed);
         Ok(self.password_work.clone().acquire_owned().await?)
+    }
+
+    /// How many password permits have been requested so far.
+    pub fn password_permits_issued(&self) -> u64 {
+        self.password_permits.load(Ordering::Relaxed)
     }
 }

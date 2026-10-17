@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -9,7 +11,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use super::onboarding::Credentials;
-use crate::auth::{AdminUser, AuthUser};
+use crate::auth::{AdminUser, AuthUser, ClientIp};
 use crate::error::ApiError;
 use crate::extract::ApiJson;
 use crate::revoke_sessions;
@@ -30,6 +32,7 @@ pub fn routes() -> Router<AppState> {
 
 async fn login(
     State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
     ApiJson(body): ApiJson<Credentials>,
 ) -> Result<Json<Value>, ApiError> {
     let username = body.username.trim().to_string();
@@ -37,6 +40,13 @@ async fn login(
         return Err(ApiError::Invalid(
             "Username and password are required".into(),
         ));
+    }
+
+    // Before any lookup or hashing, so a blocked guess costs nothing.
+    if let Err(blocked) = state.login_limit.check(ip, &username, Instant::now()) {
+        return Err(ApiError::RateLimited {
+            retry_after_secs: blocked.retry_after_secs(),
+        });
     }
 
     let found = users::find_by_username(&state.pool, &username).await?;
@@ -58,8 +68,12 @@ async fn login(
     .map_err(anyhow::Error::from)?;
 
     let Some(user) = found.filter(|_| valid) else {
+        state
+            .login_limit
+            .record_failure(ip, &username, Instant::now());
         return Err(ApiError::Unauthorized("Invalid credentials"));
     };
+    state.login_limit.record_success(ip, &username);
     Ok(Json(json!({
         "token": state.jwt.issue_access(user.id, &user.username, &user.role, user.token_version),
         "refreshToken": state.jwt.issue_refresh(user.id, user.token_version),

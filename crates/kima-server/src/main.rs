@@ -86,13 +86,16 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding {}", config.bind_addr))?;
     info!(addr = %config.bind_addr, frontend = ?config.frontend_dir, "kima listening");
     let signalled = shutdown.clone();
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            // Ends SSE streams and anything else holding a connection open.
-            signalled.cancel();
-        })
-        .into_future();
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        // Ends SSE streams and anything else holding a connection open.
+        signalled.cancel();
+    })
+    .into_future();
     tokio::pin!(server);
     let served = tokio::select! {
         res = &mut server => res,

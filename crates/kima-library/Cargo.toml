@@ -10,9 +10,7 @@ kima-db.workspace = true
 image.workspace = true
 lofty.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 unicode-normalization.workspace = true
 walkdir.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

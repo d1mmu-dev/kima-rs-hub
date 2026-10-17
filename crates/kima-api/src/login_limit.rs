@@ -35,6 +35,17 @@ struct Entry {
     blocked_until: Option<Instant>,
 }
 
+impl Entry {
+    /// Idle for `FORGET_AFTER`, counted from the later of the last failure and the end of the
+    /// block, so a maximum block is always served in full before the count can restart.
+    fn forgotten(&self, now: Instant) -> bool {
+        let since = self
+            .blocked_until
+            .map_or(self.last_failure, |until| until.max(self.last_failure));
+        now.saturating_duration_since(since) >= FORGET_AFTER
+    }
+}
+
 type Key = (IpAddr, String);
 
 pub struct LoginLimiter {
@@ -77,7 +88,7 @@ impl LoginLimiter {
         let Some(entry) = entries.get(&key) else {
             return Ok(());
         };
-        if now.saturating_duration_since(entry.last_failure) >= FORGET_AFTER {
+        if entry.forgotten(now) {
             entries.remove(&key);
             return Ok(());
         }
@@ -100,7 +111,7 @@ impl LoginLimiter {
         let key = Self::key(ip, username);
         let mut entries = self.lock();
         if let Some(entry) = entries.get(&key) {
-            if now.saturating_duration_since(entry.last_failure) >= FORGET_AFTER {
+            if entry.forgotten(now) {
                 entries.remove(&key);
             } else if let Some(until) = entry.blocked_until
                 && until > now
@@ -198,7 +209,7 @@ mod tests {
     #[test]
     fn backoff_doubles_and_caps() {
         let now = Instant::now();
-        for (failures, expected) in [(5, 2), (6, 4), (7, 8), (13, 512), (14, 900)] {
+        for (failures, expected) in [(5, 2), (6, 4), (7, 8), (13, 512), (14, 900), (40, 900)] {
             let limiter = LoginLimiter::new();
             let last = fail(&limiter, "alice", failures, now);
             assert_eq!(
@@ -240,6 +251,34 @@ mod tests {
     }
 
     #[test]
+    fn cap_holds_when_retried_right_after_the_block() {
+        let (limiter, now) = (LoginLimiter::new(), Instant::now());
+        let last = fail(&limiter, "alice", 14, now);
+        assert_eq!(secs(&limiter, "alice", last), Some(900));
+        // Retrying the instant the block ends: not reset, and the next block is the cap again.
+        let retry = last + MAX_BLOCK;
+        assert!(limiter.check(IP, "alice", retry).is_ok());
+        drop(limiter.begin(IP, "alice", retry).unwrap());
+        assert_eq!(secs(&limiter, "alice", retry), Some(900));
+        // Forgotten only 900 s after the block ends.
+        assert!(
+            limiter
+                .check(IP, "alice", retry + MAX_BLOCK + FORGET_AFTER)
+                .is_ok()
+        );
+        drop(
+            limiter
+                .begin(IP, "alice", retry + MAX_BLOCK + FORGET_AFTER)
+                .unwrap(),
+        );
+        assert!(
+            limiter
+                .check(IP, "alice", retry + MAX_BLOCK + FORGET_AFTER)
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn success_clears() {
         let (limiter, now) = (LoginLimiter::new(), Instant::now());
         fail(&limiter, "alice", 4, now);
@@ -269,7 +308,7 @@ mod tests {
     fn idle_key_forgotten() {
         let (limiter, now) = (LoginLimiter::new(), Instant::now());
         fail(&limiter, "alice", 5, now);
-        let later = now + Duration::from_secs(901);
+        let later = now + Duration::from_secs(903);
         assert!(limiter.check(IP, "alice", later).is_ok());
         drop(limiter.begin(IP, "alice", later).unwrap());
         assert!(limiter.check(IP, "alice", later).is_ok(), "count restarted");

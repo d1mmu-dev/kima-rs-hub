@@ -138,3 +138,27 @@ async fn differently_cased_usernames_share_a_key(pool: PgPool) {
             .assert_status(axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
 }
+
+/// Postgres folds `ΑΣ` to `ασ`, while Rust (final sigma) folds it to `ας`, so the request spelling
+/// `ασ` finds the account but has a different Rust key. A block on the stored name's key must
+/// answer like a wrong password, not 429, or it would reveal that the account exists.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn blocked_stored_name_key_answers_401_after_hashing(pool: PgPool) {
+    let state = common::state(pool);
+    common::user_with_token(&state, "ΑΣ").await;
+    let server = server_from(&state, [10, 0, 0, 1]);
+    for _ in 0..5 {
+        login_as(&server, "ΑΣ", "wrong-password")
+            .await
+            .assert_status_unauthorized();
+    }
+    let before = state.password_permits_issued();
+    login_as(&server, "ασ", "password1")
+        .await
+        .assert_status_unauthorized();
+    assert_eq!(
+        state.password_permits_issued(),
+        before + 1,
+        "hashed like a wrong password"
+    );
+}

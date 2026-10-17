@@ -5,8 +5,15 @@ import { usePathname } from "@/lib/use-pathname";
 import { Library, Sparkles, BookOpen, Mic, ListMusic } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useIsMobile, useIsTablet } from "@/hooks/useMediaQuery";
+import { useFeatures, type SectionFlag } from "@/lib/features-context";
 
-const navigationItems = [
+const navigationItems: Array<{
+    name: string;
+    href: string;
+    icon: typeof Library;
+    matchPattern: string;
+    feature?: SectionFlag;
+}> = [
     {
         name: "Collection",
         href: "/collection",
@@ -23,13 +30,15 @@ const navigationItems = [
         name: "Audiobooks",
         href: "/audiobooks",
         icon: BookOpen,
-        matchPattern: "/audiobooks"
+        matchPattern: "/audiobooks",
+        feature: "audiobooks" as const,
     },
     {
         name: "Podcasts",
         href: "/podcasts",
         icon: Mic,
-        matchPattern: "/podcasts"
+        matchPattern: "/podcasts",
+        feature: "podcasts" as const,
     },
     {
         name: "Playlists",
@@ -41,6 +50,7 @@ const navigationItems = [
 
 export function BottomNavigation() {
     const pathname = usePathname();
+    const features = useFeatures();
     const isMobile = useIsMobile();
     const isTablet = useIsTablet();
     const isMobileOrTablet = isMobile || isTablet;
@@ -57,7 +67,7 @@ export function BottomNavigation() {
             }}
         >
             <div className="flex items-center justify-around" style={{ height: "var(--nav-h)" }}>
-                {navigationItems.map((item) => {
+                {navigationItems.filter((item) => !item.feature || features[item.feature]).map((item) => {
                     const isActive = pathname.startsWith(item.matchPattern);
                     const Icon = item.icon;
 

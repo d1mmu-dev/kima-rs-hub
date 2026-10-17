@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth-context";
 import { searchResultStore } from "@/lib/search-result-store";
 import { api, getApiBaseUrl } from "@/lib/api";
+import { applyLibraryProgress } from "@/features/organizer/progress";
 
 /** In proxy mode this is "", so events go through the streaming route in app/api/events. */
 function getSSEBaseUrl(): string {
@@ -74,6 +75,9 @@ export function useEventSource() {
                             if (data.searchId) {
                                 searchResultStore.complete(data.searchId);
                             }
+                            break;
+                        case "library:progress":
+                            applyLibraryProgress(queryClient, data);
                             break;
                         case "scan:progress":
                             queryClient.setQueryData(

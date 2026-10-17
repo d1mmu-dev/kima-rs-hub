@@ -15,10 +15,12 @@ import { AudiobooksGrid } from "@/features/home/components/AudiobooksGrid";
 import { FeaturedPlaylistsGrid, FeaturedPlaylistsSkeleton } from "@/features/home/components/FeaturedPlaylistsGrid";
 import { LibraryRadioStations } from "@/features/home/components/LibraryRadioStations";
 import { Button } from "@/components/ui/Button";
+import { useFeatures } from "@/lib/features-context";
 
 const MoodMixer = lazy(() => import("@/components/MoodMixer").then(mod => ({ default: mod.MoodMixer })));
 
 export default function HomePage() {
+    const features = useFeatures();
     const [showMoodMixer, setShowMoodMixer] = useState(false);
     const {
         recentlyListened,
@@ -49,7 +51,7 @@ export default function HomePage() {
                     items 9+ render immediately. Animation is mount-only (CSS animation-fill-mode: both). */}
                 {(() => {
                     const sections: Array<{ key: string; visible: boolean; content: React.ReactNode }> = [
-                        { key: "library-radio", visible: true, content: (
+                        { key: "library-radio", visible: features.mixes, content: (
                             <section data-tv-section="library-radio">
                                 <SectionHeader title="Library Radio" showAllHref="/radio" type="featured" />
                                 <LibraryRadioStations />

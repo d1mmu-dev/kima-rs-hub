@@ -236,6 +236,33 @@ async fn status_with_a_bad_token_falls_back_to_the_basic_answer(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn features_m1_flags(pool: PgPool) {
+    let server = common::server(pool);
+    let body: Value = register(&server, "ana", "secret1").await.json();
+    let token = body["token"].as_str().unwrap();
+    server.get("/api/system/features").authorization_bearer(token).await.assert_json(&json!({
+        "musicCNN": false, "vibeEmbeddings": false, "audiobookshelfEnabled": false, "fpcalc": false,
+        "library": true, "podcasts": false, "audiobooks": false, "discover": false,
+        "mixes": false, "downloads": false, "imports": false
+    }));
+    let stub: Value = server
+        .get("/api/notifications/downloads/active")
+        .authorization_bearer(token)
+        .await
+        .json();
+    assert_eq!(stub, json!([]));
+    server
+        .get("/api/discover/batch-status")
+        .authorization_bearer(token)
+        .await
+        .assert_json(&json!({ "active": false, "status": null }));
+    server
+        .get("/api/discover/batch-status")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn logout_and_features(pool: PgPool) {
     let server = common::server(pool);
     server
@@ -249,7 +276,9 @@ async fn logout_and_features(pool: PgPool) {
         .get("/api/system/features")
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
-    server.get("/api/system/features").authorization_bearer(token).await.assert_json(&json!({
-        "musicCNN": false, "vibeEmbeddings": false, "audiobookshelfEnabled": false, "fpcalc": false
-    }));
+    server
+        .get("/api/system/features")
+        .authorization_bearer(token)
+        .await
+        .assert_status_ok();
 }

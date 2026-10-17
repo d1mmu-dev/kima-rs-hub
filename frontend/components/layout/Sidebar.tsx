@@ -19,11 +19,11 @@ import { Button } from "@/components/ui/Button";
 const allNavigation = [
     { name: "Collection", href: "/collection", feature: null },
     { name: "Queue", href: "/queue", feature: null },
-    { name: "Radio", href: "/radio", feature: null },
-    { name: "Discovery", href: "/discover", feature: null },
+    { name: "Radio", href: "/radio", feature: "mixes" as const },
+    { name: "Discovery", href: "/discover", feature: "discover" as const },
     { name: "Vibe", href: "/vibe", feature: null },
-    { name: "Audiobooks", href: "/audiobooks", feature: "audiobookshelfEnabled" as const },
-    { name: "Podcasts", href: "/podcasts", feature: null },
+    { name: "Audiobooks", href: "/audiobooks", feature: "audiobooks" as const },
+    { name: "Podcasts", href: "/podcasts", feature: "podcasts" as const },
     { name: "Browse", href: "/browse/playlists", feature: null },
     { name: "Stats", href: "/stats", feature: null },
 ];
@@ -44,7 +44,7 @@ function SidebarInner() {
     const router = useRouter();
     const queryClient = useQueryClient();
     const { isAuthenticated } = useAuth();
-    const { audiobookshelfEnabled } = useFeatures();
+    const features = useFeatures();
     const isMobile = useIsMobile();
     const isTablet = useIsTablet();
     const isMobileOrTablet = isMobile || isTablet;
@@ -145,7 +145,7 @@ function SidebarInner() {
                 </div>
                 <div className="space-y-0.5">
                     {allNavigation.filter((item) =>
-                        item.feature === null || (item.feature === "audiobookshelfEnabled" && audiobookshelfEnabled)
+                        item.feature === null || features[item.feature]
                     ).map((item, index) => {
                         const isActive = pathname === item.href;
 

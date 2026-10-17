@@ -29,6 +29,7 @@ import { CacheSection } from "@/features/settings/components/sections/CacheSecti
 import { UserManagementSection } from "@/features/settings/components/sections/UserManagementSection";
 import { CorruptTracksSection } from "@/features/settings/components/sections/CorruptTracksSection";
 import { Button } from "@/components/ui/Button";
+import { LibraryToolsSection } from "@/features/settings/components/sections/LibraryToolsSection";
 
 const sidebarItems: SidebarItem[] = [
     { id: "account", label: "Account" },
@@ -44,6 +45,7 @@ const sidebarItems: SidebarItem[] = [
     { id: "cache", label: "Library Enrichment", adminOnly: true },
     { id: "corrupt-tracks", label: "Corrupt Tracks", adminOnly: true },
     { id: "users", label: "Users", adminOnly: true },
+    { id: "library-tools", label: "Library Tools", adminOnly: true },
 ];
 
 export default function SettingsPage() {
@@ -271,6 +273,8 @@ export default function SettingsPage() {
                         <CorruptTracksSection />
 
                         <UserManagementSection />
+
+                        <LibraryToolsSection />
                     </>
                 )}
             </div>

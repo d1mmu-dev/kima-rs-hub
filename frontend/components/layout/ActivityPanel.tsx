@@ -16,6 +16,7 @@ import {
     type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { useFeatures } from "@/lib/features-context";
 import { useIsMobile, useIsTablet } from "@/hooks/useMediaQuery";
 import { useActivityPanelSettings } from "@/lib/activity-panel-settings-context";
 import { useActivityPanelOpen } from "@/hooks/useActivityPanel";
@@ -49,6 +50,10 @@ export function ActivityPanel({
     const setResolvedActiveTab = onTabChange ?? setInternalActiveTab;
     const { unreadCount } = useNotifications();
     const { downloads: activeDownloads } = useActiveDownloads();
+    const features = useFeatures();
+    const tabs = TABS.filter(
+        (t) => (t.id !== "active" && t.id !== "history") || features.downloads,
+    ).filter((t) => t.id !== "imports" || features.imports);
 
     const handleTabClick = useCallback((tab: ActivityTab) => {
         if (tab !== "settings" && resolvedActiveTab === "settings" && settingsContent) {
@@ -98,7 +103,7 @@ export function ActivityPanel({
                 </div>
 
                 <div className="flex border-b border-white/10">
-                    {TABS.map((tab) => {
+                    {tabs.map((tab) => {
                         const Icon = tab.icon;
                         const badge =
                             tab.id === "notifications"

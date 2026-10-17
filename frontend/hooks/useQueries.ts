@@ -172,8 +172,9 @@ export function useLibraryTracksQuery({
     });
 }
 
-export function useRecommendationsQuery(limit: number = 10) {
+export function useRecommendationsQuery(limit: number = 10, enabled: boolean = true) {
     return useQuery({
+        enabled,
         queryKey: queryKeys.recommendations(limit),
         queryFn: () => api.getRecommendationsForYou(limit),
         staleTime: 5 * 60 * 1000, // 5 minutes
@@ -241,8 +242,9 @@ export function usePlaylistQuery(id: string | undefined) {
     });
 }
 
-export function useMixesQuery() {
+export function useMixesQuery(enabled: boolean = true) {
     return useQuery({
+        enabled,
         queryKey: queryKeys.mixes(),
         queryFn: () => api.getMixes(),
         staleTime: 5 * 60 * 1000, // 5 minutes
@@ -261,16 +263,18 @@ export function useMixQuery(id: string | undefined) {
     });
 }
 
-export function usePopularArtistsQuery(limit: number = 20) {
+export function usePopularArtistsQuery(limit: number = 20, enabled: boolean = true) {
     return useQuery({
+        enabled,
         queryKey: queryKeys.popularArtists(limit),
         queryFn: () => api.getPopularArtists(limit),
         staleTime: 10 * 60 * 1000, // 10 minutes
     });
 }
 
-export function useAudiobooksQuery() {
+export function useAudiobooksQuery(enabled: boolean = true) {
     return useQuery({
+        enabled,
         queryKey: queryKeys.audiobooks(),
         queryFn: () => api.getAudiobooks(),
         staleTime: 5 * 60 * 1000, // 5 minutes
@@ -372,8 +376,9 @@ export function usePodcastQuery(
     };
 }
 
-export function useTopPodcastsQuery(limit: number = 20, genreId?: number) {
+export function useTopPodcastsQuery(limit: number = 20, genreId?: number, enabled: boolean = true) {
     return useQuery({
+        enabled,
         queryKey: queryKeys.topPodcasts(limit, genreId),
         queryFn: () => api.getTopPodcasts(limit, genreId),
         staleTime: 10 * 60 * 1000, // 10 minutes
@@ -540,8 +545,9 @@ interface BrowseAllResponse {
     genres: Genre[];
 }
 
-export function useBrowseAllQuery() {
+export function useBrowseAllQuery(enabled: boolean = true) {
     return useQuery({
+        enabled,
         queryKey: queryKeys.browseAll(),
         queryFn: async (): Promise<BrowseAllResponse> => {
             return api.get<BrowseAllResponse>("/browse/all");

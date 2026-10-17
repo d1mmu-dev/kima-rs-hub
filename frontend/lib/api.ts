@@ -1,4 +1,11 @@
 import type { MapTrack } from "@/features/vibe/types";
+import type {
+    AttentionAlbum,
+    OrganizerCapabilities,
+    OrganizerMode,
+    OrganizerRun,
+    OrganizerRunDetail,
+} from "@/features/organizer/types";
 import { backendUrl } from "@/lib/backend-url";
 
 const AUTH_TOKEN_KEY = "auth_token";
@@ -997,10 +1004,60 @@ class ApiClient {
     }
 
     // System Features
-    async getFeatures(): Promise<{ musicCNN: boolean; vibeEmbeddings: boolean; audiobookshelfEnabled: boolean }> {
-        return this.request<{ musicCNN: boolean; vibeEmbeddings: boolean; audiobookshelfEnabled: boolean }>(
-            "/system/features"
+    async getFeatures(): Promise<{
+        musicCNN: boolean;
+        vibeEmbeddings: boolean;
+        audiobookshelfEnabled: boolean;
+        library?: boolean;
+        podcasts?: boolean;
+        audiobooks?: boolean;
+        discover?: boolean;
+        mixes?: boolean;
+        downloads?: boolean;
+        imports?: boolean;
+    }> {
+        return this.request("/system/features");
+    }
+
+    // Library organizer and attention report (admin)
+    async getOrganizerCapabilities() {
+        return this.get<OrganizerCapabilities>("/library/organizer/capabilities");
+    }
+
+    async previewOrganizer(mode: OrganizerMode) {
+        return this.post<{ runId: string; jobId: string }>("/library/organizer/preview", { mode });
+    }
+
+    async getOrganizerRuns() {
+        return this.get<{ runs: OrganizerRun[] }>("/library/organizer/runs");
+    }
+
+    async getOrganizerRun(id: string, offset = 0, limit = 200) {
+        return this.get<OrganizerRunDetail>(
+            `/library/organizer/runs/${encodeURIComponent(id)}?offset=${offset}&limit=${limit}`
         );
+    }
+
+    async applyOrganizerRun(id: string) {
+        return this.post<{ runId: string; jobId: string }>(`/library/organizer/runs/${encodeURIComponent(id)}/apply`);
+    }
+
+    async undoOrganizerRun(id: string) {
+        return this.post<{ runId: string; jobId: string }>(`/library/organizer/runs/${encodeURIComponent(id)}/undo`);
+    }
+
+    async switchOrganizerRoot(id: string) {
+        return this.post<{ runId: string; jobId: string }>(
+            `/library/organizer/runs/${encodeURIComponent(id)}/switch-root`
+        );
+    }
+
+    async getAttention() {
+        return this.get<AttentionAlbum[]>("/library/attention");
+    }
+
+    async getWatchStatus() {
+        return this.get<{ mode: string; active: boolean; lastError: string | null }>("/library/watch-status");
     }
 
     // System Settings

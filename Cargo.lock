@@ -1132,6 +1132,7 @@ dependencies = [
  "kima-core",
  "kima-db",
  "kima-jobs",
+ "libc",
  "lofty",
  "notify-debouncer-full",
  "serde",

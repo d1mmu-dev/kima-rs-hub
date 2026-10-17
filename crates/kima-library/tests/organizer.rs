@@ -716,7 +716,7 @@ async fn watcher_ignores_organizer_moves(pool: PgPool) {
     apply_run(&lib, run).await;
     tokio::time::sleep(debounce * 8).await;
     let jobs: Vec<String> =
-        sqlx::query_scalar("SELECT payload::text FROM jobs WHERE queue = 'library' ORDER BY id")
+        sqlx::query_scalar("SELECT payload::text FROM jobs WHERE queue = 'library' AND payload ->> 'kind' <> 'reconcile' ORDER BY id")
             .fetch_all(&pool)
             .await
             .unwrap();
@@ -1010,4 +1010,352 @@ async fn crash_between_link_and_unlink_resumes(pool: PgPool) {
         assert!(!lib.root.join(from).exists());
     }
     assert!(rows(&lib, run).await.iter().all(|r| r.state == "done"));
+}
+
+fn swap_files() -> Vec<(&'static str, Tags, &'static str)> {
+    vec![
+        (
+            "Alpha/2001 - First/01 - One.flac",
+            tags("Alpha", "First", "2001", "2", "Two"),
+            "Alpha/2001 - First/02 - Two.flac",
+        ),
+        (
+            "Alpha/2001 - First/02 - Two.flac",
+            tags("Alpha", "First", "2001", "1", "One"),
+            "Alpha/2001 - First/01 - One.flac",
+        ),
+    ]
+}
+
+async fn is_missing(pool: &PgPool, track: Uuid) -> bool {
+    sqlx::query_scalar("SELECT missing_since IS NOT NULL FROM tracks WHERE id = $1")
+        .bind(track)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_refuses_when_track_moved_since(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let run = new_run(&lib, "move").await;
+    apply_run(&lib, run).await;
+    // After the apply, the owner moves one organized file and the scanner follows it.
+    let moved_to = "Elsewhere/one.flac";
+    std::fs::create_dir_all(lib.root.join("Elsewhere")).unwrap();
+    std::fs::rename(
+        lib.root.join("Alpha/2001 - First/01 - One.flac"),
+        lib.root.join(moved_to),
+    )
+    .unwrap();
+    let row = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.from_path == "messy/a.flac")
+        .unwrap();
+    sqlx::query("UPDATE tracks SET path = $2 WHERE id = $1")
+        .bind(row.track_id.unwrap())
+        .bind(moved_to)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let kept = tree(&lib.root)[moved_to].clone();
+
+    undo_run(&lib, run).await;
+    let all = rows(&lib, run).await;
+    let refused = all.iter().find(|r| r.id == row.id).unwrap();
+    assert_eq!(refused.state, "skipped");
+    assert_eq!(
+        refused.note.as_deref(),
+        Some("could not undo: the track moved since the apply")
+    );
+    assert_eq!(tree(&lib.root)[moved_to], kept);
+    assert!(!lib.root.join("messy/a.flac").exists());
+    assert_eq!(
+        db::track_path(&pool, row.track_id.unwrap())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(moved_to)
+    );
+    for (from, _, _) in files.iter().filter(|(f, _, _)| *f != "messy/a.flac") {
+        assert!(lib.root.join(from).exists(), "{from}");
+    }
+
+    // An undo after the library root changed is refused outright.
+    let run2 = new_run(&lib, "move").await;
+    apply_run(&lib, run2).await;
+    let elsewhere = tempfile::tempdir().unwrap();
+    lib.ctx.root.set(elsewhere.path().to_path_buf());
+    start(&lib, run2, &["done"], "undoing").await;
+    let err = apply::run_action(&lib.ctx, run2, Action::Undo, &Hooks::default()).await;
+    assert!(
+        matches!(&err, Err(OrganizeError::Invalid(m)) if m.contains("library root changed")),
+        "{err:?}"
+    );
+    lib.ctx.root.set(lib.root.clone());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_refuses_after_root_switched(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let run = new_run(&lib, "copy").await;
+    apply_run(&lib, run).await;
+    apply::run_action(&lib.ctx, run, Action::SwitchRoot, &Hooks::default())
+        .await
+        .unwrap();
+    let copied = tree(&lib.target);
+    // Even without the switch stamp, the job sees that the copy is the library.
+    sqlx::query("UPDATE organizer_runs SET switched_at = NULL WHERE id = $1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    start(&lib, run, &["done"], "undoing").await;
+    let err = apply::run_action(&lib.ctx, run, Action::Undo, &Hooks::default()).await;
+    assert!(
+        matches!(&err, Err(OrganizeError::Invalid(m)) if m.contains("library uses this copy")),
+        "{err:?}"
+    );
+    assert_eq!(tree(&lib.target), copied);
+}
+
+/// A staged file whose target is taken, and whose own place is taken too, stays parked; the
+/// scanner must not flag its track missing.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn parked_file_is_not_marked_missing(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = swap_files();
+    let lib = library(&pool, &files).await;
+    let run = new_run(&lib, "move").await;
+    start(&lib, run, &["previewed"], "applying").await;
+    // First pass done (one staged, one moved), then stop before the second pass.
+    let hooks = Hooks {
+        stop_after: Some(2),
+        ..Default::default()
+    };
+    assert!(apply_with(&lib, run, &hooks).await.is_err());
+    let staged = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.state == "staged")
+        .expect("one row staged");
+    // Someone takes the staged file's target meanwhile.
+    std::fs::write(lib.root.join(&staged.to_path), b"squatter").unwrap();
+    apply_with(&lib, run, &Hooks::default()).await.unwrap();
+    assert_eq!(state(&lib, run).await, "failed");
+    let row = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.id == staged.id)
+        .unwrap();
+    assert_eq!(row.state, "staged");
+    assert_eq!(
+        std::fs::read(lib.root.join(&staged.to_path)).unwrap(),
+        b"squatter"
+    );
+    let track = row.track_id.unwrap();
+    let parked = db::track_path(&pool, track).await.unwrap().unwrap();
+    assert!(parked.contains(".kima-stage-"), "{parked}");
+    assert!(lib.root.join(&parked).is_file());
+
+    let report = scan::reconcile(&lib.ctx).await.unwrap();
+    assert_eq!(report.missing, 0, "{report:?}");
+    assert!(!is_missing(&pool, track).await);
+}
+
+/// A staged file whose target is taken goes back where it came from when that is free.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn parked_file_goes_back_when_its_place_is_free(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = vec![(
+        "alpha/2001 - first/01 - one.flac",
+        tags("Alpha", "First", "2001", "1", "One"),
+        "Alpha/2001 - First/01 - One.flac",
+    )];
+    let lib = library(&pool, &files).await;
+    let original = tree(&lib.root);
+    let run = new_run(&lib, "move").await;
+    start(&lib, run, &["previewed"], "applying").await;
+    let hooks = Hooks {
+        stop_after: Some(1),
+        ..Default::default()
+    };
+    assert!(apply_with(&lib, run, &hooks).await.is_err());
+    let target = lib.root.join("Alpha/2001 - First/01 - One.flac");
+    std::fs::write(&target, b"squatter").unwrap();
+    apply_with(&lib, run, &Hooks::default()).await.unwrap();
+    let row = rows(&lib, run).await.pop().unwrap();
+    assert_eq!(row.state, "skipped");
+    assert_eq!(std::fs::read(&target).unwrap(), b"squatter");
+    let mut want = original.clone();
+    want.insert("Alpha/2001 - First/01 - One.flac".into(), sha(&target));
+    assert_eq!(tree(&lib.root), want);
+    assert_eq!(
+        db::track_path(&pool, row.track_id.unwrap())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("alpha/2001 - first/01 - one.flac")
+    );
+    assert!(all_files(&lib.root).iter().all(|f| !f.contains(".kima-")));
+}
+
+/// Killed while staging, between linking the staging name and unlinking the old name.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn crash_between_link_and_unlink_while_staging_resumes(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = swap_files();
+    let lib = library(&pool, &files).await;
+    let original = tree(&lib.root);
+    let run = new_run(&lib, "move").await;
+    start(&lib, run, &["previewed"], "applying").await;
+    // The first row in plan order is the one that gets staged. Reproduce the moment: its
+    // checksum journalled, the staging name linked, the old name still there.
+    let row = rows(&lib, run).await.into_iter().next().unwrap();
+    let src = lib.root.join(&row.from_path);
+    let (dir, name) = row.to_path.rsplit_once('/').unwrap();
+    let stage = lib
+        .root
+        .join(dir)
+        .join(format!(".kima-stage-{}-{name}", row.id));
+    db::set_sha(&pool, row.id, &sha(&src)).await.unwrap();
+    std::fs::hard_link(&src, &stage).unwrap();
+
+    apply_with(&lib, run, &Hooks::default()).await.unwrap();
+    assert_eq!(state(&lib, run).await, "done");
+    let after = tree(&lib.root);
+    for (from, _, to) in &files {
+        assert_eq!(after[*to], original[*from], "{from} -> {to}");
+    }
+    assert_eq!(all_files(&lib.root).len(), 2, "{:?}", all_files(&lib.root));
+    assert!(rows(&lib, run).await.iter().all(|r| r.state == "done"));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn switch_root_refuses_tracks_added_after_the_preview(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let run = new_run(&lib, "copy").await;
+    apply_run(&lib, run).await;
+    make_audio(
+        &lib.root,
+        "late/new.flac",
+        tags("Late", "L", "2020", "1", "New"),
+    );
+    assert_eq!(scan::reconcile(&lib.ctx).await.unwrap().added, 1);
+    let err = apply::run_action(&lib.ctx, run, Action::SwitchRoot, &Hooks::default()).await;
+    assert!(matches!(err, Err(OrganizeError::Invalid(_))), "{err:?}");
+    assert_eq!(lib.ctx.root.get(), lib.root);
+    assert_eq!(
+        kima_db::settings::get(&pool).await.unwrap().library_root,
+        None
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refuses_symlinked_target_folders(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let run = new_run(&lib, "move").await;
+    // After the preview, the artist folder becomes a link out of the library.
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), lib.root.join("Alpha")).unwrap();
+    apply_run(&lib, run).await;
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    for r in rows(&lib, run).await {
+        if r.to_path.starts_with("Alpha/") {
+            assert_eq!(r.state, "skipped", "{r:?}");
+            assert_eq!(
+                r.note.as_deref(),
+                Some("a folder on the target path is a symbolic link")
+            );
+            assert!(lib.root.join(&r.from_path).exists());
+        } else {
+            assert_eq!(r.state, "done", "{r:?}");
+        }
+    }
+
+    // Copy mode too.
+    std::fs::create_dir_all(&lib.target).unwrap();
+    std::os::unix::fs::symlink(outside.path(), lib.target.join("Beta")).unwrap();
+    let copy = new_run(&lib, "copy").await;
+    apply_run(&lib, copy).await;
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    let refused = db::all_rows(&pool, copy)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.to_path.starts_with("Beta/"))
+        .inspect(|r| assert_eq!(r.state, "skipped", "{r:?}"))
+        .count();
+    assert_eq!(refused, 2);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unchanged_rows_are_journaled_and_left_alone(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = vec![
+        (
+            "Alpha/2001 - First/01 - One.flac",
+            tags("Alpha", "First", "2001", "1", "One"),
+            "Alpha/2001 - First/01 - One.flac",
+        ),
+        (
+            "messy/b.flac",
+            tags("Alpha", "First", "2001", "2", "Two"),
+            "Alpha/2001 - First/02 - Two.flac",
+        ),
+    ];
+    let lib = library(&pool, &files).await;
+    let original = tree(&lib.root);
+    let run = new_run(&lib, "move").await;
+    let in_place = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.from_path == "Alpha/2001 - First/01 - One.flac")
+        .unwrap();
+    assert_eq!(in_place.state, "unchanged");
+    assert_eq!(in_place.from_path, in_place.to_path);
+    let summary = db::get_run(&pool, run).await.unwrap().unwrap().summary;
+    assert_eq!(summary["unchanged"], 1);
+    assert_eq!(summary["planned"], 1);
+
+    apply_run(&lib, run).await;
+    assert_eq!(state(&lib, run).await, "done");
+    let after = rows(&lib, run).await;
+    let row = after.iter().find(|r| r.id == in_place.id).unwrap();
+    assert_eq!(row.state, "unchanged");
+    assert!(row.sha256.is_none());
+    undo_run(&lib, run).await;
+    assert_eq!(state(&lib, run).await, "undone");
+    assert_eq!(tree(&lib.root), original);
+    let row = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.id == in_place.id)
+        .unwrap();
+    assert_eq!(row.state, "unchanged");
 }

@@ -591,12 +591,21 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
     }
 
     // Mark vanished files missing first, so a moved file's old row can be re-pointed below.
+    // Files an unfinished organizer run parked under a hidden staging name are not walked,
+    // but they are there: their tracks are not missing.
+    let root = ctx.root.get();
+    let parked: HashSet<String> = kima_db::organizer::parked_paths(&ctx.pool)
+        .await?
+        .into_iter()
+        .filter(|p| root.join(p).is_file())
+        .collect();
     let vanished: Vec<String> = if report.root_empty_guard {
         Vec::new()
     } else {
         index
             .values()
             .filter(|t| !t.missing && !on_disk.contains(t.path.as_str()))
+            .filter(|t| !parked.contains(&t.path))
             .filter(|t| !under_any(&t.path, &walked.unreadable))
             .map(|t| t.path.clone())
             .collect()

@@ -18,6 +18,23 @@ pub const MISSING_TRACK_NUMBERS: &str = "missingTrackNumbers";
 pub const DUPLICATE_TRACK_NUMBERS: &str = "duplicateTrackNumbers";
 pub const FOLDER_SPLIT: &str = "folderSplit";
 
+/// The issue codes one track raises by itself (the album-wide ones, duplicate track numbers
+/// and folder splits, need its siblings). Same order as the album report.
+pub fn track_codes(guessed: &Guessed, album_year: Option<i32>, track_no: i32) -> Vec<&'static str> {
+    [
+        (ARTIST_FROM_PATH, guessed.artist_from_path),
+        (ALBUM_FROM_PATH, guessed.album_from_path),
+        (UNKNOWN_ARTIST, guessed.unknown_artist),
+        (UNKNOWN_ALBUM, guessed.unknown_album),
+        (MISSING_YEAR, album_year.is_none()),
+        (CONFLICTING_YEARS, guessed.year_conflict),
+        (MISSING_TRACK_NUMBERS, track_no <= 0),
+    ]
+    .into_iter()
+    .filter_map(|(code, hit)| hit.then_some(code))
+    .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumAttention {
     pub album_id: Uuid,

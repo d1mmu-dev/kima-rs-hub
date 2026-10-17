@@ -229,6 +229,36 @@ async fn stale_fail_is_ignored(pool: PgPool) {
     assert_eq!(state_of(&pool, id).await.0, "queued");
 }
 
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn requeue_running_recovers_jobs_of_a_dead_process(pool: PgPool) {
+    let stuck = queue::enqueue(&pool, "q", json!({"kind": "x"}), 3)
+        .await
+        .unwrap();
+    queue::claim(&pool, "q", 1, LEASE).await.unwrap();
+    let waiting = queue::enqueue(&pool, "q", json!({"kind": "y"}), 3)
+        .await
+        .unwrap();
+    let other = queue::enqueue(&pool, "other", json!({}), 3).await.unwrap();
+    queue::claim(&pool, "other", 1, LEASE).await.unwrap();
+
+    assert_eq!(queue::requeue_running(&pool, "q").await.unwrap(), 1);
+    let (state, attempts, _, delayed) = state_of(&pool, stuck).await;
+    assert_eq!((state.as_str(), attempts, delayed), ("queued", 1, false));
+    let unlocked: bool = sqlx::query_scalar("SELECT locked_until IS NULL FROM jobs WHERE id = $1")
+        .bind(stuck)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(unlocked);
+    assert_eq!(state_of(&pool, waiting).await.0, "queued");
+    // Other queues are left alone.
+    assert_eq!(state_of(&pool, other).await.0, "running");
+    // And it can be claimed straight away, as its next attempt.
+    let again = queue::claim(&pool, "q", 10, LEASE).await.unwrap();
+    let job = again.iter().find(|j| j.id == stuck).unwrap();
+    assert_eq!(job.attempts, 2);
+}
+
 async fn pending(
     pool: &PgPool,
     queue_name: &str,

@@ -51,11 +51,12 @@ async fn main() -> anyhow::Result<()> {
         events: state.events.clone(),
         data_dir: config.data_dir.clone(),
     });
-    let workers = kima_server::jobs::spawn_all(&pool, registry, shutdown.clone());
-    // Safety-net reconcile on every start (spec §4.4); skipped if one is already queued.
-    kima_library::jobs::enqueue_reconcile(&pool)
+    // Before any worker starts: recover library jobs a dead process left running, then queue
+    // the safety-net reconcile (spec §4.4).
+    kima_server::jobs::prepare_library_queue(&pool)
         .await
-        .context("queueing the startup library reconcile")?;
+        .context("preparing the library job queue")?;
+    let workers = kima_server::jobs::spawn_all(&pool, registry, shutdown.clone());
     let app = kima_server::app(state, &config);
     let listener = TcpListener::bind(config.bind_addr)
         .await

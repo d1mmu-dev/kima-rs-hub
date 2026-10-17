@@ -19,6 +19,7 @@ jobs:
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -42,3 +43,59 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run test:unit
       - run: npm run build
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: kima
+          POSTGRES_PASSWORD: kima
+          POSTGRES_DB: kima
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kima"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: cargo build -p kima-server
+      - name: Generate fixture library
+        run: tools/make-fixture-library.sh "$RUNNER_TEMP/music"
+      - name: Start kima
+        run: |
+          mkdir -p "$RUNNER_TEMP/data" "$RUNNER_TEMP/organized"
+          DATABASE_URL=postgres://kima:kima@localhost:5432/kima \
+          KIMA_DATA_DIR="$RUNNER_TEMP/data" \
+          KIMA_FRONTEND_DIR=frontend/out \
+          MUSIC_PATH="$RUNNER_TEMP/music" \
+          KIMA_ORGANIZE_TARGET="$RUNNER_TEMP/organized" \
+          KIMA_WATCH_MODE=poll \
+          PORT=3030 \
+          nohup target/debug/kima > "$RUNNER_TEMP/kima.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fs http://localhost:3030/health && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/kima.log"
+          exit 1
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npx playwright test -c playwright.kima-rs.config.ts
+        working-directory: frontend
+      - name: kima log
+        if: failure()
+        run: cat "$RUNNER_TEMP/kima.log"

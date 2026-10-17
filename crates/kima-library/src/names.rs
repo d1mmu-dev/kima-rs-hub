@@ -5,6 +5,9 @@ use unicode_normalization::UnicodeNormalization;
 pub const VARIOUS_ARTISTS: &str = "Various Artists";
 
 /// Identity key: NFC, trimmed, whitespace collapsed, lowercase.
+///
+/// Limitation: this is `to_lowercase`, not a full Unicode case fold, so `ß` and `SS`, or a
+/// final `ς` and `σ`, produce different keys.
 pub fn key(s: &str) -> String {
     let nfc: String = s.nfc().collect();
     nfc.split_whitespace()
@@ -18,7 +21,7 @@ pub fn key(s: &str) -> String {
 /// Covers upstream's `canonicalizeVariousArtists` (VA, V.A., V/A, Various, Various Artist(s),
 /// `<Various Artists>`) plus "Varios Artistas". Case-insensitive.
 pub fn canonical_various(s: &str) -> Option<&'static str> {
-    let lower = s.trim().to_lowercase();
+    let lower = key(s);
     let t = lower
         .strip_prefix('<')
         .unwrap_or(&lower)
@@ -91,6 +94,8 @@ mod tests {
             "<Various Artists>",
             "varios artistas",
             "VARIOUS",
+            "Various  Artists",
+            " various\tartists ",
         ] {
             assert_eq!(canonical_various(s), Some("Various Artists"), "{s}");
         }

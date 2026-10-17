@@ -14,6 +14,9 @@ use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// Longer queries are cut on a character boundary.
+const MAX_QUERY_CHARS: usize = 500;
+
 pub fn routes() -> Router<AppState> {
     Router::new().route("/search", get(search))
 }
@@ -32,9 +35,7 @@ async fn search(
     Query(params): Query<Params>,
 ) -> Result<Json<Value>, ApiError> {
     let q = params.q.as_deref().unwrap_or("").trim();
-    if q.is_empty() {
-        return Err(ApiError::BadRequest("q is required".into()));
-    }
+    let q: String = q.chars().take(MAX_QUERY_CHARS).collect();
     let limit = params
         .limit
         .as_deref()
@@ -45,7 +46,7 @@ async fn search(
     let want = |name: &str| kind == "all" || kind == name;
 
     let (mut artists, mut albums, mut tracks) = (Vec::new(), Vec::new(), Vec::new());
-    if let Some(tsq) = search::prefix_query(&state.pool, q).await? {
+    if let Some(tsq) = search::prefix_query(&state.pool, &q).await? {
         if want("artists") {
             artists = search::artists(&state.pool, &tsq, limit).await?;
         }

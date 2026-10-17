@@ -114,16 +114,47 @@ async fn missing_tracks_excluded(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn empty_query_400(pool: PgPool) {
+async fn empty_query_returns_empty_lists(pool: PgPool) {
     let e = env(pool).await;
     for path in ["/api/search", "/api/search?q=", "/api/search?q=%20%20"] {
-        let res = e.server.get(path).authorization_bearer(&e.token).await;
-        res.assert_status(StatusCode::BAD_REQUEST);
-        assert!(res.json::<Value>()["error"].is_string());
+        let v = search(&e, path).await;
+        for k in [
+            "artists",
+            "albums",
+            "tracks",
+            "audiobooks",
+            "podcasts",
+            "episodes",
+        ] {
+            assert_eq!(len(&v, k), 0, "{path} {k}");
+        }
     }
-    // Text with no searchable term is an empty result, not an error.
     let v = search(&e, "/api/search?q=%21%21").await;
     assert_eq!(len(&v, "tracks"), 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn odd_queries_never_500(pool: PgPool) {
+    seed(&pool, Seed::new("x", "A B", Some(2000), "a b")).await;
+    let e = env(pool).await;
+    let long = "a".repeat(2000);
+    let cases = [
+        "x -\"a b\"".to_string(),
+        "-\"a b\"".to_string(),
+        "\"unterminated".to_string(),
+        "a & | b".to_string(),
+        ":*".to_string(),
+        long,
+    ];
+    for q in cases {
+        let res = e
+            .server
+            .get("/api/search")
+            .add_query_param("q", &q)
+            .authorization_bearer(&e.token)
+            .await;
+        res.assert_status_ok();
+    }
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

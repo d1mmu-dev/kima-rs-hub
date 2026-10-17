@@ -95,22 +95,28 @@ test("seek works", async ({ page, request }) => {
     await signIn(page, s);
     const plain = album(albums, "Plain Album");
 
-    const statuses: number[] = [];
+    // Start byte of every 206 /stream response.
+    const ranged: number[] = [];
     page.on("response", (r) => {
-        if (r.url().includes("/stream")) statuses.push(r.status());
+        if (!r.url().includes("/stream") || r.status() !== 206) return;
+        const m = /bytes (\d+)-/.exec(r.headers()["content-range"] ?? "");
+        if (m) ranged.push(Number(m[1]));
     });
 
     await page.goto(`/album/?id=${plain.id}`);
     await page.getByRole("button", { name: "play all" }).click();
     await expect.poll(() => currentTime(page), { timeout: 5_000 }).toBeGreaterThan(0);
 
+    // Only requests caused by the seek count.
+    ranged.length = 0;
     await page.evaluate(() => {
         const a = document.querySelector<HTMLAudioElement>('audio[data-kima-player="main"]')!;
-        a.currentTime = 4.0;
+        a.currentTime = 450;
     });
     // Playback continues from the seek target, not from the start.
-    await expect.poll(() => currentTime(page), { timeout: 5_000 }).toBeGreaterThan(4.0);
-    expect(statuses).toContain(206);
+    await expect.poll(() => currentTime(page), { timeout: 5_000 }).toBeGreaterThan(450);
+    // The seek made a ranged request that starts past byte 0.
+    await expect.poll(() => ranged.some((start) => start > 0), { timeout: 5_000 }).toBe(true);
 });
 
 test("playlist create and add", async ({ page, request }) => {
@@ -128,13 +134,11 @@ test("playlist create and add", async ({ page, request }) => {
         .poll(
             async () => {
                 const res = await request.get("/api/playlists", { headers: auth(s) });
-                const list = await res.json();
-                const p = (Array.isArray(list) ? list : (list.playlists ?? [])).find(
-                    (x: { name: string }) => x.name === "E2E mix",
-                );
+                const list: { id: string; name: string }[] = await res.json();
+                const p = list.find((x) => x.name === "E2E mix");
                 if (!p) return -1;
                 const d = await (await request.get(`/api/playlists/${p.id}`, { headers: auth(s) })).json();
-                return (d.items ?? d.tracks ?? []).length;
+                return (d.items as unknown[]).length;
             },
             { timeout: 10_000 },
         )
@@ -164,12 +168,13 @@ test("same-route navigation resets state", async ({ page, request }) => {
     await page.goto(`/album/?id=${plain.id}`);
     await expect(page.getByText("Third").first()).toBeVisible();
 
-    // Client-side navigation to another album through the same /album/ route (no reload).
+    // Client-side navigation through Next's router to another album on the same /album/ route.
     await page.evaluate(() => {
         (window as unknown as { __noReload: boolean }).__noReload = true;
     });
     await page.evaluate((id) => {
-        window.history.pushState({}, "", `/album/?id=${id}`);
+        const w = window as unknown as { next: { router: { push: (u: string) => void } } };
+        w.next.router.push(`/album/?id=${id}`);
     }, woods.id);
     await expect(page.getByText("Woods 2").first()).toBeVisible();
     await expect(page.getByText("Third")).toHaveCount(0);
@@ -179,8 +184,14 @@ test("same-route navigation resets state", async ({ page, request }) => {
 test("hidden sections are hidden", async ({ page, request }) => {
     const s = await session(request);
     await signIn(page, s);
+    const features = page.waitForResponse((r) => r.url().includes("/api/system/features"));
     await page.goto("/");
+    expect((await features).ok()).toBe(true);
+    // "Collection" is always shown; Radio and Discovery need the flags (mixes and discover are
+    // off), so their absence is only meaningful once the flags have been applied.
     await expect(page.getByRole("link", { name: "Collection" }).first()).toBeVisible();
+    await expect(page.getByRole("link", { name: "Radio" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Discovery" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Podcasts" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Audiobooks" })).toHaveCount(0);
 });

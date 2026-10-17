@@ -4,7 +4,12 @@ import { defineConfig } from "@playwright/test";
 // then logs in as that admin, so it runs after smoke.
 export default defineConfig({
     testDir: "./tests/e2e/kima-rs",
-    use: { baseURL: process.env.KIMA_URL ?? "http://localhost:3030" },
+    forbidOnly: !!process.env.CI,
+    use: {
+        baseURL: process.env.KIMA_URL ?? "http://localhost:3030",
+        trace: "retain-on-failure",
+        screenshot: "only-on-failure",
+    },
     reporter: "list",
     workers: 1,
     projects: [

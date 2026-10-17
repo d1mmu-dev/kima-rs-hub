@@ -17,6 +17,8 @@ pub struct AuthUser {
     pub id: Uuid,
     pub username: String,
     pub role: String,
+    /// The user's `token_version` that this session was checked against.
+    pub token_version: i32,
 }
 
 pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -75,6 +77,7 @@ pub async fn authenticate(
         id: user.id,
         username: user.username,
         role: user.role,
+        token_version: user.token_version,
     }))
 }
 

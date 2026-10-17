@@ -1,5 +1,6 @@
 //! Shared building blocks with no web or database dependencies.
 
+pub mod app_token;
 pub mod auth;
 pub mod cipher;
 pub mod config;

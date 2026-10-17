@@ -16,6 +16,8 @@ pub struct Config {
     pub watch_poll_secs: u64,
     pub organize_target: Option<PathBuf>,
     pub transcode_cache_mb: u64,
+    /// `KIMA_PUBLIC_URL`: where clients reach this server, without a trailing slash.
+    pub public_url: Option<String>,
 }
 
 /// How the library folder is watched for changes (`KIMA_WATCH_MODE`).
@@ -106,6 +108,25 @@ impl Config {
             })?,
         };
 
+        let public_url = match value("KIMA_PUBLIC_URL") {
+            None => None,
+            Some(raw) => {
+                let trimmed = raw.trim_end_matches('/');
+                let host = trimmed
+                    .strip_prefix("https://")
+                    .or_else(|| trimmed.strip_prefix("http://"));
+                match host {
+                    Some(host) if !host.is_empty() => Some(trimmed.to_string()),
+                    _ => {
+                        return Err(ConfigError::Invalid {
+                            name: "KIMA_PUBLIC_URL",
+                            value: raw,
+                        });
+                    }
+                }
+            }
+        };
+
         Ok(Self {
             database_url,
             data_dir: value("KIMA_DATA_DIR")
@@ -124,6 +145,7 @@ impl Config {
             watch_poll_secs,
             organize_target: value("KIMA_ORGANIZE_TARGET").map(PathBuf::from),
             transcode_cache_mb,
+            public_url,
         })
     }
 }
@@ -229,6 +251,48 @@ mod tests {
         .unwrap();
         assert_eq!(config.organize_target, Some(PathBuf::from("/organized")));
         assert_eq!(config.transcode_cache_mb, 512);
+    }
+
+    #[test]
+    fn public_url_trailing_slash_stripped() {
+        let url = |v: &str| {
+            Config::from_lookup(lookup(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("KIMA_PUBLIC_URL", v),
+            ]))
+            .unwrap()
+            .public_url
+        };
+        assert_eq!(
+            url("https://kima.example/"),
+            Some("https://kima.example".into())
+        );
+        assert_eq!(
+            url("http://10.0.0.2:3030//"),
+            Some("http://10.0.0.2:3030".into())
+        );
+        assert_eq!(
+            url("https://k.example/base"),
+            Some("https://k.example/base".into())
+        );
+        let unset = Config::from_lookup(lookup(&[("DATABASE_URL", "postgres://x")])).unwrap();
+        assert_eq!(unset.public_url, None);
+    }
+
+    #[test]
+    fn public_url_without_scheme_invalid() {
+        for bad in ["kima.example", "ftp://kima.example", "/", "https://"] {
+            assert_eq!(
+                Config::from_lookup(lookup(&[
+                    ("DATABASE_URL", "postgres://x"),
+                    ("KIMA_PUBLIC_URL", bad)
+                ])),
+                Err(ConfigError::Invalid {
+                    name: "KIMA_PUBLIC_URL",
+                    value: bad.into()
+                })
+            );
+        }
     }
 
     #[test]

@@ -5,13 +5,20 @@ use kima_db::settings::{self, SettingsPatch, SystemSettings};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::auth::AdminUser;
+use crate::auth::{AdminUser, AuthUser};
 use crate::error::ApiError;
 use crate::extract::ApiJson;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/system-settings", get(show).post(update))
+    Router::new()
+        .route("/system-settings", get(show).post(update))
+        .route("/system-settings/public-config", get(public_config))
+}
+
+/// Any signed-in user. `KIMA_PUBLIC_URL`, empty when unset (D-096).
+async fn public_config(State(state): State<AppState>, _user: AuthUser) -> Json<Value> {
+    Json(json!({ "publicUrl": state.public_url.as_deref().unwrap_or("") }))
 }
 
 fn body(settings: SystemSettings) -> Json<Value> {

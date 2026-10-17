@@ -1,6 +1,8 @@
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+use crate::api_keys;
 
 pub const ROLE_ADMIN: &str = "admin";
 pub const ROLE_USER: &str = "user";
@@ -209,24 +211,32 @@ pub async fn delete_unless_last_admin(pool: &PgPool, id: Uuid) -> sqlx::Result<D
     Ok(Deletion::Deleted)
 }
 
-/// Sets a new password hash and bumps the token version, but only if the version is still
-/// `seen_version` (what the caller verified the old password against). Returns the new version,
-/// or `None` if the user changed meanwhile or is gone.
+/// Sets a new password hash, bumps the token version and revokes all of the user's app tokens.
+/// `seen_version` is what the caller verified the old password against: the update then applies
+/// only if the version is unchanged. `None` updates unconditionally. Returns the new version,
+/// or `None` if nothing matched (the user changed meanwhile or is gone).
+///
+/// Takes a connection so the caller owns the transaction. The token deletion runs on the same
+/// connection, so tokens and password can only commit together, whoever the caller is.
 pub async fn set_password(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     id: Uuid,
     password_hash: &str,
-    seen_version: i32,
+    seen_version: Option<i32>,
 ) -> sqlx::Result<Option<i32>> {
-    sqlx::query_scalar!(
+    let version = sqlx::query_scalar!(
         "UPDATE users SET password_hash = $2, token_version = token_version + 1
-         WHERE id = $1 AND token_version = $3 RETURNING token_version",
+         WHERE id = $1 AND ($3::int IS NULL OR token_version = $3) RETURNING token_version",
         id,
         password_hash,
         seen_version
     )
-    .fetch_optional(pool)
-    .await
+    .fetch_optional(&mut *conn)
+    .await?;
+    if version.is_some() {
+        api_keys::delete_all_for_user(conn, id).await?;
+    }
+    Ok(version)
 }
 
 pub async fn bump_token_version(pool: &PgPool, id: Uuid) -> sqlx::Result<i32> {

@@ -20,11 +20,15 @@ async fn set_password_bumps_token_version(pool: PgPool) {
     let Registration::Created(user) = register(&pool, "ana").await else {
         panic!("expected Created")
     };
-    let set = |hash: &'static str, seen: i32| users::set_password(&pool, user.id, hash, seen);
+    let mut conn = pool.acquire().await.unwrap();
+    let mut set = async |hash: &'static str, seen: i32| {
+        users::set_password(&mut conn, user.id, hash, Some(seen)).await
+    };
     assert_eq!(set("new-hash", 0).await.unwrap(), Some(1));
     assert_eq!(set("newer", 1).await.unwrap(), Some(2));
     // A stale version (one a concurrent change already replaced) writes nothing.
     assert_eq!(set("stale", 1).await.unwrap(), None);
+    drop(conn);
     assert_eq!(users::bump_token_version(&pool, user.id).await.unwrap(), 3);
     let found = users::find_by_id(&pool, user.id).await.unwrap().unwrap();
     assert_eq!(found.password_hash, "newer");

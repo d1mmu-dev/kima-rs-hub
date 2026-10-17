@@ -4,6 +4,7 @@ use sqlx::postgres::PgPoolOptions;
 
 pub use sqlx::PgPool;
 
+pub mod api_keys;
 pub mod attention;
 pub mod browse;
 pub mod library;

@@ -14,6 +14,7 @@ use crate::state::AppState;
 mod albums;
 pub(super) mod artists;
 mod scan;
+mod stream;
 mod tracks;
 
 pub fn routes() -> Router<AppState> {
@@ -22,6 +23,7 @@ pub fn routes() -> Router<AppState> {
         .merge(albums::routes())
         .merge(tracks::routes())
         .merge(scan::routes())
+        .merge(stream::routes())
 }
 
 /// Paging as upstream's `library/paging.ts`: a bad or absent number takes the default, a page

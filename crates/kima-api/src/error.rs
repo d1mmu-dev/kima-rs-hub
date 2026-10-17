@@ -20,6 +20,9 @@ pub enum ApiError {
     Conflict(&'static str),
     #[error("{0}")]
     TooManyRequests(&'static str),
+    /// 429 with `Retry-After`: the failed-login limiter refused the attempt.
+    #[error("Too many failed login attempts. Try again in {retry_after_secs} seconds.")]
+    RateLimited { retry_after_secs: u64 },
     #[error("Request body too large")]
     PayloadTooLarge,
     #[error("Internal error")]
@@ -41,6 +44,7 @@ impl IntoResponse for ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Internal(error) => {
                 tracing::error!(error = ?error, "internal error");
@@ -51,6 +55,12 @@ impl IntoResponse for ApiError {
             Self::Invalid(details) => json!({ "error": self.to_string(), "details": details }),
             _ => json!({ "error": self.to_string() }),
         };
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if let Self::RateLimited { retry_after_secs } = &self {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, (*retry_after_secs).into());
+        }
+        response
     }
 }

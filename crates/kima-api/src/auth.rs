@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use axum::extract::{FromRequestParts, Query};
+use axum::extract::{ConnectInfo, FromRequestParts, Query};
 use axum::http::HeaderMap;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
@@ -108,5 +109,22 @@ impl FromRequestParts<AppState> for AuthUser {
         authenticate(state, &token, path)
             .await?
             .ok_or(ApiError::Unauthorized("Not authenticated"))
+    }
+}
+
+/// The TCP peer address. `X-Forwarded-For` is deliberately never read: anyone can forge it.
+/// Without connect info (in-process tests) it is `0.0.0.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientIp(pub IpAddr);
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        // The extractor also honours `MockConnectInfo`, which tests layer on.
+        let ip = ConnectInfo::<SocketAddr>::from_request_parts(parts, state)
+            .await
+            .map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |info| info.0.ip());
+        Ok(Self(ip))
     }
 }

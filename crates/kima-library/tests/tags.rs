@@ -96,4 +96,88 @@ fn fingerprint_small_file() {
     let e = dir.path().join("e.bin");
     std::fs::write(&e, b"").unwrap();
     assert_ne!(f, fingerprint::of(&e).unwrap());
+    let b = dir.path().join("t.bin");
+    std::fs::write(&b, b"tiny").unwrap();
+    assert_eq!(f, fingerprint::of(&b).unwrap());
+    let c = dir.path().join("c.bin");
+    std::fs::write(&c, b"tinz").unwrap();
+    assert_ne!(f, fingerprint::of(&c).unwrap());
+}
+
+fn pattern(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i * 7 % 253) as u8).collect()
+}
+
+fn manual(data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    const C: usize = 64 * 1024;
+    let head = data.len().min(C);
+    let tail_start = data.len().saturating_sub(C).max(head);
+    let mut h = Sha256::new();
+    h.update((data.len() as u64).to_le_bytes());
+    h.update(&data[..head]);
+    h.update(&data[tail_start..]);
+    h.finalize().into()
+}
+
+#[test]
+fn fingerprint_known_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("k.bin");
+    for n in [200 * 1024, 100 * 1024, 64 * 1024, 128 * 1024, 70_000] {
+        let data = pattern(n);
+        std::fs::write(&p, &data).unwrap();
+        assert_eq!(fingerprint::of(&p).unwrap(), manual(&data), "size {n}");
+    }
+}
+
+#[test]
+fn fingerprint_last_byte_matters_middle_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("m.bin");
+    let mut data = pattern(300 * 1024);
+    std::fs::write(&p, &data).unwrap();
+    let base = fingerprint::of(&p).unwrap();
+
+    data[100 * 1024] ^= 0xff; // middle: not hashed, by design
+    std::fs::write(&p, &data).unwrap();
+    assert_eq!(base, fingerprint::of(&p).unwrap());
+
+    let last = data.len() - 1;
+    data[last] ^= 0xff;
+    std::fs::write(&p, &data).unwrap();
+    assert_ne!(base, fingerprint::of(&p).unwrap());
+}
+
+#[test]
+fn read_never_panics_on_bad_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("empty.mp3");
+    std::fs::write(&empty, b"").unwrap();
+    let noise = dir.path().join("noise.flac");
+    let bytes: Vec<u8> = (0..4096u32)
+        .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+        .collect();
+    std::fs::write(&noise, bytes).unwrap();
+    let mut cases = vec![
+        empty,
+        noise,
+        dir.path().to_path_buf(),
+        dir.path().join("missing.mp3"),
+    ];
+    if require_ffmpeg() {
+        let good = make_audio(dir.path(), "good.flac", Tags::full());
+        let trunc = dir.path().join("trunc.flac");
+        std::fs::write(&trunc, &std::fs::read(good).unwrap()[..1000]).unwrap();
+        cases.push(trunc);
+    }
+    for p in cases {
+        match tags::read(&p) {
+            Err(_) => {}
+            Ok(t) => assert!(
+                t.artist.is_none() && t.album.is_none() && t.title.is_none(),
+                "{p:?}: {t:?}"
+            ),
+        }
+    }
 }

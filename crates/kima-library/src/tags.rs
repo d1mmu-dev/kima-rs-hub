@@ -96,7 +96,26 @@ pub fn read(path: &Path) -> Result<RawTags, TagError> {
     out.year = out.date.as_deref().and_then(year_of);
     out.compilation = tag
         .get_string(ItemKey::FlagCompilation)
-        .map(|v| matches!(v.trim(), "1" | "true" | "True" | "TRUE"))
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+        })
         .unwrap_or(false);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::year_of;
+
+    #[test]
+    fn year_of_cases() {
+        assert_eq!(year_of("1997"), Some(1997));
+        assert_eq!(year_of("1997-05-21"), Some(1997));
+        // Accepted limitation: non-ISO dates (month first) are not parsed.
+        assert_eq!(year_of("05/21/1997"), None);
+        assert_eq!(year_of(""), None);
+        assert_eq!(year_of("abcd"), None);
+        assert_eq!(year_of("0000"), None);
+    }
 }

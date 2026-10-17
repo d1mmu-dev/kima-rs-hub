@@ -69,13 +69,19 @@ async fn login(
     let found = users::find_by_username(&state.pool, &username).await?;
     // The database folds case its own way (`lower()` under its locale), Rust another. Also
     // count the attempt on the stored name's key, so no spelling gets a separate budget.
+    // A refusal here must look like a wrong password (same work, same 401), or the early answer
+    // would reveal that the account exists.
+    let mut stored_blocked = false;
     let stored_attempt = match &found {
-        Some(user) if user.username.to_lowercase() != username.to_lowercase() => Some(
-            state
-                .login_limit
-                .begin(ip, &user.username, now)
-                .map_err(rate_limited)?,
-        ),
+        Some(user) if user.username.to_lowercase() != username.to_lowercase() => {
+            match state.login_limit.begin(ip, &user.username, now) {
+                Ok(attempt) => Some(attempt),
+                Err(_) => {
+                    stored_blocked = true;
+                    None
+                }
+            }
+        }
         _ => None,
     };
     let password = body.password;
@@ -84,7 +90,7 @@ async fn login(
         // Released when the verify ends, even if the client hung up and the handler was dropped.
         let _permit = permit;
         let valid = match &found {
-            Some(user) => verify_password(&password, &user.password_hash),
+            Some(user) => verify_password(&password, &user.password_hash) && !stored_blocked,
             None => {
                 verify_dummy(&password);
                 false

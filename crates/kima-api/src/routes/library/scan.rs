@@ -3,11 +3,11 @@
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use kima_db::{browse, users};
+use kima_db::browse;
 use serde_json::{Value, json};
 
 use super::parse_id;
-use crate::auth::AuthUser;
+use crate::auth::{AdminUser, AuthUser};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -18,10 +18,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Queues a reconcile, or returns the id of the one already queued or running.
-async fn start(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    if user.role != users::ROLE_ADMIN {
-        return Err(ApiError::Forbidden("Admin access required"));
-    }
+async fn start(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Value>, ApiError> {
     let job_id = kima_library::jobs::request_reconcile(&state.pool).await?;
     Ok(Json(json!({
         "message": "Library scan started",

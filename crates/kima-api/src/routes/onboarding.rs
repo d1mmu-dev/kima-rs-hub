@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::auth::{AuthUser, authenticate, bearer_token};
+use crate::auth::{AdminUser, AuthUser, authenticate, bearer_token};
 use crate::error::ApiError;
 use crate::extract::ApiJson;
 use crate::state::AppState;
@@ -115,14 +115,7 @@ struct IntegrationStep {
 }
 
 /// Stub for an integration step: "disabled" succeeds as upstream does; enabling one is refused.
-fn integration_step(
-    user: &AuthUser,
-    step: &IntegrationStep,
-    name: &str,
-) -> Result<Json<Value>, ApiError> {
-    if user.role != users::ROLE_ADMIN {
-        return Err(ApiError::Forbidden("Admin access required"));
-    }
+fn integration_step(step: &IntegrationStep, name: &str) -> Result<Json<Value>, ApiError> {
     if step.enabled {
         return Err(ApiError::BadRequest(format!(
             "{name} integration is not available yet"
@@ -132,24 +125,24 @@ fn integration_step(
 }
 
 async fn lidarr(
-    user: AuthUser,
+    _admin: AdminUser,
     ApiJson(step): ApiJson<IntegrationStep>,
 ) -> Result<Json<Value>, ApiError> {
-    integration_step(&user, &step, "Lidarr")
+    integration_step(&step, "Lidarr")
 }
 
 async fn audiobookshelf(
-    user: AuthUser,
+    _admin: AdminUser,
     ApiJson(step): ApiJson<IntegrationStep>,
 ) -> Result<Json<Value>, ApiError> {
-    integration_step(&user, &step, "Audiobookshelf")
+    integration_step(&step, "Audiobookshelf")
 }
 
 async fn soulseek(
-    user: AuthUser,
+    _admin: AdminUser,
     ApiJson(step): ApiJson<IntegrationStep>,
 ) -> Result<Json<Value>, ApiError> {
-    integration_step(&user, &step, "Soulseek")
+    integration_step(&step, "Soulseek")
 }
 
 async fn complete(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {

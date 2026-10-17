@@ -293,6 +293,17 @@ pub async fn scan_index(
     .await
 }
 
+/// Paths of the present (not missing) tracks anywhere under the folder `dir_prefix`
+/// (`"Artist/Album/"`, with the trailing slash). Used to expand a deleted or renamed folder.
+pub async fn paths_under(pool: &PgPool, dir_prefix: &str) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar(
+        "SELECT path FROM tracks WHERE starts_with(path, $1) AND missing_since IS NULL",
+    )
+    .bind(dir_prefix)
+    .fetch_all(pool)
+    .await
+}
+
 /// Clears the missing flag of tracks whose file is back at the same path, unchanged.
 /// Returns how many rows changed.
 pub async fn clear_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> {

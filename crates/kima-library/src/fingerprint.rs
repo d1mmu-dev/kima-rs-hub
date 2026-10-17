@@ -1,4 +1,9 @@
-//! Cheap content fingerprint: SHA-256 of (size as 8 LE bytes || first 64 KiB || last 64 KiB).
+//! Cheap content fingerprint (kima-internal format).
+//!
+//! SHA-256 over, in order: the file size as 8 little-endian bytes; the head (the first
+//! `min(size, 64 KiB)` bytes); and the tail, starting at `max(size - 64 KiB, head_len)`
+//! and running to the end, so no byte is hashed twice. Bytes between head and tail are
+//! deliberately not hashed.
 
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -22,7 +27,7 @@ pub fn of(path: &Path) -> io::Result<[u8; 32]> {
     let tail_start = size.saturating_sub(CHUNK).max(head.len() as u64);
     file.seek(SeekFrom::Start(tail_start))?;
     let mut tail = Vec::new();
-    file.read_to_end(&mut tail)?;
+    (&mut file).take(CHUNK).read_to_end(&mut tail)?;
     hasher.update(&tail);
 
     Ok(hasher.finalize().into())

@@ -132,25 +132,44 @@ pub fn backoff(attempts: i32) -> Duration {
     Duration::from_secs(5u64.saturating_mul(1 << exponent).min(3600))
 }
 
-/// Like [`enqueue`], unless a job with exactly this payload is already queued on `queue`.
-/// Returns the new job's id, or `None` when one was already waiting. Not atomic: two
-/// concurrent callers can both enqueue, which is harmless for idempotent jobs.
-pub async fn enqueue_unless_queued(
+/// Like [`enqueue`], unless a job of the same `kind` (the payload's `kind` field) is already
+/// queued or running on `queue`. Returns the new job's id, or `None` when one is pending.
+///
+/// The check and insert are one statement, serialised per queue by a transaction-scoped
+/// advisory lock, so concurrent callers cannot both insert (a bare `INSERT ... WHERE NOT
+/// EXISTS` can, under READ COMMITTED).
+pub async fn enqueue_unless_pending(
     pool: &PgPool,
     queue: &str,
     payload: serde_json::Value,
     max_attempts: i32,
 ) -> sqlx::Result<Option<Uuid>> {
-    let waiting = sqlx::query_scalar!(
-        r#"SELECT EXISTS (SELECT 1 FROM jobs WHERE queue = $1 AND state = 'queued' AND payload = $2)
-           AS "exists!""#,
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('kima_jobs_enqueue:' || $1))")
+        .bind(queue)
+        .execute(&mut *tx)
+        .await?;
+    let id = sqlx::query_scalar!(
+        r#"INSERT INTO jobs (id, queue, payload, max_attempts)
+           SELECT $1::uuid, $2::text, $3::jsonb, $4::int4
+           WHERE NOT EXISTS (SELECT 1 FROM jobs
+                             WHERE queue = $2 AND state IN ('queued', 'running')
+                               AND payload ->> 'kind' IS NOT DISTINCT FROM $3::jsonb ->> 'kind')
+           RETURNING id"#,
+        Uuid::now_v7(),
         queue,
-        payload
+        payload,
+        max_attempts
     )
-    .fetch_one(pool)
+    .fetch_optional(&mut *tx)
     .await?;
-    if waiting {
-        return Ok(None);
+    if id.is_some() {
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(NOTIFY_CHANNEL)
+            .bind(queue)
+            .execute(&mut *tx)
+            .await?;
     }
-    enqueue(pool, queue, payload, max_attempts).await.map(Some)
+    tx.commit().await?;
+    Ok(id)
 }

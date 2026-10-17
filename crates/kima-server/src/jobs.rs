@@ -11,10 +11,16 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-/// Maps a queue name to the handler that runs its jobs, with that queue's concurrency.
+/// Lease for `library` jobs. A first reconcile of a large library (or an organizer run) can
+/// take hours, and the worker does not renew leases yet (heartbeats are planned for M3). With
+/// the default 5 min lease, a job on its final attempt would be reaped as "lease expired"
+/// while still running; 6 h keeps a long run from being reaped.
+pub const LIBRARY_LEASE: Duration = Duration::from_secs(6 * 3600);
+
+/// Maps a queue name to the handler that runs its jobs, with that queue's worker settings.
 #[derive(Default)]
 pub struct Registry {
-    queues: BTreeMap<String, (usize, Handler)>,
+    queues: BTreeMap<String, (WorkerConfig, Handler)>,
 }
 
 impl Registry {
@@ -23,7 +29,17 @@ impl Registry {
     }
 
     pub fn register(&mut self, queue: impl Into<String>, concurrency: usize, handler: Handler) {
-        self.queues.insert(queue.into(), (concurrency, handler));
+        self.register_config(WorkerConfig::new(queue, concurrency), handler);
+    }
+
+    /// Registers a queue with explicit worker settings (lease, poll interval, ...).
+    pub fn register_config(&mut self, config: WorkerConfig, handler: Handler) {
+        self.queues.insert(config.queue.clone(), (config, handler));
+    }
+
+    /// The worker settings registered for `queue`.
+    pub fn config(&self, queue: &str) -> Option<&WorkerConfig> {
+        self.queues.get(queue).map(|(c, _)| c)
     }
 
     pub fn len(&self) -> usize {
@@ -35,9 +51,11 @@ impl Registry {
     }
 
     /// Registers the `library` queue (reconciles, single-file updates, organizer runs).
-    /// Concurrency 1: those jobs must never overlap.
+    /// Concurrency 1: those jobs must never overlap. Lease: [`LIBRARY_LEASE`].
     pub fn register_library(&mut self, ctx: LibraryCtx) {
-        self.register(library_jobs::QUEUE, 1, library_jobs::handler(ctx));
+        let mut config = WorkerConfig::new(library_jobs::QUEUE, 1);
+        config.lease = LIBRARY_LEASE;
+        self.register_config(config, library_jobs::handler(ctx));
     }
 }
 
@@ -50,14 +68,7 @@ pub fn spawn_all(
     registry
         .queues
         .into_iter()
-        .map(|(queue, (concurrency, handler))| {
-            spawn_worker(
-                pool.clone(),
-                WorkerConfig::new(queue, concurrency),
-                handler,
-                shutdown.clone(),
-            )
-        })
+        .map(|(_, (config, handler))| spawn_worker(pool.clone(), config, handler, shutdown.clone()))
         .collect()
 }
 

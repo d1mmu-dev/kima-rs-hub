@@ -127,6 +127,23 @@ async fn reconcile_indexes_messy_tree(pool: PgPool) {
         );
     }
     std::fs::write(root.join("Radiohead/OK Computer/notes.txt"), "hi").unwrap();
+    // Hidden folders and AppleDouble files are skipped, not reported as corrupt.
+    make_audio(
+        root,
+        ".trash/old.flac",
+        tags("Old", "Old", "x", "1990", "1"),
+    );
+    std::fs::write(
+        root.join("Radiohead/OK Computer/._01.flac"),
+        b"resource fork",
+    )
+    .unwrap();
+    // Symlinks are not followed.
+    std::os::unix::fs::symlink(
+        root.join("Radiohead/OK Computer/01.flac"),
+        root.join("Radiohead/link.flac"),
+    )
+    .unwrap();
 
     let report = scan::reconcile(&ctx(&pool, root)).await.unwrap();
     assert_eq!(report.added, 5, "{report:?}");
@@ -255,33 +272,6 @@ async fn deleted_file_marked_missing_not_deleted(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn missing_tracks_purged_after_grace(pool: PgPool) {
-    if !require_ffmpeg() {
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let c = ctx(&pool, dir.path());
-    let p = make_audio(
-        dir.path(),
-        "A/B/01.flac",
-        tags("A", "B", "one", "2000", "1"),
-    );
-    scan::reconcile(&c).await.unwrap();
-    std::fs::remove_file(p).unwrap();
-    scan::reconcile(&c).await.unwrap();
-    sqlx::query("UPDATE tracks SET missing_since = now() - interval '8 days'")
-        .execute(&pool)
-        .await
-        .unwrap();
-    let report = scan::reconcile(&c).await.unwrap();
-    assert_eq!(report.purged, 1, "{report:?}");
-    assert_eq!(count(&pool, "tracks").await, 0);
-    // The emptied album and artist are pruned too.
-    assert_eq!(count(&pool, "albums").await, 0);
-    assert_eq!(count(&pool, "artists").await, 0);
-}
-
-#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn moved_file_is_repointed_and_keeps_plays(pool: PgPool) {
     if !require_ffmpeg() {
         return;
@@ -311,7 +301,8 @@ async fn moved_file_is_repointed_and_keeps_plays(pool: PgPool) {
     assert_eq!(plays_of(&pool, id).await, 1);
 }
 
-/// Review Focus 2: the library disk is unplugged, stays away for days, and comes back.
+/// Review Focus 2: the library disk is unplugged (an empty mount point is left behind),
+/// stays away for longer than the grace period, and comes back.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn unplug_and_replug_keeps_history(pool: PgPool) {
     if !require_ffmpeg() {
@@ -337,35 +328,184 @@ async fn unplug_and_replug_keeps_history(pool: PgPool) {
         ids.push(id);
     }
 
-    // Unplugged: the mount point is still there but empty.
+    // Unplugged: the mount point is still there but empty. Nothing is marked missing.
     let away = disk.path().join("away");
     std::fs::rename(&mount, &away).unwrap();
     std::fs::create_dir(&mount).unwrap();
     let report = scan::reconcile(&c).await.unwrap();
-    assert_eq!((report.missing, report.purged), (4, 0), "{report:?}");
-    assert_eq!(missing_count(&pool).await, 4);
+    assert!(report.root_empty_guard, "{report:?}");
+    assert_eq!((report.missing, report.purged), (0, 0), "{report:?}");
+    assert_eq!(missing_count(&pool).await, 0);
 
-    // Six days later another reconcile (and purge) runs: nothing is removed.
-    sqlx::query("UPDATE tracks SET missing_since = now() - interval '6 days'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    // A single-file event for one of the vanished files changes nothing either.
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::RootUnavailable
+    );
+    assert_eq!(missing_count(&pool).await, 0);
+
+    // Weeks later, still unplugged: still nothing missing, nothing purged.
     let report = scan::reconcile(&c).await.unwrap();
-    assert_eq!(report.purged, 0, "{report:?}");
+    assert!(report.root_empty_guard && report.purged == 0, "{report:?}");
     assert_eq!(count(&pool, "tracks").await, 4);
     assert_eq!(count(&pool, "albums").await, 2);
 
-    // Plugged back in.
+    // Plugged back in: everything is intact and unchanged.
     std::fs::remove_dir(&mount).unwrap();
     std::fs::rename(&away, &mount).unwrap();
     let report = scan::reconcile(&c).await.unwrap();
-    assert_eq!(report.restored, 4, "{report:?}");
-    assert_eq!(report.added, 0);
+    assert!(!report.root_empty_guard, "{report:?}");
+    assert_eq!((report.unchanged, report.added), (4, 0), "{report:?}");
     assert_eq!(missing_count(&pool).await, 0);
     for (p, id) in paths.iter().zip(&ids) {
         assert_eq!(track_id(&pool, p).await, *id, "{p}");
         assert_eq!(plays_of(&pool, *id).await, 1, "{p}");
     }
+}
+
+/// Only some files deleted: they are marked missing, kept for the grace period, then purged.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn missing_tracks_purged_after_grace(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let p = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "C/D/01.flac",
+        tags("C", "D", "two", "2001", "1"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    let gone = track_id(&pool, "A/B/01.flac").await;
+    add_play(&pool, gone).await;
+    std::fs::remove_file(p).unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(
+        (report.missing, report.root_empty_guard),
+        (1, false),
+        "{report:?}"
+    );
+
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '6 days' WHERE id = $1")
+        .bind(gone)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.purged, 0, "{report:?}");
+    assert_eq!(plays_of(&pool, gone).await, 1);
+
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '8 days' WHERE id = $1")
+        .bind(gone)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.purged, 1, "{report:?}");
+    assert_eq!(count(&pool, "tracks").await, 1);
+    // The emptied album and artist are pruned too.
+    assert_eq!(count(&pool, "albums").await, 1);
+    assert_eq!(count(&pool, "artists").await, 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn update_path_root_unavailable(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("music");
+    let c = ctx(&pool, &root);
+    make_audio(&root, "A/B/01.flac", tags("A", "B", "one", "2000", "1"));
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::Added
+    );
+    // Root gone entirely.
+    let away = dir.path().join("away");
+    std::fs::rename(&root, &away).unwrap();
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::RootUnavailable
+    );
+    // Root present but empty.
+    std::fs::create_dir(&root).unwrap();
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::RootUnavailable
+    );
+    assert_eq!(missing_count(&pool).await, 0);
+    // A root with other content: the file really is gone.
+    std::fs::create_dir(root.join("Other")).unwrap();
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::MarkedMissing
+    );
+}
+
+/// The re-point and the metadata upsert share one transaction: when the upsert fails, the
+/// track stays missing at its old path instead of being half-moved.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn failed_upsert_rolls_back_the_repoint(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let p = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "A/B/02.flac",
+        tags("A", "B", "two", "2000", "2"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    let id = track_id(&pool, "A/B/01.flac").await;
+
+    // Fails the upsert's UPDATE (which sets `title`) but not the re-point (which does not).
+    sqlx::query(
+        "CREATE FUNCTION boom() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'injected failure'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER boom BEFORE UPDATE OF title ON tracks FOR EACH ROW
+         WHEN (NEW.path LIKE 'Elsewhere/%') EXECUTE FUNCTION boom()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    std::fs::create_dir_all(dir.path().join("Elsewhere")).unwrap();
+    std::fs::rename(p, dir.path().join("Elsewhere/01.flac")).unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.repointed, 0, "{report:?}");
+    assert!(
+        report
+            .failed
+            .iter()
+            .any(|(path, e)| path == "Elsewhere/01.flac" && e.contains("injected failure")),
+        "{report:?}"
+    );
+    let (path, missing): (String, bool) =
+        sqlx::query_as("SELECT path, missing_since IS NOT NULL FROM tracks WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((path.as_str(), missing), ("A/B/01.flac", true));
+    assert_eq!(count(&pool, "tracks").await, 2);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -506,6 +646,15 @@ async fn update_path_single_file(pool: PgPool) {
     );
     assert_eq!(
         scan::update_path(&c, "../escape.flac").await.unwrap(),
+        PathOutcome::Ignored
+    );
+    make_audio(
+        dir.path(),
+        "A/B/._02.flac",
+        tags("A", "B", "x", "2000", "2"),
+    );
+    assert_eq!(
+        scan::update_path(&c, "A/B/._02.flac").await.unwrap(),
         PathOutcome::Ignored
     );
     std::fs::write(dir.path().join("A/B/bad.mp3"), b"junk").unwrap();

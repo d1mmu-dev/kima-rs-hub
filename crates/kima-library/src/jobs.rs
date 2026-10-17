@@ -30,7 +30,7 @@ pub enum LibraryJob {
 
 /// Queues a reconcile unless one is already waiting.
 pub async fn enqueue_reconcile(pool: &PgPool) -> sqlx::Result<Option<Uuid>> {
-    queue::enqueue_unless_queued(
+    queue::enqueue_unless_pending(
         pool,
         QUEUE,
         serde_json::json!({ "kind": "reconcile" }),
@@ -79,6 +79,9 @@ pub async fn run(ctx: &LibraryCtx, payload: &serde_json::Value) -> Result<(), St
                 // (or reconcile) picks it up again.
                 PathOutcome::Failed(reason) => {
                     info!(%path, %reason, "library file could not be read");
+                }
+                PathOutcome::RootUnavailable => {
+                    tracing::warn!(%path, "library root unavailable (unmounted?); file left as is");
                 }
                 outcome => tracing::debug!(%path, ?outcome, "library file updated"),
             }

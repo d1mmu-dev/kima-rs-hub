@@ -176,6 +176,17 @@ pub async fn repoint_by_fingerprint(
     fingerprint: &[u8; 32],
     new_path: &str,
 ) -> sqlx::Result<Option<Uuid>> {
+    let mut conn = pool.acquire().await?;
+    repoint_by_fingerprint_in(&mut conn, fingerprint, new_path).await
+}
+
+/// [`repoint_by_fingerprint`] on a caller's connection or transaction, so the re-point and
+/// the metadata upsert that follows commit or roll back together.
+pub async fn repoint_by_fingerprint_in(
+    conn: &mut PgConnection,
+    fingerprint: &[u8; 32],
+    new_path: &str,
+) -> sqlx::Result<Option<Uuid>> {
     sqlx::query_scalar!(
         r#"UPDATE tracks SET path = $2, missing_since = NULL, updated_at = now()
            WHERE id = (SELECT id FROM tracks
@@ -186,8 +197,15 @@ pub async fn repoint_by_fingerprint(
         fingerprint.as_slice(),
         new_path
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
+}
+
+/// The album of the track at `path`, if there is one.
+pub async fn album_of_path(conn: &mut PgConnection, path: &str) -> sqlx::Result<Option<Uuid>> {
+    sqlx::query_scalar!("SELECT album_id FROM tracks WHERE path = $1", path)
+        .fetch_optional(&mut *conn)
+        .await
 }
 
 /// Deletes tracks missing for longer than `older_than`. Returns how many.

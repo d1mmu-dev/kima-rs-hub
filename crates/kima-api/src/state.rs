@@ -52,6 +52,8 @@ pub struct AppState {
     /// `KIMA_ORGANIZE_TARGET`: where the organizer's copy mode writes. `None` disables copy mode.
     pub organize_target: Option<PathBuf>,
     pub library: LibraryServices,
+    /// `KIMA_PUBLIC_URL`, shown to clients by `GET /api/system-settings/public-config`.
+    pub public_url: Option<String>,
     /// Cached mp3 transcodes for the stream endpoint. `None` serves every stream as the original.
     pub transcoder: Option<Transcoder>,
     /// Encrypts secrets stored in the database. Random per process unless `with_cipher` is used.
@@ -80,6 +82,7 @@ impl AppState {
             library_root: None,
             organize_target: None,
             library: LibraryServices::default(),
+            public_url: None,
             transcoder: None,
             cipher: Arc::new(Cipher::random()),
             login_limit: Arc::new(LoginLimiter::new()),
@@ -89,6 +92,11 @@ impl AppState {
 
     pub fn with_cipher(mut self, cipher: Cipher) -> Self {
         self.cipher = Arc::new(cipher);
+        self
+    }
+
+    pub fn with_public_url(mut self, public_url: Option<String>) -> Self {
+        self.public_url = public_url;
         self
     }
 

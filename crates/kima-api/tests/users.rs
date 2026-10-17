@@ -27,6 +27,43 @@ async fn change_password_requires_current(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn change_password_revokes_app_tokens(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, ana) = common::user_with_token(&state, "ana").await;
+    let (_, bob) = common::user_with_token(&state, "bob").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    for (jwt, name) in [(&ana, "phone"), (&bob, "tablet")] {
+        server
+            .post("/api/api-keys")
+            .authorization_bearer(jwt)
+            .json(&json!({ "deviceName": name }))
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+
+    let res = server
+        .post("/api/auth/change-password")
+        .authorization_bearer(&ana)
+        .json(&json!({ "currentPassword": "password1", "newPassword": "newsecret" }))
+        .await;
+    res.assert_status_ok();
+    let fresh = res.json::<Value>()["token"].as_str().unwrap().to_string();
+
+    let mine: Value = server
+        .get("/api/api-keys")
+        .authorization_bearer(&fresh)
+        .await
+        .json();
+    assert_eq!(mine, json!({ "apiKeys": [] }));
+    let theirs: Value = server
+        .get("/api/api-keys")
+        .authorization_bearer(&bob)
+        .await
+        .json();
+    assert_eq!(theirs["apiKeys"].as_array().unwrap().len(), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn change_password_revokes_old_tokens(pool: PgPool) {
     let state = common::state(pool);
     let (_, old) = common::user_with_token(&state, "ana").await;

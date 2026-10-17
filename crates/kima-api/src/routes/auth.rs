@@ -235,9 +235,12 @@ async fn change_password(
         return Err(ApiError::BadRequest("Current password is incorrect".into()));
     };
 
-    let version = users::set_password(&state.pool, auth.id, &hash, seen_version)
+    // The password and the revocation of the user's app tokens commit together.
+    let mut tx = state.pool.begin().await?;
+    let version = users::set_password(&mut tx, auth.id, &hash, Some(seen_version))
         .await?
         .ok_or_else(|| ApiError::Conflict("Password was changed concurrently, please retry"))?;
+    tx.commit().await?;
     revoke_sessions(&state, auth.id);
     Ok(Json(json!({
         "message": "Password changed successfully",

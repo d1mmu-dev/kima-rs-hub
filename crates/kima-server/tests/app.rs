@@ -40,6 +40,7 @@ fn config(frontend: Option<&Path>, origins: &[&str]) -> Config {
         watch_poll_secs: 60,
         organize_target: None,
         transcode_cache_mb: 2048,
+        public_url: None,
     }
 }
 

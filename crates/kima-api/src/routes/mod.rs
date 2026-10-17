@@ -4,6 +4,7 @@ use axum::routing::get;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+mod api_keys;
 mod auth;
 mod cover_art;
 mod events;
@@ -24,6 +25,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::health))
         .merge(onboarding::routes())
         .merge(auth::routes())
+        .merge(api_keys::routes())
         .merge(system::routes())
         .merge(stubs::routes())
         .merge(system_settings::routes())

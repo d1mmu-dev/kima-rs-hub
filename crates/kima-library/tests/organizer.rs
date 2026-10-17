@@ -687,7 +687,8 @@ async fn switch_root_repoints_and_reconcile_is_noop(pool: PgPool) {
     // A switched copy cannot be undone.
     start(&lib, run, &["done"], "undoing").await;
     let err = apply::run_action(&lib.ctx, run, Action::Undo, &Hooks::default()).await;
-    assert!(matches!(err, Err(OrganizeError::Invalid(_))));
+    assert!(matches!(err, Err(OrganizeError::Refused(_))), "{err:?}");
+    assert_eq!(state(&lib, run).await, "done");
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -1094,7 +1095,7 @@ async fn undo_refuses_when_track_moved_since(pool: PgPool) {
     start(&lib, run2, &["done"], "undoing").await;
     let err = apply::run_action(&lib.ctx, run2, Action::Undo, &Hooks::default()).await;
     assert!(
-        matches!(&err, Err(OrganizeError::Invalid(m)) if m.contains("library root changed")),
+        matches!(&err, Err(OrganizeError::Refused(m)) if m.contains("library root changed")),
         "{err:?}"
     );
     lib.ctx.root.set(lib.root.clone());
@@ -1122,7 +1123,7 @@ async fn undo_refuses_after_root_switched(pool: PgPool) {
     start(&lib, run, &["done"], "undoing").await;
     let err = apply::run_action(&lib.ctx, run, Action::Undo, &Hooks::default()).await;
     assert!(
-        matches!(&err, Err(OrganizeError::Invalid(m)) if m.contains("library uses this copy")),
+        matches!(&err, Err(OrganizeError::Refused(m)) if m.contains("library uses this copy")),
         "{err:?}"
     );
     assert_eq!(tree(&lib.target), copied);
@@ -1358,4 +1359,113 @@ async fn unchanged_rows_are_journaled_and_left_alone(pool: PgPool) {
         .find(|r| r.id == in_place.id)
         .unwrap();
     assert_eq!(row.state, "unchanged");
+}
+
+/// Killed after a cross-filesystem copy into the staging name, before the old name was
+/// dropped; then something rewrites the source. The resume must keep both files.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn changed_source_after_a_staging_copy_is_kept(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = swap_files();
+    let lib = library(&pool, &files).await;
+    let run = new_run(&lib, "move").await;
+    start(&lib, run, &["previewed"], "applying").await;
+    let row = rows(&lib, run).await.into_iter().next().unwrap();
+    let src = lib.root.join(&row.from_path);
+    let (dir, name) = row.to_path.rsplit_once('/').unwrap();
+    let stage = lib
+        .root
+        .join(dir)
+        .join(format!(".kima-stage-{}-{name}", row.id));
+    // The copy step finished (a separate file, not a link) and the checksum is journalled.
+    db::set_sha(&pool, row.id, &sha(&src)).await.unwrap();
+    std::fs::copy(&src, &stage).unwrap();
+    let copied = std::fs::read(&stage).unwrap();
+    // Then the source is rewritten.
+    std::fs::write(&src, b"rewritten after the copy").unwrap();
+
+    apply_with(&lib, run, &Hooks::default()).await.unwrap();
+    assert_eq!(std::fs::read(&src).unwrap(), b"rewritten after the copy");
+    assert_eq!(std::fs::read(&stage).unwrap(), copied);
+    let row = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.id == row.id)
+        .unwrap();
+    assert_eq!(row.state, "failed");
+    assert_eq!(
+        row.note.as_deref(),
+        Some("the source changed after it was copied; both files were kept")
+    );
+}
+
+/// Same for a direct placement: the copy sits at the target, the source was rewritten.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn changed_source_after_a_direct_copy_is_kept(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let run = new_run(&lib, "move").await;
+    start(&lib, run, &["previewed"], "applying").await;
+    let row = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.from_path == "messy/a.flac")
+        .unwrap();
+    let (src, dst) = (lib.root.join(&row.from_path), lib.root.join(&row.to_path));
+    db::set_sha(&pool, row.id, &sha(&src)).await.unwrap();
+    std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+    std::fs::copy(&src, &dst).unwrap();
+    std::fs::write(&src, b"rewritten").unwrap();
+
+    apply_with(&lib, run, &Hooks::default()).await.unwrap();
+    assert_eq!(std::fs::read(&src).unwrap(), b"rewritten");
+    assert!(dst.exists());
+    let row = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.id == row.id)
+        .unwrap();
+    assert_eq!(row.state, "failed");
+}
+
+/// A refused undo puts the run back where it was, with the reason.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refused_undo_does_not_leave_the_run_undoing(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let run = new_run(&lib, "move").await;
+    apply_run(&lib, run).await;
+    let elsewhere = tempfile::tempdir().unwrap();
+    lib.ctx.root.set(elsewhere.path().to_path_buf());
+    start(&lib, run, &["done"], "undoing").await;
+    // Through the job entry point, as the worker runs it.
+    apply::run_job(&lib.ctx, run, Action::Undo).await.unwrap();
+    let r = db::get_run(&pool, run).await.unwrap().unwrap();
+    assert_eq!(r.state, "done");
+    assert!(
+        r.error
+            .as_deref()
+            .is_some_and(|e| e.contains("library root changed")),
+        "{:?}",
+        r.error
+    );
+
+    // From `failed`, it goes back to `failed`.
+    db::fail_run(&pool, run, "earlier trouble").await.unwrap();
+    start(&lib, run, &["failed"], "undoing").await;
+    apply::run_job(&lib.ctx, run, Action::Undo).await.unwrap();
+    assert_eq!(state(&lib, run).await, "failed");
+    lib.ctx.root.set(lib.root.clone());
+    // And once the root is back, the undo works.
+    start(&lib, run, &["failed"], "undoing").await;
+    apply::run_job(&lib.ctx, run, Action::Undo).await.unwrap();
+    assert_eq!(state(&lib, run).await, "undone");
 }

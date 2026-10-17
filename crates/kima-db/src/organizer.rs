@@ -128,10 +128,14 @@ pub async fn list_runs(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<Run>> {
 pub async fn transition(pool: &PgPool, id: Uuid, from: &[&str], to: &str) -> sqlx::Result<bool> {
     let from: Vec<String> = from.iter().map(|s| s.to_string()).collect();
     let done = matches!(to, "previewed" | "done" | "failed" | "undone");
+    // An undo remembers the state it started from, so a refused undo can return to it.
     let res = sqlx::query(
         "UPDATE organizer_runs
          SET state = $3, error = NULL,
-             finished_at = CASE WHEN $4 THEN now() ELSE NULL END
+             finished_at = CASE WHEN $4 THEN now() ELSE NULL END,
+             summary = CASE WHEN $3 = 'undoing'
+                            THEN summary || jsonb_build_object('undoFrom', state)
+                            ELSE summary END
          WHERE id = $1 AND state = ANY($2)",
     )
     .bind(id)
@@ -141,6 +145,23 @@ pub async fn transition(pool: &PgPool, id: Uuid, from: &[&str], to: &str) -> sql
     .execute(pool)
     .await?;
     Ok(res.rows_affected() == 1)
+}
+
+/// A refused undo: the run goes back to the state it was undone from (`done` or `failed`),
+/// with the reason in `error`.
+pub async fn revert_undo(pool: &PgPool, id: Uuid, reason: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE organizer_runs
+         SET state = CASE WHEN summary ->> 'undoFrom' IN ('done', 'failed')
+                          THEN summary ->> 'undoFrom' ELSE 'failed' END,
+             error = $2, finished_at = now()
+         WHERE id = $1 AND state = 'undoing'",
+    )
+    .bind(id)
+    .bind(reason)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Ends a run as `failed` with a reason.

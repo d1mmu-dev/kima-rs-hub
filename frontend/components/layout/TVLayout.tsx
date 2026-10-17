@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { usePathname } from "@/lib/use-pathname";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { cn } from "@/lib/cn";
 import { useAudio } from "@/lib/audio-context";
 import { api } from "@/lib/api";
@@ -13,20 +13,27 @@ import { formatTime, clampTime, formatMediaDuration } from "@/lib/format";
 import { RefreshCw, SkipBack, SkipForward, Shuffle, Repeat } from "lucide-react";
 import { CachedImage } from "@/components/ui/CachedImage";
 import { KimaMark } from "@/components/ui/KimaMark";
+import { useFeatures, type SectionFlag } from "@/lib/features-context";
 
-const tvNavigation = [
+const allTvNavigation: Array<{ name: string; href: string; feature?: SectionFlag }> = [
     { name: "Home", href: "/" },
     { name: "Search", href: "/search" },
     { name: "Collection", href: "/collection" },
-    { name: "Audiobooks", href: "/audiobooks" },
-    { name: "Podcasts", href: "/podcasts" },
-    { name: "Discovery", href: "/discover" },
+    { name: "Audiobooks", href: "/audiobooks", feature: "audiobooks" },
+    { name: "Podcasts", href: "/podcasts", feature: "podcasts" },
+    { name: "Discovery", href: "/discover", feature: "discover" },
     { name: "Playlists", href: "/playlists" },
 ];
 
 export function TVLayout({ children }: { children: React.ReactNode }) {
     const pathname = usePathname();
     const router = useRouter();
+    // Sections the server does not have are neither shown nor reachable by D-pad (D-030).
+    const features = useFeatures();
+    const tvNavigation = useMemo(
+        () => allTvNavigation.filter((n) => !n.feature || features[n.feature]),
+        [features],
+    );
     // Start with nav focused and first tab selected for immediate D-pad usability
     const [focusedTabIndex, setFocusedTabIndex] = useState(0);
     const [isNavFocused, setIsNavFocused] = useState(true);
@@ -180,7 +187,7 @@ export function TVLayout({ children }: { children: React.ReactNode }) {
         } else {
             handleContentKeyDown(e);
         }
-    }, [isNavFocused, focusedTabIndex, router, hasMedia, isPlaying, pause, resumeWithGesture, next, previous, seek, focusFirstCard, handleContentKeyDown]);
+    }, [isNavFocused, focusedTabIndex, router, tvNavigation, hasMedia, isPlaying, pause, resumeWithGesture, next, previous, seek, focusFirstCard, handleContentKeyDown]);
 
     useEffect(() => {
         window.addEventListener("keydown", handleKeyDown);

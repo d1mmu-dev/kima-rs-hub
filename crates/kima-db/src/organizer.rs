@@ -271,6 +271,17 @@ pub async fn all_rows(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Vec<JournalRo
     .await
 }
 
+/// Whether an undo has touched the run: any row `undone`, `undo_staged` or `undo_failed`.
+pub async fn has_undo_rows(pool: &PgPool, run_id: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM organizer_journal
+         WHERE run_id = $1 AND state IN ('undone', 'undo_staged', 'undo_failed'))",
+    )
+    .bind(run_id)
+    .fetch_one(pool)
+    .await
+}
+
 /// Row counts per state.
 pub async fn state_counts(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Vec<(String, i64)>> {
     sqlx::query_as(

@@ -78,11 +78,15 @@ fn row_json(v: &RowView) -> Value {
         (Some(g), Some(no)) => attention::track_codes(&g.0, v.album_year, no),
         _ => Vec::new(),
     };
+    // A rename that only changes letter case (kept in step with the planner).
+    let case_only =
+        r.from_path != r.to_path && r.from_path.to_lowercase() == r.to_path.to_lowercase();
     json!({
         "id": r.id,
         "trackId": r.track_id,
         "from": r.from_path,
         "to": r.to_path,
+        "caseOnly": case_only,
         "state": r.state,
         "note": r.note,
         "collision": r.collision,
@@ -256,6 +260,11 @@ async fn detail(
     let (offset, limit) = (paging.offset(), paging.limit(200));
     let (rows, total) = db::rows(&state.pool, run.id, offset, limit).await?;
     let mut v = run_json(&run);
+    v["lastAction"] = json!(if db::has_undo_rows(&state.pool, run.id).await? {
+        "undo"
+    } else {
+        "apply"
+    });
     v["rows"] = rows.iter().map(row_json).collect();
     v["total"] = json!(total);
     v["offset"] = json!(offset);
@@ -287,6 +296,11 @@ async fn apply_run(
     if state.library_root().as_deref() != Some(FsPath::new(&run.source_root)) {
         return Err(ApiError::Conflict(
             "The library folder changed since this preview; preview again",
+        ));
+    }
+    if db::has_undo_rows(&state.pool, run.id).await? {
+        return Err(ApiError::Conflict(
+            "This run was partly undone; undo it fully or start a new preview",
         ));
     }
     if !db::transition(&state.pool, run.id, &["previewed", "failed"], "applying").await? {

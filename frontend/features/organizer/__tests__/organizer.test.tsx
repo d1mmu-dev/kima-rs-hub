@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import React, { act } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { filterRows, NO_FILTERS } from "../filters";
-import { applyLibraryProgress, progressPercent } from "../progress";
+import { applyLibraryProgress, clearLibraryProgress, progressPercent } from "../progress";
 import { ProgressBar } from "../components/ProgressBar";
 import type { OrganizerRow } from "../types";
 
@@ -98,5 +98,28 @@ describe("progress event updates bar", () => {
         await send(qc, { type: "library:progress", job: "organize", done: "x" });
         expect(bar()).toBe("75");
         expect(el.textContent).toContain("3 / 4");
+    });
+
+    it("a new run does not show the previous run's progress", async () => {
+        const qc = new QueryClient();
+        const el = document.createElement("div");
+        document.body.appendChild(el);
+        root = createRoot(el);
+        await act(async () => {
+            root!.render(
+                <QueryClientProvider client={qc}>
+                    <ProgressBar job="organize" label="Organizing" />
+                </QueryClientProvider>,
+            );
+        });
+        const bar = () => el.querySelector('[role="progressbar"]')!.getAttribute("aria-valuenow");
+        await send(qc, { type: "library:progress", job: "organize", done: 4, total: 4 });
+        expect(bar()).toBe("100");
+        await act(async () => {
+            clearLibraryProgress(qc, "organize");
+            await new Promise((r) => setTimeout(r, 10));
+        });
+        expect(bar()).toBe("0");
+        expect(el.textContent).toContain("waiting");
     });
 });

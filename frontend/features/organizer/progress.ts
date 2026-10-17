@@ -13,6 +13,11 @@ export function applyLibraryProgress(queryClient: QueryClient, data: unknown): v
     queryClient.setQueryData<LibraryProgress>(libraryProgressKey(e.job), { done: e.done, total: e.total });
 }
 
+/** Forgets a job's progress, so a finished run's 100% never shows for the next one. */
+export function clearLibraryProgress(queryClient: QueryClient, job: LibraryJob): void {
+    queryClient.setQueryData<LibraryProgress | null>(libraryProgressKey(job), null);
+}
+
 /** Whole-number percentage 0-100; 0 while the total is unknown. */
 export function progressPercent(p: LibraryProgress | undefined | null): number {
     if (!p || p.total <= 0) return 0;

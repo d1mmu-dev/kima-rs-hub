@@ -35,10 +35,11 @@ CREATE TABLE organizer_journal (
     -- staged: parked under a temporary name in the target folder (swap cycles, case-only
     -- renames); failed: the copy did not verify, nothing was left at `to_path`; undo_staged:
     -- the same on the way back during an undo; unchanged: already in place, listed so the
-    -- preview can show it, never touched.
+    -- preview can show it, never touched; undo_failed: an undo found the row unsafe to
+    -- reverse and touched nothing (a later undo retries it).
     state       text NOT NULL DEFAULT 'planned'
                 CHECK (state IN ('planned', 'unchanged', 'staged', 'done', 'skipped', 'failed',
-                                 'undo_staged', 'undone')),
+                                 'undo_staged', 'undo_failed', 'undone')),
     note        text,
     collision   boolean NOT NULL DEFAULT false,
     -- Order in which rows reached `done`; undo walks it backwards.

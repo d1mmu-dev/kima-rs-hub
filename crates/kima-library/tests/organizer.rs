@@ -1469,3 +1469,89 @@ async fn refused_undo_does_not_leave_the_run_undoing(pool: PgPool) {
     apply::run_job(&lib.ctx, run, Action::Undo).await.unwrap();
     assert_eq!(state(&lib, run).await, "undone");
 }
+
+/// Rows that failed during the apply are never undone, and must not keep the run from
+/// reaching `undone`.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_ends_undone_despite_apply_time_failures(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let original = tree(&lib.root);
+    let run = new_run(&lib, "move").await;
+    start(&lib, run, &["previewed"], "applying").await;
+    let hooks = Hooks {
+        force_cross_fs: true,
+        after_copy: Some(Arc::new(|part: &Path| {
+            if part.to_string_lossy().contains("02 - Two") {
+                let mut bytes = std::fs::read(part).unwrap();
+                bytes[100] ^= 0xff;
+                std::fs::write(part, bytes).unwrap();
+            }
+        })),
+        ..Default::default()
+    };
+    apply_with(&lib, run, &hooks).await.unwrap();
+    let failed = rows(&lib, run)
+        .await
+        .into_iter()
+        .filter(|r| r.state == "failed")
+        .count();
+    assert_eq!(failed, 1);
+    assert_eq!(state(&lib, run).await, "done");
+
+    undo_run(&lib, run).await;
+    assert_eq!(state(&lib, run).await, "undone");
+    assert_eq!(tree(&lib.root), original);
+    let after = rows(&lib, run).await;
+    assert_eq!(after.iter().filter(|r| r.state == "failed").count(), 1);
+    assert_eq!(
+        after.iter().filter(|r| r.state == "undone").count(),
+        files.len() - 1
+    );
+}
+
+/// An undo that finds a row unsafe marks it `undo_failed`; once the cause is gone, a second
+/// undo retries and finishes it.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_failed_rows_are_retried(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let original = tree(&lib.root);
+    let run = new_run(&lib, "move").await;
+    apply_run(&lib, run).await;
+    // An undo died after copying one file back (across filesystems) and before dropping the
+    // organized copy; then the organized copy was rewritten.
+    let row = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.from_path == "messy/a.flac")
+        .unwrap();
+    let (applied, home) = (lib.root.join(&row.to_path), lib.root.join(&row.from_path));
+    let bytes = std::fs::read(&applied).unwrap();
+    std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+    std::fs::copy(&applied, &home).unwrap();
+    std::fs::write(&applied, b"rewritten").unwrap();
+
+    undo_run(&lib, run).await;
+    assert_eq!(state(&lib, run).await, "failed");
+    let r = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.id == row.id)
+        .unwrap();
+    assert_eq!(r.state, "undo_failed");
+    assert_eq!(std::fs::read(&applied).unwrap(), b"rewritten");
+
+    // The organized file is put back as it was; the retry completes the undo.
+    std::fs::write(&applied, &bytes).unwrap();
+    undo_run(&lib, run).await;
+    assert_eq!(state(&lib, run).await, "undone");
+    assert_eq!(tree(&lib.root), original);
+    assert!(rows(&lib, run).await.iter().all(|r| r.state == "undone"));
+}

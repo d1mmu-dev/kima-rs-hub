@@ -107,3 +107,18 @@ async fn library_root_setting_overrides_music_path(pool: PgPool) {
         std::path::Path::new("/organized")
     );
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn library_queue_is_serial_with_a_long_lease(pool: PgPool) {
+    let mut registry = Registry::new();
+    registry.register_library(LibraryCtx {
+        pool: pool.clone(),
+        root: "/music".into(),
+        events: EventBus::new(4),
+        data_dir: "/data".into(),
+    });
+    let config = registry.config("library").unwrap();
+    assert_eq!(config.concurrency, 1);
+    assert_eq!(config.lease, kima_server::jobs::LIBRARY_LEASE);
+    assert_eq!(config.lease, Duration::from_secs(6 * 3600));
+}

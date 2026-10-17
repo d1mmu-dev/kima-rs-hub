@@ -63,6 +63,9 @@ pub struct ScanReport {
     pub tags_read: usize,
     /// (relative path, reason) for files or folders that could not be read.
     pub failed: Vec<(String, String)>,
+    /// The walk found no audio files although the library has present tracks: most likely
+    /// an unmounted disk (an empty mount point). Nothing was marked missing or purged.
+    pub root_empty_guard: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,8 +75,11 @@ pub enum PathOutcome {
     Unchanged,
     Repointed,
     MarkedMissing,
-    /// Not an audio file, not under the root, or a vanished path kima never knew.
+    /// Not an audio file, hidden, not under the root, or a vanished path kima never knew.
     Ignored,
+    /// The file is gone, but so is the library root (missing, unreadable or empty, as when a
+    /// disk is unmounted); nothing was changed.
+    RootUnavailable,
     Failed(String),
 }
 
@@ -217,6 +223,11 @@ fn rel_of(root: &Path, path: &Path) -> Option<String> {
     Some(s.replace('\\', "/"))
 }
 
+/// Dot-prefixed names (hidden files and folders, `._` AppleDouble files) are never indexed.
+fn is_hidden(name: &str) -> bool {
+    name.starts_with('.')
+}
+
 fn walk(root: &Path) -> Result<Walk, ScanError> {
     std::fs::read_dir(root).map_err(|source| ScanError::Root {
         path: root.to_path_buf(),
@@ -227,13 +238,43 @@ fn walk(root: &Path) -> Result<Walk, ScanError> {
         unreadable: Vec::new(),
         failed: Vec::new(),
     };
-    for entry in walkdir::WalkDir::new(root).follow_links(true) {
+    // Symlinks are not followed, as upstream.
+    let entries = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !is_hidden(&e.file_name().to_string_lossy()));
+    for entry in entries {
         let entry = match entry {
             Ok(e) => e,
+            Err(e) if e.depth() == 0 => {
+                return Err(ScanError::Root {
+                    path: root.to_path_buf(),
+                    source: e
+                        .into_io_error()
+                        .unwrap_or_else(|| std::io::Error::other("cannot walk the library root")),
+                });
+            }
             Err(e) => {
-                let rel = e.path().and_then(|p| rel_of(root, p)).unwrap_or_default();
-                out.failed.push((rel.clone(), e.to_string()));
-                out.unreadable.push(rel);
+                // Shield the unreadable sub-path from missing-marking. Never push "" (that
+                // would shield everything); a path that cannot be made relative is only
+                // reported.
+                let path = e.path().map(Path::to_path_buf);
+                let rel = path.as_deref().and_then(|p| {
+                    p.strip_prefix(root)
+                        .ok()
+                        .map(|r| r.to_string_lossy().replace('\\', "/"))
+                });
+                match rel.filter(|r| !r.is_empty()) {
+                    Some(rel) => {
+                        out.failed.push((rel.clone(), e.to_string()));
+                        out.unreadable.push(rel);
+                    }
+                    None => out.failed.push((
+                        path.map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        e.to_string(),
+                    )),
+                }
                 continue;
             }
         };
@@ -257,7 +298,8 @@ fn walk(root: &Path) -> Result<Walk, ScanError> {
 
 fn under_any(rel: &str, prefixes: &[String]) -> bool {
     prefixes.iter().any(|p| {
-        p.is_empty() || rel == p || (rel.starts_with(p.as_str()) && rel[p.len()..].starts_with('/'))
+        !p.is_empty()
+            && (rel == p || (rel.starts_with(p.as_str()) && rel[p.len()..].starts_with('/')))
     })
 }
 
@@ -312,11 +354,37 @@ fn to_track(p: &Prepared, album_year: Option<i32>) -> ResolvedTrack {
     }
 }
 
-async fn store(pool: &PgPool, t: &ResolvedTrack) -> sqlx::Result<Uuid> {
+/// What storing one file did.
+struct StoreResult {
+    stored: Stored,
+    /// The row already existed (here or re-pointed from elsewhere) and is now on another album,
+    /// so its old album may be empty.
+    album_moved: bool,
+}
+
+/// Stores one file in its own transaction. For a path with no row (`repoint`), first tries to
+/// re-point a missing track with the same fingerprint; the re-point and the metadata upsert
+/// commit or roll back together, so a failed upsert never leaves a half-moved track.
+async fn store(pool: &PgPool, t: &ResolvedTrack, repoint: bool) -> sqlx::Result<StoreResult> {
     let mut tx = pool.begin().await?;
-    let id = library::upsert_track(&mut tx, t).await?;
+    let repointed = if repoint {
+        library::repoint_by_fingerprint_in(&mut tx, &t.fingerprint, &t.path).await?
+    } else {
+        None
+    };
+    let old_album = library::album_of_path(&mut tx, &t.path).await?;
+    library::upsert_track(&mut tx, t).await?;
+    let new_album = library::album_of_path(&mut tx, &t.path).await?;
     tx.commit().await?;
-    Ok(id)
+    let stored = match (repointed, old_album) {
+        (Some(id), _) => Stored::Repointed(id),
+        (None, Some(_)) => Stored::Updated,
+        (None, None) => Stored::Added,
+    };
+    Ok(StoreResult {
+        stored,
+        album_moved: old_album.is_some() && old_album != new_album,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,6 +400,8 @@ struct FolderResult {
     stored: Vec<(String, Stored)>,
     failed: Vec<(String, String)>,
     tags_read: usize,
+    /// Some existing track changed album.
+    album_moved: bool,
 }
 
 /// Reads and stores the changed files of one folder. `siblings` are the folder's other
@@ -377,26 +447,11 @@ async fn process_folder(
         let year = years.get(&group_key(&p.resolved)).copied().flatten();
         let track = to_track(p, year);
         let rel = p.disk.rel.clone();
-        let result = async {
-            if known.contains_key(&rel) {
-                store(&ctx.pool, &track).await?;
-                return Ok(Stored::Updated);
+        match store(&ctx.pool, &track, !known.contains_key(&rel)).await {
+            Ok(r) => {
+                out.album_moved |= r.album_moved;
+                out.stored.push((rel, r.stored));
             }
-            match library::repoint_by_fingerprint(&ctx.pool, &p.fingerprint, &rel).await? {
-                Some(id) => {
-                    // Refresh the re-pointed row's metadata in place (same id).
-                    store(&ctx.pool, &track).await?;
-                    Ok(Stored::Repointed(id))
-                }
-                None => {
-                    store(&ctx.pool, &track).await?;
-                    Ok(Stored::Added)
-                }
-            }
-        }
-        .await;
-        match result {
-            Ok(s) => out.stored.push((rel, s)),
             Err(e) if per_file_db_error(&e) => out.failed.push((rel, e.to_string())),
             Err(e) => return Err(e.into()),
         }
@@ -429,8 +484,11 @@ async fn process_folder(
         };
         // Re-read tags may have moved it to another group; use that group's year if known.
         let year = years.get(&group_key(&p.resolved)).copied().unwrap_or(year);
-        match store(&ctx.pool, &to_track(&p, year)).await {
-            Ok(_) => out.stored.push((s.path.clone(), Stored::Updated)),
+        match store(&ctx.pool, &to_track(&p, year), false).await {
+            Ok(r) => {
+                out.album_moved |= r.album_moved;
+                out.stored.push((s.path.clone(), Stored::Updated));
+            }
             Err(e) if per_file_db_error(&e) => out.failed.push((s.path.clone(), e.to_string())),
             Err(e) => return Err(e.into()),
         }
@@ -479,13 +537,29 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
         }
     }
 
+    // Review Focus 2: an unmounted disk usually leaves an empty, readable mount point. If
+    // the walk found nothing while tracks are present, assume that rather than "the whole
+    // library was deleted": mark nothing missing and purge nothing.
+    report.root_empty_guard = walked.files.is_empty() && index.values().any(|t| !t.missing);
+    if report.root_empty_guard {
+        warn!(
+            root = %ctx.root.display(),
+            "library root has no audio files but the library has tracks; is the disk mounted? \
+             Not marking anything missing"
+        );
+    }
+
     // Mark vanished files missing first, so a moved file's old row can be re-pointed below.
-    let vanished: Vec<String> = index
-        .values()
-        .filter(|t| !t.missing && !on_disk.contains(t.path.as_str()))
-        .filter(|t| !under_any(&t.path, &walked.unreadable))
-        .map(|t| t.path.clone())
-        .collect();
+    let vanished: Vec<String> = if report.root_empty_guard {
+        Vec::new()
+    } else {
+        index
+            .values()
+            .filter(|t| !t.missing && !on_disk.contains(t.path.as_str()))
+            .filter(|t| !under_any(&t.path, &walked.unreadable))
+            .map(|t| t.path.clone())
+            .collect()
+    };
     for chunk in vanished.chunks(MARK_CHUNK) {
         report.missing += library::mark_missing(&ctx.pool, chunk).await? as usize;
     }
@@ -516,7 +590,9 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
         progress.advance(n);
     }
 
-    report.purged = library::purge_missing(&ctx.pool, MISSING_GRACE).await? as usize;
+    if !report.root_empty_guard {
+        report.purged = library::purge_missing(&ctx.pool, MISSING_GRACE).await? as usize;
+    }
     library::prune_empty(&ctx.pool).await?;
     progress.finish();
     if !report.failed.is_empty() {
@@ -528,12 +604,18 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
     Ok(report)
 }
 
-/// A relative path made only of normal components, or `None`.
+/// A relative path made only of normal, non-hidden components, or `None`.
 fn clean_rel(rel: &str) -> Option<String> {
     let mut parts = Vec::new();
     for c in Path::new(rel).components() {
         match c {
-            Component::Normal(s) => parts.push(s.to_str()?),
+            Component::Normal(s) => {
+                let s = s.to_str()?;
+                if is_hidden(s) {
+                    return None;
+                }
+                parts.push(s);
+            }
             Component::CurDir => {}
             _ => return None,
         }
@@ -556,6 +638,7 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
             return Ok(match library::find_by_path(&ctx.pool, &rel).await? {
                 None => PathOutcome::Ignored,
                 Some(row) if row.missing_since.is_some() => PathOutcome::Unchanged,
+                Some(_) if !root_available(&ctx.root).await => PathOutcome::RootUnavailable,
                 Some(_) => {
                     library::mark_missing(&ctx.pool, std::slice::from_ref(&rel)).await?;
                     PathOutcome::MarkedMissing
@@ -610,11 +693,22 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
             PathOutcome::Failed(reason)
         }
     };
-    if !result.stored.is_empty() {
-        // Album years may have moved, leaving an album empty.
+    if result.album_moved {
+        // An existing track changed album (new tags, or the folder's album year moved), so
+        // its old album may now be empty. Safe here: prune_empty must not race upserts, and
+        // update_path only runs on the concurrency-1 `library` queue, like every other writer.
         library::prune_empty(&ctx.pool).await?;
     }
     Ok(outcome)
+}
+
+/// The root is a readable directory with at least one entry. An unmounted disk usually
+/// leaves an empty mount point behind.
+async fn root_available(root: &Path) -> bool {
+    match tokio::fs::read_dir(root).await {
+        Ok(mut dir) => matches!(dir.next_entry().await, Ok(Some(_))),
+        Err(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -651,6 +745,8 @@ mod tests {
         assert_eq!(clean_rel("A//x.mp3/").as_deref(), Some("A/x.mp3"));
         assert_eq!(clean_rel("A/../x.mp3"), None);
         assert_eq!(clean_rel(""), None);
+        assert_eq!(clean_rel(".hidden/x.mp3"), None);
+        assert_eq!(clean_rel("A/._x.mp3"), None);
     }
 
     #[test]
@@ -658,7 +754,7 @@ mod tests {
         let p = vec!["A/B".to_string()];
         assert!(under_any("A/B/x.mp3", &p));
         assert!(!under_any("A/BB/x.mp3", &p));
-        assert!(under_any("anything", &[String::new()]));
+        assert!(!under_any("anything", &[String::new()]));
     }
 
     #[test]

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT album_id FROM tracks WHERE path = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "album_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cc4a330cb417a756348439a6c566bbbc8851dd921732f66d25fe45f78e81ff10"
+}

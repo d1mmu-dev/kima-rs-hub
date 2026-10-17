@@ -229,37 +229,46 @@ async fn stale_fail_is_ignored(pool: PgPool) {
     assert_eq!(state_of(&pool, id).await.0, "queued");
 }
 
+async fn pending(
+    pool: &PgPool,
+    queue_name: &str,
+    payload: serde_json::Value,
+) -> Option<uuid::Uuid> {
+    queue::enqueue_unless_pending(pool, queue_name, payload, 3)
+        .await
+        .unwrap()
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn enqueue_unless_queued_skips_a_waiting_duplicate(pool: PgPool) {
-    let x = || json!({"kind": "x"});
-    let first = queue::enqueue_unless_queued(&pool, "q", x(), 3)
+async fn enqueue_unless_pending_skips_a_queued_or_running_duplicate(pool: PgPool) {
+    let first = pending(&pool, "q", json!({"kind": "x"})).await.unwrap();
+    // Same kind, even with other fields: a duplicate.
+    assert_eq!(
+        pending(&pool, "q", json!({"kind": "x", "n": 2})).await,
+        None
+    );
+    // Another kind or queue is not.
+    assert!(pending(&pool, "q", json!({"kind": "y"})).await.is_some());
+    assert!(pending(&pool, "r", json!({"kind": "x"})).await.is_some());
+
+    // Running still counts as pending.
+    let jobs = queue::claim(&pool, "q", 10, LEASE).await.unwrap();
+    assert_eq!(pending(&pool, "q", json!({"kind": "x"})).await, None);
+    // Once finished, a new one may be queued.
+    for job in jobs.iter().filter(|j| j.id == first) {
+        assert!(queue::complete(&pool, job).await.unwrap());
+    }
+    assert!(pending(&pool, "q", json!({"kind": "x"})).await.is_some());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_unless_pending_is_race_safe(pool: PgPool) {
+    let calls = (0..16).map(|_| pending(&pool, "q", json!({"kind": "x"})));
+    let results = futures::future::join_all(calls).await;
+    assert_eq!(results.iter().filter(|r| r.is_some()).count(), 1);
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE queue = 'q'")
+        .fetch_one(&pool)
         .await
         .unwrap();
-    assert!(first.is_some());
-    let dup = queue::enqueue_unless_queued(&pool, "q", x(), 3)
-        .await
-        .unwrap();
-    assert_eq!(dup, None);
-    // A different payload or queue is not a duplicate.
-    let other = json!({"kind": "y"});
-    assert!(
-        queue::enqueue_unless_queued(&pool, "q", other, 3)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        queue::enqueue_unless_queued(&pool, "r", x(), 3)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    // Once the waiting one is claimed, a new one may be queued.
-    queue::claim(&pool, "q", 10, LEASE).await.unwrap();
-    assert!(
-        queue::enqueue_unless_queued(&pool, "q", x(), 3)
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert_eq!(n, 1);
 }

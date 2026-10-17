@@ -7,6 +7,10 @@ services:
     volumes:
       - ${MUSIC_DIR:-./music}:/music:ro
       - kima_data:/data
+      # Organizer copy mode: uncomment, point at a writable folder, and set KIMA_ORGANIZE_TARGET.
+      # - ${ORGANIZE_DIR:-./organized}:/organized
+    # environment:
+    #   - KIMA_ORGANIZE_TARGET=/organized
     restart: unless-stopped
     # kima drains for up to 10 s, then the bundled Postgres needs time to stop cleanly.
     stop_grace_period: 30s

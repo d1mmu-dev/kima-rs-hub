@@ -198,7 +198,7 @@ that hides features not yet available through the `features` endpoint.
 | # | Milestone | Scope |
 |---|---|---|
 | M0 | Skeleton | Workspace, config/env, Postgres + migrations, job queue, sessions, users, first-admin onboarding, SSE, static frontend served by axum, Dockerfile |
-| M1 | Library & playback | User management (admin create/list users, change password, registration toggle), scanner (lofty), artwork, browse, tsvector search, streaming with range requests, ffmpeg transcode 320/192/128, plays, playlists, likes, playback state |
+| M1 | Library & playback | User management (admin create/list users, change password, registration toggle), scanner (lofty), artwork, browse, tsvector search, streaming with range requests, ffmpeg transcode 320/192/128, plays, playlists, playback state (track likes dropped: upstream has none, see D-071) |
 | M2 | Subsonic | OpenSubsonic API (XML+JSON), per-app tokens, snapshot-tested responses |
 | M3 | Identification | MusicBrainz, AcoustID via rusty-chromaprint, artist metadata enrichment, genres, lyrics (lrclib), enrichment stage tracking |
 | M4 | ML analysis | `kima-ml` (CLAP, musicnn, DSP) as enrichment stages, worker setting, progress UI |

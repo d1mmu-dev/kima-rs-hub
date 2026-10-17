@@ -31,7 +31,7 @@ struct ListParams {
 }
 
 /// The fields the artist cards read. There are no artist images or MusicBrainz ids in M1.
-fn artist_json(a: &ArtistRow) -> Value {
+pub(in crate::routes) fn artist_json(a: &ArtistRow) -> Value {
     json!({
         "id": a.id,
         "mbid": null,

@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::state::AppState;
 
 mod albums;
-mod artists;
+pub(super) mod artists;
 mod scan;
 mod tracks;
 
@@ -51,7 +51,7 @@ impl Paging {
 }
 
 /// JavaScript `parseInt`: leading integer, ignoring trailing junk.
-fn parse_int(s: &str) -> Option<i64> {
+pub(super) fn parse_int(s: &str) -> Option<i64> {
     let s = s.trim_start();
     let (sign, digits) = match s.strip_prefix('-') {
         Some(rest) => (-1, rest),

@@ -48,13 +48,13 @@ async fn search(
     let (mut artists, mut albums, mut tracks) = (Vec::new(), Vec::new(), Vec::new());
     if let Some(tsq) = search::prefix_query(&state.pool, &q).await? {
         if want("artists") {
-            artists = search::artists(&state.pool, &tsq, limit).await?;
+            artists = search::artists(&state.pool, &tsq, limit, 0).await?;
         }
         if want("albums") {
-            albums = search::albums(&state.pool, &tsq, limit).await?;
+            albums = search::albums(&state.pool, &tsq, limit, 0).await?;
         }
         if want("tracks") {
-            tracks = search::tracks(&state.pool, &tsq, limit).await?;
+            tracks = search::tracks(&state.pool, &tsq, limit, 0).await?;
         }
     }
     Ok(Json(json!({

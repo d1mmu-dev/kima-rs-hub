@@ -6,14 +6,18 @@ pub use sqlx::PgPool;
 
 pub mod api_keys;
 pub mod attention;
+pub mod bookmarks;
 pub mod browse;
 pub mod library;
 pub mod organizer;
 pub mod playback;
 pub mod playlists;
 pub mod plays;
+pub mod ratings;
 pub mod search;
 pub mod settings;
+pub mod stars;
+pub mod subsonic;
 pub mod users;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

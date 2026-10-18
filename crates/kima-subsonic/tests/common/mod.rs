@@ -12,6 +12,55 @@ use uuid::Uuid;
 
 pub const SECRET: &str = "test-secret";
 
+// The SQL fixture `fixtures/subsonic.sql` (spec §10.1). Ids are `00000000-0000-7000-8000-K0000000000N`
+// with K = 1 artists, 2 albums, 3 tracks, 4 users, 5 playlists, 6 app tokens.
+pub const FIXTURE_CIPHER_SECRET: &str = "kima-subsonic-fixture";
+/// Alice's app token "Phone": `0123456789abcdef` four times.
+pub const FIXTURE_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+pub const ADMIN_NAME: &str = "admin";
+pub const ADMIN_PASSWORD: &str = "adminpass1";
+pub const ALICE_NAME: &str = "alice";
+pub const ALICE_PASSWORD: &str = "alicepass1";
+
+/// `n` written out in decimal digits, one per nibble: 20 becomes 0x20, as in the fixture's ids.
+const fn dec(mut n: u128) -> u128 {
+    let (mut out, mut shift) = (0, 0);
+    while n > 0 {
+        out |= (n % 10) << shift;
+        shift += 4;
+        n /= 10;
+    }
+    out
+}
+
+/// `00000000-0000-7000-8000-{kind}{n:011}`: `kind` 1..=6, `n` the running number in that table.
+pub const fn fixture_id(kind: u128, n: u128) -> Uuid {
+    Uuid::from_u128(0x0000_0000_0000_7000_8000_0000_0000_0000 | (kind << 44) | dec(n))
+}
+pub const ADMIN_ID: Uuid = fixture_id(4, 1);
+pub const ALICE_ID: Uuid = fixture_id(4, 2);
+pub const ALICE_TOKEN_ID: Uuid = fixture_id(6, 1);
+pub const fn artist_id(n: u128) -> Uuid {
+    fixture_id(1, n)
+}
+pub const fn album_id(n: u128) -> Uuid {
+    fixture_id(2, n)
+}
+pub const fn track_id(n: u128) -> Uuid {
+    fixture_id(3, n)
+}
+
+/// State for tests on the fixture: the fixture's cipher (so `FIXTURE_TOKEN` opens) and an empty
+/// temporary library root.
+pub fn fixture_state(pool: PgPool) -> AppState {
+    let root = tempfile::tempdir().unwrap().keep();
+    AppState::new(pool, SECRET)
+        .with_cipher(kima_core::cipher::Cipher::from_secret(
+            FIXTURE_CIPHER_SECRET,
+        ))
+        .with_library_root(root)
+}
+
 /// The Subsonic router on its own (no `/rest` prefix), with a fixed client address.
 pub fn server(pool: PgPool) -> (TestServer, AppState) {
     let state = AppState::new(pool, SECRET);

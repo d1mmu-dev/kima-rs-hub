@@ -1,6 +1,6 @@
 //! Album cover art, resized and cached. Shared by `/api` and `/rest`.
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use kima_library::artwork;
 use uuid::Uuid;
@@ -30,18 +30,71 @@ pub async fn cover(
     let paths = kima_db::library::album_track_paths(&state.pool, album_id).await?;
     let key = album_id.to_string();
     let cap = state.artwork_cache_bytes;
+    let job = Job {
+        data_dir,
+        root,
+        key,
+        album_id,
+        size,
+        cap,
+        paths,
+    };
     let bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Vec<u8>>> {
-        let entry = data_dir.join("artwork").join(&key);
+        // Another request can evict or remove this entry between our steps; build once more.
+        match job.run() {
+            Err(e) if vanished(&e) => job.run(),
+            other => other,
+        }
+    })
+    .await
+    .map_err(|e| MediaError::Internal(e.into()))??;
+
+    Ok(bytes.map(|bytes| CoverImage {
+        bytes,
+        content_type: "image/jpeg",
+    }))
+}
+
+struct Job {
+    data_dir: PathBuf,
+    root: PathBuf,
+    key: String,
+    album_id: Uuid,
+    size: Option<u32>,
+    cap: u64,
+    paths: Vec<String>,
+}
+
+/// True when the error is a file or folder that disappeared under us.
+fn vanished(e: &anyhow::Error) -> bool {
+    let not_found = |io: &std::io::Error| io.kind() == std::io::ErrorKind::NotFound;
+    e.downcast_ref::<std::io::Error>().is_some_and(not_found)
+        || matches!(e.downcast_ref::<artwork::ArtworkError>(), Some(artwork::ArtworkError::Io(io)) if not_found(io))
+}
+
+impl Job {
+    fn run(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        let Self {
+            data_dir,
+            root,
+            key,
+            album_id,
+            size,
+            cap,
+            paths,
+        } = self;
+        let (album_id, size, cap) = (*album_id, *size, *cap);
+        let entry = data_dir.join("artwork").join(key);
         if entry.is_dir() {
-            if artwork::stamp_is_fresh(&root, &entry) {
-                let cached = artwork::cache_path(&data_dir, &key, size);
+            if artwork::stamp_is_fresh(root, &entry) {
+                let cached = artwork::cache_path(data_dir, key, size);
                 if cached.is_file() {
                     artwork::touch_stamp(&entry);
                     return Ok(Some(std::fs::read(cached)?));
                 }
             } else {
                 // The source or its folder changed (or the entry predates stamps): start over.
-                artwork::remove_album(&data_dir, album_id)?;
+                artwork::remove_album(data_dir, album_id)?;
             }
         }
         let mut failed = 0;
@@ -53,10 +106,10 @@ pub async fn cover(
             }
             for (source, origin) in artwork::candidates_with_origin(&root.join(rel)) {
                 // Stamped before decoding, so a change during the build shows up as stale.
-                let Ok(stamp) = artwork::SourceStamp::capture(&root, &origin) else {
+                let Ok(stamp) = artwork::SourceStamp::capture(root, &origin) else {
                     continue;
                 };
-                let (file, bad) = artwork::cached_from(&data_dir, &key, size, [source])?;
+                let (file, bad) = artwork::cached_from(data_dir, key, size, [source])?;
                 let Some(file) = file else {
                     failed += bad;
                     continue;
@@ -64,7 +117,7 @@ pub async fn cover(
                 artwork::write_stamp(&entry, &stamp)?;
                 // Read before trimming: a tiny cap may evict this very entry.
                 let bytes = std::fs::read(&file)?;
-                if let Err(e) = artwork::evict_to(&data_dir, cap) {
+                if let Err(e) = artwork::evict_to(data_dir, cap) {
                     tracing::warn!(error = %e, "could not trim the cover cache");
                 }
                 return Ok(Some(bytes));
@@ -74,12 +127,5 @@ pub async fn cover(
             tracing::warn!(album = %key, failed, "cover art found but none of it could be decoded");
         }
         Ok(None)
-    })
-    .await
-    .map_err(|e| MediaError::Internal(e.into()))??;
-
-    Ok(bytes.map(|bytes| CoverImage {
-        bytes,
-        content_type: "image/jpeg",
-    }))
+    }
 }

@@ -21,8 +21,8 @@ async fn album_with_track(pool: &PgPool, path: &str) -> Uuid {
             album_artist: "Artist".into(),
             album_artist_key: "artist".into(),
             track_artist: "Artist".into(),
-            album: "Album".into(),
-            album_key: "album".into(),
+            album: path.into(),
+            album_key: path.into(),
             album_year: Some(2001),
             track_year: Some(2001),
             is_compilation: false,
@@ -35,7 +35,13 @@ async fn album_with_track(pool: &PgPool, path: &str) -> Uuid {
             path: path.into(),
             size: 1,
             mtime: OffsetDateTime::now_utc(),
-            fingerprint: [1; 32],
+            fingerprint: {
+                let mut fp = [1u8; 32];
+                for (i, b) in path.bytes().enumerate() {
+                    fp[i % 32] ^= b.wrapping_add(i as u8);
+                }
+                fp
+            },
             guessed: Guessed::default(),
         },
     )
@@ -314,6 +320,37 @@ async fn entry_without_stamp_is_rebuilt(pool: PgPool) {
     std::fs::write(f.entry().join("orig.jpg"), b"stale").unwrap();
     assert_eq!(f.orig_dims().await, (400, 200));
     assert!(f.entry().join("source.json").is_file());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn parallel_builds_survive_eviction(pool: PgPool) {
+    let music = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let mut albums = Vec::new();
+    for i in 0..16 {
+        std::fs::create_dir_all(music.path().join(format!("d{i}"))).unwrap();
+        std::fs::write(music.path().join(format!("d{i}/cover.png")), png(300, 300)).unwrap();
+        albums.push(album_with_track(&pool, &format!("d{i}/01.mp3")).await);
+    }
+    let mut state = common::state(pool)
+        .with_data_dir(data.path().into())
+        .with_library_root(music.path().into());
+    // Over the cap after the first build or two, so every build evicts others.
+    state.artwork_cache_bytes = 3000;
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    let (server, token) = (&server, &token);
+    let results = futures::future::join_all(albums.iter().map(|album| async move {
+        server
+            .get(&format!("/api/library/cover-art/{album}"))
+            .authorization_bearer(token)
+            .await
+    }))
+    .await;
+    for res in results {
+        res.assert_status_ok();
+        assert!(image::load_from_memory(res.as_bytes()).is_ok());
+    }
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

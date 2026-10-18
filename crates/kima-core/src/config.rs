@@ -16,6 +16,8 @@ pub struct Config {
     pub watch_poll_secs: u64,
     pub organize_target: Option<PathBuf>,
     pub transcode_cache_mb: u64,
+    /// `KIMA_ARTWORK_CACHE_MB`: size cap of the cover-art cache.
+    pub artwork_cache_mb: u64,
     /// `KIMA_PUBLIC_URL`: where clients reach this server, without a trailing slash.
     pub public_url: Option<String>,
 }
@@ -108,6 +110,14 @@ impl Config {
             })?,
         };
 
+        let artwork_cache_mb = match value("KIMA_ARTWORK_CACHE_MB") {
+            None => 512,
+            Some(raw) => raw.parse::<u64>().map_err(|_| ConfigError::Invalid {
+                name: "KIMA_ARTWORK_CACHE_MB",
+                value: raw,
+            })?,
+        };
+
         let public_url = match value("KIMA_PUBLIC_URL") {
             None => None,
             Some(raw) => {
@@ -145,6 +155,7 @@ impl Config {
             watch_poll_secs,
             organize_target: value("KIMA_ORGANIZE_TARGET").map(PathBuf::from),
             transcode_cache_mb,
+            artwork_cache_mb,
             public_url,
         })
     }
@@ -194,6 +205,28 @@ mod tests {
         assert_eq!(config.watch_poll_secs, 60);
         assert_eq!(config.organize_target, None);
         assert_eq!(config.transcode_cache_mb, 2048);
+    }
+
+    #[test]
+    fn artwork_cache_default_512() {
+        let config = Config::from_lookup(lookup(&[("DATABASE_URL", "postgres://x")])).unwrap();
+        assert_eq!(config.artwork_cache_mb, 512);
+        let config = Config::from_lookup(lookup(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("KIMA_ARTWORK_CACHE_MB", "64"),
+        ]))
+        .unwrap();
+        assert_eq!(config.artwork_cache_mb, 64);
+        assert!(matches!(
+            Config::from_lookup(lookup(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("KIMA_ARTWORK_CACHE_MB", "lots"),
+            ])),
+            Err(ConfigError::Invalid {
+                name: "KIMA_ARTWORK_CACHE_MB",
+                ..
+            })
+        ));
     }
 
     #[test]

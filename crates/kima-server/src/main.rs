@@ -52,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         .with_shared_library_root(library_root.clone())
         .with_organize_target(config.organize_target.clone())
         .with_public_url(config.public_url.clone())
+        .with_artwork_cache_mb(config.artwork_cache_mb)
         .with_transcoder(kima_library::transcode::Transcoder::new(
             config.data_dir.join("transcode"),
             config.transcode_cache_mb * 1024 * 1024,

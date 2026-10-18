@@ -1,7 +1,8 @@
 //! Album artwork: find the cover (embedded first, then a folder image), resize it and cache it.
 
 use std::io::{Cursor, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
@@ -9,6 +10,8 @@ use image::{DynamicImage, ImageReader, Limits};
 use lofty::file::TaggedFileExt;
 use lofty::picture::PictureType;
 use lofty::probe::Probe;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArtworkError {
@@ -72,6 +75,21 @@ pub fn candidates(track_path: &Path) -> Vec<CoverSource> {
         .map(CoverSource::Embedded)
         .collect();
     out.extend(folder_images(track_path).into_iter().map(CoverSource::File));
+    out
+}
+
+/// Like [`candidates`], but pairs each candidate with the file it came from (the track itself
+/// for embedded art), so a cache entry can record what it was built from.
+pub fn candidates_with_origin(track_path: &Path) -> Vec<(CoverSource, PathBuf)> {
+    let mut out: Vec<(CoverSource, PathBuf)> = embedded(track_path)
+        .into_iter()
+        .map(|bytes| (CoverSource::Embedded(bytes), track_path.to_path_buf()))
+        .collect();
+    out.extend(
+        folder_images(track_path)
+            .into_iter()
+            .map(|p| (CoverSource::File(p.clone()), p)),
+    );
     out
 }
 
@@ -226,4 +244,162 @@ fn store(out: &Path, jpeg: &[u8]) -> Result<(), ArtworkError> {
     tmp.write_all(jpeg)?;
     tmp.persist(out).map_err(|e| e.error)?;
     Ok(())
+}
+
+const STAMP_FILE: &str = "source.json";
+
+/// What a cache entry was built from. Stored as `<entry>/source.json`; the entry is stale
+/// once the source or the source's folder no longer matches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceStamp {
+    /// The source file, relative to the library root (the track file for embedded art).
+    pub source_rel: String,
+    pub size: u64,
+    pub mtime_ns: u128,
+    /// The mtime of the source's folder; it changes when a `cover.*` is added or renamed.
+    pub folder_mtime_ns: u128,
+}
+
+fn mtime_ns(meta: &std::fs::Metadata) -> std::io::Result<u128> {
+    Ok(meta
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos())
+}
+
+fn safe_rel(rel: &Path) -> bool {
+    !rel.as_os_str().is_empty() && rel.components().all(|c| matches!(c, Component::Normal(_)))
+}
+
+impl SourceStamp {
+    /// Stamps `source` (an absolute path under `root`) as it is now.
+    pub fn capture(root: &Path, source: &Path) -> std::io::Result<Self> {
+        let rel = source
+            .strip_prefix(root)
+            .ok()
+            .filter(|r| safe_rel(r))
+            .ok_or_else(|| std::io::Error::other("cover source is outside the library root"))?;
+        let source_rel = rel
+            .to_str()
+            .ok_or_else(|| std::io::Error::other("cover source path is not valid UTF-8"))?
+            .to_owned();
+        let meta = std::fs::metadata(source)?;
+        let folder = std::fs::metadata(source.parent().unwrap_or(root))?;
+        Ok(Self {
+            source_rel,
+            size: meta.len(),
+            mtime_ns: mtime_ns(&meta)?,
+            folder_mtime_ns: mtime_ns(&folder)?,
+        })
+    }
+}
+
+/// Writes the entry's `source.json`.
+pub fn write_stamp(entry_dir: &Path, stamp: &SourceStamp) -> std::io::Result<()> {
+    let json = serde_json::to_vec(stamp).map_err(std::io::Error::other)?;
+    std::fs::create_dir_all(entry_dir)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(entry_dir)?;
+    tmp.write_all(&json)?;
+    tmp.persist(entry_dir.join(STAMP_FILE))
+        .map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// True when the entry's source and its folder still have the stamped size and mtimes.
+/// A missing or unreadable stamp counts as stale.
+pub fn stamp_is_fresh(root: &Path, entry_dir: &Path) -> bool {
+    fn check(root: &Path, entry_dir: &Path) -> Option<bool> {
+        let raw = std::fs::read(entry_dir.join(STAMP_FILE)).ok()?;
+        let stamp: SourceStamp = serde_json::from_slice(&raw).ok()?;
+        let rel = Path::new(&stamp.source_rel);
+        if !safe_rel(rel) {
+            return None;
+        }
+        let now = SourceStamp::capture(root, &root.join(rel)).ok()?;
+        Some(now == stamp)
+    }
+    check(root, entry_dir).unwrap_or(false)
+}
+
+/// A cache hit refreshes the stamp's mtime, which is what eviction orders by.
+pub fn touch_stamp(entry_dir: &Path) {
+    let touched = std::fs::File::options()
+        .write(true)
+        .open(entry_dir.join(STAMP_FILE))
+        .and_then(|f| f.set_modified(SystemTime::now()));
+    drop(touched);
+}
+
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
+/// Deletes the album's cache folder. A symlink in its place is unlinked, never followed.
+pub fn remove_album(data_dir: &Path, album_id: Uuid) -> std::io::Result<()> {
+    let entry = data_dir.join("artwork").join(album_id.to_string());
+    let result = match std::fs::symlink_metadata(&entry) {
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(&entry),
+        Ok(_) => std::fs::remove_file(&entry),
+        Err(e) => Err(e),
+    };
+    match result {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Bytes of the regular files directly inside `dir` (symlinks are not followed or counted).
+fn entry_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// Removes whole album folders, oldest `source.json` mtime first, until the cache holds at
+/// most `max_bytes`. Returns the bytes removed. Only real directories named by an album UUID
+/// directly under `<data_dir>/artwork` are considered; anything else is left alone.
+pub fn evict_to(data_dir: &Path, max_bytes: u64) -> std::io::Result<u64> {
+    let root = data_dir.join("artwork");
+    let reader = match std::fs::read_dir(&root) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut entries: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+    for entry in reader.flatten() {
+        let path = entry.path();
+        let named_by_album = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| Uuid::try_parse(n).is_ok());
+        if !named_by_album || !is_real_dir(&path) {
+            continue;
+        }
+        let stamped = std::fs::metadata(path.join(STAMP_FILE))
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        entries.push((stamped, entry_size(&path), path));
+    }
+    let mut total: u64 = entries.iter().map(|e| e.1).sum();
+    entries.sort();
+    let mut removed = 0;
+    for (_, size, path) in entries {
+        if total <= max_bytes {
+            break;
+        }
+        // Re-checked at delete time: the entry could have been swapped for a symlink.
+        if !is_real_dir(&path) {
+            continue;
+        }
+        std::fs::remove_dir_all(&path)?;
+        total = total.saturating_sub(size);
+        removed += size;
+    }
+    Ok(removed)
 }

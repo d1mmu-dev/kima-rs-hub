@@ -223,20 +223,22 @@ pub async fn purge_missing(pool: &PgPool, older_than: Duration) -> sqlx::Result<
 
 /// Deletes albums with no tracks, then artists with no albums, in one transaction.
 /// Must not run concurrently with upserts (the FKs are RESTRICT, so a race fails loudly
-/// instead of cascading); the `library` queue serialises it.
-pub async fn prune_empty(pool: &PgPool) -> sqlx::Result<()> {
+/// instead of cascading); the `library` queue serialises it. Returns the deleted album ids.
+pub async fn prune_empty(pool: &PgPool) -> sqlx::Result<Vec<Uuid>> {
     let mut tx = pool.begin().await?;
-    sqlx::query!(
-        "DELETE FROM albums a WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)"
+    let albums = sqlx::query_scalar!(
+        "DELETE FROM albums a WHERE NOT EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = a.id)
+         RETURNING id"
     )
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
     sqlx::query!(
         "DELETE FROM artists a WHERE NOT EXISTS (SELECT 1 FROM albums b WHERE b.artist_id = a.id)"
     )
     .execute(&mut *tx)
     .await?;
-    tx.commit().await
+    tx.commit().await?;
+    Ok(albums)
 }
 
 /// Paths (relative to the library root) of the album's present tracks, in play order.

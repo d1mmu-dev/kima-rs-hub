@@ -1,6 +1,6 @@
 //! Album cover art, resized and cached. Shared by `/api` and `/rest`.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use kima_library::artwork;
 use uuid::Uuid;
@@ -29,10 +29,20 @@ pub async fn cover(
 
     let paths = kima_db::library::album_track_paths(&state.pool, album_id).await?;
     let key = album_id.to_string();
-    let jpeg = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<PathBuf>> {
-        let cached = artwork::cache_path(&data_dir, &key, size);
-        if cached.is_file() {
-            return Ok(Some(cached));
+    let cap = state.artwork_cache_bytes;
+    let bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Vec<u8>>> {
+        let entry = data_dir.join("artwork").join(&key);
+        if entry.is_dir() {
+            if artwork::stamp_is_fresh(&root, &entry) {
+                let cached = artwork::cache_path(&data_dir, &key, size);
+                if cached.is_file() {
+                    artwork::touch_stamp(&entry);
+                    return Ok(Some(std::fs::read(cached)?));
+                }
+            } else {
+                // The source or its folder changed (or the entry predates stamps): start over.
+                artwork::remove_album(&data_dir, album_id)?;
+            }
         }
         let mut failed = 0;
         for rel in paths.iter().take(PROBE_TRACKS) {
@@ -41,12 +51,24 @@ pub async fn cover(
             if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
                 continue;
             }
-            let candidates = artwork::candidates(&root.join(rel));
-            let (file, bad) = artwork::cached_from(&data_dir, &key, size, candidates)?;
-            if file.is_some() {
-                return Ok(file);
+            for (source, origin) in artwork::candidates_with_origin(&root.join(rel)) {
+                // Stamped before decoding, so a change during the build shows up as stale.
+                let Ok(stamp) = artwork::SourceStamp::capture(&root, &origin) else {
+                    continue;
+                };
+                let (file, bad) = artwork::cached_from(&data_dir, &key, size, [source])?;
+                let Some(file) = file else {
+                    failed += bad;
+                    continue;
+                };
+                artwork::write_stamp(&entry, &stamp)?;
+                // Read before trimming: a tiny cap may evict this very entry.
+                let bytes = std::fs::read(&file)?;
+                if let Err(e) = artwork::evict_to(&data_dir, cap) {
+                    tracing::warn!(error = %e, "could not trim the cover cache");
+                }
+                return Ok(Some(bytes));
             }
-            failed += bad;
         }
         if failed > 0 {
             tracing::warn!(album = %key, failed, "cover art found but none of it could be decoded");
@@ -56,13 +78,7 @@ pub async fn cover(
     .await
     .map_err(|e| MediaError::Internal(e.into()))??;
 
-    let Some(file) = jpeg else {
-        return Ok(None);
-    };
-    let bytes = tokio::fs::read(&file)
-        .await
-        .map_err(|e| MediaError::Internal(e.into()))?;
-    Ok(Some(CoverImage {
+    Ok(bytes.map(|bytes| CoverImage {
         bytes,
         content_type: "image/jpeg",
     }))

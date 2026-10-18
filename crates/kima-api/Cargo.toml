@@ -9,6 +9,7 @@ rust-version.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 futures.workspace = true
+httpdate.workspace = true
 kima-core.workspace = true
 kima-db.workspace = true
 kima-library.workspace = true

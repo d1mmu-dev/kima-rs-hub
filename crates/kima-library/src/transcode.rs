@@ -56,7 +56,7 @@ impl Quality {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Quality::Original => "original",
             Quality::High => "high",

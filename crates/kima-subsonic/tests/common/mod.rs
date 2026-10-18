@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod audio;
+
 use std::net::SocketAddr;
 
 use axum::extract::connect_info::MockConnectInfo;

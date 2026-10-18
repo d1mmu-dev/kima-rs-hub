@@ -28,6 +28,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum-test.workspace = true
+image.workspace = true
 insta.workspace = true
 kima-api.workspace = true
 tempfile.workspace = true

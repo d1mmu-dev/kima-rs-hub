@@ -8,6 +8,7 @@ use crate::ctx::SubsonicCtx;
 use crate::error::SubsonicError;
 
 mod browse;
+mod media;
 mod search;
 mod system;
 
@@ -28,6 +29,7 @@ pub fn router() -> Router<SubsonicCtx> {
     let router = system::add_routes(router);
     let router = browse::add_routes(router);
     let router = search::add_routes(router);
+    let router = media::add_routes(router);
     router.fallback(not_implemented)
 }
 

@@ -3,6 +3,7 @@ use axum::handler::Handler;
 use axum::http::Uri;
 use axum::routing::get;
 
+use crate::auth::SubsonicUser;
 use crate::ctx::SubsonicCtx;
 use crate::error::SubsonicError;
 
@@ -26,8 +27,9 @@ pub fn router() -> Router<SubsonicCtx> {
     router.fallback(not_implemented)
 }
 
-/// Unknown endpoints answer 0, as upstream's catch-all does.
-async fn not_implemented(uri: Uri) -> SubsonicError {
+/// Unknown endpoints answer 0, as upstream's catch-all does, after auth (so an unauthenticated
+/// probe learns nothing about which endpoints exist).
+async fn not_implemented(_: SubsonicUser, uri: Uri) -> SubsonicError {
     let path = uri.path();
     let path = if path.ends_with(".view") {
         path.to_owned()

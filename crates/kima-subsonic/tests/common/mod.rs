@@ -67,3 +67,16 @@ pub async fn app_token(state: &AppState, user: &User, name: &str) -> (Uuid, Stri
     .unwrap();
     (id, token)
 }
+
+/// The `t` and `s` parameters a token+salt client sends for `secret`, with a random salt.
+pub fn ts_params(secret: &str) -> [(String, String); 2] {
+    use md5::{Digest, Md5};
+    use rand::Rng;
+    let salt: String = rand::thread_rng()
+        .sample_iter(rand::distributions::Alphanumeric)
+        .take(12)
+        .map(char::from)
+        .collect();
+    let t = hex::encode(Md5::digest(format!("{secret}{salt}")));
+    [("t".to_owned(), t), ("s".to_owned(), salt)]
+}

@@ -1,10 +1,51 @@
+use std::sync::Arc;
+use std::time::Instant;
+
 use axum::extract::FromRef;
 use kima_api::AppState;
+use uuid::Uuid;
 
-/// What Subsonic handlers share. Later tasks add the now-playing map, the password cache, etc.
+use crate::auth::{
+    DECRYPT_WARN_INTERVAL, PASSWORD_CACHE_TTL, PasswordCache, TOUCH_INTERVAL, Throttle, make_dummy,
+};
+
+/// What Subsonic handlers share. Later tasks add the now-playing map, etc.
 #[derive(Clone)]
 pub struct SubsonicCtx {
     pub app: AppState,
+    /// Passwords that verified in the last 10 minutes (spec §5.3).
+    pub password_cache: Arc<PasswordCache>,
+    /// Limits `last_used_at` writes to one a minute per token.
+    pub touch: Arc<Throttle>,
+    /// Limits the "cannot be decrypted" warning to one an hour per token.
+    pub decrypt_warn: Arc<Throttle>,
+    /// A ciphertext under the app cipher, decrypted by the spare token+salt rounds.
+    pub dummy_secret: Arc<Vec<u8>>,
+}
+
+impl SubsonicCtx {
+    pub fn new(app: AppState) -> Self {
+        let dummy_secret = Arc::new(make_dummy(&app.cipher));
+        Self {
+            app,
+            password_cache: Arc::new(PasswordCache::new(PASSWORD_CACHE_TTL)),
+            touch: Arc::new(Throttle::new(TOUCH_INTERVAL)),
+            decrypt_warn: Arc::new(Throttle::new(DECRYPT_WARN_INTERVAL)),
+            dummy_secret,
+        }
+    }
+
+    /// Records that a token was used, at most once a minute, without making the request wait.
+    pub fn token_used(&self, key_id: Uuid, now: Instant) {
+        if self.touch.allow(key_id, now) {
+            let pool = self.app.pool.clone();
+            tokio::spawn(async move {
+                if let Err(error) = kima_db::api_keys::touch(&pool, key_id).await {
+                    tracing::warn!(key_id = %key_id, ?error, "cannot record app token use");
+                }
+            });
+        }
+    }
 }
 
 impl FromRef<SubsonicCtx> for AppState {

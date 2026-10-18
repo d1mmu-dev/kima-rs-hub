@@ -136,7 +136,7 @@ New in kima-rs:
 | `KIMA_WATCH_POLL_SECS` | `60` | Poll interval in seconds (must be > 0) for `poll` mode and the `auto` fallback. |
 | `KIMA_ORGANIZE_TARGET` | unset | Writable directory for the organizer's copy mode. Unset means copy mode is unavailable. |
 | `KIMA_TRANSCODE_CACHE_MB` | `2048` | Size cap of the transcode cache under `KIMA_DATA_DIR`, in MB. |
-| `KIMA_ARTWORK_CACHE_MB` | `512` | Size cap of the cover-art cache under `KIMA_DATA_DIR/artwork`, in MB. The oldest albums are dropped first. |
+| `KIMA_ARTWORK_CACHE_MB` | `512` | Size cap of the cover-art cache under `KIMA_DATA_DIR/artwork`, in MB. The oldest albums are dropped first. `0` means nothing is kept, so every request rebuilds. |
 
 Keep `secrets.json` (or the two secret variables) safe: losing it makes stored encrypted settings
 unreadable. A corrupt file stops startup rather than being replaced.

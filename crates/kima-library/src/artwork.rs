@@ -248,6 +248,10 @@ fn store(out: &Path, jpeg: &[u8]) -> Result<(), ArtworkError> {
 
 const STAMP_FILE: &str = "source.json";
 
+/// An entry folder with no `source.json` younger than this is a build in progress; eviction
+/// leaves it alone.
+const IN_FLIGHT_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// What a cache entry was built from. Stored as `<entry>/source.json`; the entry is stale
 /// once the source or the source's folder no longer matches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -328,7 +332,9 @@ pub fn touch_stamp(entry_dir: &Path) {
         .write(true)
         .open(entry_dir.join(STAMP_FILE))
         .and_then(|f| f.set_modified(SystemTime::now()));
-    drop(touched);
+    if let Err(e) = touched {
+        tracing::debug!(error = %e, "could not refresh the cover cache stamp");
+    }
 }
 
 fn is_real_dir(path: &Path) -> bool {
@@ -372,6 +378,7 @@ pub fn evict_to(data_dir: &Path, max_bytes: u64) -> std::io::Result<u64> {
         Err(e) => return Err(e),
     };
     let mut entries: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
+    let mut total: u64 = 0;
     for entry in reader.flatten() {
         let path = entry.path();
         let named_by_album = entry
@@ -381,12 +388,25 @@ pub fn evict_to(data_dir: &Path, max_bytes: u64) -> std::io::Result<u64> {
         if !named_by_album || !is_real_dir(&path) {
             continue;
         }
-        let stamped = std::fs::metadata(path.join(STAMP_FILE))
-            .and_then(|m| m.modified())
-            .unwrap_or(UNIX_EPOCH);
-        entries.push((stamped, entry_size(&path), path));
+        let size = entry_size(&path);
+        total += size;
+        let stamped = match std::fs::metadata(path.join(STAMP_FILE)).and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => {
+                // No stamp yet: a build in flight, unless the folder has sat there a while.
+                let young = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_none_or(|age| age < IN_FLIGHT_GRACE);
+                if young {
+                    continue;
+                }
+                UNIX_EPOCH
+            }
+        };
+        entries.push((stamped, size, path));
     }
-    let mut total: u64 = entries.iter().map(|e| e.1).sum();
     entries.sort();
     let mut removed = 0;
     for (_, size, path) in entries {
@@ -397,7 +417,12 @@ pub fn evict_to(data_dir: &Path, max_bytes: u64) -> std::io::Result<u64> {
         if !is_real_dir(&path) {
             continue;
         }
-        std::fs::remove_dir_all(&path)?;
+        // Gone already (a concurrent removal) counts as removed.
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
         total = total.saturating_sub(size);
         removed += size;
     }

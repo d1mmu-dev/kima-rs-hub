@@ -200,6 +200,7 @@ fixture_test!(music_directory_root_artist_album, |server, _pool| {
         assert_eq!(ids(&dir["child"]), album_ids(&[1, 2]));
         assert_eq!(dir["child"][0]["isDir"], true);
         assert_eq!(dir["child"][0]["title"], "Abbey Road");
+        assert_eq!(dir["child"][0]["album"], "Abbey Road");
         assert_eq!(dir["child"][0]["parent"], artist_id(1).to_string());
     }
 

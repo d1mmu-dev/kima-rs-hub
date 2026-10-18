@@ -139,6 +139,8 @@ impl Node {
     }
 
     /// A body with no element of its own: its children go straight into the envelope.
+    /// Their names must not clash with the envelope's own children (`error`); that is a
+    /// debug-build panic.
     pub fn fragment() -> Self {
         Self::new("")
     }

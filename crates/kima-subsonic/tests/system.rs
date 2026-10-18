@@ -116,3 +116,22 @@ async fn xml_is_the_default_format(pool: PgPool) {
     );
     assert!(res.text().contains("<error code=\"10\""));
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn too_many_parameters_is_error_0(pool: PgPool) {
+    let (server, _) = server(pool);
+    let body: String = (0..10_001).map(|i| format!("k{i}=&")).collect();
+    let res = server
+        .post("/tokenInfo")
+        .add_query_param("f", "json")
+        .content_type("application/x-www-form-urlencoded")
+        .bytes(body.into())
+        .await;
+    res.assert_status_ok();
+    let v = res.json::<serde_json::Value>();
+    assert_eq!(v["subsonic-response"]["error"]["code"], 0);
+    assert_eq!(
+        v["subsonic-response"]["error"]["message"],
+        "Too many parameters"
+    );
+}

@@ -1,6 +1,7 @@
 //! Request parameters: the query string and a form-encoded POST body, merged (OpenSubsonic
 //! `formPost`), with repeated keys collected in order.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use axum::body::{Body, to_bytes};
@@ -17,29 +18,47 @@ use crate::response::{Format, render_error};
 /// Largest form body read.
 const BODY_LIMIT: usize = 1024 * 1024;
 
+/// Most parameters (query and form together) one request may carry. Repeated `id=` for a
+/// playlist or queue is the legitimate heavy use.
+pub const MAX_PARAMS: usize = 10_000;
+
 /// Keys in order of first appearance, each with its values in order. Query values come before
 /// body values.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Params {
     entries: Vec<(String, Vec<String>)>,
+    /// Key to position in `entries`, so `push` is O(1).
+    index: HashMap<String, usize>,
 }
 
 impl Params {
-    pub fn parse(query: Option<&str>, form_body: Option<&[u8]>) -> Self {
+    /// Errors with 0 "Too many parameters" past [`MAX_PARAMS`], without reading the rest.
+    pub fn try_parse(query: Option<&str>, form_body: Option<&[u8]>) -> Result<Self, SubsonicError> {
         let mut params = Self::default();
         let query = query.unwrap_or("").as_bytes();
-        for (key, value) in
-            form_urlencoded::parse(query).chain(form_urlencoded::parse(form_body.unwrap_or(&[])))
-        {
+        let pairs =
+            form_urlencoded::parse(query).chain(form_urlencoded::parse(form_body.unwrap_or(&[])));
+        for (count, (key, value)) in pairs.enumerate() {
+            if count >= MAX_PARAMS {
+                return Err(SubsonicError::generic("Too many parameters"));
+            }
             params.push(key.into_owned(), value.into_owned());
         }
-        params
+        Ok(params)
+    }
+
+    #[cfg(test)]
+    pub fn parse(query: Option<&str>, form_body: Option<&[u8]>) -> Self {
+        Self::try_parse(query, form_body).unwrap()
     }
 
     fn push(&mut self, key: String, value: String) {
-        match self.entries.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, values)) => values.push(value),
-            None => self.entries.push((key, vec![value])),
+        match self.index.get(&key) {
+            Some(&at) => self.entries[at].1.push(value),
+            None => {
+                self.index.insert(key.clone(), self.entries.len());
+                self.entries.push((key, vec![value]));
+            }
         }
     }
 
@@ -49,10 +68,9 @@ impl Params {
     }
 
     pub fn all(&self, key: &str) -> &[String] {
-        self.entries
-            .iter()
-            .find(|(k, _)| k == key)
-            .map_or(&[], |(_, values)| values.as_slice())
+        self.index
+            .get(key)
+            .map_or(&[], |&at| self.entries[at].1.as_slice())
     }
 
     /// Missing or empty is error 10.
@@ -120,17 +138,28 @@ pub async fn params_layer(request: Request, next: Next) -> Response {
         match to_bytes(body, BODY_LIMIT).await {
             Ok(bytes) => (Body::from(bytes.clone()), Some(bytes)),
             Err(_) => {
-                let format = Params::parse(query, None).format();
-                return render_error(format, &SubsonicError::generic("Request body too large"));
+                return render_error(
+                    format_hint(query),
+                    &SubsonicError::generic("Request body too large"),
+                );
             }
         }
     } else {
         (body, None)
     };
-    let params = Params::parse(query, form.as_deref());
+    let params = match Params::try_parse(query, form.as_deref()) {
+        Ok(params) => params,
+        Err(error) => return render_error(format_hint(query), &error),
+    };
     let mut request = Request::from_parts(parts, body);
     request.extensions_mut().insert(params);
     next.run(request).await
+}
+
+/// The requested format from the query alone, for answers given before parsing succeeds.
+fn format_hint(query: Option<&str>) -> Format {
+    let f = form_urlencoded::parse(query.unwrap_or("").as_bytes()).find(|(k, _)| k == "f");
+    Format::from_param(f.as_ref().map(|(_, v)| v.as_ref()))
 }
 
 /// `enc:<hex>` is the hex of the UTF-8 password; anything else (including bad hex) is the
@@ -148,6 +177,18 @@ pub fn decode_password(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn many_distinct_keys_parse_fast_and_over_cap_is_refused() {
+        let at_cap: String = (0..MAX_PARAMS).map(|i| format!("k{i}=&")).collect();
+        let start = std::time::Instant::now();
+        let p = Params::try_parse(Some(&at_cap), None).unwrap();
+        assert_eq!(p.get("k9999"), Some(""));
+        let body: String = (0..100_000).map(|i| format!("k{i}=&")).collect();
+        let err = Params::try_parse(Some("f=json"), Some(body.as_bytes())).unwrap_err();
+        assert_eq!((err.code, err.message.as_str()), (0, "Too many parameters"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
 
     #[test]
     fn repeated_keys_kept_in_order() {

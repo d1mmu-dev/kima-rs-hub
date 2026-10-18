@@ -69,7 +69,7 @@ pub(crate) const ALBUM_SELECT: &str =
     JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL";
 
 /// `%` and `_` in a user's text must match themselves in `ILIKE`.
-fn like_pattern(q: &str) -> String {
+pub(crate) fn like_pattern(q: &str) -> String {
     let escaped = q
         .replace('\\', "\\\\")
         .replace('%', "\\%")

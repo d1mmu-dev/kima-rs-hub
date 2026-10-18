@@ -643,7 +643,7 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
     if !report.root_empty_guard {
         report.purged = library::purge_missing(&ctx.pool, MISSING_GRACE).await? as usize;
     }
-    library::prune_empty(&ctx.pool).await?;
+    prune_empty(ctx).await?;
     progress.finish();
     if !report.failed.is_empty() {
         warn!(
@@ -747,9 +747,28 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
         // An existing track changed album (new tags, or the folder's album year moved), so
         // its old album may now be empty. Safe here: prune_empty must not race upserts, and
         // update_path only runs on the concurrency-1 `library` queue, like every other writer.
-        library::prune_empty(&ctx.pool).await?;
+        prune_empty(ctx).await?;
     }
     Ok(outcome)
+}
+
+/// Prunes empty albums and artists, then deletes the cover cache of each deleted album.
+/// A cache folder that cannot be removed is logged, not fatal: the rows are already gone.
+async fn prune_empty(ctx: &LibraryCtx) -> Result<(), ScanError> {
+    let albums = library::prune_empty(&ctx.pool).await?;
+    if albums.is_empty() {
+        return Ok(());
+    }
+    let data_dir = ctx.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        for id in albums {
+            if let Err(e) = crate::artwork::remove_album(&data_dir, id) {
+                warn!(album = %id, error = %e, "could not remove the cover cache of a deleted album");
+            }
+        }
+    })
+    .await?;
+    Ok(())
 }
 
 /// The root is readable and holds at least one audio file. An unmounted disk usually

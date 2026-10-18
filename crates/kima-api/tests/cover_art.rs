@@ -155,10 +155,12 @@ async fn sizes_share_a_bucket_and_cache_file(pool: PgPool) {
         let img = image::load_from_memory(res.as_bytes()).unwrap();
         assert_eq!((img.width(), img.height()), (512, 256));
     }
-    let files: Vec<_> = std::fs::read_dir(data.path().join(format!("artwork/{album}")))
+    let mut files: Vec<_> = std::fs::read_dir(data.path().join(format!("artwork/{album}")))
         .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
-    assert_eq!(files.len(), 1);
+    files.sort();
+    assert_eq!(files, ["512.jpg", "source.json"]);
     assert!(
         data.path()
             .join(format!("artwork/{album}/512.jpg"))
@@ -194,4 +196,130 @@ async fn query_token_is_rejected_on_non_media_routes(pool: PgPool) {
         .get(&format!("/api/system/features?token={token}"))
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
+}
+
+fn set_mtime(path: &std::path::Path, secs_from_now: i64) {
+    let now = std::time::SystemTime::now();
+    let when = if secs_from_now >= 0 {
+        now + std::time::Duration::from_secs(secs_from_now as u64)
+    } else {
+        now - std::time::Duration::from_secs(secs_from_now.unsigned_abs())
+    };
+    std::fs::File::open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+struct Fixture {
+    server: axum_test::TestServer,
+    token: String,
+    album: Uuid,
+    music: tempfile::TempDir,
+    data: tempfile::TempDir,
+}
+
+/// A music dir with `A/B/cover.png` (400x200), an album for `A/B/01.mp3`, and a server on them.
+async fn cover_fixture(pool: PgPool, cache_mb: Option<u64>) -> Fixture {
+    let music = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(music.path().join("A/B")).unwrap();
+    std::fs::write(music.path().join("A/B/cover.png"), png(400, 200)).unwrap();
+    let album = album_with_track(&pool, "A/B/01.mp3").await;
+    let mut state = common::state(pool)
+        .with_data_dir(data.path().into())
+        .with_library_root(music.path().into());
+    if let Some(mb) = cache_mb {
+        state = state.with_artwork_cache_mb(mb);
+    }
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    Fixture {
+        server,
+        token,
+        album,
+        music,
+        data,
+    }
+}
+
+impl Fixture {
+    async fn orig_dims(&self) -> (u32, u32) {
+        let res = self
+            .server
+            .get(&format!("/api/library/cover-art/{}", self.album))
+            .authorization_bearer(&self.token)
+            .await;
+        res.assert_status_ok();
+        let img = image::load_from_memory(res.as_bytes()).unwrap();
+        (img.width(), img.height())
+    }
+
+    fn entry(&self) -> std::path::PathBuf {
+        self.data.path().join(format!("artwork/{}", self.album))
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stamp_written_with_entry(pool: PgPool) {
+    let f = cover_fixture(pool, None).await;
+    assert_eq!(f.orig_dims().await, (400, 200));
+    let raw = std::fs::read(f.entry().join("source.json")).unwrap();
+    let stamp: kima_library::artwork::SourceStamp = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(stamp.source_rel, "A/B/cover.png");
+    let meta = std::fs::metadata(f.music.path().join("A/B/cover.png")).unwrap();
+    assert_eq!(stamp.size, meta.len());
+    assert!(stamp.mtime_ns > 0 && stamp.folder_mtime_ns > 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn rewritten_cover_file_rebuilds(pool: PgPool) {
+    let f = cover_fixture(pool, None).await;
+    assert_eq!(f.orig_dims().await, (400, 200));
+    let cover = f.music.path().join("A/B/cover.png");
+    std::fs::write(&cover, png(300, 300)).unwrap();
+    set_mtime(&cover, 30);
+    assert_eq!(f.orig_dims().await, (300, 300));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn new_cover_file_rebuilds(pool: PgPool) {
+    let f = cover_fixture(pool, None).await;
+    assert_eq!(f.orig_dims().await, (400, 200));
+    // cover.jpg outranks cover.png; adding it changes the folder's mtime.
+    let jpg = image::RgbImage::from_pixel(100, 50, image::Rgb([0, 0, 200]));
+    jpg.save(f.music.path().join("A/B/cover.jpg")).unwrap();
+    set_mtime(&f.music.path().join("A/B"), 30);
+    assert_eq!(f.orig_dims().await, (100, 50));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unchanged_hit_reuses_and_refreshes_stamp(pool: PgPool) {
+    let f = cover_fixture(pool, None).await;
+    f.orig_dims().await;
+    let (jpg, stamp) = (f.entry().join("orig.jpg"), f.entry().join("source.json"));
+    set_mtime(&stamp, -3600);
+    let old_stamp = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+    let built = std::fs::metadata(&jpg).unwrap().modified().unwrap();
+    f.orig_dims().await;
+    assert_eq!(std::fs::metadata(&jpg).unwrap().modified().unwrap(), built);
+    assert!(std::fs::metadata(&stamp).unwrap().modified().unwrap() > old_stamp);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn entry_without_stamp_is_rebuilt(pool: PgPool) {
+    let f = cover_fixture(pool, None).await;
+    // An M1-era entry: a cache file but no source.json.
+    std::fs::create_dir_all(f.entry()).unwrap();
+    std::fs::write(f.entry().join("orig.jpg"), b"stale").unwrap();
+    assert_eq!(f.orig_dims().await, (400, 200));
+    assert!(f.entry().join("source.json").is_file());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cache_cap_evicts_after_write(pool: PgPool) {
+    // A zero cap evicts every entry, yet the response that built it still carries the image.
+    let f = cover_fixture(pool, Some(0)).await;
+    assert_eq!(f.orig_dims().await, (400, 200));
+    assert!(!f.entry().exists());
 }

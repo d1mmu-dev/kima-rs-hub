@@ -416,6 +416,56 @@ async fn missing_tracks_purged_after_grace(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn purge_removes_artwork_folder(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let p = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "C/D/01.flac",
+        tags("C", "D", "two", "2001", "1"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    let album_of = |title: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT a.id FROM albums a JOIN tracks t ON t.album_id = a.id WHERE t.title = $1",
+            )
+            .bind(title)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let (gone, kept) = (album_of("one").await, album_of("two").await);
+    for id in [gone, kept] {
+        let folder = c.data_dir.join("artwork").join(id.to_string());
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("orig.jpg"), b"x").unwrap();
+    }
+
+    std::fs::remove_file(p).unwrap();
+    scan::reconcile(&c).await.unwrap();
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '8 days' WHERE title = 'one'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.purged, 1, "{report:?}");
+    let art = c.data_dir.join("artwork");
+    assert!(!art.join(gone.to_string()).exists());
+    assert!(art.join(kept.to_string()).join("orig.jpg").exists());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn update_path_root_unavailable(pool: PgPool) {
     if !require_ffmpeg() {
         return;

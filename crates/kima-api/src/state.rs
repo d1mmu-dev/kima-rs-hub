@@ -46,6 +46,8 @@ pub struct AppState {
     pub password_work: Arc<Semaphore>,
     /// Where kima keeps its own files (artwork cache, ...). `None` disables features that need it.
     pub data_dir: Option<PathBuf>,
+    /// `KIMA_ARTWORK_CACHE_MB` in bytes: the cover-art cache is trimmed to this after each write.
+    pub artwork_cache_bytes: u64,
     /// The music library root that track paths are relative to. `None` until configured.
     /// Shared with the job worker and the watcher, so switching it reaches all of them.
     pub library_root: Option<LibraryRoot>,
@@ -79,6 +81,7 @@ impl AppState {
             shutdown,
             password_work: Arc::new(Semaphore::new(cpus.max(1))),
             data_dir: None,
+            artwork_cache_bytes: 512 * 1024 * 1024,
             library_root: None,
             organize_target: None,
             library: LibraryServices::default(),
@@ -97,6 +100,11 @@ impl AppState {
 
     pub fn with_public_url(mut self, public_url: Option<String>) -> Self {
         self.public_url = public_url;
+        self
+    }
+
+    pub fn with_artwork_cache_mb(mut self, mb: u64) -> Self {
+        self.artwork_cache_bytes = mb.saturating_mul(1024 * 1024);
         self
     }
 

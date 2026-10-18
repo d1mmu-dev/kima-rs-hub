@@ -212,3 +212,144 @@ fn concurrent_cached_calls_all_succeed() {
         .collect();
     assert_eq!(leftovers.len(), 1, "no stray temp files");
 }
+
+fn set_mtime(path: &std::path::Path, secs_from_now: i64) {
+    let now = std::time::SystemTime::now();
+    let when = if secs_from_now >= 0 {
+        now + std::time::Duration::from_secs(secs_from_now as u64)
+    } else {
+        now - std::time::Duration::from_secs(secs_from_now.unsigned_abs())
+    };
+    std::fs::File::open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+/// An album cache entry of `bytes` bytes whose stamp is `age_secs` old.
+fn entry(data: &std::path::Path, album: uuid::Uuid, bytes: usize, age_secs: i64) {
+    let dir = data.join("artwork").join(album.to_string());
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("orig.jpg"), vec![0u8; bytes]).unwrap();
+    std::fs::write(dir.join("source.json"), b"{}").unwrap();
+    set_mtime(&dir.join("source.json"), -age_secs);
+}
+
+#[test]
+fn evict_to_removes_oldest_albums() {
+    let data = tempfile::tempdir().unwrap();
+    let (old, mid, new) = (
+        uuid::Uuid::now_v7(),
+        uuid::Uuid::now_v7(),
+        uuid::Uuid::now_v7(),
+    );
+    entry(data.path(), mid, 1000, 200);
+    entry(data.path(), old, 1000, 500);
+    entry(data.path(), new, 1000, 10);
+    // Each entry is 1002 bytes; a cap of 2100 fits two.
+    let removed = artwork::evict_to(data.path(), 2100).unwrap();
+    assert_eq!(removed, 1002);
+    let art = data.path().join("artwork");
+    assert!(!art.join(old.to_string()).exists());
+    assert!(art.join(mid.to_string()).exists());
+    assert!(art.join(new.to_string()).exists());
+    assert_eq!(artwork::evict_to(data.path(), 2100).unwrap(), 0);
+}
+
+#[test]
+fn evict_and_remove_never_leave_the_cache() {
+    let data = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("precious.txt"), b"keep").unwrap();
+    let art = data.path().join("artwork");
+    std::fs::create_dir_all(&art).unwrap();
+    // A symlinked "album", a non-UUID folder and a stray file are all left alone by eviction.
+    let linked = uuid::Uuid::now_v7();
+    std::os::unix::fs::symlink(outside.path(), art.join(linked.to_string())).unwrap();
+    std::fs::create_dir_all(art.join("..sneaky")).unwrap();
+    std::fs::write(art.join("..sneaky/x"), vec![0u8; 5000]).unwrap();
+    std::fs::write(art.join("loose.bin"), vec![0u8; 5000]).unwrap();
+    artwork::evict_to(data.path(), 0).unwrap();
+    assert!(outside.path().join("precious.txt").exists());
+    assert!(art.join("..sneaky/x").exists());
+    assert!(art.join("loose.bin").exists());
+    assert!(art.join(linked.to_string()).exists());
+    // remove_album unlinks the symlink itself and nothing behind it.
+    artwork::remove_album(data.path(), linked).unwrap();
+    assert!(!art.join(linked.to_string()).exists());
+    assert!(outside.path().join("precious.txt").exists());
+    // Removing an album that has no folder is fine.
+    artwork::remove_album(data.path(), uuid::Uuid::now_v7()).unwrap();
+}
+
+#[test]
+fn stamp_goes_stale_when_source_or_folder_changes() {
+    let root = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("a")).unwrap();
+    let cover = root.path().join("a/cover.png");
+    std::fs::write(&cover, png_bytes(10, 10, [1, 2, 3])).unwrap();
+    let entry_dir = data.path().join("artwork/e");
+    assert!(
+        !artwork::stamp_is_fresh(root.path(), &entry_dir),
+        "no stamp"
+    );
+
+    let stamp = artwork::SourceStamp::capture(root.path(), &cover).unwrap();
+    assert_eq!(stamp.source_rel, "a/cover.png");
+    artwork::write_stamp(&entry_dir, &stamp).unwrap();
+    assert!(artwork::stamp_is_fresh(root.path(), &entry_dir));
+
+    set_mtime(&root.path().join("a"), 30);
+    assert!(
+        !artwork::stamp_is_fresh(root.path(), &entry_dir),
+        "folder changed"
+    );
+    artwork::write_stamp(
+        &entry_dir,
+        &artwork::SourceStamp::capture(root.path(), &cover).unwrap(),
+    )
+    .unwrap();
+    assert!(artwork::stamp_is_fresh(root.path(), &entry_dir));
+    set_mtime(&cover, 60);
+    assert!(
+        !artwork::stamp_is_fresh(root.path(), &entry_dir),
+        "source mtime changed"
+    );
+
+    // A stamp pointing out of the root, or at a missing file, is stale.
+    std::fs::write(
+        entry_dir.join("source.json"),
+        br#"{"source_rel":"../x","size":1,"mtime_ns":1,"folder_mtime_ns":1}"#,
+    )
+    .unwrap();
+    assert!(!artwork::stamp_is_fresh(root.path(), &entry_dir));
+    std::fs::write(entry_dir.join("source.json"), b"garbage").unwrap();
+    assert!(!artwork::stamp_is_fresh(root.path(), &entry_dir));
+}
+
+#[test]
+fn reembedded_art_makes_the_stamp_stale() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let track = make_audio(root.path(), "a/01.mp3", Tags::full());
+    embed_cover(&track, png_bytes(20, 20, [255, 0, 0]));
+    let (_, origin) = artwork::candidates_with_origin(&track)
+        .into_iter()
+        .next()
+        .expect("embedded candidate");
+    assert_eq!(origin, track, "embedded art names the track as its source");
+    let entry_dir = data.path().join("artwork/e");
+    artwork::write_stamp(
+        &entry_dir,
+        &artwork::SourceStamp::capture(root.path(), &origin).unwrap(),
+    )
+    .unwrap();
+    assert!(artwork::stamp_is_fresh(root.path(), &entry_dir));
+    embed_cover(&track, png_bytes(40, 40, [0, 255, 0]));
+    set_mtime(&track, 90);
+    assert!(!artwork::stamp_is_fresh(root.path(), &entry_dir));
+}

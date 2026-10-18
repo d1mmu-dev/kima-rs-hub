@@ -71,8 +71,23 @@ impl LoginLimiter {
         }
     }
 
+    /// IPv6 peers share one key per /64 (a host can rotate through its whole prefix), and an
+    /// IPv4-mapped IPv6 address is its IPv4 form.
+    fn network(ip: IpAddr) -> IpAddr {
+        match ip {
+            IpAddr::V4(_) => ip,
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => IpAddr::V4(v4),
+                None => {
+                    let s = v6.segments();
+                    IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+                }
+            },
+        }
+    }
+
     fn key(ip: IpAddr, username: &str) -> Key {
-        (ip, username.to_lowercase())
+        (Self::network(ip), username.to_lowercase())
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<Key, Entry>> {
@@ -294,6 +309,29 @@ mod tests {
         fail(&limiter, "alice", 5, now);
         assert!(limiter.begin(OTHER_IP, "alice", now).is_ok());
         assert!(limiter.begin(IP, "bob", now).is_ok());
+    }
+
+    #[test]
+    fn ipv6_peers_share_a_key_per_64() {
+        let (limiter, now) = (LoginLimiter::new(), Instant::now());
+        let a: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let same_64: IpAddr = "2001:db8:1:2:ffff:eeee:dddd:cccc".parse().unwrap();
+        let other_64: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        for _ in 0..5 {
+            drop(limiter.begin(a, "alice", now).unwrap());
+        }
+        assert!(limiter.begin(same_64, "alice", now).is_err());
+        assert!(limiter.begin(other_64, "alice", now).is_ok());
+    }
+
+    #[test]
+    fn mapped_ipv4_equals_plain_ipv4() {
+        let (limiter, now) = (LoginLimiter::new(), Instant::now());
+        let mapped: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        fail(&limiter, "alice", 5, now);
+        assert!(limiter.begin(mapped, "alice", now).is_err());
+        let other_mapped: IpAddr = "::ffff:10.0.0.2".parse().unwrap();
+        assert!(limiter.begin(other_mapped, "alice", now).is_ok());
     }
 
     #[test]

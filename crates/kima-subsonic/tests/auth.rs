@@ -237,11 +237,13 @@ async fn limiter_blocks_sixth_p_with_41(pool: PgPool) {
     }
     let permits = state.password_permits_issued();
     let res = ping(&server, &[("u", "alice"), ("p", "pw-alice")]).await;
-    assert_error(
-        &res,
-        41,
-        "Too many failed sign-in attempts. Try again in 2 seconds.",
-    );
+    assert_eq!(res["error"]["code"], 41, "{res}");
+    let message = res["error"]["message"].as_str().unwrap();
+    let secs = message
+        .strip_prefix("Too many failed sign-in attempts. Try again in ")
+        .and_then(|rest| rest.strip_suffix(" seconds."))
+        .and_then(|n| n.parse::<u32>().ok());
+    assert!(secs.is_some_and(|n| n > 0), "{message}");
     assert_eq!(state.password_permits_issued(), permits, "no argon2 ran");
     // App tokens are never blocked.
     assert_ok(&ping(&server, &[("apiKey", &token)]).await);

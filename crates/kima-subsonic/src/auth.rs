@@ -260,7 +260,7 @@ fn blocked(blocked: kima_api::login_limit::Blocked) -> SubsonicError {
     )
 }
 
-/// A non-empty parameter.
+/// A non-empty parameter. An empty `apiKey`, `p`, `t` or `s` counts as absent (D-074).
 fn given<'a>(params: &'a Params, key: &str) -> Option<&'a str> {
     params.get(key).filter(|value| !value.is_empty())
 }
@@ -302,9 +302,6 @@ impl FromRequestParts<SubsonicCtx> for SubsonicUser {
 
         // 2. u from here on.
         let u = given(&params, "u").ok_or_else(|| SubsonicError::missing("u"))?;
-        if u.chars().count() > MAX_USERNAME_CHARS {
-            return Err(SubsonicError::wrong_credentials());
-        }
 
         // 3. Token + salt.
         if let Some(t) = given(&params, "t") {
@@ -312,11 +309,9 @@ impl FromRequestParts<SubsonicCtx> for SubsonicUser {
             if !is_md5_hex(t) {
                 return Err(SubsonicError::new(40, TS_HINT));
             }
-            let found = users::find_by_username(pool, u).await?;
-            let secrets = match &found {
-                Some(user) => kima_db::api_keys::secrets_for_user(pool, user.id).await?,
-                None => Vec::new(),
-            };
+            // One query whatever the user: no extra round trip for an existing user, so the
+            // timing does not reveal which usernames exist (spec §5.3 step 3). Keep it so.
+            let (found, secrets) = kima_db::api_keys::user_with_secrets(pool, u).await?;
             let outcome = ts_rounds(&ctx.app.cipher, &secrets, &ctx.dummy_secret, salt, t);
             for id in &outcome.undecryptable {
                 if ctx.decrypt_warn.allow(*id, now) {
@@ -364,6 +359,10 @@ async fn password_auth(
     password: String,
     now: Instant,
 ) -> Result<SubsonicUser, SubsonicError> {
+    // No account can have a name this long, so refuse it before it becomes a limiter key.
+    if u.chars().count() > MAX_USERNAME_CHARS {
+        return Err(SubsonicError::wrong_credentials());
+    }
     let state = &ctx.app;
     // Before any lookup or hashing. Counted as a failure now; cleared on success.
     let attempt = state.login_limit.begin(ip, u, now).map_err(blocked)?;

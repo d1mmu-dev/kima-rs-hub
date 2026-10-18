@@ -275,3 +275,17 @@ async fn set_password_none_is_unconditional(pool: PgPool) {
             .is_empty()
     );
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn user_with_secrets_one_query_known_or_not(pool: PgPool) {
+    let ana = user(&pool, "ana").await;
+    let (found, secrets) = api_keys::user_with_secrets(&pool, "ANA").await.unwrap();
+    assert_eq!(found.unwrap().id, ana.id);
+    assert!(secrets.is_empty(), "a user with no tokens still comes back");
+    let first = add(&pool, ana.id, "phone", 1).await;
+    let (found, secrets) = api_keys::user_with_secrets(&pool, "ana").await.unwrap();
+    assert_eq!(found.unwrap().id, ana.id);
+    assert_eq!(secrets, vec![(first.id, b"enc".to_vec())]);
+    let (found, secrets) = api_keys::user_with_secrets(&pool, "nobody").await.unwrap();
+    assert!(found.is_none() && secrets.is_empty());
+}

@@ -1308,6 +1308,7 @@ dependencies = [
  "form_urlencoded",
  "hex",
  "hmac 0.13.0",
+ "image",
  "insta",
  "kima-api",
  "kima-core",

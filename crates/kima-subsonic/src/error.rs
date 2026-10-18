@@ -4,6 +4,7 @@ use std::fmt::Debug;
 
 use axum::response::{IntoResponse, Response};
 use kima_api::error::ApiError;
+use kima_api::media::MediaError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubsonicError {
@@ -65,6 +66,16 @@ impl From<ApiError> for SubsonicError {
         match error {
             ApiError::NotFound(message) => Self::not_found(message),
             other => Self::internal(other),
+        }
+    }
+}
+
+impl From<MediaError> for SubsonicError {
+    fn from(error: MediaError) -> Self {
+        match error {
+            MediaError::NotFound(message) => Self::not_found(message),
+            MediaError::BadRequest(message) => Self::new(10, message),
+            MediaError::Internal(error) => Self::internal(error),
         }
     }
 }

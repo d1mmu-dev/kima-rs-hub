@@ -9,6 +9,7 @@ pub mod ctx;
 pub mod error;
 pub mod ids;
 pub mod map;
+pub mod media;
 pub mod params;
 pub mod response;
 mod routes;

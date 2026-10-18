@@ -43,6 +43,7 @@ sha2 = "0.11"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "time", "json"] }
 tempfile = "3"
 thiserror = "2"
+httpdate = "1"
 time = { version = "0.3", features = ["serde", "formatting"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

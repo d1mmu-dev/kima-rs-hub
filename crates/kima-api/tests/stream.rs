@@ -268,3 +268,154 @@ async fn transcode_first_play_200_no_ranges_then_cached_206(pool: PgPool) {
             .starts_with("bytes 100-199/")
     );
 }
+
+use axum::http::header::{ETAG, IF_NONE_MATCH, IF_RANGE, LAST_MODIFIED};
+
+/// A tiny mp3 for the transcode tests.
+fn make_mp3(dest: &Path) {
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
+        .arg("sine=frequency=440:duration=3")
+        .args(["-c:a", "libmp3lame", "-b:a", "320k"])
+        .arg(dest)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn original_has_etag_and_last_modified(pool: PgPool) {
+    let root = tempfile::tempdir().unwrap();
+    let id = track_with_file(&pool, root.path(), &bytes(10_000)).await;
+    let state = setup(pool, root.path());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    let res = server
+        .get(&format!("/api/library/tracks/{id}/stream"))
+        .authorization_bearer(&token)
+        .await;
+    res.assert_status_ok();
+    let etag = res.header(ETAG).to_str().unwrap().to_string();
+    assert!(etag.starts_with("\"2710-") && etag.ends_with('"'), "{etag}");
+    assert!(
+        res.header(LAST_MODIFIED)
+            .to_str()
+            .unwrap()
+            .ends_with(" GMT")
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn if_none_match_304(pool: PgPool) {
+    let root = tempfile::tempdir().unwrap();
+    let id = track_with_file(&pool, root.path(), &bytes(10_000)).await;
+    let state = setup(pool, root.path());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    let url = format!("/api/library/tracks/{id}/stream");
+    let first = server.get(&url).authorization_bearer(&token).await;
+    let etag = first.header(ETAG).to_str().unwrap().to_string();
+    let res = server
+        .get(&url)
+        .authorization_bearer(&token)
+        .add_header(IF_NONE_MATCH, etag.as_str())
+        .await;
+    res.assert_status(StatusCode::NOT_MODIFIED);
+    assert!(res.as_bytes().is_empty());
+    assert_eq!(res.header(ETAG).to_str().unwrap(), etag);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn if_range_matching_206(pool: PgPool) {
+    let root = tempfile::tempdir().unwrap();
+    let data = bytes(10_000);
+    let id = track_with_file(&pool, root.path(), &data).await;
+    let state = setup(pool, root.path());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    let url = format!("/api/library/tracks/{id}/stream");
+    let first = server.get(&url).authorization_bearer(&token).await;
+    let etag = first.header(ETAG).to_str().unwrap().to_string();
+    let lm = first.header(LAST_MODIFIED).to_str().unwrap().to_string();
+    for validator in [etag, lm] {
+        let res = server
+            .get(&url)
+            .authorization_bearer(&token)
+            .add_header(RANGE, "bytes=10-19")
+            .add_header(IF_RANGE, validator.as_str())
+            .await;
+        res.assert_status(StatusCode::PARTIAL_CONTENT);
+        assert_eq!(res.as_bytes().as_ref(), &data[10..20]);
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn if_range_stale_200_full(pool: PgPool) {
+    let root = tempfile::tempdir().unwrap();
+    let data = bytes(10_000);
+    let id = track_with_file(&pool, root.path(), &data).await;
+    let state = setup(pool, root.path());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    let res = server
+        .get(&format!("/api/library/tracks/{id}/stream"))
+        .authorization_bearer(&token)
+        .add_header(RANGE, "bytes=10-19")
+        .add_header(IF_RANGE, "\"stale\"")
+        .await;
+    res.assert_status_ok();
+    assert_eq!(res.as_bytes().as_ref(), &data[..]);
+    assert_eq!(res.header(CONTENT_LENGTH), "10000");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cached_transcode_etag_has_quality(pool: PgPool) {
+    if !Transcoder::ffmpeg_available() {
+        eprintln!("ffmpeg missing, skipping");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let id = track_with_file(&pool, root.path(), b"").await;
+    make_mp3(&root.path().join("Artist/Album/1-1 Song.mp3"));
+    let state =
+        setup(pool, root.path()).with_transcoder(Transcoder::new(cache.path(), 100 * 1024 * 1024));
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    let url = format!("/api/library/tracks/{id}/stream?quality=low");
+    // Drain the first (growing) play, then wait for the cached file.
+    server.get(&url).authorization_bearer(&token).await;
+    for _ in 0..50 {
+        let r = server.get(&url).authorization_bearer(&token).await;
+        if let Some(e) = r.maybe_header(ETAG) {
+            assert!(e.to_str().unwrap().ends_with("-low\""), "{e:?}");
+            assert!(r.maybe_header(LAST_MODIFIED).is_some());
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("transcode never became cached");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn growing_transcode_has_no_etag(pool: PgPool) {
+    if !Transcoder::ffmpeg_available() {
+        eprintln!("ffmpeg missing, skipping");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let id = track_with_file(&pool, root.path(), b"").await;
+    make_mp3(&root.path().join("Artist/Album/1-1 Song.mp3"));
+    let state =
+        setup(pool, root.path()).with_transcoder(Transcoder::new(cache.path(), 100 * 1024 * 1024));
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    let res = server
+        .get(&format!("/api/library/tracks/{id}/stream?quality=low"))
+        .authorization_bearer(&token)
+        .await;
+    res.assert_status_ok();
+    assert!(res.maybe_header(ETAG).is_none());
+    assert!(res.maybe_header(LAST_MODIFIED).is_none());
+}

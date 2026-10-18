@@ -4,6 +4,7 @@ use axum::Router;
 use axum::middleware::from_fn;
 use kima_api::AppState;
 
+pub mod auth;
 pub mod ctx;
 pub mod error;
 pub mod params;
@@ -18,5 +19,5 @@ pub fn router(app: AppState) -> Router {
     routes::router()
         .layer(from_fn(response::render_layer))
         .layer(from_fn(params::params_layer))
-        .with_state(SubsonicCtx { app })
+        .with_state(SubsonicCtx::new(app))
 }

@@ -91,15 +91,19 @@ async fn head_answers(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn unknown_endpoint_is_error_0(pool: PgPool) {
-    let (server, _) = server(pool);
-    let res = rest(&server, "nothingHere", &[]).await;
+    let (server, state) = server(pool);
+    user(&state, "root", "pw", ROLE_USER).await;
+    let res = rest(&server, "nothingHere", &[("u", "root"), ("p", "pw")]).await;
     assert_eq!(res["status"], "failed");
     assert_eq!(res["error"]["code"], 0);
     assert_eq!(
         res["error"]["message"],
         "Not implemented: /nothingHere.view"
     );
-    let res = server.get("/other").add_query_param("f", "json").await;
+    let res = server
+        .get("/other")
+        .add_query_params([("f", "json"), ("u", "root"), ("p", "pw")])
+        .await;
     assert_eq!(
         res.json::<serde_json::Value>()["subsonic-response"]["error"]["message"],
         "Not implemented: /other.view"

@@ -74,7 +74,9 @@ async fn rest_paths_never_fall_to_spa(pool: PgPool) {
         !body.contains("SPA"),
         "fell through to the frontend: {body}"
     );
-    assert!(body.contains("Not implemented: /nothing.view"), "{body}");
+    // Auth runs before the not-implemented answer, so an anonymous probe gets 10.
+    assert!(body.contains("subsonic-response"), "{body}");
+    assert!(body.contains("Required parameter is missing: u"), "{body}");
     // The SPA still answers elsewhere.
     assert_eq!(server.get("/").await.text(), "SPA HOME");
 }

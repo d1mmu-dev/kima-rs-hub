@@ -71,21 +71,34 @@ async fn find(
         return Ok(Found::default());
     };
     // The search rows carry no star or rating; the `*_by_ids` reads add the caller's.
-    let artist_ids: Vec<Uuid> = search::artists(pool, &q, page.artist_count, page.artist_offset)
-        .await?
-        .iter()
-        .map(|a| a.id)
-        .collect();
-    let album_ids: Vec<Uuid> = search::albums(pool, &q, page.album_count, page.album_offset)
-        .await?
-        .iter()
-        .map(|a| a.id)
-        .collect();
-    let track_ids: Vec<Uuid> = search::tracks(pool, &q, page.song_count, page.song_offset)
-        .await?
-        .iter()
-        .map(|t| t.id)
-        .collect();
+    // A zero count runs no SQL.
+    let artist_ids: Vec<Uuid> = if page.artist_count > 0 {
+        search::artists(pool, &q, page.artist_count, page.artist_offset)
+            .await?
+            .iter()
+            .map(|a| a.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let album_ids: Vec<Uuid> = if page.album_count > 0 {
+        search::albums(pool, &q, page.album_count, page.album_offset)
+            .await?
+            .iter()
+            .map(|a| a.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let track_ids: Vec<Uuid> = if page.song_count > 0 {
+        search::tracks(pool, &q, page.song_count, page.song_offset)
+            .await?
+            .iter()
+            .map(|t| t.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
     Ok(Found {
         artists: subsonic::artists_by_ids(pool, user, &artist_ids).await?,
         albums: subsonic::albums_by_ids(pool, user, &album_ids).await?,
@@ -137,8 +150,8 @@ async fn search2(
 }
 
 /// The legacy `search`: songs only, as `match` entries. The text comes from `query`, else `any`,
-/// `title`, `album` or `artist` (D-080). `totalHits` is the offset plus what this page holds,
-/// since no total is computed.
+/// `title`, `album` or `artist` (D-080). One row more than `count` is fetched: `totalHits` is the
+/// offset plus the page, plus one when that extra row exists (a lower bound, D-100).
 async fn legacy_search(
     user: SubsonicUser,
     State(app): State<AppState>,
@@ -150,16 +163,21 @@ async fn legacy_search(
         .find(|v| !v.trim().is_empty())
         .unwrap_or("");
     let song_offset = offset(&params, "offset")?;
+    let wanted = count(&params, "count", 20)?;
     let page = SearchPage {
         artist_count: 0,
         artist_offset: 0,
         album_count: 0,
         album_offset: 0,
-        song_count: count(&params, "count", 20)?,
+        song_count: wanted + 1,
         song_offset,
     };
-    let found = find(&app.pool, user.user.id, query, page).await?;
-    let hits = song_offset + i64::try_from(found.songs.len()).unwrap_or(0);
+    let mut found = find(&app.pool, user.user.id, query, page).await?;
+    let more = i64::try_from(found.songs.len()).unwrap_or(i64::MAX) > wanted;
+    found
+        .songs
+        .truncate(usize::try_from(wanted).unwrap_or_default());
+    let hits = song_offset + i64::try_from(found.songs.len()).unwrap_or(0) + i64::from(more);
     Ok(Answer::node(
         Node::new("searchResult")
             .attr("offset", song_offset)
@@ -225,7 +243,8 @@ async fn get_similar_songs(_user: SubsonicUser, params: Params) -> Result<Answer
     ))
 }
 
-async fn get_similar_songs2(_user: SubsonicUser) -> Result<Answer, SubsonicError> {
+async fn get_similar_songs2(_user: SubsonicUser, params: Params) -> Result<Answer, SubsonicError> {
+    params.required("id")?;
     Ok(Answer::node(
         Node::new("similarSongs2").list("song", Vec::new()),
     ))

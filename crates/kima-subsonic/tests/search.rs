@@ -303,6 +303,18 @@ fixture_test!(
         .await;
         assert_eq!(matches(&res).len(), 1);
         assert_eq!(res["searchResult"]["offset"], 4);
+        // The page ends the results: no extra row, so the total is exact.
+        assert_eq!(res["searchResult"]["totalHits"], 5);
+        // More rows exist past the page: a lower bound, one past what is shown.
+        let res = alice(
+            &server,
+            "search",
+            &[("album", "abbey"), ("count", "2"), ("offset", "1")],
+        )
+        .await;
+        assert_eq!(matches(&res).len(), 2);
+        assert_eq!(res["searchResult"]["totalHits"], 4);
+        let res = alice(&server, "search", &[("album", "abbey"), ("count", "5")]).await;
         assert_eq!(res["searchResult"]["totalHits"], 5);
         // No text at all lists the library, as the empty `search3` does.
         let res = alice(&server, "search", &[("count", "500")]).await;
@@ -479,8 +491,7 @@ fixture_test!(similar_songs2_empty, |server, _pool| {
     )
     .await;
     assert_eq!(res["similarSongs2"]["song"], serde_json::json!([]));
-    let res = alice(&server, "getSimilarSongs2", &[]).await;
-    assert_eq!(res["similarSongs2"]["song"], serde_json::json!([]));
+    assert_failed(&alice(&server, "getSimilarSongs2", &[]).await, 10);
 });
 
 fixture_test!(genres_empty, |server, _pool| {
@@ -509,6 +520,15 @@ async fn search3_sync_page_timing_10k(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query("ANALYZE tracks").execute(&pool).await.unwrap();
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT t.id FROM tracks t WHERE t.missing_since IS NULL
+         ORDER BY lower(t.title) ASC, t.id ASC LIMIT 500 OFFSET 5000",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    println!("{}", plan.join("\n"));
     let server = app(pool);
     for offset in ["0", "5000", "9500"] {
         let start = std::time::Instant::now();

@@ -372,31 +372,44 @@ pub async fn search_all(
     user: Uuid,
     page: SearchPage,
 ) -> sqlx::Result<(Vec<ArtistItem>, Vec<AlbumItem>, Vec<SongItem>)> {
-    let artists = sqlx::query_as(&format!(
-        "{ARTIST_SELECT} {ARTIST_GROUP} ORDER BY ar.sort_name ASC, ar.id ASC LIMIT $2 OFFSET $3"
-    ))
-    .bind(user)
-    .bind(page.artist_count)
-    .bind(page.artist_offset)
-    .fetch_all(pool)
-    .await?;
-    let albums = sqlx::query_as(&format!(
-        "{ALBUM_SELECT} {ALBUM_GROUP} ORDER BY al.sort_name ASC, al.id ASC LIMIT $2 OFFSET $3"
-    ))
-    .bind(user)
-    .bind(page.album_count)
-    .bind(page.album_offset)
-    .fetch_all(pool)
-    .await?;
-    let songs = sqlx::query_as(&format!(
-        "{SONG_SELECT} WHERE t.missing_since IS NULL ORDER BY lower(t.title) ASC, t.id ASC
-         LIMIT $2 OFFSET $3"
-    ))
-    .bind(user)
-    .bind(page.song_count)
-    .bind(page.song_offset)
-    .fetch_all(pool)
-    .await?;
+    // A zero count runs no SQL: the aggregates would otherwise be built and sorted for nothing.
+    let artists = if page.artist_count > 0 {
+        sqlx::query_as(&format!(
+            "{ARTIST_SELECT} {ARTIST_GROUP} ORDER BY ar.sort_name ASC, ar.id ASC LIMIT $2 OFFSET $3"
+        ))
+        .bind(user)
+        .bind(page.artist_count)
+        .bind(page.artist_offset)
+        .fetch_all(pool)
+        .await?
+    } else {
+        Vec::new()
+    };
+    let albums = if page.album_count > 0 {
+        sqlx::query_as(&format!(
+            "{ALBUM_SELECT} {ALBUM_GROUP} ORDER BY al.sort_name ASC, al.id ASC LIMIT $2 OFFSET $3"
+        ))
+        .bind(user)
+        .bind(page.album_count)
+        .bind(page.album_offset)
+        .fetch_all(pool)
+        .await?
+    } else {
+        Vec::new()
+    };
+    let songs = if page.song_count > 0 {
+        sqlx::query_as(&format!(
+            "{SONG_SELECT} WHERE t.missing_since IS NULL ORDER BY lower(t.title) ASC, t.id ASC
+             LIMIT $2 OFFSET $3"
+        ))
+        .bind(user)
+        .bind(page.song_count)
+        .bind(page.song_offset)
+        .fetch_all(pool)
+        .await?
+    } else {
+        Vec::new()
+    };
     Ok((artists, albums, songs))
 }
 

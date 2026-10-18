@@ -148,6 +148,42 @@ pub async fn secrets_for_user(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<(Uu
 }
 
 /// Records that the token was just used.
+/// The user named `username` (case-insensitive) and their token secrets, in ONE query that runs
+/// the same way whether or not the user exists: token+salt auth must not tell a client, by
+/// round trips, which usernames exist. An unknown user gives `(None, [])`.
+pub async fn user_with_secrets(
+    pool: &PgPool,
+    username: &str,
+) -> sqlx::Result<(Option<User>, Vec<(Uuid, Vec<u8>)>)> {
+    let rows = sqlx::query!(
+        r#"SELECT u.id, u.username, u.password_hash, u.role, u.onboarding_complete,
+                  u.token_version, u.created_at,
+                  k.id AS "key_id?", k.secret_enc AS "secret_enc?"
+           FROM users u LEFT JOIN api_keys k ON k.user_id = u.id
+           WHERE lower(u.username) = lower($1)
+           ORDER BY k.created_at ASC, k.id ASC
+           LIMIT $2"#,
+        username,
+        MAX_PER_USER
+    )
+    .fetch_all(pool)
+    .await?;
+    let user = rows.first().map(|r| User {
+        id: r.id,
+        username: r.username.clone(),
+        password_hash: r.password_hash.clone(),
+        role: r.role.clone(),
+        onboarding_complete: r.onboarding_complete,
+        token_version: r.token_version,
+        created_at: r.created_at,
+    });
+    let secrets = rows
+        .into_iter()
+        .filter_map(|r| Some((r.key_id?, r.secret_enc?)))
+        .collect();
+    Ok((user, secrets))
+}
+
 pub async fn touch(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
     sqlx::query!("UPDATE api_keys SET last_used_at = now() WHERE id = $1", id)
         .execute(pool)

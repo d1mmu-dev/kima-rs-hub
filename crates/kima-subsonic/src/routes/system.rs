@@ -16,7 +16,38 @@ pub fn add_routes(router: Router<SubsonicCtx>) -> Router<SubsonicCtx> {
     let router = add(router, "tokenInfo", token_info);
     let router = add(router, "ping", ping);
     let router = add(router, "getLicense", get_license);
+    let router = add(router, "getScanStatus", get_scan_status);
+    let router = add(router, "startScan", start_scan);
     add(router, "getMusicFolders", get_music_folders)
+}
+
+/// `scanning` is a reconcile queued or running; `count` is the number of present tracks
+/// (upstream: the number of queued scan jobs, D-087).
+async fn scan_status(app: &AppState, scanning: bool) -> Result<Answer, SubsonicError> {
+    let count = kima_db::plays::count_present_tracks(&app.pool).await?;
+    Ok(Answer::node(
+        Node::new("scanStatus")
+            .attr("scanning", scanning)
+            .attr("count", count),
+    ))
+}
+
+async fn get_scan_status(
+    _: SubsonicUser,
+    State(app): State<AppState>,
+) -> Result<Answer, SubsonicError> {
+    let pending =
+        kima_jobs::queue::pending_id(&app.pool, kima_library::jobs::QUEUE, "reconcile").await?;
+    scan_status(&app, pending.is_some()).await
+}
+
+async fn start_scan(
+    user: SubsonicUser,
+    State(app): State<AppState>,
+) -> Result<Answer, SubsonicError> {
+    user.require_admin()?;
+    kima_library::jobs::request_reconcile(&app.pool).await?;
+    scan_status(&app, true).await
 }
 
 async fn ping(_: SubsonicUser) -> Answer {

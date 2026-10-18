@@ -7,6 +7,8 @@ use kima_api::AppState;
 pub mod auth;
 pub mod ctx;
 pub mod error;
+pub mod ids;
+pub mod map;
 pub mod params;
 pub mod response;
 mod routes;

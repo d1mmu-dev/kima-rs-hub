@@ -48,6 +48,13 @@ pub enum PlayOutcome {
     UnknownTrack,
 }
 
+/// How many tracks the library holds right now (those not flagged missing).
+pub async fn count_present_tracks(pool: &PgPool) -> sqlx::Result<i64> {
+    sqlx::query_scalar("SELECT count(*) FROM tracks WHERE missing_since IS NULL")
+        .fetch_one(pool)
+        .await
+}
+
 /// Records a play if the listening earns it. The duration comes from the database, never the
 /// request. The duplicate check and the insert run in one transaction behind a per-(user, track)
 /// advisory lock, so concurrent reports of one play cannot both write.

@@ -157,6 +157,12 @@ impl Node {
         }
     }
 
+    /// The same node under another element name (`song` as `entry` or `child`).
+    pub fn renamed(mut self, name: &'static str) -> Self {
+        self.name = name;
+        self
+    }
+
     pub fn text(mut self, text: impl Into<String>) -> Self {
         self.text = Some(text.into());
         self

@@ -7,6 +7,7 @@ use crate::auth::SubsonicUser;
 use crate::ctx::SubsonicCtx;
 use crate::error::SubsonicError;
 
+mod browse;
 mod system;
 
 /// Registers `/{name}` and `/{name}.view` for GET, HEAD and POST.
@@ -24,6 +25,7 @@ where
 pub fn router() -> Router<SubsonicCtx> {
     let router = Router::new();
     let router = system::add_routes(router);
+    let router = browse::add_routes(router);
     router.fallback(not_implemented)
 }
 

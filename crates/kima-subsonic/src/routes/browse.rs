@@ -108,7 +108,7 @@ async fn get_music_directory(
     let raw = params.required("id")?;
     let not_found = || SubsonicError::not_found("Directory not found");
     let me = user.user.id;
-    if raw == "1" {
+    if raw.trim() == "1" {
         let artists = subsonic::artists_sorted(&app.pool, me).await?;
         return Ok(Answer::node(
             Node::new("directory")

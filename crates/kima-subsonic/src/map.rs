@@ -127,6 +127,7 @@ pub fn album_child(a: &AlbumItem) -> Node {
         Node::new("album")
             .attr("isDir", true)
             .attr("title", &a.title)
+            .attr("album", &a.title)
             .attr("parent", a.artist_id.to_string()),
         a,
     )

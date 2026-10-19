@@ -113,10 +113,13 @@ impl Scheduler {
 }
 
 async fn run_entry(entry: Entry, pool: PgPool, shutdown: CancellationToken, clock: Clock) {
+    let mut last_fire: Option<OffsetDateTime> = None;
     loop {
         // Fires missed while asleep or suspended are not caught up: the next fire is always
-        // the first one after the current time.
-        let Some(next) = entry.cron.next_after(clock()) else {
+        // the first one after the current time, and never the boundary that just fired, even
+        // if the clock was stepped back across it.
+        let from = last_fire.map_or_else(|| clock(), |f| f.max(clock()));
+        let Some(next) = entry.cron.next_after(from) else {
             info!(job = entry.name, "schedule has no further fire times");
             return;
         };
@@ -131,6 +134,7 @@ async fn run_entry(entry: Entry, pool: PgPool, shutdown: CancellationToken, cloc
                 () = tokio::time::sleep(wait.min(MAX_CHUNK)) => {}
             }
         }
+        last_fire = Some(next);
         if let Err(e) = (entry.f)(pool.clone()).await {
             warn!(job = entry.name, error = %e, "scheduled job failed to enqueue");
         }

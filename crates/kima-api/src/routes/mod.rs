@@ -16,6 +16,7 @@ mod playback_state;
 mod playlists;
 mod plays;
 mod search;
+mod settings;
 mod stubs;
 mod system;
 mod system_settings;
@@ -37,6 +38,7 @@ pub fn router(state: AppState) -> Router {
         .merge(plays::routes())
         .merge(playlists::routes())
         .merge(playback_state::routes())
+        .merge(settings::routes())
         .fallback(|| async { ApiError::NotFound("Not found") });
 
     Router::new()

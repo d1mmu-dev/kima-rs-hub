@@ -419,3 +419,37 @@ async fn growing_transcode_has_no_etag(pool: PgPool) {
     assert!(res.maybe_header(ETAG).is_none());
     assert!(res.maybe_header(LAST_MODIFIED).is_none());
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stream_without_quality_follows_user_setting(pool: PgPool) {
+    if !Transcoder::ffmpeg_available() {
+        eprintln!("ffmpeg missing, skipping");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let id = track_with_file(&pool, root.path(), b"").await;
+    make_mp3(&root.path().join("Artist/Album/1-1 Song.mp3"));
+    let state =
+        setup(pool, root.path()).with_transcoder(Transcoder::new(cache.path(), 100 * 1024 * 1024));
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    server
+        .post("/api/settings")
+        .authorization_bearer(&token)
+        .json(&serde_json::json!({ "playbackQuality": "low" }))
+        .await
+        .assert_status_ok();
+    // No `quality` in the URL: the saved "low" is used, so the cached ETag names it.
+    let url = format!("/api/library/tracks/{id}/stream");
+    server.get(&url).authorization_bearer(&token).await;
+    for _ in 0..50 {
+        let r = server.get(&url).authorization_bearer(&token).await;
+        if let Some(e) = r.maybe_header(ETAG) {
+            assert!(e.to_str().unwrap().ends_with("-low\""), "{e:?}");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("transcode never became cached");
+}

@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,\n                  share_live_listening\n           FROM user_settings WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "playback_quality",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "wifi_only",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 3,
+        "name": "offline_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_cache_size_mb",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "share_live_listening",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "df9944f7e90662b97f328f064c8b9d912a69b9a8ff27db4f56985a95ea005f0c"
+}

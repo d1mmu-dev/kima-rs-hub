@@ -25,14 +25,6 @@ test("native apps: create a token, use it on /rest, revoke it", async ({ page, r
         localStorage.setItem("refresh_token", v.refreshToken);
     }, s);
 
-    // kima-rs has no GET /api/settings yet (no per-user settings table), and the settings page
-    // refuses to render without it. Stub it so the page under test can load.
-    await page.route("**/api/settings", (route) =>
-        route.request().method() === "GET"
-            ? route.fulfill({ json: { playbackQuality: "original" } })
-            : route.continue(),
-    );
-
     await page.goto("/settings");
     await page.getByRole("button", { name: /native apps/i }).click();
     await expect(page.getByText("Setup Guide")).toBeVisible();
@@ -56,8 +48,11 @@ test("native apps: create a token, use it on /rest, revoke it", async ({ page, r
 
     expect(await ping(token)).toBe("ok");
 
-    await page.getByRole("button", { name: "Revoke" }).click();
-    await page.getByRole("button", { name: "Revoke" }).last().click();
+    const row = page
+        .locator("div.flex.items-center.justify-between")
+        .filter({ has: page.getByText("e2e", { exact: true }) });
+    await row.getByRole("button", { name: "Revoke" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Revoke" }).click();
     await expect(page.getByText("No tokens yet.")).toBeVisible();
 
     expect(await ping(token)).toBe("failed");

@@ -93,6 +93,13 @@ impl Params {
         }
     }
 
+    /// A paging or size parameter (`size`, `count`, `offset`, `*Count`, `*Offset`): absent,
+    /// empty or unparsable is `None`, so the endpoint's default applies, as upstream's
+    /// `parseIntParam` and Navidrome. Other numbers use the strict [`Params::int`].
+    pub fn paging<T: FromStr>(&self, key: &str) -> Option<T> {
+        self.get(key).and_then(|value| value.trim().parse().ok())
+    }
+
     /// Accepts `true`, `false`, `1` and `0`.
     pub fn bool(&self, key: &str) -> Result<Option<bool>, SubsonicError> {
         match self.get(key) {
@@ -245,6 +252,22 @@ mod tests {
         assert_eq!(err.code, 10);
         assert_eq!(err.message, "Invalid parameter: bad");
         assert!(p.int::<u32>("neg").is_err());
+    }
+
+    #[test]
+    fn paging_falls_back_to_the_default() {
+        let p = Params::parse(
+            Some("n=12&sp=%2012%20&bad=abc&frac=10.5&empty=&neg=-3"),
+            None,
+        );
+        assert_eq!(p.paging::<i64>("n"), Some(12));
+        assert_eq!(p.paging::<i64>("sp"), Some(12));
+        assert_eq!(p.paging::<i64>("neg"), Some(-3));
+        assert_eq!(p.paging::<u32>("neg"), None);
+        assert_eq!(p.paging::<i64>("bad"), None);
+        assert_eq!(p.paging::<i64>("frac"), None);
+        assert_eq!(p.paging::<i64>("empty"), None);
+        assert_eq!(p.paging::<i64>("none"), None);
     }
 
     #[test]

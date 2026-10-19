@@ -29,16 +29,17 @@ pub fn add_routes(router: Router<SubsonicCtx>) -> Router<SubsonicCtx> {
     add(router, "getGenres", get_genres)
 }
 
-/// A paging count: the default when absent, then clamped to `0..=500`.
-fn count(params: &Params, key: &str, default: i64) -> Result<i64, SubsonicError> {
-    Ok(params
-        .int::<i64>(key)?
+/// A paging count: the default when absent or unparsable, then clamped to `0..=500`.
+fn count(params: &Params, key: &str, default: i64) -> i64 {
+    params
+        .paging::<i64>(key)
         .unwrap_or(default)
-        .clamp(0, MAX_PAGE))
+        .clamp(0, MAX_PAGE)
 }
 
-fn offset(params: &Params, key: &str) -> Result<i64, SubsonicError> {
-    Ok(params.int::<i64>(key)?.unwrap_or(0).max(0))
+/// A paging offset: 0 when absent or unparsable, never negative.
+fn offset(params: &Params, key: &str) -> i64 {
+    params.paging::<i64>(key).unwrap_or(0).max(0)
 }
 
 /// `""`, `''` and `""` (two double quotes) count as empty, as clients send them for "everything".
@@ -113,12 +114,12 @@ async fn search_result(
     params: Params,
 ) -> Result<Answer, SubsonicError> {
     let page = SearchPage {
-        artist_count: count(&params, "artistCount", 20)?,
-        artist_offset: offset(&params, "artistOffset")?,
-        album_count: count(&params, "albumCount", 20)?,
-        album_offset: offset(&params, "albumOffset")?,
-        song_count: count(&params, "songCount", 20)?,
-        song_offset: offset(&params, "songOffset")?,
+        artist_count: count(&params, "artistCount", 20),
+        artist_offset: offset(&params, "artistOffset"),
+        album_count: count(&params, "albumCount", 20),
+        album_offset: offset(&params, "albumOffset"),
+        song_count: count(&params, "songCount", 20),
+        song_offset: offset(&params, "songOffset"),
     };
     let query = params.get("query").unwrap_or("");
     let found = find(&app.pool, user.user.id, query, page).await?;
@@ -162,8 +163,8 @@ async fn legacy_search(
         .filter_map(|k| params.get(k))
         .find(|v| !v.trim().is_empty())
         .unwrap_or("");
-    let song_offset = offset(&params, "offset")?;
-    let wanted = count(&params, "count", 20)?;
+    let song_offset = offset(&params, "offset");
+    let wanted = count(&params, "count", 20);
     let page = SearchPage {
         artist_count: 0,
         artist_offset: 0,
@@ -198,7 +199,10 @@ async fn get_random_songs(
     State(app): State<AppState>,
     params: Params,
 ) -> Result<Answer, SubsonicError> {
-    let size = params.int::<i64>("size")?.unwrap_or(10).clamp(1, MAX_PAGE);
+    let size = params
+        .paging::<i64>("size")
+        .unwrap_or(10)
+        .clamp(1, MAX_PAGE);
     let from = params.int::<i32>("fromYear")?;
     let to = params.int::<i32>("toYear")?;
     let years = match (from, to) {
@@ -229,7 +233,10 @@ async fn get_top_songs(
     params: Params,
 ) -> Result<Answer, SubsonicError> {
     let artist = params.required("artist")?;
-    let count = params.int::<i64>("count")?.unwrap_or(50).clamp(1, MAX_PAGE);
+    let count = params
+        .paging::<i64>("count")
+        .unwrap_or(50)
+        .clamp(1, MAX_PAGE);
     let songs = subsonic::top_tracks(&app.pool, user.user.id, artist, count).await?;
     Ok(Answer::node(
         Node::new("topSongs").list("song", songs.iter().map(map::song).collect()),

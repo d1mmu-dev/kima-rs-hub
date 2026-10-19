@@ -237,7 +237,8 @@ async fn get_cover_art(
     State(app): State<AppState>,
 ) -> Result<Response, SubsonicError> {
     let raw = params.required("id")?;
-    let size = match params.int::<u32>("size")? {
+    // Junk falls back to the original size, as for the paging parameters.
+    let size = match params.paging::<u32>("size") {
         Some(0) | None => None,
         some => some,
     };

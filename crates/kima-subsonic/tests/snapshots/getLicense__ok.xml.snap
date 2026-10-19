@@ -1,0 +1,7 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <license valid="true" email="kima@kima" licenseExpires="2099-12-31T23:59:59"/>
+</subsonic-response>

@@ -1,0 +1,13 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <albumList2>
+    <album id="00000000-0000-7000-8000-200000000001" name="Abbey Road" artist="The Beatles" artistId="00000000-0000-7000-8000-100000000001" coverArt="00000000-0000-7000-8000-200000000001" songCount="5" duration="1040" year="1969" created="2026-01-01T00:01:00.000Z" starred="2026-01-01T04:04:00.000Z" userRating="4"/>
+    <album id="00000000-0000-7000-8000-200000000002" name="White Album" artist="The Beatles" artistId="00000000-0000-7000-8000-100000000001" coverArt="00000000-0000-7000-8000-200000000002" songCount="4" duration="831" year="1968" created="2026-01-01T00:02:00.000Z"/>
+    <album id="00000000-0000-7000-8000-200000000003" name="La Roux" artist="La Roux" artistId="00000000-0000-7000-8000-100000000002" coverArt="00000000-0000-7000-8000-200000000003" songCount="3" duration="671" year="2009" created="2026-01-01T00:03:00.000Z" starred="2026-01-01T04:03:00.000Z"/>
+    <album id="00000000-0000-7000-8000-200000000004" name="Now Hits" artist="Various Artists" artistId="00000000-0000-7000-8000-100000000003" coverArt="00000000-0000-7000-8000-200000000004" songCount="4" duration="903" year="2010" created="2026-01-01T00:04:00.000Z" userRating="5"/>
+    <album id="00000000-0000-7000-8000-200000000005" name="Untitled Demos" artist="La Roux" artistId="00000000-0000-7000-8000-100000000002" coverArt="00000000-0000-7000-8000-200000000005" songCount="3" duration="195" created="2026-01-01T00:05:00.000Z"/>
+  </albumList2>
+</subsonic-response>

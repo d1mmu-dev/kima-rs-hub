@@ -1,0 +1,42 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "nowPlaying": {
+      "entry": [
+        {
+          "album": "Abbey Road",
+          "albumId": "00000000-0000-7000-8000-200000000001",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000001",
+          "created": "2026-01-01T00:03:00.000Z",
+          "discNumber": 1,
+          "duration": 207,
+          "id": "00000000-0000-7000-8000-300000000003",
+          "isDir": false,
+          "minutesAgo": "[redacted]",
+          "parent": "00000000-0000-7000-8000-200000000001",
+          "playerId": 3152842248,
+          "playerName": "Symfonium",
+          "size": 30000003,
+          "suffix": "flac",
+          "title": "Maxwell's Silver Hammer",
+          "track": 3,
+          "type": "music",
+          "username": "alice",
+          "year": 1969
+        }
+      ]
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

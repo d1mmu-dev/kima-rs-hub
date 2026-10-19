@@ -1,0 +1,10 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <searchResult3>
+    <song id="00000000-0000-7000-8000-300000000017" parent="00000000-0000-7000-8000-200000000005" title="Intro" album="Untitled Demos" artist="La Roux" isDir="false" coverArt="00000000-0000-7000-8000-200000000005" duration="60" bitRate="900" track="1" discNumber="1" size="30000017" contentType="audio/flac" suffix="flac" albumId="00000000-0000-7000-8000-200000000005" artistId="00000000-0000-7000-8000-100000000002" type="music" created="2026-01-01T00:17:00.000Z"/>
+    <song id="00000000-0000-7000-8000-300000000018" parent="00000000-0000-7000-8000-200000000005" title="Intro" album="Untitled Demos" artist="La Roux" isDir="false" coverArt="00000000-0000-7000-8000-200000000005" duration="45" bitRate="900" track="2" discNumber="1" size="30000018" contentType="audio/flac" suffix="flac" albumId="00000000-0000-7000-8000-200000000005" artistId="00000000-0000-7000-8000-100000000002" type="music" created="2026-01-01T00:18:00.000Z"/>
+  </searchResult3>
+</subsonic-response>

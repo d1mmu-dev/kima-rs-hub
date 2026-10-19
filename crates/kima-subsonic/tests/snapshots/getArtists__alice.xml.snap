@@ -1,0 +1,17 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <artists ignoredArticles="The A An Le La Les Los Las Die Der Das">
+    <index name="B">
+      <artist id="00000000-0000-7000-8000-100000000001" name="The Beatles" albumCount="2" coverArt="ar-00000000-0000-7000-8000-100000000001" starred="2026-01-01T04:06:00.000Z"/>
+    </index>
+    <index name="R">
+      <artist id="00000000-0000-7000-8000-100000000002" name="La Roux" albumCount="2" coverArt="ar-00000000-0000-7000-8000-100000000002" userRating="3"/>
+    </index>
+    <index name="V">
+      <artist id="00000000-0000-7000-8000-100000000003" name="Various Artists" albumCount="1" coverArt="ar-00000000-0000-7000-8000-100000000003"/>
+    </index>
+  </artists>
+</subsonic-response>

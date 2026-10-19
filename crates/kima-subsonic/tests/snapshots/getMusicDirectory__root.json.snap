@@ -1,0 +1,45 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "directory": {
+      "child": [
+        {
+          "artist": "The Beatles",
+          "coverArt": "ar-00000000-0000-7000-8000-100000000001",
+          "id": "00000000-0000-7000-8000-100000000001",
+          "isDir": true,
+          "parent": "1",
+          "starred": "2026-01-01T04:06:00.000Z",
+          "title": "The Beatles"
+        },
+        {
+          "artist": "La Roux",
+          "coverArt": "ar-00000000-0000-7000-8000-100000000002",
+          "id": "00000000-0000-7000-8000-100000000002",
+          "isDir": true,
+          "parent": "1",
+          "title": "La Roux",
+          "userRating": 3
+        },
+        {
+          "artist": "Various Artists",
+          "coverArt": "ar-00000000-0000-7000-8000-100000000003",
+          "id": "00000000-0000-7000-8000-100000000003",
+          "isDir": true,
+          "parent": "1",
+          "title": "Various Artists"
+        }
+      ],
+      "id": "1",
+      "name": "Music"
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

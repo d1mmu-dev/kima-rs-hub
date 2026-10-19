@@ -1,0 +1,40 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "searchResult": {
+      "match": [
+        {
+          "album": "Abbey Road",
+          "albumId": "00000000-0000-7000-8000-200000000001",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000001",
+          "created": "2026-01-01T00:05:00.000Z",
+          "discNumber": 1,
+          "duration": 185,
+          "id": "00000000-0000-7000-8000-300000000005",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000001",
+          "size": 30000005,
+          "suffix": "flac",
+          "title": "Here Comes the Sun",
+          "track": 5,
+          "type": "music",
+          "year": 1969
+        }
+      ],
+      "offset": 0,
+      "totalHits": 1
+    },
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

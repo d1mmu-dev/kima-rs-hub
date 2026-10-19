@@ -1,0 +1,15 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <openSubsonicExtensions name="apiKeyAuthentication">
+    <versions>1</versions>
+  </openSubsonicExtensions>
+  <openSubsonicExtensions name="formPost">
+    <versions>1</versions>
+  </openSubsonicExtensions>
+  <openSubsonicExtensions name="indexBasedQueue">
+    <versions>1</versions>
+  </openSubsonicExtensions>
+</subsonic-response>

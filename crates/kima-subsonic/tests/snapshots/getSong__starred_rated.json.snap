@@ -1,0 +1,36 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "song": {
+      "album": "Abbey Road",
+      "albumId": "00000000-0000-7000-8000-200000000001",
+      "artist": "The Beatles",
+      "artistId": "00000000-0000-7000-8000-100000000001",
+      "bitRate": 900,
+      "contentType": "audio/flac",
+      "coverArt": "00000000-0000-7000-8000-200000000001",
+      "created": "2026-01-01T00:01:00.000Z",
+      "discNumber": 1,
+      "duration": 259,
+      "id": "00000000-0000-7000-8000-300000000001",
+      "isDir": false,
+      "parent": "00000000-0000-7000-8000-200000000001",
+      "size": 30000001,
+      "starred": "2026-01-01T04:01:00.000Z",
+      "suffix": "flac",
+      "title": "Come Together",
+      "track": 1,
+      "type": "music",
+      "userRating": 5,
+      "year": 1969
+    },
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

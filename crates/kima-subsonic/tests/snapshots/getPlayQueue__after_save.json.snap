@@ -1,0 +1,87 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "playQueue": {
+      "changed": "[redacted]",
+      "changedBy": "Subsonic",
+      "current": "00000000-0000-7000-8000-300000000002",
+      "entry": [
+        {
+          "album": "Abbey Road",
+          "albumId": "00000000-0000-7000-8000-200000000001",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000001",
+          "created": "2026-01-01T00:01:00.000Z",
+          "discNumber": 1,
+          "duration": 259,
+          "id": "00000000-0000-7000-8000-300000000001",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000001",
+          "size": 30000001,
+          "starred": "2026-01-01T04:01:00.000Z",
+          "suffix": "flac",
+          "title": "Come Together",
+          "track": 1,
+          "type": "music",
+          "userRating": 5,
+          "year": 1969
+        },
+        {
+          "album": "Abbey Road",
+          "albumId": "00000000-0000-7000-8000-200000000001",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000001",
+          "created": "2026-01-01T00:02:00.000Z",
+          "discNumber": 1,
+          "duration": 183,
+          "id": "00000000-0000-7000-8000-300000000002",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000001",
+          "size": 30000002,
+          "suffix": "flac",
+          "title": "Something",
+          "track": 2,
+          "type": "music",
+          "year": 1970
+        },
+        {
+          "album": "La Roux",
+          "albumId": "00000000-0000-7000-8000-200000000003",
+          "artist": "La Roux",
+          "artistId": "00000000-0000-7000-8000-100000000002",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000003",
+          "created": "2026-01-01T00:10:00.000Z",
+          "discNumber": 1,
+          "duration": 248,
+          "id": "00000000-0000-7000-8000-300000000010",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000003",
+          "size": 30000010,
+          "suffix": "flac",
+          "title": "In for the Kill",
+          "track": 1,
+          "type": "music",
+          "year": 2009
+        }
+      ],
+      "position": 4000,
+      "username": "alice"
+    },
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

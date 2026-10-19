@@ -1,0 +1,37 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "playlists": {
+      "playlist": [
+        {
+          "changed": "2026-01-01T01:02:00.000Z",
+          "created": "2026-01-01T01:02:00.000Z",
+          "duration": 399,
+          "id": "00000000-0000-7000-8000-500000000002",
+          "name": "Private Mix",
+          "owner": "alice",
+          "public": false,
+          "songCount": 2
+        },
+        {
+          "changed": "2026-01-01T01:01:00.000Z",
+          "created": "2026-01-01T01:01:00.000Z",
+          "duration": 707,
+          "id": "00000000-0000-7000-8000-500000000001",
+          "name": "Road Trip",
+          "owner": "alice",
+          "public": true,
+          "songCount": 3
+        }
+      ]
+    },
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

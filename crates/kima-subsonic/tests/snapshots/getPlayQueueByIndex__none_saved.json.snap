@@ -1,0 +1,21 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "playQueueByIndex": {
+      "changed": "[redacted]",
+      "changedBy": "Kima",
+      "currentIndex": 0,
+      "entry": [],
+      "position": 0,
+      "username": "admin"
+    },
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

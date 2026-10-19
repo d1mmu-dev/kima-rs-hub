@@ -1,0 +1,89 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "users": {
+      "user": [
+        {
+          "adminRole": true,
+          "commentRole": false,
+          "coverArtRole": false,
+          "downloadRole": true,
+          "folder": [
+            1
+          ],
+          "jukeboxRole": false,
+          "playlistRole": true,
+          "podcastRole": false,
+          "scrobblingEnabled": true,
+          "settingsRole": true,
+          "shareRole": false,
+          "streamRole": true,
+          "uploadRole": false,
+          "username": "admin"
+        },
+        {
+          "adminRole": true,
+          "commentRole": false,
+          "coverArtRole": false,
+          "downloadRole": true,
+          "folder": [
+            1
+          ],
+          "jukeboxRole": false,
+          "playlistRole": true,
+          "podcastRole": false,
+          "scrobblingEnabled": true,
+          "settingsRole": true,
+          "shareRole": false,
+          "streamRole": true,
+          "uploadRole": false,
+          "username": "alice"
+        },
+        {
+          "adminRole": false,
+          "commentRole": false,
+          "coverArtRole": false,
+          "downloadRole": true,
+          "folder": [
+            1
+          ],
+          "jukeboxRole": false,
+          "playlistRole": true,
+          "podcastRole": false,
+          "scrobblingEnabled": true,
+          "settingsRole": true,
+          "shareRole": false,
+          "streamRole": true,
+          "uploadRole": false,
+          "username": "bob"
+        },
+        {
+          "adminRole": true,
+          "commentRole": false,
+          "coverArtRole": false,
+          "downloadRole": true,
+          "folder": [
+            1
+          ],
+          "jukeboxRole": false,
+          "playlistRole": true,
+          "podcastRole": false,
+          "scrobblingEnabled": true,
+          "settingsRole": true,
+          "shareRole": false,
+          "streamRole": true,
+          "uploadRole": false,
+          "username": "carol"
+        }
+      ]
+    },
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

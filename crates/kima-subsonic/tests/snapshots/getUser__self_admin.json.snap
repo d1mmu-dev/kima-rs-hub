@@ -1,0 +1,31 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "user": {
+      "adminRole": true,
+      "commentRole": false,
+      "coverArtRole": false,
+      "downloadRole": true,
+      "folder": [
+        1
+      ],
+      "jukeboxRole": false,
+      "playlistRole": true,
+      "podcastRole": false,
+      "scrobblingEnabled": true,
+      "settingsRole": true,
+      "shareRole": false,
+      "streamRole": true,
+      "uploadRole": false,
+      "username": "admin"
+    },
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

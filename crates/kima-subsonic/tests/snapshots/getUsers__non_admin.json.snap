@@ -1,0 +1,17 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "error": {
+      "code": 50,
+      "message": "Admin privileges required"
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "failed",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

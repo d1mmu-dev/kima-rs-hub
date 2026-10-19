@@ -1,0 +1,59 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "topSongs": {
+      "song": [
+        {
+          "album": "La Roux",
+          "albumId": "00000000-0000-7000-8000-200000000003",
+          "artist": "La Roux",
+          "artistId": "00000000-0000-7000-8000-100000000002",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000003",
+          "created": "2026-01-01T00:10:00.000Z",
+          "discNumber": 1,
+          "duration": 248,
+          "id": "00000000-0000-7000-8000-300000000010",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000003",
+          "size": 30000010,
+          "suffix": "flac",
+          "title": "In for the Kill",
+          "track": 1,
+          "type": "music",
+          "year": 2009
+        },
+        {
+          "album": "La Roux",
+          "albumId": "00000000-0000-7000-8000-200000000003",
+          "artist": "La Roux",
+          "artistId": "00000000-0000-7000-8000-100000000002",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000003",
+          "created": "2026-01-01T00:11:00.000Z",
+          "discNumber": 1,
+          "duration": 205,
+          "id": "00000000-0000-7000-8000-300000000011",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000003",
+          "size": 30000011,
+          "suffix": "flac",
+          "title": "Bulletproof",
+          "track": 2,
+          "type": "music",
+          "year": 2009
+        }
+      ]
+    },
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

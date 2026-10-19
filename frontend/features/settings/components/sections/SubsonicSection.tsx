@@ -16,6 +16,10 @@ interface ApiKey {
     lastUsed: string | null;
 }
 
+export const API_KEYS_CHANGED_EVENT = "kima:api-keys-changed";
+export const PASSWORD_CHANGE_WARNING =
+    "Changing your password signs out every app that uses these tokens. You will need to create new ones.";
+
 export function SubsonicSection() {
     const { user } = useAuth();
 
@@ -40,6 +44,11 @@ export function SubsonicSection() {
             });
 
         loadApiKeys();
+
+        // A password change deletes every token server-side; refetch so the list shows it.
+        const onChanged = () => void loadApiKeys();
+        window.addEventListener(API_KEYS_CHANGED_EVENT, onChanged);
+        return () => window.removeEventListener(API_KEYS_CHANGED_EVENT, onChanged);
     }, []);
 
     const loadApiKeys = async () => {
@@ -171,49 +180,54 @@ export function SubsonicSection() {
                 </div>
             )}
 
-            {newToken && (
-                <SettingsRow
-                    label="Setup Guide"
-                    description="How to connect your client"
-                >
-                    <div className="space-y-1 text-xs tabular-nums text-[var(--text-muted)]">
-                        <p>1. Server URL — paste the URL above</p>
-                        <p>2. Username — your Kima username</p>
-                        <p>3. Password / API key — paste the token above</p>
-                    </div>
-                </SettingsRow>
-            )}
+            <SettingsRow
+                label="Setup Guide"
+                description="How to connect your client"
+            >
+                <div className="space-y-1 text-xs tabular-nums text-[var(--text-muted)]">
+                    <p>1. Server URL — paste the URL above</p>
+                    <p>2. Username — your Kima username</p>
+                    <p>3. Password / API key — paste the token above</p>
+                    <p>
+                        Use the token as the password. It works with apps that send hashed passwords (token and salt) and with apps that have an API key field.
+                    </p>
+                </div>
+            </SettingsRow>
 
-            {apiKeys.length > 0 && (
-                <SettingsRow
-                    label="Active Tokens"
-                    description="Revoke tokens to disconnect clients"
-                >
-                    <div className="space-y-2 w-full">
-                        {apiKeys.map((key) => (
-                            <div
-                                key={key.id}
-                                className="flex items-center justify-between gap-4 bg-white/5 border border-white/10 px-3 py-2 rounded-lg"
-                            >
-                                <div className="min-w-0">
-                                    <p className="text-xs tabular-nums text-white truncate">{key.name}</p>
-                                    <p className="text-xs tabular-nums text-[var(--text-muted)]">
-                                        Created {formatDate(key.createdAt)}
-                                        {key.lastUsed && ` · Last used ${formatDate(key.lastUsed)}`}
-                                    </p>
-                                </div>
-                                <button
-                                    onClick={() => setConfirmRevoke({ id: key.id, name: key.name })}
-                                    disabled={revoking === key.id}
-                                    className="text-xs tabular-nums text-danger-light hover:brightness-125 transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                    {revoking === key.id ? "Revoking..." : "Revoke"}
-                                </button>
+            <SettingsRow
+                label="Active Tokens"
+                description="Revoke tokens to disconnect clients"
+            >
+                <div className="space-y-2 w-full">
+                    {apiKeys.length === 0 && (
+                        <p className="text-xs text-[var(--text-muted)]">No tokens yet.</p>
+                    )}
+                    {apiKeys.map((key) => (
+                        <div
+                            key={key.id}
+                            className="flex items-center justify-between gap-4 bg-white/5 border border-white/10 px-3 py-2 rounded-lg"
+                        >
+                            <div className="min-w-0">
+                                <p className="text-xs tabular-nums text-white truncate">{key.name}</p>
+                                <p className="text-xs tabular-nums text-[var(--text-muted)]">
+                                    Created {formatDate(key.createdAt)}
+                                    {key.lastUsed
+                                        ? ` · Last used ${formatDate(key.lastUsed)}`
+                                        : " · Never used"}
+                                </p>
                             </div>
-                        ))}
-                    </div>
-                </SettingsRow>
-            )}
+                            <button
+                                onClick={() => setConfirmRevoke({ id: key.id, name: key.name })}
+                                disabled={revoking === key.id}
+                                className="text-xs tabular-nums text-danger-light hover:brightness-125 transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {revoking === key.id ? "Revoking..." : "Revoke"}
+                            </button>
+                        </div>
+                    ))}
+                    <p className="text-xs text-warning pt-1">{PASSWORD_CHANGE_WARNING}</p>
+                </div>
+            </SettingsRow>
             <ConfirmDialog
                 isOpen={confirmRevoke !== null}
                 onClose={() => setConfirmRevoke(null)}

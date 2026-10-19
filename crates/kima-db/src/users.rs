@@ -211,6 +211,49 @@ pub async fn delete_unless_last_admin(pool: &PgPool, id: Uuid) -> sqlx::Result<D
     Ok(Deletion::Deleted)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum RoleChange {
+    Changed,
+    NotFound,
+    LastAdmin,
+}
+
+/// Sets a user's role unless that would demote the last admin. Serialised with registrations and
+/// deletions under the same lock, so two admins demoting each other cannot both succeed.
+pub async fn set_role_unless_last_admin(
+    pool: &PgPool,
+    id: Uuid,
+    role: &str,
+) -> sqlx::Result<RoleChange> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(REGISTRATION_LOCK)
+        .execute(&mut *tx)
+        .await?;
+    let Some(current) = sqlx::query_scalar!("SELECT role FROM users WHERE id = $1", id)
+        .fetch_optional(&mut *tx)
+        .await?
+    else {
+        return Ok(RoleChange::NotFound);
+    };
+    if current == ROLE_ADMIN && role != ROLE_ADMIN {
+        let admins = sqlx::query_scalar!(
+            r#"SELECT count(*) AS "count!" FROM users WHERE role = $1"#,
+            ROLE_ADMIN
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if admins <= 1 {
+            return Ok(RoleChange::LastAdmin);
+        }
+    }
+    sqlx::query!("UPDATE users SET role = $2 WHERE id = $1", id, role)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(RoleChange::Changed)
+}
+
 /// Sets a new password hash, bumps the token version and revokes all of the user's app tokens.
 /// `seen_version` is what the caller verified the old password against: the update then applies
 /// only if the version is unchanged. `None` updates unconditionally. Returns the new version,

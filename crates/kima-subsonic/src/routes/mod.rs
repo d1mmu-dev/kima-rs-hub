@@ -16,6 +16,7 @@ mod scrobble;
 mod search;
 mod stars;
 mod system;
+mod users;
 
 /// Registers `/{name}` and `/{name}.view` for GET, HEAD and POST.
 pub fn add<H, T>(router: Router<SubsonicCtx>, name: &'static str, handler: H) -> Router<SubsonicCtx>
@@ -40,6 +41,7 @@ pub fn router() -> Router<SubsonicCtx> {
     let router = playlists::add_routes(router);
     let router = stars::add_routes(router);
     let router = bookmarks::add_routes(router);
+    let router = users::add_routes(router);
     router.fallback(not_implemented)
 }
 

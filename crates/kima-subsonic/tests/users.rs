@@ -790,3 +790,37 @@ async fn password_change_revokes_web_sessions(pool: PgPool) {
         assert_eq!(event.user_id, Some(bob.id));
     }
 }
+
+/// `createUser` and password sign-in share one cap (50 characters), so an admin can never
+/// create an account that cannot sign in.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn create_user_caps_username_at_50_characters(pool: PgPool) {
+    let s = Setup::new(pool).await;
+    let root = s.root_password();
+    let fifty = "é".repeat(50);
+    ok(&s
+        .call(
+            "createUser",
+            &root,
+            &[("username", &fifty), ("password", "longpass1")],
+        )
+        .await);
+    ok(&s
+        .call(
+            "ping",
+            &Auth::Password(fifty.clone(), "longpass1".into()),
+            &[],
+        )
+        .await);
+
+    let fifty_one = "é".repeat(51);
+    let res = s
+        .call(
+            "createUser",
+            &root,
+            &[("username", &fifty_one), ("password", "longpass1")],
+        )
+        .await;
+    failed(&res, 10, "Username must be at most 50 characters");
+    assert!(s.find(&fifty_one).await.is_none());
+}

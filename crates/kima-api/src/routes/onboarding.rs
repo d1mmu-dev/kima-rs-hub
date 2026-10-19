@@ -60,7 +60,7 @@ async fn register(
     ApiJson(body): ApiJson<Credentials>,
 ) -> Result<Json<Value>, ApiError> {
     let username = body.username.trim().to_string();
-    if !(3..=50).contains(&username.chars().count()) {
+    if !(3..=users::MAX_USERNAME_CHARS).contains(&username.chars().count()) {
         return Err(ApiError::Invalid(
             "Username must be 3 to 50 characters".into(),
         ));

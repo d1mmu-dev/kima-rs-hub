@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use kima_core::auth::{TokenKind, hash_password, verify_dummy, verify_password};
-use kima_db::users::{self, Deletion};
+use kima_db::users::{self, Deletion, MAX_USERNAME_CHARS};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
@@ -30,9 +30,6 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/users/{id}", delete(delete_user))
 }
 
-/// The longest username registration accepts.
-const MAX_USERNAME_CHARS: usize = 50;
-
 fn rate_limited(blocked: crate::login_limit::Blocked) -> ApiError {
     ApiError::RateLimited {
         retry_after_secs: blocked.retry_after_secs(),
@@ -51,8 +48,8 @@ async fn login(
         ));
     }
 
-    // No account can have a name this long (registration allows 50), so refuse it before it
-    // becomes a limiter key or reaches the database.
+    // No account can have a name this long (every create path caps it), so refuse it before
+    // it becomes a limiter key or reaches the database.
     if username.chars().count() > MAX_USERNAME_CHARS {
         return Err(ApiError::Unauthorized("Invalid credentials"));
     }
@@ -286,6 +283,11 @@ async fn create_user(
         return Err(ApiError::BadRequest(
             "Username and password are required".into(),
         ));
+    }
+    if username.chars().count() > MAX_USERNAME_CHARS {
+        return Err(ApiError::BadRequest(format!(
+            "Username must be at most {MAX_USERNAME_CHARS} characters"
+        )));
     }
     if body.password.chars().count() < 6 {
         return Err(ApiError::BadRequest(

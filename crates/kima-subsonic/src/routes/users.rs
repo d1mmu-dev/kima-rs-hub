@@ -147,6 +147,15 @@ async fn create_user(
     if username.is_empty() {
         return Err(SubsonicError::missing("username"));
     }
+    if username.chars().count() > users::MAX_USERNAME_CHARS {
+        return Err(SubsonicError::new(
+            10,
+            format!(
+                "Username must be at most {} characters",
+                users::MAX_USERNAME_CHARS
+            ),
+        ));
+    }
     let password = required_password(&params)?;
     let role = if params.bool("adminRole")?.unwrap_or(false) {
         ROLE_ADMIN

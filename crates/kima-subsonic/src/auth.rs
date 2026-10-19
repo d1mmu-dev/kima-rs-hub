@@ -11,7 +11,7 @@ use axum::http::request::Parts;
 use hmac::{Hmac, KeyInit, Mac};
 use kima_api::auth::{AuthUser, ClientIp};
 use kima_core::cipher::Cipher;
-use kima_db::users::{self, ROLE_ADMIN, User};
+use kima_db::users::{self, MAX_USERNAME_CHARS, ROLE_ADMIN, User};
 use md5::{Digest, Md5};
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -24,9 +24,6 @@ use crate::params::{Params, decode_password};
 
 /// Decrypt-and-md5 rounds of every token+salt check, whatever the user holds.
 pub const TS_ROUNDS: usize = 50;
-/// The longest username registration allows; longer ones cannot exist, so they never reach the
-/// limiter or the database.
-const MAX_USERNAME_CHARS: usize = 50;
 pub const PASSWORD_CACHE_TTL: Duration = Duration::from_secs(600);
 pub const TOUCH_INTERVAL: Duration = Duration::from_secs(60);
 pub const DECRYPT_WARN_INTERVAL: Duration = Duration::from_secs(3600);

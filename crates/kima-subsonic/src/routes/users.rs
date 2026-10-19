@@ -32,15 +32,29 @@ fn user_not_found() -> SubsonicError {
     SubsonicError::not_found("User not found")
 }
 
-/// Whether `name` is the caller's own username (usernames are unique ignoring case).
-fn is_self(caller: &SubsonicUser, name: &str) -> bool {
-    caller.user.username.to_lowercase() == name.to_lowercase()
-}
-
 async fn find(app: &AppState, name: &str) -> Result<User, SubsonicError> {
     users::find_by_username(&app.pool, name)
         .await?
         .ok_or_else(user_not_found)
+}
+
+/// The user `name` resolves to in the database, for a caller who may act on themselves and, as
+/// an admin, on anyone. Self is decided by id after the lookup, never by comparing names (Rust
+/// and the database fold case differently). Anyone else needs admin, checked before an unknown
+/// name is revealed, so a non-admin gets the same 50 for every other name.
+async fn find_self_or_admin(
+    app: &AppState,
+    caller: &SubsonicUser,
+    name: &str,
+) -> Result<User, SubsonicError> {
+    let found = users::find_by_username(&app.pool, name).await?;
+    match found {
+        Some(user) if user.id == caller.user.id => Ok(user),
+        other => {
+            caller.require_admin()?;
+            other.ok_or_else(user_not_found)
+        }
+    }
 }
 
 /// The decoded `password` parameter, checked as the web forms check it.
@@ -95,14 +109,12 @@ async fn get_user(
     State(app): State<AppState>,
     params: Params,
 ) -> Result<Answer, SubsonicError> {
-    let name = match params.get("username") {
-        Some(name) if !name.is_empty() => name,
-        _ => &caller.user.username,
+    let target = match params.get("username") {
+        Some(name) if !name.is_empty() => find_self_or_admin(&app, &caller, name).await?,
+        _ => users::find_by_id(&app.pool, caller.user.id)
+            .await?
+            .ok_or_else(user_not_found)?,
     };
-    if !is_self(&caller, name) {
-        caller.require_admin()?;
-    }
-    let target = find(&app, name).await?;
     Ok(Answer::node(map::user(&target)))
 }
 
@@ -222,12 +234,8 @@ async fn change_password(
     caller.require_password_auth().map_err(|_| {
         SubsonicError::not_authorized("Change your password on the web, not with an app key.")
     })?;
-    let name = params.required("username")?;
+    let target = find_self_or_admin(&app, &caller, params.required("username")?).await?;
     let password = required_password(&params)?;
-    if !is_self(&caller, name) {
-        caller.require_admin()?;
-    }
-    let target = find(&app, name).await?;
     let password_hash = hash(&app, password).await?;
     set_password(&app, target.id, &password_hash).await?;
     Ok(Answer::ok())

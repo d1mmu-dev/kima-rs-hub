@@ -664,3 +664,129 @@ async fn create_user_enc_password_and_duplicate_0(pool: PgPool) {
     failed(&res, 10, "Required parameter is missing: password");
     assert!(s.find("erin").await.is_none());
 }
+
+/// Self is decided by user id after the database lookup, never by comparing names in Rust. Rust
+/// lowercases `İ` (U+0130) to `i` + U+0307, the database (en_US) to plain `i`. So `İvy` folds to
+/// the caller `i̇vy` in Rust, but the database resolves it to another user, `ivy`.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn self_check_uses_the_resolved_user_not_name_folding(pool: PgPool) {
+    let s = Setup::new(pool).await;
+    let caller_name = "i\u{307}vy";
+    user(&s.state, caller_name, "callerpass1", ROLE_USER).await;
+    let victim = user(&s.state, "ivy", "victimpass1", ROLE_USER).await;
+    let probe = "\u{130}vy";
+    assert_eq!(probe.to_lowercase(), caller_name.to_lowercase());
+    assert_eq!(
+        s.find(probe).await.map(|u| u.id),
+        Some(victim.id),
+        "the database resolves the probe to the victim"
+    );
+
+    let caller = Auth::Password(caller_name.into(), "callerpass1".into());
+    let res = s
+        .call(
+            "changePassword",
+            &caller,
+            &[("username", probe), ("password", "hijacked1")],
+        )
+        .await;
+    failed(&res, 50, "Admin privileges required");
+    let res = s.call("getUser", &caller, &[("username", probe)]).await;
+    failed(&res, 50, "Admin privileges required");
+    assert_eq!(s.find("ivy").await.unwrap(), victim);
+
+    // Their own name still works.
+    let res = s
+        .call("getUser", &caller, &[("username", caller_name)])
+        .await;
+    ok(&res);
+    assert_eq!(res["user"]["username"], caller_name);
+}
+
+/// A non-admin learns nothing about other names: unknown and known both give 50, and the
+/// admin check comes before the password checks.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn non_admin_gets_50_for_any_other_name(pool: PgPool) {
+    let s = Setup::new(pool).await;
+    let bob = s.bob_password();
+    for name in ["root", "nobody"] {
+        let res = s.call("getUser", &bob, &[("username", name)]).await;
+        failed(&res, 50, "Admin privileges required");
+        for password in ["abc", "longenough1"] {
+            let res = s
+                .call(
+                    "changePassword",
+                    &bob,
+                    &[("username", name), ("password", password)],
+                )
+                .await;
+            failed(&res, 50, "Admin privileges required");
+        }
+        let res = s.call("changePassword", &bob, &[("username", name)]).await;
+        failed(&res, 50, "Admin privileges required");
+    }
+    assert_eq!(s.find("root").await.unwrap(), s.root);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn non_admin_password_cannot_update_or_delete(pool: PgPool) {
+    let s = Setup::new(pool).await;
+    let carol = user(&s.state, "carol", "carolpass1", ROLE_USER).await;
+    let bob = s.bob_password();
+    for params in [
+        vec![("username", "carol"), ("adminRole", "true")],
+        vec![("username", "carol"), ("password", "hijacked1")],
+        vec![("username", "bob"), ("adminRole", "true")],
+    ] {
+        let res = s.call("updateUser", &bob, &params).await;
+        failed(&res, 50, "Admin privileges required");
+    }
+    let res = s.call("deleteUser", &bob, &[("username", "carol")]).await;
+    failed(&res, 50, "Admin privileges required");
+    assert_eq!(s.find("carol").await.unwrap(), carol);
+    assert_eq!(s.find("bob").await.unwrap(), s.bob);
+    assert_eq!(s.find("root").await.unwrap(), s.root);
+}
+
+/// A password change ends the target's web sessions too: the old access token stops working and
+/// their event streams are told (`revoke_sessions`).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn password_change_revokes_web_sessions(pool: PgPool) {
+    let s = Setup::new(pool).await;
+    let peer: SocketAddr = "10.0.0.3:4000".parse().unwrap();
+    let api =
+        TestServer::new(kima_api::router(s.state.clone()).layer(MockConnectInfo(peer))).unwrap();
+    let me = async |token: &str| {
+        api.get("/api/auth/me")
+            .authorization_bearer(token)
+            .await
+            .status_code()
+    };
+
+    for (endpoint, auth, password) in [
+        ("changePassword", s.bob_password(), "bobnew123"),
+        ("updateUser", s.root_password(), "bobnewer1"),
+    ] {
+        let bob = s.find("bob").await.unwrap();
+        let token = s
+            .state
+            .jwt
+            .issue_access(bob.id, &bob.username, &bob.role, bob.token_version);
+        assert_eq!(me(&token).await, axum::http::StatusCode::OK);
+        let mut events = s.state.events.subscribe();
+
+        let res = s
+            .call(
+                endpoint,
+                &auth,
+                &[("username", "bob"), ("password", password)],
+            )
+            .await;
+        ok(&res);
+
+        assert_eq!(me(&token).await, axum::http::StatusCode::UNAUTHORIZED);
+        let event = events.try_recv().expect("a revocation was published");
+        assert!(event.is_revocation(), "{event:?}");
+        assert_eq!(event.user_id, Some(bob.id));
+    }
+}

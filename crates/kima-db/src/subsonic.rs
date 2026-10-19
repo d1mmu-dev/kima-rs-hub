@@ -445,7 +445,9 @@ pub async fn web_now_playing(
         "SELECT ps.user_id, u.username, t.id, ps.updated_at
          FROM playback_state ps
          JOIN users u ON u.id = ps.user_id
-         JOIN tracks t ON t.id::text = ps.track_id AND t.missing_since IS NULL
+         JOIN tracks t ON t.missing_since IS NULL AND t.id = CASE
+             WHEN ps.track_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+             THEN ps.track_id::uuid END
          WHERE ps.playback_type = 'track' AND ps.updated_at >= $1
          ORDER BY ps.updated_at DESC, ps.user_id LIMIT 50",
     )

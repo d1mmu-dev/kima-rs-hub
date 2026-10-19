@@ -9,6 +9,7 @@ use crate::error::SubsonicError;
 
 mod browse;
 mod media;
+mod playlists;
 mod queue;
 mod scrobble;
 mod search;
@@ -34,6 +35,7 @@ pub fn router() -> Router<SubsonicCtx> {
     let router = media::add_routes(router);
     let router = scrobble::add_routes(router);
     let router = queue::add_routes(router);
+    let router = playlists::add_routes(router);
     router.fallback(not_implemented)
 }
 

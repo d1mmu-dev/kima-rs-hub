@@ -430,6 +430,14 @@ fixture_test!(album_list2_size_capped_500, |server, pool| {
     // The default is 10.
     let res = alice(&server, "getAlbumList2", &[]).await;
     assert_eq!(res["albumList2"]["album"].as_array().unwrap().len(), 10);
+    // Junk paging falls back to the defaults (size 10, offset 0), as upstream and Navidrome.
+    let junk = alice(
+        &server,
+        "getAlbumList2",
+        &[("size", "ten"), ("offset", "10.5")],
+    )
+    .await;
+    assert_eq!(junk["albumList2"], res["albumList2"]);
 });
 
 fixture_test!(album_list2_by_genre_empty, |server, _pool| {

@@ -213,10 +213,10 @@ async fn album_list(
         _ => Some(AlbumListKind::Newest),
     };
     let size = params
-        .int::<i64>("size")?
+        .paging::<i64>("size")
         .unwrap_or(DEFAULT_PAGE)
         .clamp(0, MAX_PAGE);
-    let offset = params.int::<i64>("offset")?.unwrap_or(0).max(0);
+    let offset = params.paging::<i64>("offset").unwrap_or(0).max(0);
     let Some(kind) = kind else {
         return Ok(Vec::new());
     };

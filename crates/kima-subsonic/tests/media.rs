@@ -644,11 +644,12 @@ async fn cover_art_album_track_and_prefixes(pool: PgPool) {
     .await;
     env.assert_error("getCoverArt", &[], 10, "Required parameter is missing: id")
         .await;
+    // A junk size is ignored like a paging parameter: the id still decides the answer.
     env.assert_error(
         "getCoverArt",
         &[("id", "x"), ("size", "abc")],
-        10,
-        "Invalid parameter: size",
+        70,
+        "Cover art not found",
     )
     .await;
 }
@@ -674,6 +675,14 @@ async fn cover_art_size_snaps(pool: PgPool) {
         .get("getCoverArt", &[("id", &album), ("size", "0")])
         .await;
     assert_eq!(dims(&zero), (400, 200));
+    // Junk falls back to the original size, as upstream (which ignores `size`) and Navidrome.
+    for junk in ["abc", "10.5", "-5"] {
+        let res = env
+            .get("getCoverArt", &[("id", &album), ("size", junk)])
+            .await;
+        res.assert_status_ok();
+        assert_eq!(dims(&res), (400, 200), "{junk}");
+    }
 }
 
 #[sqlx::test(

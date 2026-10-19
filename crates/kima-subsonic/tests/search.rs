@@ -169,6 +169,70 @@ fixture_test!(search3_counts_default_20_capped_500, |server, pool| {
     assert!(n(&res, "song") <= 5);
 });
 
+// Paging parameters fall back to the default on junk, as upstream's `parseIntParam` and
+// Navidrome, instead of error 10 (M2 final review, ruling #19 revised).
+fixture_test!(paging_junk_falls_back_to_defaults, |server, pool| {
+    seed_extra(&pool, 600, 0).await;
+    let n = |res: &Value, key: &str| res["searchResult3"][key].as_array().unwrap().len();
+    let res = alice(
+        &server,
+        "search3",
+        &[
+            ("query", ""),
+            ("songCount", "abc"),
+            ("albumCount", "10.5"),
+            ("artistCount", " "),
+            ("songOffset", "x"),
+            ("albumOffset", "1e3"),
+            ("artistOffset", "--1"),
+        ],
+    )
+    .await;
+    assert_eq!(res["status"], "ok", "{res}");
+    assert_eq!(n(&res, "song"), 20);
+    assert_eq!(n(&res, "album"), 5);
+    assert_eq!(n(&res, "artist"), 3);
+    let first = alice(&server, "search3", &[("query", "")]).await;
+    assert_eq!(
+        res["searchResult3"], first["searchResult3"],
+        "offsets default to 0"
+    );
+    // A surrounding space is still a number.
+    let res = alice(&server, "search3", &[("songCount", " 7 ")]).await;
+    assert_eq!(n(&res, "song"), 7);
+
+    let res = alice(
+        &server,
+        "search",
+        &[("any", "extra"), ("count", "x"), ("offset", "y")],
+    )
+    .await;
+    assert_eq!(res["status"], "ok", "{res}");
+    assert_eq!(res["searchResult"]["match"].as_array().unwrap().len(), 20);
+    assert_eq!(res["searchResult"]["offset"], 0);
+
+    let res = alice(&server, "getRandomSongs", &[("size", "lots")]).await;
+    assert_eq!(res["randomSongs"]["song"].as_array().unwrap().len(), 10);
+    let res = alice(
+        &server,
+        "getTopSongs",
+        &[("artist", "extra"), ("count", "x")],
+    )
+    .await;
+    assert_eq!(res["status"], "ok", "{res}");
+
+    // Numbers that change meaning stay strict.
+    assert_failed(
+        &alice(
+            &server,
+            "getRandomSongs",
+            &[("size", "x"), ("fromYear", "abc")],
+        )
+        .await,
+        10,
+    );
+});
+
 fixture_test!(empty_query_pages_whole_library, |server, pool| {
     seed_extra(&pool, 23, 5).await;
     let expected = present_track_ids(&pool).await;

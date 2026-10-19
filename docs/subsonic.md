@@ -52,7 +52,7 @@ The limiter uses the TCP peer address and does not trust `X-Forwarded-For`. Behi
 
 ## `KIMA_PUBLIC_URL`
 
-Optional. The address clients use to reach Kima, such as `https://music.example.com` (must start with `http://` or `https://`; a trailing `/` is removed). The `hls` endpoint uses it to build the stream URL in its playlist; if it is unset, Kima uses the scheme and `Host` of the request. The settings page shows it to help with client setup. Set it when Kima is behind a proxy that changes the host name.
+Optional. The address clients use to reach Kima, such as `https://music.example.com` (must start with `http://` or `https://`; a trailing `/` is removed). The `hls` endpoint uses it to build the stream URL in its playlist; if it is unset, Kima uses `http://` and the `Host` of the request (so behind a TLS proxy, set it). The settings page shows it to help with client setup. Set it when Kima is behind a proxy that changes the host name.
 
 ## What is supported
 
@@ -65,7 +65,7 @@ All 81 paths upstream registers are answered, each with and without `.view`, by 
 - **Queue and bookmarks:** `getPlayQueue`, `savePlayQueue`, the by-index variants, and bookmarks.
 - **Playlists:** list, read, create, update and delete.
 - **Starring and ratings:** `star`, `unstar`, `getStarred`, `getStarred2` and `setRating`, for songs, albums and artists.
-- **Users:** `getUser`; an admin signed in with a password can use `getUsers`, `createUser`, `updateUser`, `deleteUser` and `changePassword`. These last four refuse any app token with error 50.
+- **Users:** `getUser`, and for an admin `getUsers`, with any sign-in method. `createUser`, `updateUser`, `deleteUser` and `changePassword` need a password sign-in (an admin's, except for changing your own password) and refuse any app token with error 50.
 
 Stubs, by the milestone that makes them real:
 

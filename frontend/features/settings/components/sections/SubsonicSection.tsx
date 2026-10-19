@@ -223,6 +223,7 @@ export function SubsonicSection() {
                             <button
                                 onClick={() => setConfirmRevoke({ id: key.id, name: key.name })}
                                 disabled={revoking === key.id}
+                                aria-label={`Revoke ${key.name}`}
                                 className="text-xs tabular-nums text-danger-light hover:brightness-125 transition-colors shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                                 {revoking === key.id ? "Revoking..." : "Revoke"}

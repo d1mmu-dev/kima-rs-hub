@@ -5,7 +5,7 @@
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use kima_db::plays::{self, PlayOutcome};
+use kima_db::plays::{self, Listen, PlayOutcome, Source};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -49,7 +49,15 @@ async fn create(
     let Ok(track) = body.track_id.parse::<Uuid>() else {
         return Err(ApiError::NotFound("Track not found"));
     };
-    let outcome = plays::record(&state.pool, user.id, track, body.seconds_listened, None).await?;
+    let outcome = plays::record(
+        &state.pool,
+        user.id,
+        track,
+        Listen::Seconds(body.seconds_listened),
+        Source::Library,
+        None,
+    )
+    .await?;
     let skipped = |reason: &str| Json(json!({ "recorded": false, "reason": reason }));
     Ok(match outcome {
         PlayOutcome::Recorded(id) => Json(json!({ "recorded": true, "playId": id })),
@@ -89,7 +97,7 @@ async fn list(
                 "userId": p.user_id,
                 "trackId": p.track_id,
                 "playedAt": iso(p.played_at),
-                "source": "LIBRARY",
+                "source": p.source,
                 "heard": p.heard,
                 "track": track_json(t),
             })

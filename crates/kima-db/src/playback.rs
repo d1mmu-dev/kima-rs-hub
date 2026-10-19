@@ -34,6 +34,10 @@ pub struct Patch {
     pub queue: Option<Option<Value>>,
     pub current_index: Option<i32>,
     pub is_shuffle: Option<bool>,
+    /// Milliseconds into the current track.
+    pub position: Option<i32>,
+    /// Who wrote the state; `Some(None)` clears it.
+    pub changed_by: Option<Option<String>>,
 }
 
 pub async fn get(pool: &PgPool, user: Uuid) -> sqlx::Result<Option<PlaybackState>> {
@@ -48,8 +52,8 @@ pub async fn upsert(pool: &PgPool, user: Uuid, patch: Patch) -> sqlx::Result<Pla
     let flat = |o: &Option<Option<String>>| o.clone().flatten();
     sqlx::query_as(
         "INSERT INTO playback_state AS s
-             (user_id, playback_type, track_id, audiobook_id, podcast_id, queue, current_index, is_shuffle)
-         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 0), COALESCE($8, false))
+             (user_id, playback_type, track_id, audiobook_id, podcast_id, queue, current_index, is_shuffle, position, changed_by)
+         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 0), COALESCE($8, false), COALESCE($13, 0), $14)
          ON CONFLICT (user_id) DO UPDATE SET
              playback_type = EXCLUDED.playback_type,
              track_id = CASE WHEN $9 THEN EXCLUDED.track_id ELSE s.track_id END,
@@ -58,6 +62,8 @@ pub async fn upsert(pool: &PgPool, user: Uuid, patch: Patch) -> sqlx::Result<Pla
              queue = CASE WHEN $12 THEN EXCLUDED.queue ELSE s.queue END,
              current_index = CASE WHEN $7 IS NOT NULL THEN EXCLUDED.current_index ELSE s.current_index END,
              is_shuffle = CASE WHEN $8 IS NOT NULL THEN EXCLUDED.is_shuffle ELSE s.is_shuffle END,
+             position = CASE WHEN $13 IS NOT NULL THEN EXCLUDED.position ELSE s.position END,
+             changed_by = CASE WHEN $15 THEN EXCLUDED.changed_by ELSE s.changed_by END,
              updated_at = now()
          RETURNING *",
     )
@@ -73,6 +79,9 @@ pub async fn upsert(pool: &PgPool, user: Uuid, patch: Patch) -> sqlx::Result<Pla
     .bind(patch.audiobook_id.is_some())
     .bind(patch.podcast_id.is_some())
     .bind(patch.queue.is_some())
+    .bind(patch.position)
+    .bind(flat(&patch.changed_by))
+    .bind(patch.changed_by.is_some())
     .fetch_one(pool)
     .await
 }

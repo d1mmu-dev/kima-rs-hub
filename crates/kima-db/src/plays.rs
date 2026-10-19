@@ -48,6 +48,32 @@ pub enum PlayOutcome {
     UnknownTrack,
 }
 
+/// Where a play came from. Mirrors the two values of the `plays.source` check constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Library,
+    Subsonic,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Library => "LIBRARY",
+            Self::Subsonic => "SUBSONIC",
+        }
+    }
+}
+
+/// What the caller knows about the listening.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Listen {
+    /// Seconds actually heard, checked against the required amount.
+    Seconds(f64),
+    /// The client says the track was played to the end (a Subsonic scrobble): the seconds-heard
+    /// check is skipped, the 30-second floor and the duplicate window are not.
+    Attested,
+}
+
 /// How many tracks the library holds right now (those not flagged missing).
 pub async fn count_present_tracks(pool: &PgPool) -> sqlx::Result<i64> {
     sqlx::query_scalar("SELECT count(*) FROM tracks WHERE missing_since IS NULL")
@@ -62,7 +88,8 @@ pub async fn record(
     pool: &PgPool,
     user: Uuid,
     track: Uuid,
-    seconds_listened: f64,
+    listen: Listen,
+    source: Source,
     played_at: Option<OffsetDateTime>,
 ) -> sqlx::Result<PlayOutcome> {
     let Some(duration) =
@@ -77,7 +104,9 @@ pub async fn record(
     let Some(required) = required_listen_seconds(duration) else {
         return Ok(PlayOutcome::TooShort);
     };
-    if !seconds_listened.is_finite() || seconds_listened < required {
+    if let Listen::Seconds(heard) = listen
+        && (!heard.is_finite() || heard < required)
+    {
         return Ok(PlayOutcome::NotEnoughListened);
     }
 
@@ -108,12 +137,14 @@ pub async fn record(
     }
     let id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO plays (id, user_id, track_id, played_at, heard) VALUES ($1, $2, $3, $4, true)",
+        "INSERT INTO plays (id, user_id, track_id, played_at, heard, source)
+         VALUES ($1, $2, $3, $4, true, $5)",
     )
     .bind(id)
     .bind(user)
     .bind(track)
     .bind(anchor)
+    .bind(source.as_str())
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -127,6 +158,7 @@ pub struct PlayRow {
     pub track_id: Uuid,
     pub played_at: OffsetDateTime,
     pub heard: bool,
+    pub source: String,
 }
 
 /// A user's plays, newest first, whose tracks are still present.
@@ -136,7 +168,7 @@ pub async fn recent(
     limit: i64,
 ) -> sqlx::Result<Vec<(PlayRow, TrackRow)>> {
     let plays: Vec<PlayRow> = sqlx::query_as(
-        "SELECT p.id, p.user_id, p.track_id, p.played_at, p.heard
+        "SELECT p.id, p.user_id, p.track_id, p.played_at, p.heard, p.source
          FROM plays p JOIN tracks t ON t.id = p.track_id AND t.missing_since IS NULL
          WHERE p.user_id = $1 ORDER BY p.played_at DESC, p.id DESC LIMIT $2",
     )

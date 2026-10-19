@@ -169,6 +169,9 @@ async fn save(
         queue: queue.map(|_| safe_queue),
         current_index,
         is_shuffle: body.get("isShuffle").and_then(Value::as_bool),
+        // Upstream's web save never writes these; only the Subsonic queue does.
+        position: None,
+        changed_by: None,
     };
     let saved = playback::upsert(&state.pool, user.id, patch).await?;
     Ok(Json(state_json(&saved)))

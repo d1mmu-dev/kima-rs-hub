@@ -259,3 +259,35 @@ async fn recently_listened_orders_by_last_play(pool: PgPool) {
         3
     );
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn api_plays_returns_stored_source(pool: PgPool) {
+    let s = seed(&pool, Seed::new("Alpha", "A1", Some(2000), "Song")).await;
+    let e = env(pool.clone()).await;
+    sqlx::query("UPDATE tracks SET duration_secs = 200 WHERE id = $1")
+        .bind(s.track)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Played through the web API: LIBRARY.
+    assert_eq!(play(&e, &e.ana, s.track, 150.0).await["recorded"], true);
+    // A Subsonic play, a day earlier (outside the duplicate window).
+    sqlx::query(
+        "INSERT INTO plays (id, user_id, track_id, played_at, heard, source)
+         VALUES ($1, $2, $3, now() - interval '1 day', true, 'SUBSONIC')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(e.ana_id)
+    .bind(s.track)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let plays = get(&e, &e.ana, "/api/plays").await;
+    let sources: Vec<&str> = plays
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources, ["LIBRARY", "SUBSONIC"]);
+}

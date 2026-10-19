@@ -8,8 +8,9 @@ use uuid::Uuid;
 use crate::auth::{
     DECRYPT_WARN_INTERVAL, PASSWORD_CACHE_TTL, PasswordCache, TOUCH_INTERVAL, Throttle, make_dummy,
 };
+use crate::now_playing::NowPlaying;
 
-/// What Subsonic handlers share. Later tasks add the now-playing map, etc.
+/// What Subsonic handlers share.
 #[derive(Clone)]
 pub struct SubsonicCtx {
     pub app: AppState,
@@ -21,6 +22,8 @@ pub struct SubsonicCtx {
     pub decrypt_warn: Arc<Throttle>,
     /// A ciphertext under the app cipher, decrypted by the spare token+salt rounds.
     pub dummy_secret: Arc<Vec<u8>>,
+    /// What Subsonic players are playing right now (spec §6.3).
+    pub now_playing: Arc<NowPlaying>,
 }
 
 impl SubsonicCtx {
@@ -32,6 +35,7 @@ impl SubsonicCtx {
             touch: Arc::new(Throttle::new(TOUCH_INTERVAL)),
             decrypt_warn: Arc::new(Throttle::new(DECRYPT_WARN_INTERVAL)),
             dummy_secret,
+            now_playing: Arc::new(NowPlaying::new()),
         }
     }
 

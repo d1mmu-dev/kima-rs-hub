@@ -270,6 +270,37 @@ async fn username_case_insensitive(pool: PgPool) {
     }
 }
 
+/// Five failures as `noisy`, then one ping as `probe` with the account's password, against a
+/// fresh limiter. The whole `subsonic-response` is what a client sees.
+async fn fold_probe(pool: &PgPool, noisy: &str, probe: &str) -> Value {
+    let (server, _state) = server(pool.clone());
+    for _ in 0..5 {
+        let res = ping(&server, &[("u", noisy), ("p", "wrong")]).await;
+        assert_eq!(res["error"]["code"], 40, "{res}");
+    }
+    ping(&server, &[("u", probe), ("p", "pw-ivy")]).await
+}
+
+/// Spec §5.7: the limiter reveals nothing about whether an account exists. Rust lowercases `İ`
+/// to `i` + U+0307, Postgres under `en_US` to plain `i`. Failures as `İvy` must then answer a
+/// following `ivy` the same way whether or not `ivy` exists (M2 final review I2).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn fold_variant_failures_answer_the_same_for_known_and_unknown_names(pool: PgPool) {
+    let unknown = fold_probe(&pool, "\u{130}vy", "ivy").await;
+    let (_, state) = server(pool.clone());
+    user(&state, "ivy", "pw-ivy", ROLE_USER).await;
+    let known = fold_probe(&pool, "\u{130}vy", "ivy").await;
+    assert_eq!(known, unknown, "the answer must not depend on existence");
+    let fold: String = sqlx::query_scalar("SELECT lower($1)")
+        .bind("\u{130}vy")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    if fold == "ivy" {
+        assert_eq!(known["error"]["code"], 41, "{known}");
+    }
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn undecryptable_secret_fails_ts_only(pool: PgPool) {
     let (server, state) = server(pool);

@@ -363,29 +363,25 @@ async fn password_auth(
     let state = &ctx.app;
     // Before any lookup or hashing. Counted as a failure now; cleared on success.
     let attempt = state.login_limit.begin(ip, u, now).map_err(blocked)?;
-    let found = users::find_by_username(&state.pool, u).await?;
-    // The database folds case its own way, Rust another: also count the attempt on the stored
-    // name's key so no spelling gets a separate budget (as `POST /api/auth/login`). A refusal
-    // there must look like a wrong password.
-    let mut stored_blocked = false;
-    let stored_attempt = match &found {
-        Some(user) if user.username.to_lowercase() != u.to_lowercase() => {
-            match state.login_limit.begin(ip, &user.username, now) {
-                Ok(attempt) => Some(attempt),
-                Err(_) => {
-                    stored_blocked = true;
-                    None
-                }
-            }
-        }
-        _ => None,
+    // The database folds case its own way, Rust another: also count the attempt on the key of
+    // the database's fold of the typed name, so no spelling gets a separate budget (as
+    // `POST /api/auth/login`). Charged whether or not the account exists (spec §5.7).
+    let lookup = users::sign_in_lookup(&state.pool, u).await?;
+    let fold_attempt = if lookup.fold.to_lowercase() == u.to_lowercase() {
+        None
+    } else {
+        Some(
+            state
+                .login_limit
+                .begin(ip, &lookup.fold, now)
+                .map_err(blocked)?,
+        )
     };
+    let found = lookup.user;
 
     let cached = found.as_ref().is_some_and(|user| {
-        !stored_blocked
-            && ctx
-                .password_cache
-                .check(user.id, &password, user.token_version, now)
+        ctx.password_cache
+            .check(user.id, &password, user.token_version, now)
     });
     let (found, valid) = if cached {
         (found, true)
@@ -399,10 +395,7 @@ async fn password_auth(
             // Released when the verify ends, even if the client hung up.
             let _permit = permit;
             let valid = match &found {
-                Some(user) => {
-                    kima_core::auth::verify_password(&to_verify, &user.password_hash)
-                        && !stored_blocked
-                }
+                Some(user) => kima_core::auth::verify_password(&to_verify, &user.password_hash),
                 None => {
                     kima_core::auth::verify_dummy(&to_verify);
                     false
@@ -418,8 +411,8 @@ async fn password_auth(
         return Err(SubsonicError::wrong_credentials());
     };
     attempt.success();
-    if let Some(stored) = stored_attempt {
-        stored.success();
+    if let Some(fold) = fold_attempt {
+        fold.success();
     }
     if !cached {
         ctx.password_cache

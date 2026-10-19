@@ -1,0 +1,17 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "error": {
+      "code": 10,
+      "message": "current must be present and included in id list"
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "failed",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

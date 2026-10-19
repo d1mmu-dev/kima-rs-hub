@@ -1,0 +1,11 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <directory id="1" name="Music">
+    <child id="00000000-0000-7000-8000-100000000001" parent="1" isDir="true" title="The Beatles" artist="The Beatles" coverArt="ar-00000000-0000-7000-8000-100000000001" starred="2026-01-01T04:06:00.000Z"/>
+    <child id="00000000-0000-7000-8000-100000000002" parent="1" isDir="true" title="La Roux" artist="La Roux" coverArt="ar-00000000-0000-7000-8000-100000000002" userRating="3"/>
+    <child id="00000000-0000-7000-8000-100000000003" parent="1" isDir="true" title="Various Artists" artist="Various Artists" coverArt="ar-00000000-0000-7000-8000-100000000003"/>
+  </directory>
+</subsonic-response>

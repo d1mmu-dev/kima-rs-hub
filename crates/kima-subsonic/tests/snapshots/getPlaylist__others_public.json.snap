@@ -1,0 +1,89 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "playlist": {
+      "changed": "2026-01-01T01:01:00.000Z",
+      "created": "2026-01-01T01:01:00.000Z",
+      "duration": 707,
+      "entry": [
+        {
+          "album": "Abbey Road",
+          "albumId": "00000000-0000-7000-8000-200000000001",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000001",
+          "created": "2026-01-01T00:01:00.000Z",
+          "discNumber": 1,
+          "duration": 259,
+          "id": "00000000-0000-7000-8000-300000000001",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000001",
+          "size": 30000001,
+          "suffix": "flac",
+          "title": "Come Together",
+          "track": 1,
+          "type": "music",
+          "userRating": 1,
+          "year": 1969
+        },
+        {
+          "album": "La Roux",
+          "albumId": "00000000-0000-7000-8000-200000000003",
+          "artist": "La Roux",
+          "artistId": "00000000-0000-7000-8000-100000000002",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000003",
+          "created": "2026-01-01T00:10:00.000Z",
+          "discNumber": 1,
+          "duration": 248,
+          "id": "00000000-0000-7000-8000-300000000010",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000003",
+          "size": 30000010,
+          "suffix": "flac",
+          "title": "In for the Kill",
+          "track": 1,
+          "type": "music",
+          "year": 2009
+        },
+        {
+          "album": "Now Hits",
+          "albumId": "00000000-0000-7000-8000-200000000004",
+          "artist": "Kesha",
+          "artistId": "00000000-0000-7000-8000-100000000003",
+          "bitRate": 256,
+          "contentType": "audio/mpeg",
+          "coverArt": "00000000-0000-7000-8000-200000000004",
+          "created": "2026-01-01T00:13:00.000Z",
+          "discNumber": 1,
+          "duration": 200,
+          "id": "00000000-0000-7000-8000-300000000013",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000004",
+          "size": 30000013,
+          "suffix": "mp3",
+          "title": "Tik Tok",
+          "track": 1,
+          "type": "music",
+          "year": 2009
+        }
+      ],
+      "id": "00000000-0000-7000-8000-500000000001",
+      "name": "Road Trip",
+      "owner": "alice",
+      "public": true,
+      "songCount": 3
+    },
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

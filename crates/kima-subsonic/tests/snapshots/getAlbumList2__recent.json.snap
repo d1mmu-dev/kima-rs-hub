@@ -1,0 +1,54 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "albumList2": {
+      "album": [
+        {
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "coverArt": "00000000-0000-7000-8000-200000000001",
+          "created": "2026-01-01T00:01:00.000Z",
+          "duration": 1040,
+          "id": "00000000-0000-7000-8000-200000000001",
+          "name": "Abbey Road",
+          "songCount": 5,
+          "starred": "2026-01-01T04:04:00.000Z",
+          "userRating": 4,
+          "year": 1969
+        },
+        {
+          "artist": "La Roux",
+          "artistId": "00000000-0000-7000-8000-100000000002",
+          "coverArt": "00000000-0000-7000-8000-200000000003",
+          "created": "2026-01-01T00:03:00.000Z",
+          "duration": 671,
+          "id": "00000000-0000-7000-8000-200000000003",
+          "name": "La Roux",
+          "songCount": 3,
+          "starred": "2026-01-01T04:03:00.000Z",
+          "year": 2009
+        },
+        {
+          "artist": "Various Artists",
+          "artistId": "00000000-0000-7000-8000-100000000003",
+          "coverArt": "00000000-0000-7000-8000-200000000004",
+          "created": "2026-01-01T00:04:00.000Z",
+          "duration": 903,
+          "id": "00000000-0000-7000-8000-200000000004",
+          "name": "Now Hits",
+          "songCount": 4,
+          "userRating": 5,
+          "year": 2010
+        }
+      ]
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

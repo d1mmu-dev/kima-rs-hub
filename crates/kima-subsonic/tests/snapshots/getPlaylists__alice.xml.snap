@@ -1,0 +1,10 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <playlists>
+    <playlist id="00000000-0000-7000-8000-500000000002" name="Private Mix" songCount="2" duration="399" public="false" owner="alice" created="2026-01-01T01:02:00.000Z" changed="2026-01-01T01:02:00.000Z"/>
+    <playlist id="00000000-0000-7000-8000-500000000001" name="Road Trip" songCount="3" duration="707" public="true" owner="alice" created="2026-01-01T01:01:00.000Z" changed="2026-01-01T01:01:00.000Z"/>
+  </playlists>
+</subsonic-response>

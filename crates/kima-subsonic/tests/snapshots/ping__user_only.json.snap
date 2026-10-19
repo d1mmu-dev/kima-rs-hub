@@ -1,0 +1,17 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "error": {
+      "code": 10,
+      "message": "Required parameter is missing: p, t or apiKey"
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "failed",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

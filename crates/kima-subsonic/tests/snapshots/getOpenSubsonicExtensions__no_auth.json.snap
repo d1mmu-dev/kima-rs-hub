@@ -1,0 +1,33 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "openSubsonicExtensions": [
+      {
+        "name": "apiKeyAuthentication",
+        "versions": [
+          1
+        ]
+      },
+      {
+        "name": "formPost",
+        "versions": [
+          1
+        ]
+      },
+      {
+        "name": "indexBasedQueue",
+        "versions": [
+          1
+        ]
+      }
+    ],
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

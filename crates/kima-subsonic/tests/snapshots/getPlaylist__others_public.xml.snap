@@ -1,0 +1,11 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <playlist id="00000000-0000-7000-8000-500000000001" name="Road Trip" songCount="3" duration="707" public="true" owner="alice" created="2026-01-01T01:01:00.000Z" changed="2026-01-01T01:01:00.000Z">
+    <entry id="00000000-0000-7000-8000-300000000001" parent="00000000-0000-7000-8000-200000000001" title="Come Together" album="Abbey Road" artist="The Beatles" isDir="false" coverArt="00000000-0000-7000-8000-200000000001" duration="259" bitRate="900" track="1" discNumber="1" year="1969" size="30000001" contentType="audio/flac" suffix="flac" albumId="00000000-0000-7000-8000-200000000001" artistId="00000000-0000-7000-8000-100000000001" type="music" created="2026-01-01T00:01:00.000Z" userRating="1"/>
+    <entry id="00000000-0000-7000-8000-300000000010" parent="00000000-0000-7000-8000-200000000003" title="In for the Kill" album="La Roux" artist="La Roux" isDir="false" coverArt="00000000-0000-7000-8000-200000000003" duration="248" bitRate="900" track="1" discNumber="1" year="2009" size="30000010" contentType="audio/flac" suffix="flac" albumId="00000000-0000-7000-8000-200000000003" artistId="00000000-0000-7000-8000-100000000002" type="music" created="2026-01-01T00:10:00.000Z"/>
+    <entry id="00000000-0000-7000-8000-300000000013" parent="00000000-0000-7000-8000-200000000004" title="Tik Tok" album="Now Hits" artist="Kesha" isDir="false" coverArt="00000000-0000-7000-8000-200000000004" duration="200" bitRate="256" track="1" discNumber="1" year="2009" size="30000013" contentType="audio/mpeg" suffix="mp3" albumId="00000000-0000-7000-8000-200000000004" artistId="00000000-0000-7000-8000-100000000003" type="music" created="2026-01-01T00:13:00.000Z"/>
+  </playlist>
+</subsonic-response>

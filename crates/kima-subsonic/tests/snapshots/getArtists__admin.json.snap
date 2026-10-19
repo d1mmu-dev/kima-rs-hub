@@ -1,0 +1,51 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "artists": {
+      "ignoredArticles": "The A An Le La Les Los Las Die Der Das",
+      "index": [
+        {
+          "artist": [
+            {
+              "albumCount": 2,
+              "coverArt": "ar-00000000-0000-7000-8000-100000000001",
+              "id": "00000000-0000-7000-8000-100000000001",
+              "name": "The Beatles"
+            }
+          ],
+          "name": "B"
+        },
+        {
+          "artist": [
+            {
+              "albumCount": 2,
+              "coverArt": "ar-00000000-0000-7000-8000-100000000002",
+              "id": "00000000-0000-7000-8000-100000000002",
+              "name": "La Roux"
+            }
+          ],
+          "name": "R"
+        },
+        {
+          "artist": [
+            {
+              "albumCount": 1,
+              "coverArt": "ar-00000000-0000-7000-8000-100000000003",
+              "id": "00000000-0000-7000-8000-100000000003",
+              "name": "Various Artists"
+            }
+          ],
+          "name": "V"
+        }
+      ]
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

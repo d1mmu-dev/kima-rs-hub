@@ -1,0 +1,17 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "error": {
+      "code": 0,
+      "message": "Rating must be between 0 and 5"
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "failed",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

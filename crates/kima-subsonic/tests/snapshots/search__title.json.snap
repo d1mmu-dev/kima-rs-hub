@@ -1,0 +1,40 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "searchResult": {
+      "match": [
+        {
+          "album": "White Album",
+          "albumId": "00000000-0000-7000-8000-200000000002",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "bitRate": 320,
+          "contentType": "audio/mpeg",
+          "coverArt": "00000000-0000-7000-8000-200000000002",
+          "created": "2026-01-01T00:07:00.000Z",
+          "discNumber": 1,
+          "duration": 236,
+          "id": "00000000-0000-7000-8000-300000000007",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000002",
+          "size": 30000007,
+          "suffix": "mp3",
+          "title": "Dear Prudence",
+          "track": 2,
+          "type": "music",
+          "year": 1968
+        }
+      ],
+      "offset": 0,
+      "totalHits": 1
+    },
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

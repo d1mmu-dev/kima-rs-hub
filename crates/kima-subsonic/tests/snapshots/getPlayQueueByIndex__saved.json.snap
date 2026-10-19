@@ -1,0 +1,85 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "playQueueByIndex": {
+      "changed": "2026-01-01T07:00:00.000Z",
+      "changedBy": "Phone",
+      "currentIndex": 1,
+      "entry": [
+        {
+          "album": "Abbey Road",
+          "albumId": "00000000-0000-7000-8000-200000000001",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000001",
+          "created": "2026-01-01T00:05:00.000Z",
+          "discNumber": 1,
+          "duration": 185,
+          "id": "00000000-0000-7000-8000-300000000005",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000001",
+          "size": 30000005,
+          "suffix": "flac",
+          "title": "Here Comes the Sun",
+          "track": 5,
+          "type": "music",
+          "year": 1969
+        },
+        {
+          "album": "White Album",
+          "albumId": "00000000-0000-7000-8000-200000000002",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "bitRate": 320,
+          "contentType": "audio/mpeg",
+          "coverArt": "00000000-0000-7000-8000-200000000002",
+          "created": "2026-01-01T00:07:00.000Z",
+          "discNumber": 1,
+          "duration": 236,
+          "id": "00000000-0000-7000-8000-300000000007",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000002",
+          "size": 30000007,
+          "suffix": "mp3",
+          "title": "Dear Prudence",
+          "track": 2,
+          "type": "music",
+          "year": 1968
+        },
+        {
+          "album": "La Roux",
+          "albumId": "00000000-0000-7000-8000-200000000003",
+          "artist": "La Roux",
+          "artistId": "00000000-0000-7000-8000-100000000002",
+          "bitRate": 900,
+          "contentType": "audio/flac",
+          "coverArt": "00000000-0000-7000-8000-200000000003",
+          "created": "2026-01-01T00:12:00.000Z",
+          "discNumber": 1,
+          "duration": 218,
+          "id": "00000000-0000-7000-8000-300000000012",
+          "isDir": false,
+          "parent": "00000000-0000-7000-8000-200000000003",
+          "size": 30000012,
+          "suffix": "flac",
+          "title": "Quicksand",
+          "track": 3,
+          "type": "music",
+          "year": 2009
+        }
+      ],
+      "position": 12345,
+      "username": "alice"
+    },
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

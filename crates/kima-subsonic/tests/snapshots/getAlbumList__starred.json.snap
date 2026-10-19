@@ -1,0 +1,50 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "albumList": {
+      "album": [
+        {
+          "album": "Abbey Road",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "coverArt": "00000000-0000-7000-8000-200000000001",
+          "created": "2026-01-01T00:01:00.000Z",
+          "duration": 1040,
+          "id": "00000000-0000-7000-8000-200000000001",
+          "isDir": true,
+          "name": "Abbey Road",
+          "parent": "00000000-0000-7000-8000-100000000001",
+          "songCount": 5,
+          "starred": "2026-01-01T04:04:00.000Z",
+          "title": "Abbey Road",
+          "userRating": 4,
+          "year": 1969
+        },
+        {
+          "album": "La Roux",
+          "artist": "La Roux",
+          "artistId": "00000000-0000-7000-8000-100000000002",
+          "coverArt": "00000000-0000-7000-8000-200000000003",
+          "created": "2026-01-01T00:03:00.000Z",
+          "duration": 671,
+          "id": "00000000-0000-7000-8000-200000000003",
+          "isDir": true,
+          "name": "La Roux",
+          "parent": "00000000-0000-7000-8000-100000000002",
+          "songCount": 3,
+          "starred": "2026-01-01T04:03:00.000Z",
+          "title": "La Roux",
+          "year": 2009
+        }
+      ]
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

@@ -1,0 +1,10 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <albumList>
+    <album isDir="true" title="Abbey Road" album="Abbey Road" parent="00000000-0000-7000-8000-100000000001" id="00000000-0000-7000-8000-200000000001" name="Abbey Road" artist="The Beatles" artistId="00000000-0000-7000-8000-100000000001" coverArt="00000000-0000-7000-8000-200000000001" songCount="5" duration="1040" year="1969" created="2026-01-01T00:01:00.000Z" starred="2026-01-01T04:04:00.000Z" userRating="4"/>
+    <album isDir="true" title="La Roux" album="La Roux" parent="00000000-0000-7000-8000-100000000002" id="00000000-0000-7000-8000-200000000003" name="La Roux" artist="La Roux" artistId="00000000-0000-7000-8000-100000000002" coverArt="00000000-0000-7000-8000-200000000003" songCount="3" duration="671" year="2009" created="2026-01-01T00:03:00.000Z" starred="2026-01-01T04:03:00.000Z"/>
+  </albumList>
+</subsonic-response>

@@ -1,0 +1,95 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "albumList": {
+      "album": [
+        {
+          "album": "Untitled Demos",
+          "artist": "La Roux",
+          "artistId": "00000000-0000-7000-8000-100000000002",
+          "coverArt": "00000000-0000-7000-8000-200000000005",
+          "created": "2026-01-01T00:05:00.000Z",
+          "duration": 195,
+          "id": "00000000-0000-7000-8000-200000000005",
+          "isDir": true,
+          "name": "Untitled Demos",
+          "parent": "00000000-0000-7000-8000-100000000002",
+          "songCount": 3,
+          "title": "Untitled Demos"
+        },
+        {
+          "album": "Now Hits",
+          "artist": "Various Artists",
+          "artistId": "00000000-0000-7000-8000-100000000003",
+          "coverArt": "00000000-0000-7000-8000-200000000004",
+          "created": "2026-01-01T00:04:00.000Z",
+          "duration": 903,
+          "id": "00000000-0000-7000-8000-200000000004",
+          "isDir": true,
+          "name": "Now Hits",
+          "parent": "00000000-0000-7000-8000-100000000003",
+          "songCount": 4,
+          "title": "Now Hits",
+          "userRating": 5,
+          "year": 2010
+        },
+        {
+          "album": "La Roux",
+          "artist": "La Roux",
+          "artistId": "00000000-0000-7000-8000-100000000002",
+          "coverArt": "00000000-0000-7000-8000-200000000003",
+          "created": "2026-01-01T00:03:00.000Z",
+          "duration": 671,
+          "id": "00000000-0000-7000-8000-200000000003",
+          "isDir": true,
+          "name": "La Roux",
+          "parent": "00000000-0000-7000-8000-100000000002",
+          "songCount": 3,
+          "starred": "2026-01-01T04:03:00.000Z",
+          "title": "La Roux",
+          "year": 2009
+        },
+        {
+          "album": "White Album",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "coverArt": "00000000-0000-7000-8000-200000000002",
+          "created": "2026-01-01T00:02:00.000Z",
+          "duration": 831,
+          "id": "00000000-0000-7000-8000-200000000002",
+          "isDir": true,
+          "name": "White Album",
+          "parent": "00000000-0000-7000-8000-100000000001",
+          "songCount": 4,
+          "title": "White Album",
+          "year": 1968
+        },
+        {
+          "album": "Abbey Road",
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "coverArt": "00000000-0000-7000-8000-200000000001",
+          "created": "2026-01-01T00:01:00.000Z",
+          "duration": 1040,
+          "id": "00000000-0000-7000-8000-200000000001",
+          "isDir": true,
+          "name": "Abbey Road",
+          "parent": "00000000-0000-7000-8000-100000000001",
+          "songCount": 5,
+          "starred": "2026-01-01T04:04:00.000Z",
+          "title": "Abbey Road",
+          "userRating": 4,
+          "year": 1969
+        }
+      ]
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

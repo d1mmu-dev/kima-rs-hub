@@ -340,6 +340,60 @@ pub fn write_json(node: &Node) -> Json {
     Json::Object(object)
 }
 
+/// Where the writers emit a list: `/`-joined element paths from the root, each ending in the
+/// list's element name. `Child::List` and `Child::Scalars` always give a JSON array, so the XML
+/// parser in the structural test (spec §10.1) needs this to tell a one-item list from an object,
+/// and to put back the empty arrays XML leaves out. A path is exact: `artist` is a list under
+/// `starred` but one object under the root (`getArtist`). Keep it in step with the handlers.
+const LIST_NAMES: &[&str] = &[
+    "subsonic-response/openSubsonicExtensions",
+    "subsonic-response/openSubsonicExtensions/versions",
+    "subsonic-response/musicFolders/musicFolder",
+    "subsonic-response/artists/index",
+    "subsonic-response/artists/index/artist",
+    "subsonic-response/indexes/index",
+    "subsonic-response/indexes/index/artist",
+    "subsonic-response/artist/album",
+    "subsonic-response/directory/child",
+    "subsonic-response/album/song",
+    "subsonic-response/albumList2/album",
+    "subsonic-response/albumList/album",
+    "subsonic-response/searchResult3/artist",
+    "subsonic-response/searchResult3/album",
+    "subsonic-response/searchResult3/song",
+    "subsonic-response/searchResult2/artist",
+    "subsonic-response/searchResult2/album",
+    "subsonic-response/searchResult2/song",
+    "subsonic-response/searchResult/match",
+    "subsonic-response/randomSongs/song",
+    "subsonic-response/songsByGenre/song",
+    "subsonic-response/topSongs/song",
+    "subsonic-response/similarSongs/song",
+    "subsonic-response/similarSongs2/song",
+    "subsonic-response/genres/genre",
+    "subsonic-response/nowPlaying/entry",
+    "subsonic-response/playQueue/entry",
+    "subsonic-response/playQueueByIndex/entry",
+    "subsonic-response/bookmarks/bookmark",
+    "subsonic-response/playlists/playlist",
+    "subsonic-response/playlist/entry",
+    "subsonic-response/starred/artist",
+    "subsonic-response/starred/album",
+    "subsonic-response/starred/song",
+    "subsonic-response/starred2/artist",
+    "subsonic-response/starred2/album",
+    "subsonic-response/starred2/song",
+    "subsonic-response/users/user",
+    "subsonic-response/users/user/folder",
+    "subsonic-response/user/folder",
+    "subsonic-response/transcodeDecision/transcodeReason",
+];
+
+/// The paths the writers always emit as lists (see `LIST_NAMES`).
+pub fn list_names() -> &'static [&'static str] {
+    LIST_NAMES
+}
+
 fn envelope(failed: Option<&SubsonicError>, body: Option<Node>) -> Node {
     let mut root = Node::new("subsonic-response")
         .attr("xmlns", XMLNS)

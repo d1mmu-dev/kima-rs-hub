@@ -1,0 +1,9 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <transcodeDecision canDirectPlay="false" canTranscode="true" errorReason="" transcodeParams="format=mp3">
+    <transcodeReason>source is flac, client asked for mp3</transcodeReason>
+  </transcodeDecision>
+</subsonic-response>

@@ -11,7 +11,6 @@ use futures::future::BoxFuture;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -62,14 +61,36 @@ struct Entry {
     f: EnqueueFn,
 }
 
-#[derive(Default)]
+/// Source of "now"; production reads the real wall clock, tests inject their own.
+pub type Clock = Arc<dyn Fn() -> OffsetDateTime + Send + Sync>;
+
+/// Longest single sleep. The wall clock is re-read after each chunk, so a suspend or a clock
+/// step delays a fire by at most this much.
+const MAX_CHUNK: Duration = Duration::from_secs(60);
+
 pub struct Scheduler {
     entries: Vec<Entry>,
+    clock: Clock,
+}
+
+impl Default for Scheduler {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            clock: Arc::new(OffsetDateTime::now_utc),
+        }
+    }
 }
 
 impl Scheduler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Replaces the wall clock (tests).
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
     }
 
     pub fn add(mut self, name: &'static str, cron: Cron, f: EnqueueFn) -> Self {
@@ -80,48 +101,36 @@ impl Scheduler {
     /// Runs every entry until `shutdown` is cancelled. An `Err` from an entry is logged with
     /// its name and the entry keeps its schedule.
     pub fn spawn(self, pool: PgPool, shutdown: CancellationToken) -> JoinHandle<()> {
-        // Wall time at start plus tokio's (pausable) monotonic clock, so sleeps and fire
-        // times agree.
-        let wall_start = OffsetDateTime::now_utc();
-        let mono_start = Instant::now();
+        let clock = self.clock;
         tokio::spawn(async move {
-            let loops = self.entries.into_iter().map(|entry| {
-                run_entry(
-                    entry,
-                    pool.clone(),
-                    shutdown.clone(),
-                    wall_start,
-                    mono_start,
-                )
-            });
+            let loops = self
+                .entries
+                .into_iter()
+                .map(|entry| run_entry(entry, pool.clone(), shutdown.clone(), clock.clone()));
             futures::future::join_all(loops).await;
         })
     }
 }
 
-async fn run_entry(
-    entry: Entry,
-    pool: PgPool,
-    shutdown: CancellationToken,
-    wall_start: OffsetDateTime,
-    mono_start: Instant,
-) {
-    let now = || wall_start + mono_start.elapsed();
-    let mut last_fire: Option<OffsetDateTime> = None;
+async fn run_entry(entry: Entry, pool: PgPool, shutdown: CancellationToken, clock: Clock) {
     loop {
-        // Never pick the fire time we just handled again.
-        let from = last_fire.map_or_else(now, |f| f.max(now()));
-        let Some(next) = entry.cron.next_after(from) else {
+        // Fires missed while asleep or suspended are not caught up: the next fire is always
+        // the first one after the current time.
+        let Some(next) = entry.cron.next_after(clock()) else {
             info!(job = entry.name, "schedule has no further fire times");
             return;
         };
-        let wait = (next - now()).max(time::Duration::ZERO);
-        let wait = Duration::try_from(wait).unwrap_or_default();
-        tokio::select! {
-            () = shutdown.cancelled() => return,
-            () = tokio::time::sleep(wait) => {}
+        loop {
+            let now = clock();
+            if now >= next {
+                break;
+            }
+            let wait = Duration::try_from(next - now).unwrap_or_default();
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(wait.min(MAX_CHUNK)) => {}
+            }
         }
-        last_fire = Some(next);
         if let Err(e) = (entry.f)(pool.clone()).await {
             warn!(job = entry.name, error = %e, "scheduled job failed to enqueue");
         }

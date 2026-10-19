@@ -159,11 +159,9 @@ async fn update_playlist(
             .await?
             .ok_or_else(not_found)?;
     }
-    if !remove.is_empty() {
-        playlists::remove_at_indexes(pool, playlist.id, &remove).await?;
-    }
-    if !add.is_empty() {
-        playlists::add_tracks(pool, playlist.id, &add)
+    // The removals and the adds land together or not at all, as upstream's one transaction.
+    if !remove.is_empty() || !add.is_empty() {
+        playlists::edit_items(pool, playlist.id, &remove, &add)
             .await?
             .ok_or_else(not_found)?;
     }

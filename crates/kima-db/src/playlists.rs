@@ -283,13 +283,46 @@ pub async fn remove_at_indexes(
     if !lock(&mut tx, playlist).await? {
         return Ok(0);
     }
+    let removed = remove_locked(&mut tx, playlist, indexes).await?;
+    tx.commit().await?;
+    Ok(removed)
+}
+
+/// Removes the items at `remove_indexes` (as `remove_at_indexes`), then appends `add` (as
+/// `add_tracks`), under one row lock in one transaction: when either step fails, neither lands.
+/// Returns how many were removed and the add outcome; `None` when the playlist no longer exists.
+pub async fn edit_items(
+    pool: &PgPool,
+    playlist: Uuid,
+    remove_indexes: &[usize],
+    add: &[Uuid],
+) -> sqlx::Result<Option<(u64, AddResult)>> {
+    let mut tx = pool.begin().await?;
+    if !lock(&mut tx, playlist).await? {
+        return Ok(None);
+    }
+    let removed = remove_locked(&mut tx, playlist, remove_indexes).await?;
+    let added = add_locked(&mut tx, playlist, add).await?;
+    tx.commit().await?;
+    Ok(Some((removed, added)))
+}
+
+/// `remove_at_indexes` with the playlist row already locked.
+async fn remove_locked(
+    tx: &mut Transaction<'_, Postgres>,
+    playlist: Uuid,
+    indexes: &[usize],
+) -> sqlx::Result<u64> {
+    if indexes.is_empty() {
+        return Ok(0);
+    }
     let visible: Vec<Uuid> = sqlx::query_scalar(
         "SELECT pi.id FROM playlist_items pi
          JOIN tracks t ON t.id = pi.track_id AND t.missing_since IS NULL
          WHERE pi.playlist_id = $1 ORDER BY pi.sort, pi.id",
     )
     .bind(playlist)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     let doomed: Vec<Uuid> = indexes
         .iter()
@@ -303,13 +336,12 @@ pub async fn remove_at_indexes(
     let removed = sqlx::query("DELETE FROM playlist_items WHERE playlist_id = $1 AND id = ANY($2)")
         .bind(playlist)
         .bind(&doomed)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
-    let ids = ordered_ids(&mut tx, playlist).await?;
-    write_order(&mut tx, playlist, &ids).await?;
-    touch(&mut tx, playlist).await?;
-    tx.commit().await?;
+    let ids = ordered_ids(tx, playlist).await?;
+    write_order(tx, playlist, &ids).await?;
+    touch(tx, playlist).await?;
     Ok(removed)
 }
 

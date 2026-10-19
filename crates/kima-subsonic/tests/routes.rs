@@ -293,51 +293,54 @@ fixture_test!(create_share_not_supported, |server, pool| {
     assert_eq!(res.json::<Value>()["subsonic-response"]["error"]["code"], 0);
 });
 
-/// Endpoints whose queries touch only `users` and `api_keys`, or no table at all: they may answer
-/// ok when every other table is gone (`hls` builds a URL from its parameters and reads no table, as upstream). The four user writes answer 50 to an app token before they
-/// read anything (D-098).
-const MAY_ANSWER: &[&str] = &[
-    "ping",
-    "getLicense",
-    "getMusicFolders",
-    "getUser",
-    "getUsers",
-    "getAvatar",
-    "hls",
-    "hls.m3u8",
-    "tokenInfo",
-    "getOpenSubsonicExtensions",
-    "createUser",
-    "updateUser",
-    "deleteUser",
-    "changePassword",
-    "getAlbumInfo",
-    "getAlbumInfo2",
-    "getLyrics",
-    "getLyricsBySongId",
-    "getPodcasts",
-    "getNewestPodcasts",
-    "getPodcastEpisode",
-    "refreshPodcasts",
-    "getShares",
-    "createShare",
-    "updateShare",
-    "deleteShare",
-    "getInternetRadioStations",
-    "createInternetRadioStation",
-    "updateInternetRadioStation",
-    "deleteInternetRadioStation",
-    "getChatMessages",
-    "addChatMessage",
-    "getVideos",
-    "getVideoInfo",
-    "getCaptions",
-    "jukeboxControl",
-    "getSongsByGenre",
-    "getSimilarSongs",
-    "getSimilarSongs2",
-    "getGenres",
+/// Endpoints whose queries touch only `users` and `api_keys`, or no table at all, so they still
+/// answer when every other table is gone. Each outcome is pinned: `None` is ok, `Some(code)` an
+/// error. The four user writes answer 50 to an app token before they read anything (D-098);
+/// the password-auth probe below covers them for real.
+const UNAFFECTED: &[(&str, Option<u64>)] = &[
+    ("ping", None),
+    ("getLicense", None),
+    ("getMusicFolders", None),
+    ("getUser", None),
+    ("getUsers", None),
+    ("getOpenSubsonicExtensions", None),
+    ("tokenInfo", None),
+    ("createUser", Some(50)),
+    ("updateUser", Some(50)),
+    ("deleteUser", Some(50)),
+    ("changePassword", Some(50)),
+    ("getAlbumInfo", None),
+    ("getAlbumInfo2", None),
+    ("getLyrics", None),
+    ("getLyricsBySongId", None),
+    ("getPodcasts", None),
+    ("getNewestPodcasts", None),
+    ("getPodcastEpisode", Some(70)),
+    ("refreshPodcasts", None),
+    ("getShares", None),
+    ("createShare", Some(0)),
+    ("updateShare", Some(0)),
+    ("deleteShare", Some(0)),
+    ("getInternetRadioStations", None),
+    ("createInternetRadioStation", Some(0)),
+    ("updateInternetRadioStation", Some(0)),
+    ("deleteInternetRadioStation", Some(0)),
+    ("getChatMessages", None),
+    ("addChatMessage", Some(0)),
+    ("getVideos", None),
+    ("getVideoInfo", None),
+    ("getCaptions", Some(70)),
+    ("jukeboxControl", Some(0)),
+    // The shared probe parameters carry no `genre`.
+    ("getSongsByGenre", Some(10)),
+    ("getSimilarSongs", None),
+    ("getSimilarSongs2", None),
+    ("getGenres", None),
 ];
+
+/// Unaffected endpoints that answer a playlist or an image, not an envelope. `hls` builds a URL
+/// from its parameters and reads no table, as upstream; `getAvatar` reads only `users`.
+const NO_ENVELOPE: &[&str] = &["hls", "hls.m3u8", "getAvatar"];
 
 fixture_test!(
     every_endpoint_answers_internal_error_when_db_breaks,
@@ -404,14 +407,75 @@ fixture_test!(
             for leak in ["_gone", "relation", "sqlx", "SELECT", "pool"] {
                 assert!(!body.contains(leak), "{name} leaks {leak}: {body}");
             }
-            if MAY_ANSWER.contains(name) {
+            if NO_ENVELOPE.contains(name) {
+                assert!(
+                    serde_json::from_str::<Value>(&body).is_err(),
+                    "{name}: {body}"
+                );
                 continue;
             }
             let json: Value = serde_json::from_str(&body)
                 .unwrap_or_else(|_| panic!("{name} answered no envelope: {body}"));
             let res = &json["subsonic-response"];
-            failed(res, 0, "Internal error");
+            match UNAFFECTED.iter().find(|(n, _)| n == name) {
+                Some((_, None)) => assert_eq!(res["status"], "ok", "{name}: {body}"),
+                Some((_, Some(code))) => {
+                    assert_eq!(res["status"], "failed", "{name}: {body}");
+                    assert_eq!(res["error"]["code"], *code, "{name}: {body}");
+                }
+                None => failed(res, 0, "Internal error"),
+            }
         }
+
+        // The user writes under password auth, which is how they work for real. Password auth,
+        // the user lookups and the password and token updates touch only `users` and `api_keys`
+        // (session revocation is in memory), so all four still succeed with the other tables
+        // gone. The outcomes are pinned, and `admin_call` checks that no body leaks a detail.
+        let admin_call = |endpoint: &'static str, extra: Vec<(&'static str, String)>| {
+            let server = &server;
+            async move {
+                let res = server
+                    .get(&format!("/{endpoint}.view"))
+                    .add_query_params([("f", "json"), ("u", ADMIN_NAME), ("p", ADMIN_PASSWORD)])
+                    .add_query_params(extra)
+                    .await;
+                res.assert_status_ok();
+                let body = res.text();
+                for leak in ["_gone", "relation", "sqlx", "SELECT", "pool"] {
+                    assert!(!body.contains(leak), "{endpoint} leaks {leak}: {body}");
+                }
+                serde_json::from_str::<Value>(&body).unwrap()["subsonic-response"].clone()
+            }
+        };
+        let res = admin_call(
+            "changePassword",
+            vec![
+                ("username", ALICE_NAME.to_owned()),
+                ("password", "newpass123".to_owned()),
+            ],
+        )
+        .await;
+        assert_eq!(res["status"], "ok", "changePassword: {res}");
+        let res = admin_call(
+            "updateUser",
+            vec![
+                ("username", ALICE_NAME.to_owned()),
+                ("password", "newpass123".to_owned()),
+            ],
+        )
+        .await;
+        assert_eq!(res["status"], "ok", "updateUser: {res}");
+        let res = admin_call(
+            "createUser",
+            vec![
+                ("username", "newbie".to_owned()),
+                ("password", "newpass123".to_owned()),
+            ],
+        )
+        .await;
+        assert_eq!(res["status"], "ok", "{res}");
+        let res = admin_call("deleteUser", vec![("username", "newbie".to_owned())]).await;
+        assert_eq!(res["status"], "ok", "{res}");
 
         // With the pool closed, even auth fails the same way.
         pool.close().await;

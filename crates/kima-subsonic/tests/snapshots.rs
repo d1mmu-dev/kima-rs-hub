@@ -23,6 +23,15 @@ const REDACTED: &str = "[redacted]";
 /// Fixture timestamps all start with this and are never redacted, only request-time values.
 const FIXTURE_TIME: &str = "2026-01-01T";
 
+/// `0` for a number, else the redaction marker.
+fn placeholder(v: &Value) -> Value {
+    if v.is_number() {
+        json!(0)
+    } else {
+        json!(REDACTED)
+    }
+}
+
 fn is_fixture_time(v: &Value) -> bool {
     v.as_str().is_some_and(|s| s.starts_with(FIXTURE_TIME))
 }
@@ -31,6 +40,7 @@ fn is_fixture_time(v: &Value) -> bool {
 // The harness
 
 struct Snap {
+    pool: PgPool,
     server: TestServer,
     xml: bool,
     json: bool,
@@ -52,8 +62,10 @@ const NONE: Opts = Opts {
 impl Snap {
     fn new(pool: PgPool, xml: bool, json: bool) -> Self {
         let peer: SocketAddr = "10.0.0.1:4000".parse().unwrap();
-        let router = kima_subsonic::router(fixture_state(pool)).layer(MockConnectInfo(peer));
+        let router =
+            kima_subsonic::router(fixture_state(pool.clone())).layer(MockConnectInfo(peer));
         Self {
+            pool,
             server: TestServer::new(router).unwrap(),
             xml,
             json,
@@ -77,12 +89,12 @@ impl Snap {
 
     /// A request whose answer is not snapshotted (set-up before the case proper).
     async fn call(&self, endpoint: &str, params: &[(&str, &str)]) {
-        if self.json {
-            self.get(endpoint, params, true).await;
-        }
-        if self.xml && !self.json {
-            self.get(endpoint, params, false).await;
-        }
+        self.get(endpoint, params, self.json).await;
+    }
+
+    /// Set-up SQL on the fixture database.
+    async fn sql(&self, sql: &str) {
+        sqlx::query(sql).execute(&self.pool).await.unwrap();
     }
 
     async fn case(&self, endpoint: &str, name: &str, params: &[(&str, &str)]) {
@@ -171,9 +183,15 @@ fn redact_attr(xml: &mut String, key: &str, from: usize, to: usize) -> usize {
             at = close;
             continue;
         }
-        xml.replace_range(start..close, REDACTED);
-        end = end + REDACTED.len() - (close - start);
-        at = start + REDACTED.len();
+        // A number stays a number, so the JSON type check still bites.
+        let placeholder = if xml[start..close].parse::<i64>().is_ok() {
+            "0"
+        } else {
+            REDACTED
+        };
+        end = end + placeholder.len() - (close - start);
+        xml.replace_range(start..close, placeholder);
+        at = start + placeholder.len();
     }
     end
 }
@@ -211,7 +229,7 @@ fn redact_json(value: &mut Value, keys: &[&str]) {
                     && !is_fixture_time(v)
                     && (key == "serverVersion" || keys.contains(&key.as_str()))
                 {
-                    *v = json!(REDACTED);
+                    *v = placeholder(v);
                     continue;
                 }
                 let scoped: Vec<&str> = keys
@@ -230,7 +248,7 @@ fn redact_json(value: &mut Value, keys: &[&str]) {
                                 .get_mut(*attr)
                                 .filter(|x| leaf(x) && !is_fixture_time(x))
                             {
-                                *x = json!(REDACTED);
+                                *x = placeholder(x);
                             }
                         }
                     }
@@ -1364,6 +1382,42 @@ snap_mut!(user_writes_xml, user_writes_json, |s| {
         .await;
     s.case("deleteUser", "unknown", &admin(&[("username", "nobody")]))
         .await;
+});
+
+snap_mut!(missing_xml, missing_json, |s| {
+    // Track 20 is flagged missing. Put it into alice's playlist, her saved queue and now playing.
+    let t20 = track_id(20);
+    let playlist = fixture_id(5, 1);
+    s.sql(&format!(
+        "INSERT INTO playlist_items (id, playlist_id, track_id, sort) \
+         VALUES ('{}', '{playlist}', '{t20}', 3)",
+        fixture_id(7, 99)
+    ))
+    .await;
+    s.sql(&format!(
+        "UPDATE playback_state SET queue = queue || '[{{\"id\":\"{t20}\"}}]'::jsonb"
+    ))
+    .await;
+    let id = t20.to_string();
+    s.call(
+        "scrobble",
+        &alice(&[("id", &id), ("submission", "false"), ("c", "Phone")]),
+    )
+    .await;
+    let playlist = playlist.to_string();
+    s.case(
+        "getPlaylist",
+        "with_missing_track",
+        &alice(&[("id", &playlist)]),
+    )
+    .await;
+    s.case("getPlaylists", "with_missing_track", &alice(&[]))
+        .await;
+    s.case("getPlayQueue", "with_missing_track", &alice(&[]))
+        .await;
+    s.case("getPlayQueueByIndex", "with_missing_track", &alice(&[]))
+        .await;
+    s.case("getNowPlaying", "missing_track", &alice(&[])).await;
 });
 
 snap!(stubs, |s| {

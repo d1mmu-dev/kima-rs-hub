@@ -340,11 +340,14 @@ pub fn write_json(node: &Node) -> Json {
     Json::Object(object)
 }
 
-/// Where the writers emit a list: `/`-joined element paths from the root, each ending in the
-/// list's element name. `Child::List` and `Child::Scalars` always give a JSON array, so the XML
-/// parser in the structural test (spec §10.1) needs this to tell a one-item list from an object,
-/// and to put back the empty arrays XML leaves out. A path is exact: `artist` is a list under
-/// `starred` but one object under the root (`getArtist`). Keep it in step with the handlers.
+/// Where the writers emit a list (`Child::List` or `Scalars`: an array in JSON even when empty).
+/// Entries are `/`-joined element paths from the root, each ending in the list's element name.
+/// The one exception to "empty means `[]`" is `subsonic-response/playlist/entry`: an empty
+/// playlist has no `entry` in either format, as upstream, so the structural test must not be
+/// given one without special-casing it. The XML parser in the structural test (spec §10.1)
+/// needs this table to tell a one-item list from an object, and to put back the empty arrays
+/// XML leaves out. A path is exact: `artist` is a list under `starred` but one object under
+/// the root (`getArtist`). Keep it in step with the handlers.
 const LIST_NAMES: &[&str] = &[
     "subsonic-response/openSubsonicExtensions",
     "subsonic-response/openSubsonicExtensions/versions",

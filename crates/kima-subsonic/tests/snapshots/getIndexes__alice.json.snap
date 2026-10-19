@@ -42,7 +42,7 @@ source: crates/kima-subsonic/tests/snapshots.rs
           "name": "V"
         }
       ],
-      "lastModified": "[redacted]"
+      "lastModified": 0
     },
     "openSubsonic": true,
     "serverVersion": "[redacted]",

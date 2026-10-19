@@ -3,7 +3,7 @@ source: crates/kima-subsonic/tests/snapshots.rs
 ---
 <?xml version="1.0" encoding="UTF-8"?>
 <subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
-  <indexes ignoredArticles="The A An Le La Les Los Las Die Der Das" lastModified="[redacted]">
+  <indexes ignoredArticles="The A An Le La Les Los Las Die Der Das" lastModified="0">
     <index name="B">
       <artist id="00000000-0000-7000-8000-100000000001" name="The Beatles" albumCount="2" coverArt="ar-00000000-0000-7000-8000-100000000001" starred="2026-01-01T04:06:00.000Z"/>
     </index>

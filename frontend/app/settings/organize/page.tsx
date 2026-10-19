@@ -126,6 +126,10 @@ export default function OrganizePage() {
                             Folder watching: {watch.data.mode}
                             {watch.data.active ? " (active)" : " (inactive)"}
                             {watch.data.lastError ? `, last error: ${watch.data.lastError}` : ""}
+                            {". "}
+                            {watch.data.nextSyncAt
+                                ? `Next safety-net sync: ${new Date(watch.data.nextSyncAt).toLocaleString()}`
+                                : "Scheduled sync off"}
                         </p>
                     )}
                 </section>

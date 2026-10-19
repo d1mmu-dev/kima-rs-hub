@@ -1057,7 +1057,7 @@ class ApiClient {
     }
 
     async getWatchStatus() {
-        return this.get<{ mode: string; active: boolean; lastError: string | null }>("/library/watch-status");
+        return this.get<{ mode: string; active: boolean; lastError: string | null; nextSyncAt: string | null }>("/library/watch-status");
     }
 
     // System Settings

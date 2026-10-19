@@ -20,6 +20,9 @@ pub struct Config {
     pub artwork_cache_mb: u64,
     /// `KIMA_PUBLIC_URL`: where clients reach this server, without a trailing slash.
     pub public_url: Option<String>,
+    /// `KIMA_LIBRARY_SYNC_CRON`: 5-field cron (UTC) of the safety-net reconcile; `None` when `off`.
+    /// The expression is validated where it is parsed (startup in `kima-server`).
+    pub library_sync_cron: Option<String>,
 }
 
 /// How the library folder is watched for changes (`KIMA_WATCH_MODE`).
@@ -137,6 +140,12 @@ impl Config {
             }
         };
 
+        let library_sync_cron = match value("KIMA_LIBRARY_SYNC_CRON") {
+            None => Some("0 4 * * *".to_string()),
+            Some(raw) if raw.eq_ignore_ascii_case("off") => None,
+            Some(raw) => Some(raw),
+        };
+
         Ok(Self {
             database_url,
             data_dir: value("KIMA_DATA_DIR")
@@ -157,6 +166,7 @@ impl Config {
             transcode_cache_mb,
             artwork_cache_mb,
             public_url,
+            library_sync_cron,
         })
     }
 }
@@ -227,6 +237,24 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn config_default_and_off() {
+        let cron = |extra: &[(&str, &str)]| {
+            let mut pairs = vec![("DATABASE_URL", "postgres://x")];
+            pairs.extend_from_slice(extra);
+            Config::from_lookup(lookup(&pairs))
+                .unwrap()
+                .library_sync_cron
+        };
+        assert_eq!(cron(&[]), Some("0 4 * * *".to_string()));
+        assert_eq!(cron(&[("KIMA_LIBRARY_SYNC_CRON", "off")]), None);
+        assert_eq!(cron(&[("KIMA_LIBRARY_SYNC_CRON", " OFF ")]), None);
+        assert_eq!(
+            cron(&[("KIMA_LIBRARY_SYNC_CRON", "*/15 * * * *")]),
+            Some("*/15 * * * *".to_string())
+        );
     }
 
     #[test]

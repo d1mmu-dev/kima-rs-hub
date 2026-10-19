@@ -6,13 +6,18 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+chrono.workspace = true
+croner.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+time.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 kima-db.workspace = true
+time = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["test-util"] }

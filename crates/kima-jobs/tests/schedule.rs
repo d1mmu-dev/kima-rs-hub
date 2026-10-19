@@ -90,20 +90,31 @@ async fn backward_clock_step_does_not_refire_a_boundary() {
     let counter = Arc::new(AtomicUsize::new(0));
     let shutdown = CancellationToken::new();
     let (clock, jump) = fake_clock(datetime!(2026-01-01 12:34:30 UTC));
+    // The first call steps the wall clock back two minutes while it runs, so the next fire is
+    // computed from a clock that is behind the boundary that just fired.
+    let f: EnqueueFn = {
+        let counter = counter.clone();
+        Arc::new(move |_pool| {
+            let counter = counter.clone();
+            let jump = jump.clone();
+            async move {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    jump.store(-120, Ordering::SeqCst);
+                }
+                Ok(())
+            }
+            .boxed()
+        })
+    };
     let handle = Scheduler::new()
         .with_clock(clock)
-        .add(
-            "test",
-            Cron::parse("* * * * *").unwrap(),
-            counting(counter.clone(), false),
-        )
+        .add("test", Cron::parse("* * * * *").unwrap(), f)
         .spawn(idle_pool(), shutdown.clone());
     settle().await;
     advance_secs(31).await;
     assert_eq!(counter.load(Ordering::SeqCst), 1);
 
-    // The clock steps back two minutes, then passes the 12:35 boundary again.
-    jump.store(-120, Ordering::SeqCst);
+    // The clock now reads 12:33:01; it passes 12:34 and 12:35 again, but 12:35 already fired.
     advance_secs(150).await;
     assert_eq!(
         counter.load(Ordering::SeqCst),

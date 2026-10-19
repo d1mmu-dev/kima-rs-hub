@@ -433,3 +433,23 @@ pub async fn kind_of(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<StarKind>> 
         _ => None,
     }))
 }
+
+/// What the web players are playing: users whose `playback_state` is of type `track`, was
+/// updated since `since`, and names a track that is still present. Newest first, at most 50.
+/// Returns user, username, track and `updated_at`.
+pub async fn web_now_playing(
+    pool: &PgPool,
+    since: OffsetDateTime,
+) -> sqlx::Result<Vec<(Uuid, String, Uuid, OffsetDateTime)>> {
+    sqlx::query_as(
+        "SELECT ps.user_id, u.username, t.id, ps.updated_at
+         FROM playback_state ps
+         JOIN users u ON u.id = ps.user_id
+         JOIN tracks t ON t.id::text = ps.track_id AND t.missing_since IS NULL
+         WHERE ps.playback_type = 'track' AND ps.updated_at >= $1
+         ORDER BY ps.updated_at DESC, ps.user_id LIMIT 50",
+    )
+    .bind(since)
+    .fetch_all(pool)
+    .await
+}

@@ -323,3 +323,41 @@ async fn registration_toggle_opens_signup(pool: PgPool) {
         .await
         .assert_status_ok();
 }
+
+/// Create and sign-in share one cap (50 characters, counted as characters, not bytes), so an
+/// admin can never create an account that cannot sign in.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn create_user_caps_username_at_50_characters(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, admin) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+
+    let fifty = "é".repeat(50);
+    server
+        .post("/api/auth/create-user")
+        .authorization_bearer(&admin)
+        .json(&json!({ "username": fifty, "password": "secret1" }))
+        .await
+        .assert_status_ok();
+    server
+        .post("/api/auth/login")
+        .json(&json!({ "username": fifty, "password": "secret1" }))
+        .await
+        .assert_status_ok();
+
+    let res = server
+        .post("/api/auth/create-user")
+        .authorization_bearer(&admin)
+        .json(&json!({ "username": "é".repeat(51), "password": "secret1" }))
+        .await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    res.assert_json(&json!({ "error": "Username must be at most 50 characters" }));
+
+    // Surrounding spaces are trimmed before counting, as at sign-in.
+    server
+        .post("/api/auth/create-user")
+        .authorization_bearer(&admin)
+        .json(&json!({ "username": format!("  {}  ", "x".repeat(50)), "password": "secret1" }))
+        .await
+        .assert_status_ok();
+}

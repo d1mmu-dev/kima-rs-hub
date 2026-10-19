@@ -7,6 +7,11 @@ use crate::api_keys;
 pub const ROLE_ADMIN: &str = "admin";
 pub const ROLE_USER: &str = "user";
 
+/// The longest username, in characters (Unicode scalar values) after trimming. Registration,
+/// both admin create paths and both sign-in paths use it, so no account can hold a name that
+/// cannot sign in.
+pub const MAX_USERNAME_CHARS: usize = 50;
+
 /// Advisory lock key that serialises registrations ("kima" in ASCII, then 1).
 const REGISTRATION_LOCK: i64 = 0x6b69_6d61_0000_0001;
 

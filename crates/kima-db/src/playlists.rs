@@ -238,17 +238,112 @@ pub async fn add_tracks(
     playlist: Uuid,
     tracks: &[Uuid],
 ) -> sqlx::Result<Option<AddResult>> {
-    let mut seen = HashSet::new();
-    let requested: Vec<Uuid> = tracks.iter().copied().filter(|t| seen.insert(*t)).collect();
-
     let mut tx = pool.begin().await?;
     if !lock(&mut tx, playlist).await? {
         return Ok(None);
     }
+    let result = add_locked(&mut tx, playlist, tracks).await?;
+    tx.commit().await?;
+    Ok(Some(result))
+}
+
+/// Replaces every item with `tracks`, under one row lock, by M1's add rules (repeats count once,
+/// unknown and missing tracks are rejected). `None` when the playlist no longer exists.
+pub async fn replace_items(
+    pool: &PgPool,
+    playlist: Uuid,
+    tracks: &[Uuid],
+) -> sqlx::Result<Option<AddResult>> {
+    let mut tx = pool.begin().await?;
+    if !lock(&mut tx, playlist).await? {
+        return Ok(None);
+    }
+    let cleared = sqlx::query("DELETE FROM playlist_items WHERE playlist_id = $1")
+        .bind(playlist)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    let result = add_locked(&mut tx, playlist, tracks).await?;
+    if cleared > 0 && result.added == 0 {
+        touch(&mut tx, playlist).await?;
+    }
+    tx.commit().await?;
+    Ok(Some(result))
+}
+
+/// Removes the items at these positions, counted over the present items in `sort` order (the
+/// ones a client was shown, D-065). Positions out of range are ignored, repeats count once. The
+/// order is rewritten dense. Returns how many were removed.
+pub async fn remove_at_indexes(
+    pool: &PgPool,
+    playlist: Uuid,
+    indexes: &[usize],
+) -> sqlx::Result<u64> {
+    let mut tx = pool.begin().await?;
+    if !lock(&mut tx, playlist).await? {
+        return Ok(0);
+    }
+    let visible: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT pi.id FROM playlist_items pi
+         JOIN tracks t ON t.id = pi.track_id AND t.missing_since IS NULL
+         WHERE pi.playlist_id = $1 ORDER BY pi.sort, pi.id",
+    )
+    .bind(playlist)
+    .fetch_all(&mut *tx)
+    .await?;
+    let doomed: Vec<Uuid> = indexes
+        .iter()
+        .filter_map(|i| visible.get(*i).copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    if doomed.is_empty() {
+        return Ok(0);
+    }
+    let removed = sqlx::query("DELETE FROM playlist_items WHERE playlist_id = $1 AND id = ANY($2)")
+        .bind(playlist)
+        .bind(&doomed)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    let ids = ordered_ids(&mut tx, playlist).await?;
+    write_order(&mut tx, playlist, &ids).await?;
+    touch(&mut tx, playlist).await?;
+    tx.commit().await?;
+    Ok(removed)
+}
+
+/// Total duration in seconds of the present items, per playlist (playlists without any are
+/// absent from the map).
+pub async fn durations(
+    pool: &PgPool,
+    playlists: &[Uuid],
+) -> sqlx::Result<std::collections::HashMap<Uuid, i64>> {
+    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT pi.playlist_id, COALESCE(sum(t.duration_secs), 0)::bigint
+         FROM playlist_items pi
+         JOIN tracks t ON t.id = pi.track_id AND t.missing_since IS NULL
+         WHERE pi.playlist_id = ANY($1) GROUP BY pi.playlist_id",
+    )
+    .bind(playlists)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// The add rules, with the playlist row already locked.
+async fn add_locked(
+    tx: &mut Transaction<'_, Postgres>,
+    playlist: Uuid,
+    tracks: &[Uuid],
+) -> sqlx::Result<AddResult> {
+    let mut seen = HashSet::new();
+    let requested: Vec<Uuid> = tracks.iter().copied().filter(|t| seen.insert(*t)).collect();
+
     let present: HashSet<Uuid> =
         sqlx::query_scalar("SELECT id FROM tracks WHERE id = ANY($1) AND missing_since IS NULL")
             .bind(&requested)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await?
             .into_iter()
             .collect();
@@ -262,7 +357,7 @@ pub async fn add_tracks(
     )
     .bind(playlist)
     .bind(&requested)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?
     .into_iter()
     .collect();
@@ -278,7 +373,7 @@ pub async fn add_tracks(
             "SELECT COALESCE(max(sort) + 1, 0) FROM playlist_items WHERE playlist_id = $1",
         )
         .bind(playlist)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         let ids: Vec<Uuid> = fresh.iter().map(|_| Uuid::now_v7()).collect();
         sqlx::query(
@@ -290,16 +385,15 @@ pub async fn add_tracks(
         .bind(&ids)
         .bind(&fresh)
         .bind(first)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        touch(&mut tx, playlist).await?;
+        touch(tx, playlist).await?;
     }
-    tx.commit().await?;
-    Ok(Some(AddResult {
+    Ok(AddResult {
         added: fresh.len(),
         duplicates,
         rejected,
-    }))
+    })
 }
 
 /// Writes `sort = 0..n-1` for the given item ids, in order.

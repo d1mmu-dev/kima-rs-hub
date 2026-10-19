@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use kima_db::browse::TrackRow;
+use kima_db::playlists::PlaylistSummary;
 use kima_db::subsonic::{AlbumItem, ArtistItem, SongItem};
 use time::OffsetDateTime;
 
@@ -153,6 +154,20 @@ pub fn artist_dir(a: &ArtistItem) -> Node {
         .attr("artist", &a.name)
         .attr("coverArt", format!("ar-{}", a.id));
     with_state(node, a.starred_at, a.rating)
+}
+
+/// A playlist header: `id name songCount duration public owner created changed`. The caller adds
+/// the `entry` songs where the endpoint sends them.
+pub fn playlist(p: &PlaylistSummary, duration_secs: i64) -> Node {
+    Node::new("playlist")
+        .attr("id", p.playlist.id.to_string())
+        .attr("name", &p.playlist.name)
+        .attr("songCount", p.track_count)
+        .attr("duration", duration_secs)
+        .attr("public", p.playlist.is_public)
+        .attr("owner", &p.username)
+        .attr("created", iso(p.playlist.created_at))
+        .attr("changed", iso(p.playlist.updated_at))
 }
 
 #[cfg(test)]

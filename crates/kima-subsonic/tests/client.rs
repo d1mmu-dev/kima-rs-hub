@@ -223,7 +223,7 @@ async fn real_handshake_end_to_end(pool: PgPool) {
     .unwrap()
     .unwrap();
 
-    // The real router on a real socket.
+    // The real router on a real socket, shut down gracefully at the end.
     let state = kima_api::AppState::new(pool.clone(), "client-secret")
         .with_library_root(root.path().to_path_buf())
         .with_data_dir(data.path().to_path_buf())
@@ -231,15 +231,27 @@ async fn real_handshake_end_to_end(pool: PgPool) {
     let app = kima_api::router(state.clone()).nest("/rest", kima_subsonic::router(state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move {
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
         )
+        .with_graceful_shutdown(async {
+            let _ = stopped.await;
+        })
         .await
         .unwrap();
     });
-    let http = reqwest::Client::new();
+    // Every request asks the server to close the connection, or the graceful shutdown would wait
+    // for the idle ones.
+    let http = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::CONNECTION,
+            reqwest::header::HeaderValue::from_static("close"),
+        )]))
+        .build()
+        .unwrap();
 
     // 1. Sign in on the web side and mint an app token.
     let (status, login) = api(
@@ -268,6 +280,10 @@ async fn real_handshake_end_to_end(pool: PgPool) {
     let client = Client::new(&http, &base, "alice", &token);
 
     // 2. Every login path.
+    // Two calls never share a salt.
+    let (first, second) = (client.ping_ts(), client.ping_ts());
+    assert_ne!(first[2], second[2], "salt repeated");
+    assert_eq!(first[2].1.len(), 12);
     ok(&client.json("ping", &[]).await);
     let xml = client.xml("ping", &[]).await;
     assert!(xml.contains("status=\"ok\""), "{xml}");
@@ -361,6 +377,8 @@ async fn real_handshake_end_to_end(pool: PgPool) {
         .call("stream", &[("id", &songs[0])], Format::Json)
         .await;
     let etag = res.headers()[ETAG].to_str().unwrap().to_owned();
+    // An unread body would hold its connection open until the end of the test.
+    drop(res);
     let res = client
         .request("stream", &[("id", &songs[0])], Format::Json)
         .header(IF_NONE_MATCH, &etag)
@@ -377,6 +395,7 @@ async fn real_handshake_end_to_end(pool: PgPool) {
         )
         .await;
     assert_eq!(res.headers()[CONTENT_TYPE], "audio/mpeg");
+    drop(res);
 
     // 5. Cover art.
     let res = client
@@ -389,6 +408,8 @@ async fn real_handshake_end_to_end(pool: PgPool) {
     assert_eq!(res.headers()[CONTENT_TYPE], "image/jpeg");
     let img = res.bytes().await.unwrap();
     assert!(img.starts_with(&[0xff, 0xd8, 0xff]), "not a JPEG");
+    let decoded = image::load_from_memory(&img).unwrap();
+    assert_eq!(decoded.width().max(decoded.height()), 128);
 
     // 6. A scrobble becomes a SUBSONIC play on the web side.
     ok(&client
@@ -447,7 +468,19 @@ async fn real_handshake_end_to_end(pool: PgPool) {
     let album = client.json("getAlbum", &[("id", &album_id)]).await;
     assert_eq!(album["album"]["userRating"], 4, "{album}");
 
-    // 9. Revoking the token ends its sessions.
+    // 9. Revoking the token ends its sessions: the very same t and s that worked now fail.
+    let replay = client.ping_ts();
+    let replay_ping = || async {
+        let res = http
+            .get(format!("{base}/rest/ping.view"))
+            .query(&replay)
+            .query(&[("f", "json")])
+            .send()
+            .await
+            .unwrap();
+        res.json_value().await["subsonic-response"].clone()
+    };
+    ok(&replay_ping().await);
     let (_, keys) = api(
         &http,
         &base,
@@ -468,6 +501,7 @@ async fn real_handshake_end_to_end(pool: PgPool) {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    failed(&replay_ping().await, 40);
     failed(&client.json("ping", &[]).await, 40);
 
     // 10. A password change revokes every token.
@@ -545,6 +579,12 @@ async fn real_handshake_end_to_end(pool: PgPool) {
     assert_eq!(status, StatusCode::CREATED);
     let fresh = Client::new(&http, &base, "alice", fresh["apiKey"].as_str().unwrap());
     ok(&fresh.json("ping", &[]).await);
+
+    stop.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), server)
+        .await
+        .expect("server did not stop")
+        .unwrap();
 }
 
 /// `Response::json()` needs reqwest's `json` feature, which this crate leaves off.

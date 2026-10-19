@@ -27,7 +27,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # Failing test lines also go out as annotations, readable without log access.
+      - run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee test.log || {
+            grep -E 'panicked at|FAILED|^---- |left:|right:|Error' test.log | head -40 | sed 's/^/::error::/'
+            exit 1
+          }
   frontend:
     runs-on: ubuntu-24.04
     defaults:

@@ -189,3 +189,45 @@ async fn concurrent_first_registrations_make_exactly_one_admin(pool: PgPool) {
     }
     assert_eq!((created, closed), (1, 7));
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn set_role_unless_last_admin_refuses_last_admin(pool: PgPool) {
+    use users::RoleChange;
+    let Registration::Created(admin) = register(&pool, "ana").await else {
+        panic!("expected Created")
+    };
+    open_registration(&pool).await;
+    let Registration::Created(other) = register(&pool, "ben").await else {
+        panic!("expected Created")
+    };
+    // The only admin cannot be demoted.
+    assert_eq!(
+        users::set_role_unless_last_admin(&pool, admin.id, ROLE_USER)
+            .await
+            .unwrap(),
+        RoleChange::LastAdmin
+    );
+    let found = users::find_by_id(&pool, admin.id).await.unwrap().unwrap();
+    assert_eq!(found.role, ROLE_ADMIN);
+    // With a second admin, the first can step down.
+    assert_eq!(
+        users::set_role_unless_last_admin(&pool, other.id, ROLE_ADMIN)
+            .await
+            .unwrap(),
+        RoleChange::Changed
+    );
+    assert_eq!(
+        users::set_role_unless_last_admin(&pool, admin.id, ROLE_USER)
+            .await
+            .unwrap(),
+        RoleChange::Changed
+    );
+    let found = users::find_by_id(&pool, admin.id).await.unwrap().unwrap();
+    assert_eq!(found.role, ROLE_USER);
+    assert_eq!(
+        users::set_role_unless_last_admin(&pool, Uuid::now_v7(), ROLE_USER)
+            .await
+            .unwrap(),
+        RoleChange::NotFound
+    );
+}

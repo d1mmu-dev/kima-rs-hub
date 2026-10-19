@@ -6,9 +6,10 @@ use std::path::Path;
 use kima_db::browse::TrackRow;
 use kima_db::playlists::PlaylistSummary;
 use kima_db::subsonic::{AlbumItem, ArtistItem, SongItem};
+use kima_db::users::{ROLE_ADMIN, User};
 use time::OffsetDateTime;
 
-use crate::response::Node;
+use crate::response::{Node, Value};
 
 /// What `getArtists` advertises: upstream's `LEADING_ARTICLES`, capitalised. The generated
 /// `sort_name` columns drop the same words (D-081).
@@ -168,6 +169,26 @@ pub fn playlist(p: &PlaylistSummary, duration_secs: i64) -> Node {
         .attr("owner", &p.username)
         .attr("created", iso(p.playlist.created_at))
         .attr("changed", iso(p.playlist.updated_at))
+}
+
+/// A user as upstream's `mapSubsonicUser`: `adminRole` from the role, the stream, download,
+/// playlist, settings and scrobbling flags on, the rest off, and the one music folder.
+pub fn user(u: &User) -> Node {
+    Node::new("user")
+        .attr("username", &u.username)
+        .attr("scrobblingEnabled", true)
+        .attr("adminRole", u.role == ROLE_ADMIN)
+        .attr("settingsRole", true)
+        .attr("downloadRole", true)
+        .attr("uploadRole", false)
+        .attr("playlistRole", true)
+        .attr("coverArtRole", false)
+        .attr("commentRole", false)
+        .attr("podcastRole", false)
+        .attr("streamRole", true)
+        .attr("jukeboxRole", false)
+        .attr("shareRole", false)
+        .scalars("folder", vec![Value::Int(1)])
 }
 
 #[cfg(test)]

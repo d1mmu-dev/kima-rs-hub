@@ -508,3 +508,52 @@ fixture_test!(delete_owner_only_50_unknown_70, |server, pool| {
             .is_some()
     );
 });
+
+fixture_test!(update_removal_and_add_land_together, |server, pool| {
+    let id = make(&server, "Atomic", &[1, 2, 3]).await;
+    // Every insert into playlist_items now fails, so the add step breaks after the removal ran.
+    sqlx::query(
+        "CREATE FUNCTION refuse_insert() RETURNS trigger LANGUAGE plpgsql AS
+         $$ BEGIN RAISE EXCEPTION 'no inserts'; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER refuse BEFORE INSERT ON playlist_items
+         FOR EACH ROW EXECUTE FUNCTION refuse_insert()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let res = call(
+        &server,
+        "updatePlaylist",
+        &update(
+            &id,
+            vec![("songIndexToRemove", "0".into()), ("songIdToAdd", tid(4))],
+        ),
+    )
+    .await;
+    failed(&res, 0);
+    // Nothing was removed: a retry would delete the same song again.
+    let got = rows(&pool, &id).await;
+    let tracks: Vec<Uuid> = got.iter().map(|r| r.0).collect();
+    assert_eq!(tracks, [track_id(1), track_id(2), track_id(3)]);
+    assert_dense(&got);
+    sqlx::query("DROP TRIGGER refuse ON playlist_items")
+        .execute(&pool)
+        .await
+        .unwrap();
+    ok(&call(
+        &server,
+        "updatePlaylist",
+        &update(
+            &id,
+            vec![("songIndexToRemove", "0".into()), ("songIdToAdd", tid(4))],
+        ),
+    )
+    .await);
+    let tracks: Vec<Uuid> = rows(&pool, &id).await.iter().map(|r| r.0).collect();
+    assert_eq!(tracks, [track_id(2), track_id(3), track_id(4)]);
+});

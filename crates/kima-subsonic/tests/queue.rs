@@ -9,6 +9,7 @@ use axum_test::TestServer;
 use common::*;
 use kima_db::PgPool;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 fn app(pool: PgPool) -> TestServer {
     let peer: SocketAddr = "10.0.0.1:4000".parse().unwrap();
@@ -325,3 +326,38 @@ fixture_test!(get_queue_empty_row_defaults, |server, pool| {
     .await;
     assert_eq!(web_state(&pool).await.changed_by.unwrap().len(), 64);
 });
+
+fixture_test!(
+    save_queue_drops_unknown_ids_before_indexing,
+    |server, pool| {
+        let unknown = Uuid::now_v7().to_string();
+        let mut q = ids(&[1]);
+        q.push(unknown.clone());
+        q.extend(ids(&[2, 3]));
+        q.push("nonsense".to_owned());
+        // Current after the dropped id: index counts survivors only.
+        call(&server, "savePlayQueue", &q, &[("current", &q[3])]).await;
+        let state = web_state(&pool).await;
+        assert_eq!(state.current_index, 2);
+        assert_eq!(state.track_id, Some(track_id(3).to_string()));
+        let stored: Vec<String> = state
+            .queue
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(stored, ids(&[1, 2, 3]));
+        // Current is itself unknown: the next survivor takes its place.
+        call(&server, "savePlayQueue", &q, &[("current", &unknown)]).await;
+        let state = web_state(&pool).await;
+        assert_eq!(state.current_index, 1);
+        assert_eq!(state.track_id, Some(track_id(2).to_string()));
+        // Everything unknown: the queue is cleared.
+        let none = vec![unknown.clone()];
+        call(&server, "savePlayQueue", &none, &[("current", &unknown)]).await;
+        let state = web_state(&pool).await;
+        assert!(state.queue.is_none() && state.track_id.is_none());
+    }
+);

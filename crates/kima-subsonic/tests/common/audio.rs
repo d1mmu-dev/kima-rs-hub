@@ -13,11 +13,16 @@ pub fn require_ffmpeg() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    if !ok {
-        assert!(std::env::var_os("CI").is_none(), "ffmpeg is required in CI");
+    ffmpeg_guard(ok, std::env::var_os("CI").is_some())
+}
+
+/// The skip rule shared with `kima-library`'s tests: `available` outside CI, a panic in CI.
+pub fn ffmpeg_guard(available: bool, ci: bool) -> bool {
+    assert!(available || !ci, "ffmpeg is required in CI");
+    if !available {
         eprintln!("ffmpeg not found; skipping test");
     }
-    ok
+    available
 }
 
 /// Writes a 3 second sine tone at `dest`; the codec follows the extension (`flac` or `mp3`).

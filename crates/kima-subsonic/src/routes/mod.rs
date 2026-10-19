@@ -7,12 +7,14 @@ use crate::auth::SubsonicUser;
 use crate::ctx::SubsonicCtx;
 use crate::error::SubsonicError;
 
+mod bookmarks;
 mod browse;
 mod media;
 mod playlists;
 mod queue;
 mod scrobble;
 mod search;
+mod stars;
 mod system;
 
 /// Registers `/{name}` and `/{name}.view` for GET, HEAD and POST.
@@ -36,6 +38,8 @@ pub fn router() -> Router<SubsonicCtx> {
     let router = scrobble::add_routes(router);
     let router = queue::add_routes(router);
     let router = playlists::add_routes(router);
+    let router = stars::add_routes(router);
+    let router = bookmarks::add_routes(router);
     router.fallback(not_implemented)
 }
 

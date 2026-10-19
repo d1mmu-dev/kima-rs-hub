@@ -13,7 +13,7 @@ pub mod media;
 pub mod now_playing;
 pub mod params;
 pub mod response;
-mod routes;
+pub mod routes;
 
 use ctx::SubsonicCtx;
 

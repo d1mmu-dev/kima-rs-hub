@@ -15,6 +15,7 @@ mod queue;
 mod scrobble;
 mod search;
 mod stars;
+mod stubs;
 mod system;
 mod users;
 
@@ -30,6 +31,92 @@ where
         .route(&format!("/{name}.view"), methods)
 }
 
+/// Every endpoint name, in spec §4 order. Each one answers with and without `.view`; `hls` also
+/// answers as `hls.m3u8`, which is the one name that is not a plain `{name}` route.
+pub const ENDPOINTS: &[&str] = &[
+    "ping",
+    "getLicense",
+    "getMusicFolders",
+    "getOpenSubsonicExtensions",
+    "tokenInfo",
+    "getScanStatus",
+    "startScan",
+    "getArtists",
+    "getIndexes",
+    "getArtist",
+    "getMusicDirectory",
+    "getAlbum",
+    "getSong",
+    "getAlbumList2",
+    "getAlbumList",
+    "search3",
+    "search2",
+    "search",
+    "getRandomSongs",
+    "getSongsByGenre",
+    "getTopSongs",
+    "getSimilarSongs",
+    "getSimilarSongs2",
+    "getGenres",
+    "getNowPlaying",
+    "stream",
+    "download",
+    "hls",
+    "hls.m3u8",
+    "getTranscodeDecision",
+    "getTranscodeStream",
+    "getCoverArt",
+    "getAvatar",
+    "scrobble",
+    "getPlayQueue",
+    "getPlayQueueByIndex",
+    "savePlayQueue",
+    "savePlayQueueByIndex",
+    "getBookmarks",
+    "createBookmark",
+    "deleteBookmark",
+    "getPlaylists",
+    "getPlaylist",
+    "createPlaylist",
+    "updatePlaylist",
+    "deletePlaylist",
+    "star",
+    "unstar",
+    "getStarred",
+    "getStarred2",
+    "setRating",
+    "getUser",
+    "getUsers",
+    "createUser",
+    "updateUser",
+    "deleteUser",
+    "changePassword",
+    "getAlbumInfo",
+    "getAlbumInfo2",
+    "getArtistInfo",
+    "getArtistInfo2",
+    "getLyrics",
+    "getLyricsBySongId",
+    "getPodcasts",
+    "getNewestPodcasts",
+    "getPodcastEpisode",
+    "refreshPodcasts",
+    "getShares",
+    "createShare",
+    "updateShare",
+    "deleteShare",
+    "getInternetRadioStations",
+    "createInternetRadioStation",
+    "updateInternetRadioStation",
+    "deleteInternetRadioStation",
+    "getChatMessages",
+    "addChatMessage",
+    "getVideos",
+    "getVideoInfo",
+    "getCaptions",
+    "jukeboxControl",
+];
+
 pub fn router() -> Router<SubsonicCtx> {
     let router = Router::new();
     let router = system::add_routes(router);
@@ -42,6 +129,7 @@ pub fn router() -> Router<SubsonicCtx> {
     let router = stars::add_routes(router);
     let router = bookmarks::add_routes(router);
     let router = users::add_routes(router);
+    let router = stubs::add_routes(router);
     router.fallback(not_implemented)
 }
 

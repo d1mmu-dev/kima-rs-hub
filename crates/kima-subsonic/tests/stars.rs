@@ -92,7 +92,7 @@ fn has_star(item: &Value) -> bool {
 fixture_test!(
     star_song_album_artist_each_shows_starred_everywhere,
     |server, pool| {
-        // Track 4 is on album 1, album 2 and artist 2 carry no star yet.
+        // Track 4 is on album 2; neither that album nor its artist carries a star yet.
         let before = call(&server, "getAlbum", &[("id", alid(2))]).await;
         assert!(!has_star(&before["album"]));
         let res = call(
@@ -162,7 +162,7 @@ fixture_test!(
                 ("id", Uuid::now_v7().to_string()),
                 ("id", "not-an-id".into()),
                 ("id", tid(5)),
-                // An album id sent as a song-kind `albumId` that is really a track: skipped too.
+                // An `albumId` that is really a track id: skipped too.
                 ("albumId", tid(6)),
             ],
         )

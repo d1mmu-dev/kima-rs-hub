@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT lower($1::text) AS \"fold!\", u.id AS \"id?\", u.username AS \"username?\",\n                  u.password_hash AS \"password_hash?\", u.role AS \"role?\",\n                  u.onboarding_complete AS \"onboarding_complete?\",\n                  u.token_version AS \"token_version?\", u.created_at AS \"created_at?\"\n           FROM (SELECT 1) AS one\n           LEFT JOIN users u ON lower(u.username) = lower($1::text)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "fold!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "username?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "password_hash?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "role?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "onboarding_complete?",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "token_version?",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at?",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "b455c72373e238dadbe819cd7c11136677af1f17da53d318ba6fc64f47354c5c"
+}

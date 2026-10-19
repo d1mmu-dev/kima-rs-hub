@@ -63,31 +63,30 @@ async fn login(
         .begin(ip, &username, now)
         .map_err(rate_limited)?;
 
-    let found = users::find_by_username(&state.pool, &username).await?;
     // The database folds case its own way (`lower()` under its locale), Rust another. Also
-    // count the attempt on the stored name's key, so no spelling gets a separate budget.
-    // A refusal here must look like a wrong password (same work, same 401), or the early answer
-    // would reveal that the account exists.
-    let mut stored_blocked = false;
-    let stored_attempt = match &found {
-        Some(user) if user.username.to_lowercase() != username.to_lowercase() => {
-            match state.login_limit.begin(ip, &user.username, now) {
-                Ok(attempt) => Some(attempt),
-                Err(_) => {
-                    stored_blocked = true;
-                    None
-                }
-            }
-        }
-        _ => None,
+    // count the attempt on the key of the database's fold of the typed name: every spelling that
+    // reaches an account shares that fold, so none gets a separate budget. The fold comes from
+    // the typed name alone, charged whether or not the account exists, so the limiter's answers
+    // reveal nothing about existence (spec §5.7).
+    let lookup = users::sign_in_lookup(&state.pool, &username).await?;
+    let fold_attempt = if lookup.fold.to_lowercase() == username.to_lowercase() {
+        None
+    } else {
+        Some(
+            state
+                .login_limit
+                .begin(ip, &lookup.fold, now)
+                .map_err(rate_limited)?,
+        )
     };
+    let found = lookup.user;
     let password = body.password;
     let permit = state.password_permit().await?;
     let (found, valid) = tokio::task::spawn_blocking(move || {
         // Released when the verify ends, even if the client hung up and the handler was dropped.
         let _permit = permit;
         let valid = match &found {
-            Some(user) => verify_password(&password, &user.password_hash) && !stored_blocked,
+            Some(user) => verify_password(&password, &user.password_hash),
             None => {
                 verify_dummy(&password);
                 false
@@ -102,8 +101,8 @@ async fn login(
         return Err(ApiError::Unauthorized("Invalid credentials"));
     };
     attempt.success();
-    if let Some(stored) = stored_attempt {
-        stored.success();
+    if let Some(fold) = fold_attempt {
+        fold.success();
     }
     Ok(Json(json!({
         "token": state.jwt.issue_access(user.id, &user.username, &user.role, user.token_version),

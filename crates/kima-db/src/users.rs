@@ -96,6 +96,65 @@ pub async fn find_by_username(pool: &PgPool, username: &str) -> sqlx::Result<Opt
     .await
 }
 
+/// What a password sign-in looks up: the database's own case fold of the typed name (always
+/// present) and the account it resolves to, if any.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SignInLookup {
+    /// `lower(name)` under the database's locale: the fold every lookup matches on.
+    pub fold: String,
+    pub user: Option<User>,
+}
+
+/// [`find_by_username`] plus the database's fold of `username`, in one query whose work does
+/// not depend on whether the account exists. The sign-in limiter keys on the fold, so every
+/// spelling that reaches the same account shares one budget, and an unknown name is charged
+/// exactly like a known one.
+pub async fn sign_in_lookup(pool: &PgPool, username: &str) -> sqlx::Result<SignInLookup> {
+    let row = sqlx::query!(
+        r#"SELECT lower($1::text) AS "fold!", u.id AS "id?", u.username AS "username?",
+                  u.password_hash AS "password_hash?", u.role AS "role?",
+                  u.onboarding_complete AS "onboarding_complete?",
+                  u.token_version AS "token_version?", u.created_at AS "created_at?"
+           FROM (SELECT 1) AS one
+           LEFT JOIN users u ON lower(u.username) = lower($1::text)"#,
+        username
+    )
+    .fetch_one(pool)
+    .await?;
+    let user = match (
+        row.id,
+        row.username,
+        row.password_hash,
+        row.role,
+        row.onboarding_complete,
+        row.token_version,
+        row.created_at,
+    ) {
+        (
+            Some(id),
+            Some(username),
+            Some(password_hash),
+            Some(role),
+            Some(onboarding_complete),
+            Some(token_version),
+            Some(created_at),
+        ) => Some(User {
+            id,
+            username,
+            password_hash,
+            role,
+            onboarding_complete,
+            token_version,
+            created_at,
+        }),
+        _ => None,
+    };
+    Ok(SignInLookup {
+        fold: row.fold,
+        user,
+    })
+}
+
 pub async fn find_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<User>> {
     sqlx::query_as!(
         User,

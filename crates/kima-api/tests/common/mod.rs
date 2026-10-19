@@ -35,3 +35,21 @@ pub async fn user_with_token(state: &AppState, name: &str) -> (User, String) {
         .issue_access(user.id, &user.username, &user.role, user.token_version);
     (user, token)
 }
+
+/// True when ffmpeg can run for a test. Outside CI a missing ffmpeg skips the test; under `CI` it
+/// panics, so the test cannot pass there by doing nothing.
+pub fn require_ffmpeg() -> bool {
+    ffmpeg_guard(
+        kima_library::transcode::Transcoder::ffmpeg_available(),
+        std::env::var_os("CI").is_some(),
+    )
+}
+
+/// The skip rule: `available` outside CI, a panic in CI.
+pub fn ffmpeg_guard(available: bool, ci: bool) -> bool {
+    assert!(available || !ci, "ffmpeg is required in CI");
+    if !available {
+        eprintln!("ffmpeg not found; skipping test");
+    }
+    available
+}

@@ -209,8 +209,7 @@ async fn no_transcoder_falls_back_to_original(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn transcode_first_play_200_no_ranges_then_cached_206(pool: PgPool) {
-    if !Transcoder::ffmpeg_available() {
-        eprintln!("ffmpeg missing, skipping");
+    if !common::require_ffmpeg() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -370,8 +369,7 @@ async fn if_range_stale_200_full(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn cached_transcode_etag_has_quality(pool: PgPool) {
-    if !Transcoder::ffmpeg_available() {
-        eprintln!("ffmpeg missing, skipping");
+    if !common::require_ffmpeg() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -399,8 +397,7 @@ async fn cached_transcode_etag_has_quality(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn growing_transcode_has_no_etag(pool: PgPool) {
-    if !Transcoder::ffmpeg_available() {
-        eprintln!("ffmpeg missing, skipping");
+    if !common::require_ffmpeg() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -422,8 +419,7 @@ async fn growing_transcode_has_no_etag(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn stream_without_quality_follows_user_setting(pool: PgPool) {
-    if !Transcoder::ffmpeg_available() {
-        eprintln!("ffmpeg missing, skipping");
+    if !common::require_ffmpeg() {
         return;
     }
     let root = tempfile::tempdir().unwrap();

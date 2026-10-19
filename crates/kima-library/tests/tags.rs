@@ -1,6 +1,6 @@
 mod common;
 
-use common::{Tags, make_audio, require_ffmpeg};
+use common::{Tags, ffmpeg_guard, make_audio, require_ffmpeg};
 use kima_library::{fingerprint, tags};
 use std::io::Write;
 
@@ -180,4 +180,17 @@ fn read_never_panics_on_bad_input() {
             ),
         }
     }
+}
+
+#[test]
+#[should_panic(expected = "ffmpeg is required in CI")]
+fn ffmpeg_guard_panics_in_ci_without_ffmpeg() {
+    ffmpeg_guard(false, true);
+}
+
+#[test]
+fn ffmpeg_guard_skips_outside_ci() {
+    assert!(!ffmpeg_guard(false, false));
+    assert!(ffmpeg_guard(true, false));
+    assert!(ffmpeg_guard(true, true));
 }

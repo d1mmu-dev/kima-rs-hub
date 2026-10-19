@@ -41,13 +41,20 @@ pub fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Returns false (after printing a note) when ffmpeg is missing; tests should return early.
-pub fn require_ffmpeg() -> bool {
-    let ok = ffmpeg_available();
-    if !ok {
+/// The skip rule for ffmpeg-gated tests: `available` outside CI, and a panic in CI when ffmpeg is
+/// missing, so a test cannot pass there by doing nothing.
+pub fn ffmpeg_guard(available: bool, ci: bool) -> bool {
+    assert!(available || !ci, "ffmpeg is required in CI");
+    if !available {
         eprintln!("ffmpeg not found; skipping test");
     }
-    ok
+    available
+}
+
+/// Returns false (after printing a note) when ffmpeg is missing; tests should return early.
+/// Under `CI` a missing ffmpeg panics instead.
+pub fn require_ffmpeg() -> bool {
+    ffmpeg_guard(ffmpeg_available(), std::env::var_os("CI").is_some())
 }
 
 /// Generates a 2 s sine tone at `dir/rel_path`; the format comes from the extension.

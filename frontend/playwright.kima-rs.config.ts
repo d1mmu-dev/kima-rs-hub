@@ -15,5 +15,6 @@ export default defineConfig({
     projects: [
         { name: "smoke", testMatch: "smoke.spec.ts" },
         { name: "library", testMatch: "library.spec.ts", dependencies: ["smoke"] },
+        { name: "subsonic", testMatch: "subsonic.spec.ts", dependencies: ["smoke"] },
     ],
 });

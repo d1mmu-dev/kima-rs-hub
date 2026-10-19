@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_KEYS_CHANGED_EVENT, PASSWORD_CHANGE_WARNING } from "./SubsonicSection";
 import { SettingsSection, SettingsRow, SettingsInput } from "../ui";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
@@ -74,6 +75,8 @@ export function AccountSection() {
             );
             // The change signs out every other device; this one keeps going on the new tokens.
             api.setToken(changed.token, changed.refreshToken);
+            // The change also deletes every app token; the Native Apps list refetches.
+            window.dispatchEvent(new Event(API_KEYS_CHANGED_EVENT));
             setPasswordStatus("success");
             setPasswordMessage("Changed. Other devices are signed out");
             setCurrentPassword("");
@@ -179,6 +182,7 @@ export function AccountSection() {
                                 onClear={() => setPasswordStatus("idle")}
                             />
                         </div>
+                        <p className="text-xs text-warning">{PASSWORD_CHANGE_WARNING}</p>
                     </div>
                 )}
 

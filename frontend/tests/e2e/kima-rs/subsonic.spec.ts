@@ -48,10 +48,7 @@ test("native apps: create a token, use it on /rest, revoke it", async ({ page, r
 
     expect(await ping(token)).toBe("ok");
 
-    const row = page
-        .locator("div.flex.items-center.justify-between")
-        .filter({ has: page.getByText("e2e", { exact: true }) });
-    await row.getByRole("button", { name: "Revoke" }).click();
+    await page.getByRole("button", { name: "Revoke e2e" }).click();
     await page.getByRole("dialog").getByRole("button", { name: "Revoke" }).click();
     await expect(page.getByText("No tokens yet.")).toBeVisible();
 

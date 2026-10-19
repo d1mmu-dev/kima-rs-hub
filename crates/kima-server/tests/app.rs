@@ -42,6 +42,7 @@ fn config(frontend: Option<&Path>, origins: &[&str]) -> Config {
         transcode_cache_mb: 2048,
         artwork_cache_mb: 512,
         public_url: None,
+        library_sync_cron: None,
     }
 }
 

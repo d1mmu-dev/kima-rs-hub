@@ -23,6 +23,19 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::new(format!("{level},tower_http=info")))
         .init();
 
+    // Before anything starts: a bad expression must fail startup, not the first fire.
+    let sync_cron = config
+        .library_sync_cron
+        .as_deref()
+        .map(|expr| {
+            kima_jobs::schedule::Cron::parse(expr).map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid KIMA_LIBRARY_SYNC_CRON {expr:?}: expected 5 cron fields or `off` ({e})"
+                )
+            })
+        })
+        .transpose()?;
+
     let secrets = secrets::load_or_generate(
         &config.data_dir,
         config.session_secret.clone(),
@@ -57,7 +70,9 @@ async fn main() -> anyhow::Result<()> {
             config.data_dir.join("transcode"),
             config.transcode_cache_mb * 1024 * 1024,
         ))
-        .with_library_services(kima_api::LibraryServices::new(config.watch_mode));
+        .with_library_services(
+            kima_api::LibraryServices::new(config.watch_mode).with_sync_cron(sync_cron.clone()),
+        );
     let library_ctx = kima_library::scan::LibraryCtx {
         pool: pool.clone(),
         root: library_root,
@@ -82,6 +97,14 @@ async fn main() -> anyhow::Result<()> {
         state.library.watch_status.clone(),
         shutdown.clone(),
     );
+    // The daily safety-net reconcile (D-091); stopped by the shutdown token.
+    let scheduler = sync_cron
+        .map(|cron| {
+            kima_jobs::schedule::Scheduler::new()
+                .add("library-sync", cron, library_sync_job())
+                .spawn(pool.clone(), shutdown.clone())
+        })
+        .unwrap_or_else(|| tokio::spawn(async {}));
     let app = kima_server::app(state, &config);
     let listener = TcpListener::bind(config.bind_addr)
         .await
@@ -115,9 +138,22 @@ async fn main() -> anyhow::Result<()> {
     // Runs whether serving ended by signal or by error, before the error is returned.
     shutdown.cancel();
     watcher.join().await;
+    let _ = scheduler.await;
     kima_server::jobs::drain(workers, SHUTDOWN_GRACE).await;
     served?;
     Ok(())
+}
+
+/// Queues the incremental reconcile; it dedupes against one already queued or running.
+fn library_sync_job() -> kima_jobs::schedule::EnqueueFn {
+    std::sync::Arc::new(|pool| {
+        Box::pin(async move {
+            kima_library::jobs::enqueue_reconcile(&pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    })
 }
 
 /// How long in-flight requests get to finish after a shutdown signal.

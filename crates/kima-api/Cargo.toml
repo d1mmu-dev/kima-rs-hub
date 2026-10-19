@@ -12,6 +12,7 @@ futures.workspace = true
 httpdate.workspace = true
 kima-core.workspace = true
 kima-db.workspace = true
+kima-jobs.workspace = true
 kima-library.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,7 +26,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-kima-jobs.workspace = true
+time = { workspace = true, features = ["parsing"] }
 axum-test.workspace = true
 image.workspace = true
 tempfile.workspace = true

@@ -23,13 +23,21 @@ pub struct LibraryServices {
     pub watch_status: SharedStatus,
     /// Paths the watcher must not react to (the organizer's own moves).
     pub ignore: IgnoreSet,
+    /// The safety-net reconcile schedule (`KIMA_LIBRARY_SYNC_CRON`); `None` when off.
+    pub sync_cron: Option<kima_jobs::schedule::Cron>,
 }
 
 impl LibraryServices {
+    pub fn with_sync_cron(mut self, cron: Option<kima_jobs::schedule::Cron>) -> Self {
+        self.sync_cron = cron;
+        self
+    }
+
     pub fn new(mode: kima_core::config::WatchMode) -> Self {
         Self {
             watch_status: Arc::new(std::sync::RwLock::new(WatchStatus::new(mode))),
             ignore: IgnoreSet::new(),
+            sync_cron: None,
         }
     }
 }

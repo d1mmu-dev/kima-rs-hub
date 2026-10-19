@@ -86,6 +86,36 @@ async fn scheduler_calls_enqueue_and_stops_on_shutdown() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn backward_clock_step_does_not_refire_a_boundary() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let shutdown = CancellationToken::new();
+    let (clock, jump) = fake_clock(datetime!(2026-01-01 12:34:30 UTC));
+    let handle = Scheduler::new()
+        .with_clock(clock)
+        .add(
+            "test",
+            Cron::parse("* * * * *").unwrap(),
+            counting(counter.clone(), false),
+        )
+        .spawn(idle_pool(), shutdown.clone());
+    settle().await;
+    advance_secs(31).await;
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+    // The clock steps back two minutes, then passes the 12:35 boundary again.
+    jump.store(-120, Ordering::SeqCst);
+    advance_secs(150).await;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "12:35 does not fire twice"
+    );
+
+    shutdown.cancel();
+    handle.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn clock_step_fires_within_one_chunk_without_catch_up() {
     let counter = Arc::new(AtomicUsize::new(0));
     let shutdown = CancellationToken::new();

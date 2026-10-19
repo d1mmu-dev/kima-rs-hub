@@ -38,14 +38,15 @@ pub struct NowPlaying {
     slots: Mutex<HashMap<(Uuid, String), Slot>>,
 }
 
-/// A stable small id for a player name: the 32-bit FNV-1a hash of its bytes.
+/// A stable small id for a player name: the 32-bit FNV-1a hash of its bytes, masked to 31 bits so it fits the signed
+/// 32-bit `int` the Subsonic schema gives `playerId`.
 pub fn player_id(player: &str) -> i64 {
     let mut hash: u32 = 2_166_136_261;
     for byte in player.as_bytes() {
         hash ^= u32::from(*byte);
         hash = hash.wrapping_mul(16_777_619);
     }
-    i64::from(hash)
+    i64::from(hash & 0x7fff_ffff)
 }
 
 impl NowPlaying {
@@ -212,8 +213,9 @@ mod tests {
     #[test]
     fn player_id_is_fnv1a() {
         // Reference values of 32-bit FNV-1a.
-        assert_eq!(player_id(""), 2_166_136_261);
-        assert_eq!(player_id("a"), 0xe40c_292c);
-        assert_eq!(player_id("foobar"), 0xbf9c_f968);
+        assert_eq!(player_id(""), 2_166_136_261 & 0x7fff_ffff);
+        assert_eq!(player_id("a"), 0xe40c_292c & 0x7fff_ffff);
+        assert_eq!(player_id("foobar"), 0xbf9c_f968 & 0x7fff_ffff);
+        assert_eq!(player_id("Symfonium"), 3_152_842_248 & 0x7fff_ffff);
     }
 }

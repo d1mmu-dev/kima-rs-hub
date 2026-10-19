@@ -10,10 +10,11 @@ export) and replaces the Node/TypeScript backend and the Python analyzers with a
 
 ## Status
 
-Milestone M1 (library and playback) is done. On top of M0's accounts and login, kima-rs now
-scans and watches a music folder, shows it as Artist, then Year - Album, then songs, and lets you
+Milestones M1 (library and playback) and M2 (Subsonic) are done. On top of M0's accounts and
+login, kima-rs now scans and watches a music folder, shows it as Artist, then Year - Album, then songs, and lets you
 browse, search, stream (with transcodes), keep playlists and resume playback. An admin can also
-preview and apply a tidy on-disk layout. Not yet built: Subsonic, identification (MusicBrainz),
+preview and apply a tidy on-disk layout. Music apps that speak Subsonic/OpenSubsonic can connect
+with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Not yet built: identification (MusicBrainz),
 audio analysis, podcasts and audiobooks, integrations. See
 `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` for what comes next.
 
@@ -135,6 +136,8 @@ New in kima-rs:
 | `KIMA_WATCH_MODE` | `auto` | Library watching: `auto` (native events, fall back to polling), `poll` or `off`. |
 | `KIMA_WATCH_POLL_SECS` | `60` | Poll interval in seconds (must be > 0) for `poll` mode and the `auto` fallback. |
 | `KIMA_ORGANIZE_TARGET` | unset | Writable directory for the organizer's copy mode. Unset means copy mode is unavailable. |
+| `KIMA_LIBRARY_SYNC_CRON` | `0 4 * * *` | Five-field cron (UTC) of the daily safety-net reconcile. `off` disables it. An invalid expression stops startup. |
+| `KIMA_PUBLIC_URL` | unset | Where clients reach this server, such as `https://music.example.com`. Must start with `http://` or `https://`; a trailing `/` is stripped. Used in the `hls` playlist and shown on the settings page. |
 | `KIMA_TRANSCODE_CACHE_MB` | `2048` | Size cap of the transcode cache under `KIMA_DATA_DIR`, in MB. |
 | `KIMA_ARTWORK_CACHE_MB` | `512` | Size cap of the cover-art cache under `KIMA_DATA_DIR/artwork`, in MB. The oldest albums are dropped first. `0` means nothing is kept, so every request rebuilds. |
 

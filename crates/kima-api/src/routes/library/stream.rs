@@ -27,13 +27,17 @@ struct Params {
 
 async fn stream(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     UrlPath(id): UrlPath<String>,
     Query(params): Query<Params>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let quality = match params.quality.as_deref() {
-        None => Quality::Original,
+        // Without `quality` the caller's `playbackQuality` setting decides, as upstream.
+        None => {
+            let saved = kima_db::user_settings::get(&state.pool, user.id).await?;
+            Quality::parse(&saved.playback_quality).unwrap_or(Quality::Original)
+        }
         Some(q) => Quality::parse(q).ok_or_else(|| {
             ApiError::BadRequest("quality must be original, high, medium or low".into())
         })?,

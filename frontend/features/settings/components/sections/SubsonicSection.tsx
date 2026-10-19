@@ -46,7 +46,11 @@ export function SubsonicSection() {
         loadApiKeys();
 
         // A password change deletes every token server-side; refetch so the list shows it.
-        const onChanged = () => void loadApiKeys();
+        const onChanged = () => {
+            // The token on show was just revoked with the rest.
+            setNewToken(null);
+            void loadApiKeys();
+        };
         window.addEventListener(API_KEYS_CHANGED_EVENT, onChanged);
         return () => window.removeEventListener(API_KEYS_CHANGED_EVENT, onChanged);
     }, []);

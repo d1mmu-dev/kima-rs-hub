@@ -8,6 +8,12 @@ pub enum ApiError {
     /// 400 `{"error":"Invalid request","details":...}`: the body failed validation.
     #[error("Invalid request")]
     Invalid(String),
+    /// 400 `{"error": message, "details": [...]}` with a list of failures.
+    #[error("{message}")]
+    InvalidWithDetails {
+        message: String,
+        details: Vec<serde_json::Value>,
+    },
     #[error("{0}")]
     BadRequest(String),
     #[error("{0}")]
@@ -38,7 +44,9 @@ impl From<sqlx::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
-            Self::Invalid(_) | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Invalid(_) | Self::InvalidWithDetails { .. } | Self::BadRequest(_) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
@@ -53,6 +61,9 @@ impl IntoResponse for ApiError {
         };
         let body = match &self {
             Self::Invalid(details) => json!({ "error": self.to_string(), "details": details }),
+            Self::InvalidWithDetails { details, .. } => {
+                json!({ "error": self.to_string(), "details": details })
+            }
             _ => json!({ "error": self.to_string() }),
         };
         let mut response = (status, Json(body)).into_response();

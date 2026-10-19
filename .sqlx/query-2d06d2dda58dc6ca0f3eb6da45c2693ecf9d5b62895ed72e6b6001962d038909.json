@@ -1,0 +1,57 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_settings\n               (user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,\n                share_live_listening)\n           VALUES ($1, COALESCE($2, 'original'), COALESCE($3, false), COALESCE($4, false),\n                   COALESCE($5, 10240), COALESCE($6, true))\n           ON CONFLICT (user_id) DO UPDATE SET\n               playback_quality = COALESCE($2, user_settings.playback_quality),\n               wifi_only = COALESCE($3, user_settings.wifi_only),\n               offline_enabled = COALESCE($4, user_settings.offline_enabled),\n               max_cache_size_mb = COALESCE($5, user_settings.max_cache_size_mb),\n               share_live_listening = COALESCE($6, user_settings.share_live_listening)\n           RETURNING user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,\n                     share_live_listening",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "playback_quality",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "wifi_only",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 3,
+        "name": "offline_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_cache_size_mb",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "share_live_listening",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bool",
+        "Bool",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2d06d2dda58dc6ca0f3eb6da45c2693ecf9d5b62895ed72e6b6001962d038909"
+}

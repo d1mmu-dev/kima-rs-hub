@@ -18,6 +18,7 @@ pub mod search;
 pub mod settings;
 pub mod stars;
 pub mod subsonic;
+pub mod user_settings;
 pub mod users;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

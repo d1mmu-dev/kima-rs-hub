@@ -726,6 +726,7 @@ async fn avatar_known_unknown_missing(pool: PgPool) {
     let res = env.get("getAvatar", &[("username", "alice")]).await;
     res.assert_status_ok();
     assert_eq!(res.header(CONTENT_TYPE), "image/png");
+    assert_eq!(res.header("cache-control"), "private, max-age=3600");
     let img = image::load_from_memory(res.as_bytes()).unwrap().to_rgba8();
     assert_eq!((img.width(), img.height()), (1, 1));
     assert_eq!(img.get_pixel(0, 0).0[3], 0);

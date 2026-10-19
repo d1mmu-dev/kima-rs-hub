@@ -291,7 +291,7 @@ async fn get_avatar(
     Ok((
         [
             (CONTENT_TYPE, "image/png"),
-            (CACHE_CONTROL, "public, max-age=3600"),
+            (CACHE_CONTROL, "private, max-age=3600"),
         ],
         TRANSPARENT_PNG.as_slice(),
     )

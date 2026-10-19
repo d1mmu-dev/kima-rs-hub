@@ -2,7 +2,7 @@ name: ci
 on: [push, pull_request]
 jobs:
   rust:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -35,7 +35,7 @@ jobs:
             exit 1
           }
   frontend:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend
@@ -51,7 +51,7 @@ jobs:
       - run: npm run test:unit
       - run: npm run build
   e2e:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
       postgres:

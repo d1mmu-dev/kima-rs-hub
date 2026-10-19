@@ -283,8 +283,20 @@ async fn listen_is_retried_when_the_first_attempt_fails(pool: PgPool) {
         .await
         .unwrap()
     };
-    let before = listen_pids().await;
-    assert_eq!(before.len(), 1, "expected one LISTEN backend: {before:?}");
+    // The job can arrive through the recovery poll after a failed attempt, before the next
+    // attempt's LISTEN is visible, so wait for the backend to appear.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let before = loop {
+        let pids = listen_pids().await;
+        if pids.len() == 1 {
+            break pids;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected one LISTEN backend: {pids:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     tokio::time::sleep(Duration::from_millis(700)).await;
     assert_eq!(
         listen_pids().await,

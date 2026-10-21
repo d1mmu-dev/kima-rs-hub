@@ -36,10 +36,14 @@ async fn targets(
     params: &Params,
 ) -> Result<Vec<(Option<StarKind>, Uuid)>, SubsonicError> {
     let mut out = Vec::new();
-    for raw in params.all("id") {
-        if let Some(id) = ids::parse(raw, &[]) {
-            out.push((subsonic::kind_of(pool, id).await?, id));
-        }
+    let plain: Vec<Uuid> = params
+        .all("id")
+        .iter()
+        .filter_map(|raw| ids::parse(raw, &[]))
+        .collect();
+    if !plain.is_empty() {
+        let kinds = subsonic::kinds_of(pool, &plain).await?;
+        out.extend(plain.iter().map(|id| (kinds.get(id).copied(), *id)));
     }
     for (key, kind) in [("albumId", StarKind::Album), ("artistId", StarKind::Artist)] {
         for raw in params.all(key) {

@@ -57,17 +57,18 @@ async fn album_info(_user: SubsonicUser) -> Result<Answer, SubsonicError> {
 
 /// 10 without `id`, 70 for an unknown artist, else an empty element.
 async fn known_artist(
-    user: &SubsonicUser,
+    _user: &SubsonicUser,
     app: &AppState,
     params: &Params,
 ) -> Result<(), SubsonicError> {
     let raw = params.required("id")?;
     let not_found = || SubsonicError::not_found("Artist not found");
     let id = ids::parse(raw, &[Prefix::Ar, Prefix::ArtistColon]).ok_or_else(not_found)?;
-    subsonic::artist_with_albums(&app.pool, user.user.id, id)
-        .await?
-        .map(|_| ())
-        .ok_or_else(not_found)
+    if subsonic::artist_exists(&app.pool, id).await? {
+        Ok(())
+    } else {
+        Err(not_found())
+    }
 }
 
 async fn artist_info(

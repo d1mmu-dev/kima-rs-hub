@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH due AS (\n             SELECT t.id FROM tracks t\n             LEFT JOIN track_stages s ON s.track_id = t.id AND s.stage = $1\n             WHERE t.missing_since IS NULL\n               AND (s.track_id IS NULL\n                    OR (s.status = 'pending'\n                        AND (s.next_attempt_at IS NULL OR s.next_attempt_at <= now()))\n                    OR (s.status IN ('failed', 'working') AND s.next_attempt_at <= now()))\n               AND ($1 <> 'recording' OR NOT $3 OR EXISTS (\n                    SELECT 1 FROM track_stages f\n                    WHERE f.track_id = t.id AND f.stage = 'fingerprint'\n                      AND (f.status = 'done'\n                           OR (f.status = 'failed' AND f.next_attempt_at IS NULL))))\n             ORDER BY t.mtime DESC, t.id\n             LIMIT $2\n             FOR UPDATE OF t SKIP LOCKED),\n           claimed AS (\n             INSERT INTO track_stages (track_id, stage, status, next_attempt_at, started_at, updated_at)\n             SELECT id, $1, 'working', now() + interval '15 minutes', now(), now() FROM due\n             ON CONFLICT (track_id, stage) DO UPDATE SET\n               status = 'working',\n               redelivered = track_stages.redelivered + (track_stages.status = 'working')::int,\n               next_attempt_at = EXCLUDED.next_attempt_at, started_at = now(), updated_at = now()\n             WHERE (track_stages.status = 'pending'\n                    AND (track_stages.next_attempt_at IS NULL\n                         OR track_stages.next_attempt_at <= now()))\n                OR (track_stages.status IN ('failed', 'working')\n                    AND track_stages.next_attempt_at <= now())\n             RETURNING track_id, started_at, attempts, redelivered)\n           SELECT c.track_id, c.started_at AS \"started_at!\", c.attempts, c.redelivered\n           FROM claimed c JOIN tracks t ON t.id = c.track_id\n           ORDER BY t.mtime DESC, t.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "track_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "started_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "attempts",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 3,
+        "name": "redelivered",
+        "type_info": "Int2"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "4fac6b51986776ddd928c8b0014e2441f05c8eefb006e677345e04a9dfb090ec"
+}

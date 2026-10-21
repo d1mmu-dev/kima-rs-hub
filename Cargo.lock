@@ -1383,13 +1383,17 @@ name = "kima-ident"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "kima-db",
  "kima-library",
+ "kima-net",
  "regex",
  "rusty-chromaprint",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "unicode-normalization",
  "uuid",

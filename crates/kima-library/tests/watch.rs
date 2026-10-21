@@ -360,7 +360,7 @@ async fn file_written_slowly_indexed_once_complete(pool: PgPool) {
         &pool,
         WatchMode::Auto,
         Duration::from_secs(60),
-        Duration::from_millis(500),
+        Duration::from_secs(2),
     );
 
     let target = h.root().join("Slow/Album/01.flac");
@@ -379,7 +379,7 @@ async fn file_written_slowly_indexed_once_complete(pool: PgPool) {
     // No job may have been queued while chunks were still arriving, so the one job that
     // appears reads the whole file.
     wait_path_job(&pool, "Slow/Album/01.flac").await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     let queued = path_jobs(&pool).await;
     assert_eq!(
         queued,

@@ -51,7 +51,21 @@ pub struct JobCtx {
 pub type Handler =
     Arc<dyn Fn(Job, JobCtx) -> BoxFuture<'static, Result<(), JobError>> + Send + Sync>;
 
-#[derive(Debug, Clone)]
+/// Opens a LISTEN connection on [`NOTIFY_CHANNEL`]; replaceable so tests can count or fail it.
+pub type ListenConnect =
+    Arc<dyn Fn(PgPool) -> BoxFuture<'static, sqlx::Result<PgListener>> + Send + Sync>;
+
+fn default_listen_connect() -> ListenConnect {
+    Arc::new(|pool| {
+        Box::pin(async move {
+            let mut listener = PgListener::connect_with(&pool).await?;
+            listener.listen(NOTIFY_CHANNEL).await?;
+            Ok(listener)
+        })
+    })
+}
+
+#[derive(Clone)]
 pub struct WorkerConfig {
     pub queue: String,
     pub concurrency: usize,
@@ -62,6 +76,21 @@ pub struct WorkerConfig {
     pub poll_interval: Duration,
     /// Minimum time between attempts to re-establish a lost LISTEN connection.
     pub listen_retry: Duration,
+    /// How the LISTEN connection is (re)established.
+    pub listen_connect: ListenConnect,
+}
+
+impl std::fmt::Debug for WorkerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerConfig")
+            .field("queue", &self.queue)
+            .field("concurrency", &self.concurrency)
+            .field("lease", &self.lease)
+            .field("heartbeat", &self.heartbeat)
+            .field("poll_interval", &self.poll_interval)
+            .field("listen_retry", &self.listen_retry)
+            .finish_non_exhaustive()
+    }
 }
 
 impl WorkerConfig {
@@ -73,6 +102,7 @@ impl WorkerConfig {
             heartbeat: Duration::from_secs(300) / 4,
             poll_interval: Duration::from_secs(5),
             listen_retry: Duration::from_secs(30),
+            listen_connect: default_listen_connect(),
         }
     }
 }
@@ -104,7 +134,7 @@ pub fn spawn_worker(
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut listener = listen(&pool).await;
+        let mut listener = listen(&pool, &config).await;
         let mut last_listen_attempt = tokio::time::Instant::now();
         let permits = Arc::new(Semaphore::new(config.concurrency));
         let mut running = JoinSet::new();
@@ -144,15 +174,18 @@ pub fn spawn_worker(
                 _ = shutdown.cancelled() => break,
                 woke = notified(&mut listener) => {
                     if !woke {
-                        // The stream failed; drop it and let the retry arm reconnect.
-                        listener = None;
+                        // The connection dropped or failed: the old listener is dropped and replaced at once. On failure
+                        // the retry arm tries again; either way the loop sweeps next, so
+                        // jobs enqueued while unsubscribed are found.
+                        last_listen_attempt = tokio::time::Instant::now();
+                        listener = listen(&pool, &config).await;
                     }
                 }
                 _ = tokio::time::sleep_until(last_listen_attempt + config.listen_retry),
                     if listener.is_none() =>
                 {
                     last_listen_attempt = tokio::time::Instant::now();
-                    listener = listen(&pool).await;
+                    listener = listen(&pool, &config).await;
                     // The loop re-claims next, so jobs enqueued while unsubscribed are found.
                 }
                 Some(result) = running.join_next(), if !running.is_empty() => log_join(result),
@@ -172,28 +205,25 @@ fn log_join(result: Result<(), tokio::task::JoinError>) {
     }
 }
 
-async fn listen(pool: &PgPool) -> Option<PgListener> {
-    let mut listener = match PgListener::connect_with(pool).await {
-        Ok(listener) => listener,
+async fn listen(pool: &PgPool, config: &WorkerConfig) -> Option<PgListener> {
+    match (config.listen_connect)(pool.clone()).await {
+        Ok(listener) => Some(listener),
         Err(error) => {
             warn!(%error, "LISTEN unavailable; falling back to polling");
-            return None;
-        }
-    };
-    match listener.listen(NOTIFY_CHANNEL).await {
-        Ok(()) => Some(listener),
-        Err(error) => {
-            warn!(%error, "LISTEN failed; falling back to polling");
             None
         }
     }
 }
 
-/// Resolves when a notification arrives (`true`) or the stream fails (`false`).
+/// Resolves when a notification arrives (`true`) or the connection is lost or fails (`false`).
 async fn notified(listener: &mut Option<PgListener>) -> bool {
     match listener {
-        Some(l) => match l.recv().await {
-            Ok(_) => true,
+        Some(l) => match l.try_recv().await {
+            Ok(Some(_)) => true,
+            Ok(None) => {
+                warn!("job notification connection dropped");
+                false
+            }
             Err(error) => {
                 warn!(%error, "job notification stream failed");
                 false

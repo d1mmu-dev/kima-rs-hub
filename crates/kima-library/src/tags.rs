@@ -121,9 +121,17 @@ fn single_mbid(tag: &Tag, key: ItemKey) -> Option<Uuid> {
 
 /// A multi-valued id field: each value, also split on `;` and `/`; invalid parts are dropped.
 fn multi_mbids(tag: &Tag, key: ItemKey) -> Vec<Uuid> {
-    tag.get_strings(key)
+    mbids_from(tag.get_strings(key))
+}
+
+/// At most this many ids are kept per artist id field (the values come from the file).
+pub const MAX_ARTIST_MBIDS: usize = 32;
+
+fn mbids_from<'a>(values: impl Iterator<Item = &'a str>) -> Vec<Uuid> {
+    values
         .flat_map(|v| v.split([';', '/']))
         .filter_map(parse_mbid)
+        .take(MAX_ARTIST_MBIDS)
         .collect()
 }
 
@@ -146,15 +154,30 @@ pub fn normalize_isrc(s: &str) -> Option<String> {
     ok.then_some(n)
 }
 
+/// At most this many genres are kept per file; splitting stops once it is reached.
+pub const MAX_GENRES: usize = 64;
+/// A genre name longer than this many characters is dropped (not truncated).
+pub const MAX_GENRE_CHARS: usize = 100;
+
 fn genres_of(tag: &Tag) -> Vec<String> {
+    genres_from(tag.get_strings(ItemKey::Genre))
+}
+
+/// Linear in the input: a crafted `;`-joined value of millions of names costs one pass at most,
+/// and the loop ends as soon as `MAX_GENRES` names are kept.
+fn genres_from<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for g in tag.get_strings(ItemKey::Genre).flat_map(|v| v.split(';')) {
+    let mut seen = std::collections::HashSet::new();
+    for g in values.flat_map(|v| v.split(';')) {
         let g = g.trim();
-        if g.is_empty() || g.starts_with('_') {
+        if g.is_empty() || g.starts_with('_') || g.chars().nth(MAX_GENRE_CHARS).is_some() {
             continue;
         }
-        if !out.iter().any(|o| o.to_lowercase() == g.to_lowercase()) {
+        if seen.insert(g.to_lowercase()) {
             out.push(g.to_string());
+            if out.len() == MAX_GENRES {
+                break;
+            }
         }
     }
     out
@@ -305,7 +328,62 @@ pub fn read(path: &Path) -> Result<RawTags, TagError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_synced, normalize_isrc, parse_mbid, year_of};
+    use super::{
+        MAX_ARTIST_MBIDS, MAX_GENRE_CHARS, MAX_GENRES, genres_from, looks_synced, mbids_from,
+        normalize_isrc, parse_mbid, year_of,
+    };
+
+    #[test]
+    fn genres_capped_in_count_and_length() {
+        let many: String = (0..200).map(|i| format!("g{i};")).collect();
+        let g = genres_from([many.as_str()].into_iter());
+        assert_eq!(g.len(), MAX_GENRES);
+        assert_eq!((g[0].as_str(), g[63].as_str()), ("g0", "g63"));
+
+        let long = "x".repeat(MAX_GENRE_CHARS + 1);
+        let edge = "é".repeat(MAX_GENRE_CHARS);
+        let input = format!("{long};{edge};Rock;ROCK");
+        assert_eq!(
+            genres_from([input.as_str()].into_iter()),
+            vec![edge.clone(), "Rock".into()]
+        );
+    }
+
+    #[test]
+    fn genres_large_crafted_value_is_fast() {
+        // ~1 million distinct names in one value: the quadratic dedup this replaces would hang.
+        let crafted: String = (0..1_000_000).map(|i| format!("a{i};")).collect();
+        let start = std::time::Instant::now();
+        assert_eq!(
+            genres_from([crafted.as_str()].into_iter()).len(),
+            MAX_GENRES
+        );
+        // Many repeats of one name (no early cap) also stay linear.
+        let repeats = "Rock;".repeat(1_000_000);
+        assert_eq!(
+            genres_from([repeats.as_str()].into_iter()),
+            vec!["Rock".to_string()]
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn artist_mbids_capped() {
+        let ids: Vec<String> = (0..100)
+            .map(|i| format!("e1e2e3e4-0000-4000-8000-{i:012}"))
+            .collect();
+        let joined = ids.join(";");
+        let got = mbids_from([joined.as_str()].into_iter());
+        assert_eq!(got.len(), MAX_ARTIST_MBIDS);
+        assert_eq!(got[0].to_string(), ids[0]);
+        assert_eq!(got[31].to_string(), ids[31]);
+        let got = mbids_from(ids.iter().map(String::as_str));
+        assert_eq!(got.len(), MAX_ARTIST_MBIDS);
+    }
 
     #[test]
     fn parse_mbid_cases() {

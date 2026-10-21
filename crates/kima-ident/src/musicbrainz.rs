@@ -366,7 +366,8 @@ static DATED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[0-9]{4}[-‐][0-9]{2}[-‐][0-9]{2}").expect("regex"));
 
 /// A disambiguation that marks another version of a song: live, a demo, acoustic, a remix, or a
-/// dated performance (`isOtherVersion`, `musicbrainz.ts:49-55`).
+/// dated performance (`isOtherVersion`, `musicbrainz.ts:49-55`). Upstream uses it only in the
+/// album-by-name search (`searchRecording`); [`identify_recording`] never applies it.
 pub fn is_other_version(disambiguation: &str) -> bool {
     let text = disambiguation.to_lowercase();
     OTHER_VERSION_WORD.is_match(&text) || DATED.is_match(&text)
@@ -518,8 +519,9 @@ pub async fn search_recordings(net: &Net, title: &str, artist: &str) -> Outcome<
 }
 
 /// The recording a track is, by name (`identifyRecording`, `musicbrainz.ts:865-897`): per query,
-/// `pick_recording` over its hits, the first pick wins. Hits whose disambiguation marks another
-/// version ([`is_other_version`]) are passed over (D-125). Failures as [`search_recordings`].
+/// `pick_recording` over all its hits, the first pick wins. A hit's disambiguation is not
+/// consulted: MusicBrainz marks a live recording only there, so filtering on it would make the
+/// right live recording unfindable (spec §8.3 rung 4). Failures as [`search_recordings`].
 pub async fn identify_recording(net: &Net, e: &Expected) -> Outcome<Recording> {
     let artist = e.artists.first().map_or("", String::as_str);
     let queries = recording_queries(&e.title, artist);
@@ -534,15 +536,11 @@ pub async fn identify_recording(net: &Net, e: &Expected) -> Outcome<Recording> {
         match search_one(net, q).await {
             Outcome::Answered(hits) => {
                 offered += hits.len();
-                let kept: Vec<&Recording> = hits
-                    .iter()
-                    .filter(|r| !r.disambiguation.as_deref().is_some_and(is_other_version))
-                    .collect();
-                let candidates: Vec<Candidate> = kept.iter().map(|r| r.candidate()).collect();
+                let candidates: Vec<Candidate> = hits.iter().map(Recording::candidate).collect();
                 if let Some(pick) = text::pick_recording(&candidates, e) {
                     let at = candidates.iter().position(|c| std::ptr::eq(c, pick));
                     if let Some(i) = at {
-                        return Outcome::Answered(kept[i].clone());
+                        return Outcome::Answered(hits[i].clone());
                     }
                 }
             }
@@ -570,9 +568,25 @@ pub async fn recording_isrcs_and_genres(net: &Net, id: Mbid) -> Outcome<Recordin
         .await
 }
 
-/// `GET /artist/{id}?inc=<inc>`; `inc` is `aliases` or `genres`.
-pub async fn artist(net: &Net, id: Mbid, inc: &str) -> Outcome<Artist> {
-    net.get_json(get(&format!("/artist/{id}"), &[("inc", inc)]).absent_on_404())
+/// What [`artist`] asks MusicBrainz to include.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtistInc {
+    Aliases,
+    Genres,
+}
+
+impl ArtistInc {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArtistInc::Aliases => "aliases",
+            ArtistInc::Genres => "genres",
+        }
+    }
+}
+
+/// `GET /artist/{id}?inc=aliases` or `?inc=genres`.
+pub async fn artist(net: &Net, id: Mbid, inc: ArtistInc) -> Outcome<Artist> {
+    net.get_json(get(&format!("/artist/{id}"), &[("inc", inc.as_str())]).absent_on_404())
         .await
 }
 

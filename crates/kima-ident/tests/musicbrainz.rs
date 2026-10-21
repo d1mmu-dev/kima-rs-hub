@@ -17,8 +17,9 @@ use sqlx::PgPool;
 
 const RG_MBID: &str = "48117b90-a16e-34ca-a514-19c702df1158";
 const EARLIEST_RELEASE: &str = "bd3bb36e-16c8-438f-850e-dfbf4d1478f0";
-/// Another official release of the same group, listed second by MusicBrainz.
-const OTHER_RELEASE: &str = "d073287b-e5b0-4b9a-a9e7-46e3f6b8d1a5";
+/// Another official release of the same group (dated 2001-02-26 too), listed second in
+/// `rg-discovery.json`; `choose_release` would not take it, its id sorting after the earliest.
+const OTHER_RELEASE: &str = "d073287b-d1bd-4f11-a933-a4386f8cf701";
 
 const PARAMORE: &str = "728ea90d-279b-4201-a8c4-e44ee1e4b4b6";
 const RADIOHEAD: &str = "a74b1b7f-71a5-4011-9441-d0b5e4122711";
@@ -225,17 +226,59 @@ async fn skips_another_artists_song_or_another_versions_length(pool: PgPool) {
     assert_eq!(rec.id, mbid(&id(32)));
 }
 
-#[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn passes_over_a_recording_marked_live(pool: PgPool) {
-    let mut live = recording(&id(40), "Daydreaming", 271000, "Paramore", Some(100));
-    live["disambiguation"] = json!("live, 2010-06-12");
-    let (_replay, net) = net_for(&pool, both_queries(200, json!({"recordings": [live]}))).await;
-    let out = musicbrainz::identify_recording(&net, &expected()).await;
-    assert!(matches!(out, Outcome::Absent(_)), "{out:?}");
+/// Upstream's test is on the album-by-name `searchRecording`, which kima-rs does not port; the
+/// helper is kept and tested on its own.
+#[test]
+fn passes_over_a_recording_marked_live() {
+    assert!(musicbrainz::is_other_version("live, 2010-06-12"));
     assert!(musicbrainz::is_other_version("2010-06-12"));
     assert!(musicbrainz::is_other_version("Acoustic"));
+    assert!(musicbrainz::is_other_version("demo"));
+    assert!(musicbrainz::is_other_version("2009‐01‐02"));
     assert!(!musicbrainz::is_other_version("album version"));
     assert!(!musicbrainz::is_other_version("delivered"));
+    assert!(!musicbrainz::is_other_version(""));
+}
+
+/// Spec §8.3 rung 4: the name search picks over every hit; a disambiguation is not consulted, so
+/// a live recording (marked live only there) can still be found.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn identify_keeps_a_hit_marked_live(pool: PgPool) {
+    let mut live = recording(&id(40), "Daydreaming", 271000, "Paramore", Some(100));
+    live["disambiguation"] = json!("live, 2010-06-12");
+    let (replay, net) = net_for(&pool, both_queries(200, json!({"recordings": [live]}))).await;
+    let out = musicbrainz::identify_recording(&net, &expected()).await;
+    let Outcome::Answered(rec) = out else {
+        panic!("expected an answer, got {out:?}");
+    };
+    assert_eq!(rec.id, mbid(&id(40)));
+    assert_eq!(rec.disambiguation.as_deref(), Some("live, 2010-06-12"));
+    assert_eq!(replay.asked().len(), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn artist_asks_one_include(pool: PgPool) {
+    let body = json!({"id": PARAMORE, "name": "Paramore", "sort-name": "Paramore",
+        "aliases": [{"name": "パラモア", "sort-name": "パラモア", "locale": "ja", "type": "Artist name"}]});
+    let (replay, net) = net_for(
+        &pool,
+        vec![entry(
+            &format!("/artist/{PARAMORE}?inc=aliases&fmt=json"),
+            200,
+            body,
+        )],
+    )
+    .await;
+    let out = musicbrainz::artist(&net, mbid(PARAMORE), musicbrainz::ArtistInc::Aliases).await;
+    let Outcome::Answered(a) = out else {
+        panic!("expected an answer, got {out:?}");
+    };
+    assert_eq!(a.aliases[0].name, "パラモア");
+    assert_eq!(musicbrainz::ArtistInc::Genres.as_str(), "genres");
+    assert_eq!(
+        replay.asked(),
+        [format!("GET /artist/{PARAMORE}?inc=aliases&fmt=json")]
+    );
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -552,6 +595,12 @@ async fn search_query_escapes_lucene_and_url(pool: PgPool) {
             "東京事変",
             r#"Don't Stop "Live" (Remix)"#,
             "recording%3A%22%E6%9D%B1%E4%BA%AC%E4%BA%8B%E5%A4%89%22%20AND%20artist%3A%22Don%27t%20Stop%20%5C%22Live%5C%22%22",
+        ),
+        // Review m3: `+`, `-` and a literal `\` (Lucene `\+`, `\-`, `\\`, then `%5C%2B`, `%5C-`, `%5C%5C`).
+        (
+            r"C++ - A\B",
+            "Jean-Michel Jarre",
+            "recording%3A%22C%5C%2B%5C%2B%20%5C-%20A%5C%5CB%22%20AND%20artist%3A%22Jean%5C-Michel%20Jarre%22",
         ),
     ];
     for (i, (title, artist, query)) in cases.iter().enumerate() {

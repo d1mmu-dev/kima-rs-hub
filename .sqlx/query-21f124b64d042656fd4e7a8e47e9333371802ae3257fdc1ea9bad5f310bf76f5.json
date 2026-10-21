@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settings_kv (key, value, secret_enc) VALUES ($1, NULL, $2)\n                   ON CONFLICT (key) DO UPDATE\n                   SET value = NULL, secret_enc = EXCLUDED.secret_enc, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "21f124b64d042656fd4e7a8e47e9333371802ae3257fdc1ea9bad5f310bf76f5"
+}

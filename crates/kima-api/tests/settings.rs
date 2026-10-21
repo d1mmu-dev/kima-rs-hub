@@ -176,3 +176,295 @@ async fn cleanup_stale_jobs_is_unrouted(pool: PgPool) {
         .await
         .assert_status_not_found();
 }
+
+// ---- /api/system-settings: the key-value settings (M3a Task 5) ----
+
+mod system {
+    use super::common;
+    use axum_test::TestServer;
+    use kima_api::AppState;
+    use kima_core::identify::IdentifySwitch;
+    use kima_db::PgPool;
+    use serde_json::{Value, json};
+
+    async fn setup(
+        pool: PgPool,
+        state: impl FnOnce(AppState) -> AppState,
+    ) -> (TestServer, AppState, String, String) {
+        let state = state(common::state(pool));
+        let (_, admin) = common::user_with_token(&state, "ana").await;
+        let (_, user) = common::user_with_token(&state, "ben").await;
+        let server = TestServer::new(kima_api::router(state.clone())).unwrap();
+        (server, state, admin, user)
+    }
+
+    async fn get(server: &TestServer, admin: &str) -> Value {
+        server
+            .get("/api/system-settings")
+            .authorization_bearer(admin)
+            .await
+            .json()
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn get_defaults(pool: PgPool) {
+        let (server, _, admin, _) = setup(pool, |s| s).await;
+        let body = get(&server, &admin).await;
+        assert_eq!(
+            body["registrationOpen"], true,
+            "the helper opens registration"
+        );
+        assert_eq!(body["fanartEnabled"], false);
+        assert_eq!(body["fanartApiKey"], "");
+        assert_eq!(body["hasFanartApiKey"], false);
+        assert_eq!(body["acoustidApiKey"], "");
+        assert_eq!(body["hasAcoustidApiKey"], false);
+        assert_eq!(body["autoEnrichMetadata"], true);
+        assert_eq!(body["autoEnrichMetadataLocked"], false);
+        assert_eq!(body["enrichmentConcurrency"], 1);
+        assert_eq!(body["autotagAutoApply"], "off");
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn acoustid_key_encrypted_at_rest_never_returned(pool: PgPool) {
+        let (server, _, admin, _) = setup(pool.clone(), |s| s).await;
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "acoustidApiKey": "abc" }))
+            .await
+            .assert_status_ok();
+        let body = get(&server, &admin).await;
+        assert_eq!(body["acoustidApiKey"], "");
+        assert_eq!(body["hasAcoustidApiKey"], true);
+        assert!(!body.to_string().contains("abc"));
+        let blob: Vec<u8> =
+            sqlx::query_scalar("SELECT secret_enc FROM settings_kv WHERE key = 'acoustidApiKey'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!blob.windows(3).any(|w| w == b"abc"));
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn post_empty_string_keeps_secret(pool: PgPool) {
+        let (server, _, admin, _) = setup(pool, |s| s).await;
+        for body in [
+            json!({ "fanartApiKey": "k" }),
+            json!({ "fanartApiKey": "" }),
+            json!({}),
+        ] {
+            server
+                .post("/api/system-settings")
+                .authorization_bearer(&admin)
+                .json(&body)
+                .await
+                .assert_status_ok();
+            assert_eq!(get(&server, &admin).await["hasFanartApiKey"], true);
+        }
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn post_null_clears_secret(pool: PgPool) {
+        let (server, _, admin, _) = setup(pool.clone(), |s| s).await;
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "fanartApiKey": "k" }))
+            .await
+            .assert_status_ok();
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "fanartApiKey": null }))
+            .await
+            .assert_status_ok();
+        assert_eq!(get(&server, &admin).await["hasFanartApiKey"], false);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM settings_kv")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn post_trims_secret(pool: PgPool) {
+        let (server, state, admin, _) = setup(pool, |s| s).await;
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "acoustidApiKey": "  abc \n" }))
+            .await
+            .assert_status_ok();
+        let kv = state.settings.get().await.unwrap();
+        assert_eq!(kv.acoustid_api_key.as_deref(), Some("abc"));
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn post_too_long_400(pool: PgPool) {
+        let (server, _, admin, _) = setup(pool, |s| s).await;
+        let res = server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "fanartApiKey": "x".repeat(201) }))
+            .await;
+        res.assert_status_bad_request();
+        res.assert_json(&json!({"error":"Invalid settings","details":"fanartApiKey is too long"}));
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "fanartApiKey": "x".repeat(200) }))
+            .await
+            .assert_status_ok();
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn post_wrong_types_400(pool: PgPool) {
+        let (server, _, admin, _) = setup(pool, |s| s).await;
+        let cases = [
+            (
+                json!({"fanartEnabled": "yes"}),
+                "fanartEnabled must be a boolean",
+            ),
+            (
+                json!({"autoEnrichMetadata": 1}),
+                "autoEnrichMetadata must be a boolean",
+            ),
+            (
+                json!({"enrichmentConcurrency": 0}),
+                "enrichmentConcurrency must be a whole number from 1 to 5",
+            ),
+            (
+                json!({"enrichmentConcurrency": 6}),
+                "enrichmentConcurrency must be a whole number from 1 to 5",
+            ),
+            (
+                json!({"enrichmentConcurrency": 2.5}),
+                "enrichmentConcurrency must be a whole number from 1 to 5",
+            ),
+            (
+                json!({"enrichmentConcurrency": "2"}),
+                "enrichmentConcurrency must be a whole number from 1 to 5",
+            ),
+            (
+                json!({"autotagAutoApply": "all"}),
+                "autotagAutoApply must be one of off, db, files",
+            ),
+            (
+                json!({"fanartApiKey": 5}),
+                "fanartApiKey must be a string or null",
+            ),
+            (
+                json!({"acoustidApiKey": true}),
+                "acoustidApiKey must be a string or null",
+            ),
+        ];
+        for (body, detail) in cases {
+            let res = server
+                .post("/api/system-settings")
+                .authorization_bearer(&admin)
+                .json(&body)
+                .await;
+            res.assert_status_bad_request();
+            res.assert_json(&json!({"error":"Invalid settings","details":detail}));
+        }
+        // Nothing from a rejected body is stored.
+        let res = server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({"fanartApiKey": "k", "fanartEnabled": "no"}))
+            .await;
+        res.assert_status_bad_request();
+        assert_eq!(get(&server, &admin).await["hasFanartApiKey"], false);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn post_unknown_fields_ignored(pool: PgPool) {
+        let (server, _, admin, _) = setup(pool, |s| s).await;
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "nope": 1, "lastfmApiKey": "x", "enrichmentConcurrency": 3 }))
+            .await
+            .assert_status_ok();
+        let body = get(&server, &admin).await;
+        assert_eq!(body["enrichmentConcurrency"], 3);
+        assert!(body.get("nope").is_none());
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn post_answers_m1_body(pool: PgPool) {
+        let (server, _, admin, _) = setup(pool, |s| s).await;
+        let res = server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "acoustidApiKey": "abc", "fanartEnabled": true, "autotagAutoApply": "db" }))
+            .await;
+        res.assert_json(&json!({ "registrationOpen": true, "libraryRoot": null }));
+        let body = get(&server, &admin).await;
+        assert_eq!(body["fanartEnabled"], true);
+        assert_eq!(body["autotagAutoApply"], "db");
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn non_admin_403(pool: PgPool) {
+        let (server, _, _, user) = setup(pool, |s| s).await;
+        server
+            .get("/api/system-settings")
+            .authorization_bearer(&user)
+            .await
+            .assert_status_forbidden();
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&user)
+            .json(&json!({ "fanartApiKey": "k" }))
+            .await
+            .assert_status_forbidden();
+        server
+            .get("/api/system-settings")
+            .await
+            .assert_status_unauthorized();
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn identify_env_off_locks(pool: PgPool) {
+        let (server, state, admin, _) =
+            setup(pool, |s| s.with_identify(IdentifySwitch::new(true, true))).await;
+        let body = get(&server, &admin).await;
+        assert_eq!(body["autoEnrichMetadata"], false);
+        assert_eq!(body["autoEnrichMetadataLocked"], true);
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "autoEnrichMetadata": true }))
+            .await
+            .assert_status_ok();
+        assert!(
+            state.settings.get().await.unwrap().auto_enrich_metadata,
+            "stored"
+        );
+        assert!(!state.identify.enabled());
+        assert_eq!(get(&server, &admin).await["autoEnrichMetadata"], false);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn toggle_flips_switch(pool: PgPool) {
+        let (server, state, admin, _) = setup(pool, |s| s).await;
+        assert!(state.identify.enabled());
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "autoEnrichMetadata": false }))
+            .await
+            .assert_status_ok();
+        assert!(!state.identify.enabled());
+        assert_eq!(get(&server, &admin).await["autoEnrichMetadata"], false);
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "autoEnrichMetadata": true }))
+            .await
+            .assert_status_ok();
+        assert!(state.identify.enabled());
+    }
+}

@@ -14,6 +14,9 @@ pub enum ApiError {
         message: String,
         details: Vec<serde_json::Value>,
     },
+    /// 400 `{"error":"Invalid settings","details":"<detail>"}` (system settings).
+    #[error("Invalid settings")]
+    InvalidSettings(String),
     #[error("{0}")]
     BadRequest(String),
     #[error("{0}")]
@@ -44,9 +47,10 @@ impl From<sqlx::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
-            Self::Invalid(_) | Self::InvalidWithDetails { .. } | Self::BadRequest(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::Invalid(_)
+            | Self::InvalidSettings(_)
+            | Self::InvalidWithDetails { .. }
+            | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
@@ -60,7 +64,9 @@ impl IntoResponse for ApiError {
             }
         };
         let body = match &self {
-            Self::Invalid(details) => json!({ "error": self.to_string(), "details": details }),
+            Self::Invalid(details) | Self::InvalidSettings(details) => {
+                json!({ "error": self.to_string(), "details": details })
+            }
             Self::InvalidWithDetails { details, .. } => {
                 json!({ "error": self.to_string(), "details": details })
             }

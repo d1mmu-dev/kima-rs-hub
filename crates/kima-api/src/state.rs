@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use kima_core::auth::JwtKeys;
 use kima_core::cipher::Cipher;
 use kima_core::events::EventBus;
+use kima_core::identify::IdentifySwitch;
 use kima_db::PgPool;
+use kima_db::settings_kv::SettingsCache;
 use kima_library::scan::LibraryRoot;
 use kima_library::transcode::Transcoder;
 use kima_library::watch::{IgnoreSet, SharedStatus, WatchStatus};
@@ -68,6 +70,10 @@ pub struct AppState {
     pub transcoder: Option<Transcoder>,
     /// Encrypts secrets stored in the database. Random per process unless `with_cipher` is used.
     pub cipher: Arc<Cipher>,
+    /// The key-value settings (`settings_kv`), cached for a minute; a POST replaces the entry.
+    pub settings: SettingsCache,
+    /// Whether outbound lookups may run: `autoEnrichMetadata` and `KIMA_IDENTIFY` (D-111).
+    pub identify: IdentifySwitch,
     /// Failed password sign-ins, per (client IP, username).
     pub login_limit: Arc<LoginLimiter>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
@@ -81,7 +87,10 @@ impl AppState {
 
     pub fn with_shutdown(pool: PgPool, session_secret: &str, shutdown: CancellationToken) -> Self {
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let cipher = Arc::new(Cipher::random());
         Self {
+            settings: SettingsCache::new(pool.clone(), cipher.clone()),
+            identify: IdentifySwitch::new(false, true),
             pool,
             jwt: Arc::new(JwtKeys::new(session_secret)),
             events: EventBus::new(1024),
@@ -95,7 +104,7 @@ impl AppState {
             library: LibraryServices::default(),
             public_url: None,
             transcoder: None,
-            cipher: Arc::new(Cipher::random()),
+            cipher,
             login_limit: Arc::new(LoginLimiter::new()),
             password_permits: Arc::new(AtomicU64::new(0)),
         }
@@ -103,6 +112,17 @@ impl AppState {
 
     pub fn with_cipher(mut self, cipher: Cipher) -> Self {
         self.cipher = Arc::new(cipher);
+        self.settings = SettingsCache::new(self.pool.clone(), self.cipher.clone());
+        self
+    }
+
+    pub fn with_settings(mut self, settings: SettingsCache) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    pub fn with_identify(mut self, identify: IdentifySwitch) -> Self {
+        self.identify = identify;
         self
     }
 

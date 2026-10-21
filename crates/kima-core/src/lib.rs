@@ -5,4 +5,5 @@ pub mod auth;
 pub mod cipher;
 pub mod config;
 pub mod events;
+pub mod identify;
 pub mod secrets;

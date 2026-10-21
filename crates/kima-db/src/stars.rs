@@ -68,13 +68,20 @@ pub async fn set(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx::R
         col = kind.column(),
         table = kind.table()
     );
-    let inserted = sqlx::query(&sql)
+    let inserted = match sqlx::query(&sql)
         .bind(Uuid::now_v7())
         .bind(user)
         .bind(id)
         .execute(pool)
-        .await?
-        .rows_affected();
+        .await
+    {
+        Ok(done) => done.rows_affected(),
+        // The target was purged between the check and the insert.
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("23503") => {
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    };
     if inserted > 0 {
         return Ok(true);
     }

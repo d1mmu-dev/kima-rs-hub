@@ -879,3 +879,30 @@ fixture_test!(purging_track_cascades_stars_ratings_bookmarks, |pool| {
         0
     );
 });
+
+fixture_test!(set_fk_violation_is_false, |pool| {
+    let done = stars::set(&pool, ALICE, StarKind::Track, Uuid::now_v7())
+        .await
+        .unwrap();
+    assert!(!done);
+});
+
+fixture_test!(kinds_of_mixed_ids, |pool| {
+    let ids = [track(1), album(1), artist(1), Uuid::now_v7()];
+    let kinds = subsonic::kinds_of(&pool, &ids).await.unwrap();
+    assert_eq!(kinds.len(), 3);
+    assert_eq!(kinds[&track(1)], StarKind::Track);
+    assert_eq!(kinds[&album(1)], StarKind::Album);
+    assert_eq!(kinds[&artist(1)], StarKind::Artist);
+});
+
+fixture_test!(artist_exists_follows_visibility, |pool| {
+    assert!(subsonic::artist_exists(&pool, artist(1)).await.unwrap());
+    // Artist 4 has no present track.
+    assert!(!subsonic::artist_exists(&pool, artist(4)).await.unwrap());
+    assert!(
+        !subsonic::artist_exists(&pool, Uuid::now_v7())
+            .await
+            .unwrap()
+    );
+});

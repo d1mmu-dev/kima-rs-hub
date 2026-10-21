@@ -290,12 +290,27 @@ pub async fn set_role_unless_last_admin(
     role: &str,
 ) -> sqlx::Result<RoleChange> {
     let mut tx = pool.begin().await?;
+    let change = set_role_unless_last_admin_in(&mut tx, id, role).await?;
+    if change == RoleChange::Changed {
+        tx.commit().await?;
+    }
+    Ok(change)
+}
+
+/// `set_role_unless_last_admin` on the caller's transaction, which must be open: the advisory
+/// lock is held until the caller commits or rolls back, so the caller can fold further changes
+/// into the same transaction. Nothing is committed here.
+pub async fn set_role_unless_last_admin_in(
+    conn: &mut PgConnection,
+    id: Uuid,
+    role: &str,
+) -> sqlx::Result<RoleChange> {
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(REGISTRATION_LOCK)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     let Some(current) = sqlx::query_scalar!("SELECT role FROM users WHERE id = $1", id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?
     else {
         return Ok(RoleChange::NotFound);
@@ -305,16 +320,15 @@ pub async fn set_role_unless_last_admin(
             r#"SELECT count(*) AS "count!" FROM users WHERE role = $1"#,
             ROLE_ADMIN
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
         if admins <= 1 {
             return Ok(RoleChange::LastAdmin);
         }
     }
     sqlx::query!("UPDATE users SET role = $2 WHERE id = $1", id, role)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
-    tx.commit().await?;
     Ok(RoleChange::Changed)
 }
 

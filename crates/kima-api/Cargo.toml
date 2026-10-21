@@ -32,3 +32,4 @@ image.workspace = true
 tempfile.workspace = true
 http-body-util.workspace = true
 tower.workspace = true
+kima-test-support.workspace = true

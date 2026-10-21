@@ -596,6 +596,50 @@ async fn update_user_last_admin_50(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn update_user_role_and_password_is_one_transaction(pool: PgPool) {
+    let s = Setup::new(pool).await;
+    user(&s.state, "ann", SECOND_ADMIN_PASSWORD, ROLE_ADMIN).await;
+    let ann = Auth::Password("ann".into(), SECOND_ADMIN_PASSWORD.into());
+    let before = |name: &'static str| {
+        let s = &s;
+        async move { s.find(name).await.unwrap().password_hash }
+    };
+    let (root_hash, ann_hash) = (before("root").await, before("ann").await);
+    // Each admin demotes the other and sets their password; the demotion that loses is refused
+    // and must leave its target's password alone.
+    let (a, b) = race_under_lock(
+        &s,
+        (
+            "updateUser",
+            s.root_password(),
+            vec![
+                ("username", "ann"),
+                ("adminRole", "false"),
+                ("password", "newpass1"),
+            ],
+        ),
+        (
+            "updateUser",
+            ann,
+            vec![
+                ("username", "root"),
+                ("adminRole", "false"),
+                ("password", "newpass1"),
+            ],
+        ),
+    )
+    .await;
+    one_ok_one_refused(&a, &b, "Cannot remove the last admin");
+    let refused_target = if a["status"] == "ok" { "root" } else { "ann" };
+    let (old, now) = if refused_target == "root" {
+        (root_hash, before("root").await)
+    } else {
+        (ann_hash, before("ann").await)
+    };
+    assert_eq!(old, now);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn delete_user_self_50_last_admin_50(pool: PgPool) {
     let s = Setup::new(pool).await;
     let res = s

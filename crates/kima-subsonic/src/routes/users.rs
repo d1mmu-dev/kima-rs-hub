@@ -190,9 +190,11 @@ async fn update_user(
         Some(password) => Some(hash(&app, password).await?),
         None => None,
     };
-    // The role first: it is the change that can be refused.
+    // One transaction: the role first, as it is the change that can be refused, so a refusal
+    // leaves the password alone.
+    let mut tx = app.pool.begin().await?;
     if let Some(role) = role {
-        match users::set_role_unless_last_admin(&app.pool, target.id, role).await? {
+        match users::set_role_unless_last_admin_in(&mut tx, target.id, role).await? {
             RoleChange::Changed => {}
             RoleChange::NotFound => return Err(user_not_found()),
             RoleChange::LastAdmin => {
@@ -202,8 +204,14 @@ async fn update_user(
             }
         }
     }
-    if let Some(password_hash) = password_hash {
-        set_password(&app, target.id, &password_hash).await?;
+    if let Some(password_hash) = &password_hash {
+        users::set_password(&mut tx, target.id, password_hash, None)
+            .await?
+            .ok_or_else(user_not_found)?;
+    }
+    tx.commit().await?;
+    if password_hash.is_some() {
+        revoke_sessions(&app, target.id);
     }
     Ok(Answer::ok())
 }

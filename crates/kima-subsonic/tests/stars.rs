@@ -417,3 +417,25 @@ fixture_test!(rating_does_not_star, |server, pool| {
     let song = call(&server, "getSong", &[("id", tid(1))]).await;
     assert_eq!(song["song"]["userRating"], 5);
 });
+
+fixture_test!(star_many_ids_one_kind_query, |server, pool| {
+    let me = ALICE_ID;
+    let ids = [track_id(2), album_id(2), artist_id(2)];
+    let params: Vec<(&str, String)> = ids.iter().map(|i| ("id", i.to_string())).collect();
+    assert_eq!(call(&server, "star", &params).await["status"], "ok");
+    for (col, id) in [
+        ("track_id", ids[0]),
+        ("album_id", ids[1]),
+        ("artist_id", ids[2]),
+    ] {
+        let n: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM stars WHERE user_id = $1 AND {col} = $2"
+        ))
+        .bind(me)
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(n, 1, "{col}");
+    }
+});

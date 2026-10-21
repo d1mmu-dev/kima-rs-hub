@@ -87,6 +87,27 @@ fixture_test!(
     }
 );
 
+fixture_test!(now_playing_hides_missing_track, |server, pool| {
+    let t = track_id(3);
+    ok(&alice(
+        &server,
+        "scrobble",
+        &[("id", &t.to_string()), ("submission", "false")],
+    )
+    .await);
+    sqlx::query("UPDATE tracks SET missing_since = now() WHERE id = $1")
+        .bind(t)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let np = alice(&server, "getNowPlaying", &[]).await;
+    assert_eq!(
+        np["nowPlaying"]["entry"].as_array().unwrap().len(),
+        0,
+        "{np}"
+    );
+});
+
 fixture_test!(
     submission_false_records_none_shows_in_now_playing,
     |server, pool| {

@@ -2,6 +2,8 @@
 //! rating, joined in the same query. Tracks flagged missing are excluded everywhere, and so are
 //! albums and artists left with no present track. Orders end in the id, so paging is stable.
 
+use std::collections::HashMap;
+
 use sqlx::{FromRow, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -432,6 +434,50 @@ pub async fn kind_of(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<StarKind>> 
         "artist" => Some(StarKind::Artist),
         _ => None,
     }))
+}
+
+/// What each id refers to, in one query over tracks, albums and artists. Ids that name nothing
+/// are absent from the map. Like `kind_of`, a missing track still counts.
+pub async fn kinds_of(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<HashMap<Uuid, StarKind>> {
+    let rows = sqlx::query!(
+        r#"SELECT id AS "id!", kind AS "kind!" FROM (
+               SELECT id, 1 AS kind FROM tracks WHERE id = ANY($1)
+               UNION ALL SELECT id, 2 FROM albums WHERE id = ANY($1)
+               UNION ALL SELECT id, 3 FROM artists WHERE id = ANY($1)
+           ) found ORDER BY kind DESC"#,
+        ids
+    )
+    .fetch_all(pool)
+    .await?;
+    // Ordered last-priority first, so a track overwrites an album overwrites an artist.
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            let kind = match r.kind {
+                1 => StarKind::Track,
+                2 => StarKind::Album,
+                3 => StarKind::Artist,
+                _ => return None,
+            };
+            Some((r.id, kind))
+        })
+        .collect())
+}
+
+/// Whether the artist is visible: it has at least one present track (the rule of
+/// `artist_with_albums`).
+pub async fn artist_exists(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let found = sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+               SELECT 1 FROM albums al
+               JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL
+               WHERE al.artist_id = $1
+           ) AS "found!""#,
+        id
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(found)
 }
 
 /// What the web players are playing: users whose `playback_state` is of type `track`, was

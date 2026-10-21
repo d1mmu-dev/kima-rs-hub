@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id AS \"id!\", kind AS \"kind!\" FROM (\n               SELECT id, 1 AS kind FROM tracks WHERE id = ANY($1)\n               UNION ALL SELECT id, 2 FROM albums WHERE id = ANY($1)\n               UNION ALL SELECT id, 3 FROM artists WHERE id = ANY($1)\n           ) found ORDER BY kind DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "kind!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "bf183777cb7ded0bc7e677f18eb14a93eaf998bb4b8efe8db264d5d4b87afd55"
+}

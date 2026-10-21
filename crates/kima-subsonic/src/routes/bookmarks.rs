@@ -1,6 +1,8 @@
 //! Bookmarks (spec §4.5 #39-#41), on Task 9's `bookmarks` layer. A bookmark of a track flagged
 //! missing is kept and left out of the list.
 
+use std::collections::HashMap;
+
 use axum::Router;
 use axum::extract::State;
 use kima_api::AppState;
@@ -33,12 +35,16 @@ async fn get_bookmarks(
     let me = user.user.id;
     let list = bookmarks::list_for_user(&app.pool, me).await?;
     let track_ids: Vec<_> = list.iter().map(|b| b.track_id).collect();
-    let songs = subsonic::tracks_by_ids(&app.pool, me, &track_ids).await?;
+    let songs: HashMap<_, _> = subsonic::tracks_by_ids(&app.pool, me, &track_ids)
+        .await?
+        .into_iter()
+        .map(|s| (s.track.id, s))
+        .collect();
     let nodes = list
         .iter()
         .filter_map(|b| {
             // A track purged since the list was read has no song; its bookmark is gone too.
-            let song = songs.iter().find(|s| s.track.id == b.track_id)?;
+            let song = songs.get(&b.track_id)?;
             Some(
                 Node::new("bookmark")
                     .attr("position", b.position_ms)

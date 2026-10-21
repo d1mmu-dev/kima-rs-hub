@@ -98,13 +98,16 @@ impl LoginLimiter {
 
     /// Whether an attempt may go ahead. Never extends a block.
     pub fn check(&self, ip: IpAddr, username: &str, now: Instant) -> Result<(), Blocked> {
-        let key = Self::key(ip, username);
+        self.check_key(&Self::key(ip, username), now)
+    }
+
+    fn check_key(&self, key: &Key, now: Instant) -> Result<(), Blocked> {
         let mut entries = self.lock();
-        let Some(entry) = entries.get(&key) else {
+        let Some(entry) = entries.get(key) else {
             return Ok(());
         };
         if entry.forgotten(now) {
-            entries.remove(&key);
+            entries.remove(key);
             return Ok(());
         }
         match entry.blocked_until {
@@ -123,7 +126,10 @@ impl LoginLimiter {
     /// A blocked key may still be evicted when the store is full (oldest failure first): making
     /// blocked keys permanent would let junk keys fill the store and disable the limiter.
     pub fn begin(&self, ip: IpAddr, username: &str, now: Instant) -> Result<Attempt<'_>, Blocked> {
-        let key = Self::key(ip, username);
+        self.begin_key(Self::key(ip, username), now)
+    }
+
+    fn begin_key(&self, key: Key, now: Instant) -> Result<Attempt<'_>, Blocked> {
         let mut entries = self.lock();
         if let Some(entry) = entries.get(&key) {
             if entry.forgotten(now) {
@@ -158,6 +164,38 @@ impl LoginLimiter {
             entry.blocked_until = Some(now + block);
         }
         Ok(Attempt { limiter: self, key })
+    }
+
+    /// Starts one attempt on the typed name plus further keys (the database's fold of it).
+    /// Every distinct key is checked first; when any is blocked the longest block is returned
+    /// and nothing is charged. Otherwise each distinct key is charged once.
+    pub fn begin_all(
+        &self,
+        ip: IpAddr,
+        names: &[&str],
+        now: Instant,
+    ) -> Result<Vec<Attempt<'_>>, Blocked> {
+        let mut keys: Vec<Key> = Vec::with_capacity(names.len());
+        for name in names {
+            let key = Self::key(ip, name);
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        let mut longest: Option<Blocked> = None;
+        for key in &keys {
+            if let Err(blocked) = self.check_key(key, now)
+                && longest.is_none_or(|l| blocked.retry_after > l.retry_after)
+            {
+                longest = Some(blocked);
+            }
+        }
+        if let Some(blocked) = longest {
+            return Err(blocked);
+        }
+        keys.iter()
+            .map(|key| self.begin_key(key.clone(), now))
+            .collect()
     }
 
     fn clear(&self, key: &Key) {
@@ -204,6 +242,44 @@ mod tests {
             .check(IP, user, now)
             .err()
             .map(|blocked| blocked.retry_after.as_secs())
+    }
+
+    fn blocked_five(limiter: &LoginLimiter, user: &str, now: Instant) {
+        fail(limiter, user, 5, now);
+        assert!(limiter.check(IP, user, now).is_err());
+    }
+
+    #[test]
+    fn begin_all_blocked_second_key_charges_nothing() {
+        let (limiter, now) = (LoginLimiter::new(), Instant::now());
+        blocked_five(&limiter, "b", now);
+        for _ in 0..10 {
+            assert!(limiter.begin_all(IP, &["a", "b"], now).is_err());
+        }
+        fail(&limiter, "a", 4, now);
+        assert!(limiter.check(IP, "a", now).is_ok());
+    }
+
+    #[test]
+    fn begin_all_blocked_first_key_charges_nothing() {
+        let (limiter, now) = (LoginLimiter::new(), Instant::now());
+        blocked_five(&limiter, "b", now);
+        for _ in 0..10 {
+            assert!(limiter.begin_all(IP, &["b", "a"], now).is_err());
+        }
+        fail(&limiter, "a", 4, now);
+        assert!(limiter.check(IP, "a", now).is_ok());
+    }
+
+    #[test]
+    fn begin_all_charges_each_distinct_key_once() {
+        let (limiter, now) = (LoginLimiter::new(), Instant::now());
+        drop(limiter.begin_all(IP, &["a", "a"], now).unwrap());
+        // One failure counted: three more stay free, the fifth blocks.
+        fail(&limiter, "a", 3, now);
+        assert!(limiter.check(IP, "a", now).is_ok());
+        drop(limiter.begin(IP, "a", now).unwrap());
+        assert!(limiter.check(IP, "a", now).is_err());
     }
 
     #[test]

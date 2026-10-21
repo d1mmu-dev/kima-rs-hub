@@ -361,22 +361,17 @@ async fn password_auth(
         return Err(SubsonicError::wrong_credentials());
     }
     let state = &ctx.app;
-    // Before any lookup or hashing. Counted as a failure now; cleared on success.
-    let attempt = state.login_limit.begin(ip, u, now).map_err(blocked)?;
+    // A blocked typed name is refused before any database work or hashing (no charge here).
+    state.login_limit.check(ip, u, now).map_err(blocked)?;
     // The database folds case its own way, Rust another: also count the attempt on the key of
     // the database's fold of the typed name, so no spelling gets a separate budget (as
-    // `POST /api/auth/login`). Charged whether or not the account exists (spec §5.7).
+    // `POST /api/auth/login`). Charged whether or not the account exists (spec §5.7). Counted
+    // as failures now, cleared on success; if any key is blocked, none is charged.
     let lookup = users::sign_in_lookup(&state.pool, u).await?;
-    let fold_attempt = if lookup.fold.to_lowercase() == u.to_lowercase() {
-        None
-    } else {
-        Some(
-            state
-                .login_limit
-                .begin(ip, &lookup.fold, now)
-                .map_err(blocked)?,
-        )
-    };
+    let attempts = state
+        .login_limit
+        .begin_all(ip, &[u, &lookup.fold], now)
+        .map_err(blocked)?;
     let found = lookup.user;
 
     let cached = found.as_ref().is_some_and(|user| {
@@ -410,9 +405,8 @@ async fn password_auth(
     let Some(user) = found.filter(|_| valid) else {
         return Err(SubsonicError::wrong_credentials());
     };
-    attempt.success();
-    if let Some(fold) = fold_attempt {
-        fold.success();
+    for attempt in attempts {
+        attempt.success();
     }
     if !cached {
         ctx.password_cache

@@ -14,6 +14,18 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U kima"
           --health-interval 5s --health-timeout 5s --health-retries 10
+      # Same image under the C locale: the fold tests must hold under both.
+      postgres-c:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: kima
+          POSTGRES_PASSWORD: kima
+          POSTGRES_DB: kima
+          POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kima"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       DATABASE_URL: postgres://kima:kima@localhost:5432/kima
       SQLX_OFFLINE: "true"
@@ -34,6 +46,8 @@ jobs:
             grep -E 'panicked at|FAILED|^---- |left:|right:|Error' test.log | head -40 | sed 's/^/::error::/'
             exit 1
           }
+      - run: DATABASE_URL=postgres://kima:kima@localhost:5433/kima cargo test -p kima-api --test login_limit
+      - run: DATABASE_URL=postgres://kima:kima@localhost:5433/kima cargo test -p kima-subsonic --test auth
   frontend:
     runs-on: ubuntu-latest
     defaults:

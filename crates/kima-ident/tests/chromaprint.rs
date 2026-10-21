@@ -5,7 +5,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use kima_ident::chromaprint::{DecodeError, compress, encode, ffmpeg_available, fingerprint_file};
-use tokio::sync::RwLock;
+use std::sync::OnceLock;
+
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 /// Every test that runs ffmpeg holds this for reading; `timeout_kills_ffmpeg` holds it for
 /// writing, so while it looks for leftover ffmpeg children no other test has any running.
@@ -17,15 +19,26 @@ fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fixtures/chromaprint")
 }
 
+/// Whether ffmpeg is on PATH, probed once. Call it only while holding `FFMPEG`: the probe
+/// spawns an ffmpeg child that `timeout_kills_ffmpeg` must not see.
 fn have_ffmpeg() -> bool {
-    let ok = Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .is_ok_and(|o| o.status.success());
+    static HAVE: OnceLock<bool> = OnceLock::new();
+    let ok = *HAVE.get_or_init(|| {
+        Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    });
     if !ok {
         eprintln!("ffmpeg not found; skipping");
     }
     ok
+}
+
+/// The shared side of `FFMPEG`, when ffmpeg is installed.
+async fn ffmpeg_read() -> Option<RwLockReadGuard<'static, ()>> {
+    let guard = FFMPEG.read().await;
+    have_ffmpeg().then_some(guard)
 }
 
 /// The fixture tone as a 44.1 kHz FLAC at `dest`.
@@ -67,10 +80,9 @@ fn compress_matches_chromaprint_vectors() {
 
 #[tokio::test]
 async fn known_answer_matches_fpcalc() {
-    if !have_ffmpeg() {
+    let Some(_g) = ffmpeg_read().await else {
         return;
-    }
-    let _g = FFMPEG.read().await;
+    };
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixture_dir().join("tone.fpcalc.json")).unwrap())
             .unwrap();
@@ -84,10 +96,9 @@ async fn known_answer_matches_fpcalc() {
 
 #[tokio::test]
 async fn flac_44k_bit_error_under_5_percent() {
-    if !have_ffmpeg() {
+    let Some(_g) = ffmpeg_read().await else {
         return;
-    }
-    let _g = FFMPEG.read().await;
+    };
     let dir = tempfile::tempdir().unwrap();
     let flac = dir.path().join("tone.flac");
     make_flac(&flac);
@@ -109,10 +120,9 @@ async fn flac_44k_bit_error_under_5_percent() {
 
 #[tokio::test]
 async fn ffmpeg_failure_reports_code_and_stderr() {
-    if !have_ffmpeg() {
+    let Some(_g) = ffmpeg_read().await else {
         return;
-    }
-    let _g = FFMPEG.read().await;
+    };
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("x.flac");
     std::fs::write(&path, "this is not audio\n".repeat(200)).unwrap();
@@ -140,10 +150,9 @@ async fn missing_file_is_missing() {
 
 #[tokio::test]
 async fn no_audio_stream_is_no_audio_or_ffmpeg() {
-    if !have_ffmpeg() {
+    let Some(_g) = ffmpeg_read().await else {
         return;
-    }
-    let _g = FFMPEG.read().await;
+    };
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cover.flac");
     let mut out = std::ffi::OsString::from("file:");
@@ -205,10 +214,10 @@ fn ffmpeg_children() -> Vec<u32> {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn timeout_kills_ffmpeg() {
+    let _g = FFMPEG.write().await;
     if !have_ffmpeg() {
         return;
     }
-    let _g = FFMPEG.write().await;
     let err = fingerprint_file(&fixture_dir().join("tone.wav"), Duration::from_millis(1))
         .await
         .unwrap_err();
@@ -218,10 +227,9 @@ async fn timeout_kills_ffmpeg() {
 
 #[tokio::test]
 async fn odd_file_names_fingerprint() {
-    if !have_ffmpeg() {
+    let Some(_g) = ffmpeg_read().await else {
         return;
-    }
-    let _g = FFMPEG.read().await;
+    };
     let dir = tempfile::tempdir().unwrap();
     let plain = dir.path().join("plain.flac");
     make_flac(&plain);
@@ -247,6 +255,42 @@ async fn odd_file_names_fingerprint() {
 
 #[tokio::test]
 async fn ffmpeg_available_probe() {
+    let _g = FFMPEG.read().await;
     let expected = have_ffmpeg();
     assert_eq!(ffmpeg_available().await, expected);
+}
+
+/// A playlist pointing at a network segment, under an audio name and under its own: ffmpeg
+/// fails and never connects (`-protocol_whitelist file`).
+#[tokio::test]
+async fn playlist_cannot_reach_network() {
+    let Some(_g) = ffmpeg_read().await else {
+        return;
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let playlist = format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nhttp://127.0.0.1:{port}/seg.ts\n#EXT-X-ENDLIST\n"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["evil.flac", "evil.m3u8"] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, &playlist).unwrap();
+        let err = fingerprint_file(&path, TIMEOUT).await.unwrap_err();
+        assert!(
+            matches!(err, DecodeError::NoAudio | DecodeError::Ffmpeg { .. }),
+            "{name}: got {err:?}"
+        );
+        if name.ends_with(".m3u8") {
+            // ffmpeg's own default for a nested input is `file,crypto,data`; ours is narrower.
+            let text = err.message();
+            assert!(text.contains("not on whitelist 'file'"), "{name}: {text}");
+        }
+        // A connection attempt would sit in the backlog.
+        match listener.accept() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("{name}: ffmpeg reached the network: {other:?}"),
+        }
+    }
 }

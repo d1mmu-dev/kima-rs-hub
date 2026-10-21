@@ -5,8 +5,8 @@
 //! `rusty_chromaprint` with the TEST2 preset, the algorithm `fpcalc` and AcoustID use.
 //!
 //! ffmpeg runs on untrusted files: the input is always `file:<absolute path>` (so a name
-//! starting with `-` or holding `:` is neither an option nor a protocol), never through a
-//! shell; stdout is bounded, stderr keeps its first 2000 bytes, a timeout kills and reaps the
+//! starting with `-` or holding `:` is neither an option nor a protocol) with
+//! `-protocol_whitelist file` (a playlist cannot reach the network), never through a shell; stdout is bounded, stderr keeps its first 2000 bytes, a timeout kills and reaps the
 //! child, and stdout is only fingerprinted after a clean exit.
 
 use std::ffi::OsString;
@@ -139,7 +139,15 @@ pub async fn fingerprint_file(path: &Path, timeout: Duration) -> Result<Fingerpr
         .map_err(DecodeError::Missing)?;
 
     let mut child = Command::new("ffmpeg")
-        .args(["-nostdin", "-v", "error", "-i"])
+        // Only local files, even for inputs a renamed playlist would open (defence in depth).
+        .args([
+            "-nostdin",
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-i",
+        ])
         .arg(file_arg(&path))
         .args(["-map", "0:a:0", "-t"])
         .arg(MAX_SECONDS.to_string())

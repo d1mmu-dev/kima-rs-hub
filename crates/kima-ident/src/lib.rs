@@ -3,6 +3,7 @@
 pub mod acoustid;
 pub mod chromaprint;
 mod ctx;
+pub mod matching;
 mod mbid;
 pub mod musicbrainz;
 pub mod stages;

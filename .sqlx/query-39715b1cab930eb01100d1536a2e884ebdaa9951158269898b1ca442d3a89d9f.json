@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id, t.title, t.artist_name, t.duration_secs, t.isrc, t.isrc_source,\n                  t.tag_recording_mbid, a.id AS album_id, a.title AS album_title,\n                  ar.name AS album_artist, a.release_mbid, a.release_group_mbid,\n                  a.label AS album_label,\n                  EXISTS (SELECT 1 FROM album_genres g\n                          WHERE g.album_id = a.id AND g.source = 'musicbrainz')\n                    AS \"album_has_mb_genres!\"\n           FROM tracks t\n           JOIN albums a ON a.id = t.album_id\n           JOIN artists ar ON ar.id = a.artist_id\n           WHERE t.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "artist_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "duration_secs",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "isrc",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "isrc_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "tag_recording_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "album_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "album_title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "album_artist",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "release_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 11,
+        "name": "release_group_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 12,
+        "name": "album_label",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "album_has_mb_genres!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "39715b1cab930eb01100d1536a2e884ebdaa9951158269898b1ca442d3a89d9f"
+}

@@ -17,6 +17,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use crate::Mbid;
+use crate::stages::STAGE_TIMEOUT;
 use crate::text::{lengths_agree, titles_agree, version_of};
 
 /// The built-in client key, last in the key order. Empty until a kima-rs application is
@@ -186,6 +187,17 @@ fn request_body(key: &str, fingerprint: &str, duration_secs: i32) -> String {
     )
 }
 
+/// `POST /lookup`, inside the stage budget ([`STAGE_TIMEOUT`], spec §10.4).
+fn lookup_request(key: &str, fingerprint: &str, duration_secs: i32) -> Req {
+    Req::post_form(
+        Host::AcoustId,
+        "/lookup",
+        request_body(key, fingerprint, duration_secs),
+    )
+    .absent_when(no_results)
+    .budget(STAGE_TIMEOUT)
+}
+
 /// An `ok` answer with no results: absent, and cached as such.
 fn no_results(v: &Value) -> bool {
     v.get("status").and_then(Value::as_str) == Some("ok")
@@ -225,12 +237,7 @@ pub async fn lookup(
             ),
         ));
     }
-    let req = Req::post_form(
-        Host::AcoustId,
-        "/lookup",
-        request_body(key, fingerprint, duration_secs),
-    )
-    .absent_when(no_results);
+    let req = lookup_request(key, fingerprint, duration_secs);
     match net.post_form_json::<LookupResponse>(req).await {
         // Results that were all unreadable are no results.
         Outcome::Answered(r) if r.results.is_empty() => {
@@ -334,5 +341,17 @@ pub async fn identify(
         Outcome::RateLimited { until } => Outcome::RateLimited { until },
         Outcome::Transient(f) => Outcome::Transient(f),
         Outcome::Permanent(f) => Outcome::Permanent(f),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_runs_inside_the_stage_budget_and_hides_the_key() {
+        let shown = format!("{:?}", lookup_request("secret-key", "AQAA", 200));
+        assert!(shown.contains(&format!("budget: Some({STAGE_TIMEOUT:?})")));
+        assert!(!shown.contains("secret-key"));
     }
 }

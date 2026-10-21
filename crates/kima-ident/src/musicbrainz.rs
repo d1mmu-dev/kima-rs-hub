@@ -16,6 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 use crate::Mbid;
+use crate::stages::STAGE_TIMEOUT;
 use crate::text::{self, Candidate, Expected};
 
 // ---- lenient field readers ----
@@ -406,7 +407,7 @@ fn is_400<T>(o: &Outcome<T>) -> bool {
     matches!(o, Outcome::Permanent(f) if f.code == "HTTP_400")
 }
 
-/// `GET <path>?<query…>&fmt=json`.
+/// `GET <path>?<query…>&fmt=json`, inside the stage budget ([`STAGE_TIMEOUT`], spec §10.4).
 fn get(path: &str, query: &[(&str, &str)]) -> Req {
     query
         .iter()
@@ -414,6 +415,7 @@ fn get(path: &str, query: &[(&str, &str)]) -> Req {
             r.query(k, *v)
         })
         .query("fmt", "json")
+        .budget(STAGE_TIMEOUT)
 }
 
 // ---- requests ----
@@ -643,4 +645,15 @@ pub async fn all_artist_release_groups(net: &Net, artist: Mbid) -> Outcome<Vec<R
         return absent(json!({"artistMbid": artist, "hits": 0}));
     }
     Outcome::Answered(groups)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_request_runs_inside_the_stage_budget() {
+        let req = get("/recording/x", &[("inc", "isrcs")]);
+        assert!(format!("{req:?}").contains(&format!("budget: Some({STAGE_TIMEOUT:?})")));
+    }
 }

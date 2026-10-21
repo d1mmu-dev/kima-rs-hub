@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE albums\n         SET label = CASE WHEN (label IS NULL OR btrim(label) = '') AND $2::text IS NOT NULL\n                          THEN $2 ELSE label END\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1fda7d381a3b29d65584fc89c721a2a87fe7d49dd2d46aeb8b8f710e63f8b09e"
+}

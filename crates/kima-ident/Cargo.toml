@@ -7,19 +7,22 @@ rust-version.workspace = true
 
 [dependencies]
 base64.workspace = true
+kima-core.workspace = true
 kima-db.workspace = true
 kima-library.workspace = true
 kima-net.workspace = true
 regex.workspace = true
 rusty-chromaprint.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 unicode-normalization.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-sqlx.workspace = true
-serde_json.workspace = true
+kima-test-support.workspace = true
 tempfile.workspace = true

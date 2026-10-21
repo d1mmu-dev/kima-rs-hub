@@ -22,6 +22,19 @@ pub(crate) fn check(url: &reqwest::Url, deny_real: bool) {
     }
 }
 
+/// Panics when `deny_real` is set and `url`'s host was resolved (a test's static host) to an
+/// address that is not this machine.
+pub(crate) fn check_addrs(url: &reqwest::Url, ips: &[std::net::IpAddr], deny_real: bool) {
+    if deny_real && !ips.iter().all(|ip| ip.to_canonical().is_loopback()) {
+        panic!(
+            "kima-net refused a real host: {}://{}{}",
+            url.scheme(),
+            url.host_str().unwrap_or(""),
+            url.path()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

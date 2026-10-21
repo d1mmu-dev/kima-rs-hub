@@ -2,12 +2,17 @@
 //! with per-source limits, persisted pauses, a User-Agent and the network guard. Knows sources
 //! and limits but nothing about music.
 
+pub mod cache;
 mod client;
 pub mod gate;
 mod guard;
+mod images;
 mod outcome;
+pub mod record;
 mod req;
+mod secrets;
 mod source;
+pub mod ssrf;
 #[cfg(feature = "testing")]
 pub mod testing;
 

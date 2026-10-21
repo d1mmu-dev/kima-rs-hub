@@ -83,6 +83,25 @@ impl Source {
         Source::ALL.into_iter().find(|s| s.as_str() == name)
     }
 
+    /// How long the response cache keeps an answer and an absence (spec §7.4); `None` for a
+    /// source that is never cached (LRCLIB has `track_lyrics`, images are files).
+    pub fn ttl(self) -> Option<(Duration, Duration)> {
+        const HOUR: u64 = 3_600;
+        const DAY: u64 = 24 * HOUR;
+        let pair = |answered: u64, absent: u64| {
+            Some((Duration::from_secs(answered), Duration::from_secs(absent)))
+        };
+        match self {
+            Source::MusicBrainz | Source::AcoustId | Source::Wikidata | Source::CoverArtArchive => {
+                pair(30 * DAY, 7 * DAY)
+            }
+            Source::Fanart => pair(7 * DAY, 7 * DAY),
+            Source::Deezer => pair(24 * HOUR, 24 * HOUR),
+            Source::ListenBrainz => pair(7 * DAY, DAY),
+            Source::Lrclib | Source::Images => None,
+        }
+    }
+
     /// Spec §7.3.
     pub fn limits(self) -> Limits {
         match self {
@@ -115,6 +134,39 @@ pub enum Host {
 }
 
 impl Host {
+    pub const ALL: [Host; 10] = [
+        Host::MusicBrainz,
+        Host::AcoustId,
+        Host::WikidataSparql,
+        Host::Wikidata,
+        Host::Wikipedia,
+        Host::Fanart,
+        Host::Deezer,
+        Host::ListenBrainz,
+        Host::Lrclib,
+        Host::CoverArtArchive,
+    ];
+
+    /// The name a fixture request file uses (`musicbrainz`, `wikidata_sparql`, ...).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Host::MusicBrainz => "musicbrainz",
+            Host::AcoustId => "acoustid",
+            Host::WikidataSparql => "wikidata_sparql",
+            Host::Wikidata => "wikidata",
+            Host::Wikipedia => "wikipedia",
+            Host::Fanart => "fanart",
+            Host::Deezer => "deezer",
+            Host::ListenBrainz => "listenbrainz",
+            Host::Lrclib => "lrclib",
+            Host::CoverArtArchive => "coverartarchive",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Host> {
+        Host::ALL.into_iter().find(|h| h.as_str() == name)
+    }
+
     pub fn source(self) -> Source {
         match self {
             Host::MusicBrainz => Source::MusicBrainz,
@@ -229,6 +281,29 @@ mod tests {
             assert_eq!(Source::from_name(s.as_str()), Some(s));
         }
         assert_eq!(Source::CoverArtArchive.as_str(), "coverartarchive");
+    }
+
+    #[test]
+    fn ttl_table() {
+        let d = |n: u64| Duration::from_secs(n * 86_400);
+        let h = |n: u64| Duration::from_secs(n * 3_600);
+        assert_eq!(Source::MusicBrainz.ttl(), Some((d(30), d(7))));
+        assert_eq!(Source::AcoustId.ttl(), Some((d(30), d(7))));
+        assert_eq!(Source::Wikidata.ttl(), Some((d(30), d(7))));
+        assert_eq!(Source::CoverArtArchive.ttl(), Some((d(30), d(7))));
+        assert_eq!(Source::Fanart.ttl(), Some((d(7), d(7))));
+        assert_eq!(Source::Deezer.ttl(), Some((h(24), h(24))));
+        assert_eq!(Source::ListenBrainz.ttl(), Some((d(7), d(1))));
+        assert_eq!(Source::Lrclib.ttl(), None);
+        assert_eq!(Source::Images.ttl(), None);
+    }
+
+    #[test]
+    fn host_names_round_trip() {
+        for h in Host::ALL {
+            assert_eq!(Host::from_name(h.as_str()), Some(h));
+        }
+        assert_eq!(Host::from_name("nope"), None);
     }
 
     #[test]

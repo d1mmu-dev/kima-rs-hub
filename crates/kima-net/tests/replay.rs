@@ -131,3 +131,88 @@ async fn replay_serves_upstream_recording(pool: PgPool) {
     assert_eq!(out, Outcome::Answered(recorded));
     assert_eq!(replay.asked().len(), 1);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn record_collects_raw_answers_with_secrets_redacted(pool: PgPool) {
+    let mut redirect = Entry {
+        method: "GET".into(),
+        url: "/r?api_key=RECKEY1234".into(),
+        status: 302,
+        headers: BTreeMap::new(),
+        body: Value::Null,
+        body_base64: None,
+        request_body_sha256: None,
+    };
+    redirect
+        .headers
+        .insert("location".into(), "/music/m".into());
+    let replay = Replay::start(Recording(vec![
+        redirect,
+        Entry {
+            method: "GET".into(),
+            url: "/music/m".into(),
+            status: 200,
+            headers: BTreeMap::new(),
+            body: json!({"echo": "key RECKEY1234"}),
+            body_base64: None,
+            request_body_sha256: None,
+        },
+        Entry {
+            method: "POST".into(),
+            url: "/lookup".into(),
+            status: 500,
+            headers: BTreeMap::new(),
+            body: Value::Null,
+            body_base64: Some("PGh0bWw+".into()), // "<html>"
+            request_body_sha256: None,
+        },
+    ]))
+    .await;
+    let record = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut cfg = NetConfig::for_tests(Bases::all(&replay.url()));
+    cfg.record = Some(record.clone());
+    let net = Net::new(cfg, pool, IdentifySwitch::new(false, true));
+    let out = net
+        .get_json::<Value>(
+            Req::get(Host::Fanart, "/r")
+                .query("api_key", "RECKEY1234")
+                .no_cache(),
+        )
+        .await;
+    assert!(matches!(out, Outcome::Answered(_)), "{out:?}");
+    let _ = net
+        .post_form_json::<Value>(Req::post_form(
+            Host::AcoustId,
+            "/lookup",
+            "client=FORMKEY99&duration=7".into(),
+        ))
+        .await;
+
+    let entries = record.lock().unwrap().clone();
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    let text = serde_json::to_string(&Recording(entries.clone())).unwrap();
+    assert!(!text.contains("RECKEY1234"), "{text}");
+    assert!(!text.contains("FORMKEY99"), "{text}");
+    assert_eq!(entries[0].status, 302);
+    assert!(
+        entries[0].url.ends_with("/r?api_key=REDACTED"),
+        "{}",
+        entries[0].url
+    );
+    assert_eq!(entries[0].headers["location"], "/music/m");
+    assert_eq!(entries[1].body, json!({"echo": "key REDACTED"}));
+    assert_eq!(entries[2].method, "POST");
+    assert_eq!(entries[2].body_base64.as_deref(), Some("PGh0bWw+"));
+    assert_eq!(
+        entries[2].request_body_sha256.as_deref(),
+        Some(body_sha256("client=REDACTED&duration=7").as_str())
+    );
+    // What was recorded replays.
+    let again = Replay::start(Recording(entries)).await;
+    let res = reqwest::Client::new()
+        .get(format!("{}/music/m", again.url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+}

@@ -2,13 +2,15 @@
 //! other failure left to the stage ledger.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use base64::Engine;
 use kima_core::identify::IdentifySwitch;
-use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+use kima_db::http_cache::CacheOutcome;
 use rand::Rng;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION, RETRY_AFTER};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, LOCATION, RETRY_AFTER};
 use reqwest::{StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -16,10 +18,13 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use tokio::time::Instant;
 
+use crate::cache;
 use crate::gate::{Busy, Gate};
 use crate::guard;
 use crate::outcome::{Evidence, Failure, Outcome};
-use crate::req::{Method, Req};
+use crate::record::Entry;
+use crate::req::{Method, Req, query_string};
+use crate::secrets::{Secrets, redact_form, redact_url};
 use crate::source::{Bases, Source};
 
 /// Largest JSON body read (spec §7.1).
@@ -36,13 +41,6 @@ const PAUSE_BASE: Duration = Duration::from_secs(30);
 const PAUSE_CAP: Duration = Duration::from_secs(60);
 /// Consecutive rate-limited outcomes before the pause starts doubling.
 const PAUSE_DOUBLING_AFTER: i32 = 5;
-
-/// Query values: everything but RFC 3986's unreserved characters is escaped (a space is `%20`).
-const QUERY: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'.')
-    .remove(b'_')
-    .remove(b'~');
 
 /// `kima-rs/<version> ( <contact> )`, the shape MusicBrainz asks for.
 pub fn user_agent(version: &str, contact: &str) -> String {
@@ -97,6 +95,15 @@ pub struct NetConfig {
     /// persisted pause lengths. 1.0 in production; tests shrink it so a retry ladder takes
     /// milliseconds.
     pub wait_scale: f64,
+    /// When set, every raw answer (each redirect hop included) is appended here, secrets
+    /// replaced by `REDACTED` (`tools/record-fixtures`).
+    pub record: Option<Arc<Mutex<Vec<Entry>>>>,
+    /// Host names answered without DNS (tests). Their addresses go through the same checks as
+    /// resolved ones.
+    pub static_hosts: HashMap<String, Vec<IpAddr>>,
+    /// Socket addresses an image download may reach although they are not public (tests: the
+    /// replay server, so a redirect away from it can be checked). Empty in production.
+    pub private_image_allow: Vec<SocketAddr>,
 }
 
 impl NetConfig {
@@ -108,6 +115,9 @@ impl NetConfig {
             deny_real: std::env::var("KIMA_NET_DENY_REAL").is_ok_and(|v| v.trim() == "1"),
             allow_private_images: false,
             wait_scale: 1.0,
+            record: None,
+            static_hosts: HashMap::new(),
+            private_image_allow: Vec::new(),
         }
     }
 
@@ -122,29 +132,32 @@ impl NetConfig {
             deny_real: true,
             allow_private_images: true,
             wait_scale: 0.001,
+            record: None,
+            static_hosts: HashMap::new(),
+            private_image_allow: Vec::new(),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Pause {
+pub(crate) struct Pause {
     until: OffsetDateTime,
     consecutive: i32,
 }
 
-struct Live {
-    cfg: NetConfig,
-    pool: PgPool,
-    switch: IdentifySwitch,
+pub(crate) struct Live {
+    pub(crate) cfg: NetConfig,
+    pub(crate) pool: PgPool,
+    pub(crate) switch: IdentifySwitch,
     http: reqwest::Client,
-    gates: HashMap<Source, Gate>,
+    pub(crate) gates: HashMap<Source, Gate>,
     /// The `source_pauses` rows, mirrored; expired entries keep their count.
     pauses: Mutex<HashMap<Source, Pause>>,
 }
 
 /// The one outbound HTTP client of a process.
 pub struct Net {
-    live: Option<Live>,
+    pub(crate) live: Option<Live>,
 }
 
 /// What came back from the wire, before classification.
@@ -155,29 +168,53 @@ struct Raw {
 }
 
 /// A rate-limited answer, before the retry decision.
-struct Limited {
-    retry_after: Option<String>,
-    reason: String,
+pub(crate) struct Limited {
+    pub(crate) retry_after: Option<String>,
+    pub(crate) reason: String,
 }
 
-enum Step<T> {
+pub(crate) enum Step<T> {
     Done(Outcome<T>),
     Limited(Limited),
 }
 
-fn transient<T>(code: &str, message: impl Into<String>) -> Outcome<T> {
+pub(crate) fn transient<T>(code: &str, message: impl Into<String>) -> Outcome<T> {
     Outcome::Transient(Failure::new(code, message))
 }
 
-fn permanent<T>(code: &str, message: impl Into<String>) -> Outcome<T> {
+pub(crate) fn permanent<T>(code: &str, message: impl Into<String>) -> Outcome<T> {
     Outcome::Permanent(Failure::new(code, message))
 }
 
-fn disabled<T>() -> Outcome<T> {
+pub(crate) fn disabled<T>() -> Outcome<T> {
     transient("DISABLED", "outbound lookups are switched off")
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+/// A failure's message with every secret of the request replaced.
+fn scrubbed<T>(out: Outcome<T>, secrets: &Secrets) -> Outcome<T> {
+    match out {
+        Outcome::Transient(f) => {
+            Outcome::Transient(Failure::new(f.code, secrets.scrub(&f.message)))
+        }
+        Outcome::Permanent(f) => {
+            Outcome::Permanent(Failure::new(f.code, secrets.scrub(&f.message)))
+        }
+        other => other,
+    }
+}
+
+/// A non-answer outcome of one type as another.
+fn retype<T, U>(out: Outcome<T>) -> Outcome<U> {
+    match out {
+        Outcome::Answered(_) => unreachable!("an answer is converted, not retyped"),
+        Outcome::Absent(e) => Outcome::Absent(e),
+        Outcome::RateLimited { until } => Outcome::RateLimited { until },
+        Outcome::Transient(f) => Outcome::Transient(f),
+        Outcome::Permanent(f) => Outcome::Permanent(f),
+    }
+}
+
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -215,7 +252,7 @@ fn to_micros(t: OffsetDateTime) -> OffsetDateTime {
     t.replace_nanosecond(n - n % 1000).unwrap_or(t)
 }
 
-fn reqwest_failure<T>(e: reqwest::Error) -> Outcome<T> {
+pub(crate) fn reqwest_failure<T>(e: reqwest::Error) -> Outcome<T> {
     let e = e.without_url();
     if e.is_timeout() {
         transient("TIMEOUT", e.to_string())
@@ -305,6 +342,8 @@ impl Net {
         self.json(req).await
     }
 
+    /// Switch, cache, pause, slot, cell, send (spec §7.3-§7.4). The switch comes first, so an
+    /// off switch answers `DISABLED` whatever is cached.
     async fn json<T: DeserializeOwned>(&self, req: Req) -> Outcome<T> {
         let Some(live) = &self.live else {
             return disabled();
@@ -312,6 +351,75 @@ impl Net {
         if !live.switch.enabled() {
             return disabled();
         }
+        let secrets = Secrets::of(&req);
+        let out = self.json_cached(live, &req, &secrets).await;
+        scrubbed(out, &secrets)
+    }
+
+    async fn json_cached<T: DeserializeOwned>(
+        &self,
+        live: &Live,
+        req: &Req,
+        secrets: &Secrets,
+    ) -> Outcome<T> {
+        let source = req.host.source();
+        let cached = match (req.no_cache, source.ttl()) {
+            (false, Some(ttl)) => {
+                let canonical = cache::canonical(req, live.cfg.bases.get(req.host));
+                Some((cache::key(source, &canonical), canonical, ttl))
+            }
+            _ => None,
+        };
+        if let Some((key, _, _)) = &cached {
+            match kima_db::http_cache::get(&live.pool, key).await {
+                Ok(Some((CacheOutcome::Absent, body))) => return Outcome::Absent(Evidence(body)),
+                Ok(Some((CacheOutcome::Answered, body))) => {
+                    // A row the caller's type no longer fits is a miss.
+                    if let Ok(t) = serde_json::from_value::<T>(body) {
+                        return Outcome::Answered(t);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(source = source.as_str(), error = %e, "could not read the response cache");
+                }
+            }
+        }
+        let out = match self.json_live(live, req, secrets).await {
+            Outcome::Answered(value) => match serde_json::from_value::<T>(value.clone()) {
+                Ok(t) => {
+                    if let Some((key, canonical, (ttl, _))) = &cached {
+                        live.store(key, source, canonical, CacheOutcome::Answered, &value, *ttl)
+                            .await;
+                    }
+                    Outcome::Answered(t)
+                }
+                Err(e) => transient("BAD_RESPONSE", format!("unexpected answer: {e}")),
+            },
+            Outcome::Absent(evidence) => {
+                if let Some((key, canonical, (_, ttl))) = &cached {
+                    live.store(
+                        key,
+                        source,
+                        canonical,
+                        CacheOutcome::Absent,
+                        &evidence.0,
+                        *ttl,
+                    )
+                    .await;
+                }
+                Outcome::Absent(evidence)
+            }
+            other => retype(other),
+        };
+        if matches!(out, Outcome::Answered(_) | Outcome::Absent(_)) {
+            live.clear_pause(source).await;
+        }
+        out
+    }
+
+    /// Pause, slot, cell, send, with the rate-limit retries; the answer as JSON.
+    async fn json_live(&self, live: &Live, req: &Req, secrets: &Secrets) -> Outcome<Value> {
         let source = req.host.source();
         if let Some(until) = self.paused_until(source) {
             return Outcome::RateLimited { until };
@@ -334,20 +442,15 @@ impl Net {
                     .map_or(now + Duration::from_secs(86_400), |b| now + b)
             });
             let ends = budget_ends.min(now + per_request);
-            let sent = tokio::time::timeout_at(ends, live.send(&req)).await;
+            let sent = tokio::time::timeout_at(ends, live.send(req, secrets)).await;
             drop(permit);
             let raw = match sent {
                 Err(_) => return transient("TIMEOUT", format!("no answer within {per_request:?}")),
                 Ok(Err(outcome)) => return outcome,
                 Ok(Ok(raw)) => raw,
             };
-            match classify::<T>(&req, source, raw) {
-                Step::Done(outcome) => {
-                    if matches!(outcome, Outcome::Answered(_) | Outcome::Absent(_)) {
-                        live.clear_pause(source).await;
-                    }
-                    return outcome;
-                }
+            match classify(req, source, raw) {
+                Step::Done(outcome) => return outcome,
                 Step::Limited(limited) => {
                     if attempt < limits.rate_limit_retries {
                         let jitter = Duration::from_millis(rand::thread_rng().gen_range(0..1000));
@@ -369,18 +472,112 @@ impl Net {
 
 impl Live {
     fn url(&self, req: &Req) -> Result<Url, Failure> {
-        let mut url = format!("{}{}", self.cfg.bases.get(req.host), req.path);
-        for (i, (k, v)) in req.query.iter().enumerate() {
-            url.push(if i == 0 { '?' } else { '&' });
-            url.extend(utf8_percent_encode(k, QUERY));
-            url.push('=');
-            url.extend(utf8_percent_encode(v, QUERY));
+        let base = self.cfg.bases.get(req.host);
+        let url = format!("{base}{}{}", req.path, query_string(&req.query));
+        Url::parse(&url).map_err(|e| {
+            // Base and path only: the query may carry a key.
+            let path = req.path.split('?').next().unwrap_or("");
+            Failure::new("BAD_URL", format!("{base}{path}: {e}"))
+        })
+    }
+
+    /// Stores an answer or an absence; a failed write is logged, never the caller's problem.
+    async fn store(
+        &self,
+        key: &str,
+        source: Source,
+        canonical: &str,
+        outcome: CacheOutcome,
+        body: &Value,
+        ttl: Duration,
+    ) {
+        let put = kima_db::http_cache::put(
+            &self.pool,
+            key,
+            source.as_str(),
+            canonical,
+            outcome,
+            body,
+            ttl,
+        );
+        if let Err(e) = put.await {
+            tracing::warn!(source = source.as_str(), error = %e, "could not write the response cache");
         }
-        Url::parse(&url).map_err(|e| Failure::new("BAD_URL", format!("{url}: {e}")))
+    }
+
+    /// Appends one raw answer to the recording, if one is kept. The URL is relative to `base`
+    /// when it starts with it (a replay server serves every host at its root); secret values
+    /// are `REDACTED` everywhere, and a POST entry names the SHA-256 of its redacted body.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record(
+        &self,
+        method: Method,
+        url: &Url,
+        base: Option<&str>,
+        request_body: Option<&str>,
+        status: StatusCode,
+        headers: &HeaderMap,
+        body: &[u8],
+        secrets: &Secrets,
+    ) {
+        let Some(record) = &self.cfg.record else {
+            return;
+        };
+        let full = url.as_str();
+        let shown = base
+            .and_then(|b| full.strip_prefix(b))
+            .filter(|rest| rest.starts_with('/') || rest.starts_with('?'))
+            .unwrap_or(full);
+        let header = |name| {
+            headers
+                .get(name)
+                .and_then(|v: &reqwest::header::HeaderValue| v.to_str().ok())
+                .map(|v| secrets.scrub(v))
+        };
+        let mut kept = std::collections::BTreeMap::new();
+        for (name, value) in [
+            ("location", header(LOCATION)),
+            ("retry-after", header(RETRY_AFTER)),
+        ] {
+            if let Some(v) = value {
+                kept.insert(name.to_string(), redact_url(&v));
+            }
+        }
+        let text = std::str::from_utf8(body).ok().map(|t| secrets.scrub(t));
+        let json = text
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+            .and_then(|t| serde_json::from_str::<Value>(t).ok());
+        let (json_body, body_base64) = match (json, body.is_empty()) {
+            (Some(v), _) => (v, None),
+            (None, true) => (Value::Null, None),
+            (None, false) => {
+                if let Some(ct) = header(CONTENT_TYPE) {
+                    kept.insert("content-type".into(), ct);
+                }
+                let bytes = text.map_or_else(|| body.to_vec(), String::into_bytes);
+                (
+                    Value::Null,
+                    Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                )
+            }
+        };
+        let entry = Entry {
+            method: method.as_str().to_string(),
+            url: secrets.scrub(&redact_url(shown)),
+            status: status.as_u16(),
+            headers: kept,
+            body: json_body,
+            body_base64,
+            request_body_sha256: (method == Method::Post)
+                .then(|| cache::sha256_hex(redact_form(request_body.unwrap_or("")).as_bytes())),
+        };
+        lock(record).push(entry);
     }
 
     /// Sends `req`, following up to three redirects by hand, and reads at most 4 MiB.
-    async fn send<T>(&self, req: &Req) -> Result<Raw, Outcome<T>> {
+    async fn send<T>(&self, req: &Req, secrets: &Secrets) -> Result<Raw, Outcome<T>> {
+        let base = self.cfg.bases.get(req.host);
         let mut url = self.url(req).map_err(Outcome::Permanent)?;
         let mut method = req.method;
         let mut body = req.body.clone();
@@ -400,6 +597,16 @@ impl Live {
             let status = res.status();
             if status.is_redirection() {
                 if let Some(location) = res.headers().get(LOCATION) {
+                    self.record(
+                        method,
+                        &url,
+                        Some(base),
+                        body.as_deref(),
+                        status,
+                        res.headers(),
+                        &[],
+                        secrets,
+                    );
                     if hops == MAX_REDIRECTS {
                         return Err(permanent(
                             "TOO_MANY_REDIRECTS",
@@ -454,6 +661,16 @@ impl Live {
                 }
                 bytes.extend_from_slice(&chunk);
             }
+            self.record(
+                method,
+                &url,
+                Some(base),
+                body.as_deref(),
+                status,
+                res.headers(),
+                &bytes,
+                secrets,
+            );
             return Ok(Raw {
                 status,
                 retry_after,
@@ -463,7 +680,7 @@ impl Live {
     }
 
     /// Pauses `source` after its retries are spent, here and in `source_pauses`.
-    async fn pause(&self, source: Source, reason: &str) -> OffsetDateTime {
+    pub(crate) async fn pause(&self, source: Source, reason: &str) -> OffsetDateTime {
         let now = OffsetDateTime::now_utc();
         let predicted = lock(&self.pauses)
             .get(&source)
@@ -498,7 +715,7 @@ impl Live {
     }
 
     /// The source answered: its consecutive count starts again.
-    async fn clear_pause(&self, source: Source) {
+    pub(crate) async fn clear_pause(&self, source: Source) {
         if lock(&self.pauses).remove(&source).is_none() {
             return;
         }
@@ -509,7 +726,7 @@ impl Live {
 }
 
 /// Spec §7.2: what an answer means.
-fn classify<T: DeserializeOwned>(req: &Req, source: Source, raw: Raw) -> Step<T> {
+fn classify(req: &Req, source: Source, raw: Raw) -> Step<Value> {
     let status = raw.status;
     let code = status.as_u16();
     if status.is_success() {
@@ -520,10 +737,7 @@ fn classify<T: DeserializeOwned>(req: &Req, source: Source, raw: Raw) -> Step<T>
         if req.absent_when.is_some_and(|f| f(&value)) {
             return Step::Done(Outcome::Absent(Evidence(value)));
         }
-        return Step::Done(match serde_json::from_value::<T>(value) {
-            Ok(t) => Outcome::Answered(t),
-            Err(e) => transient("BAD_RESPONSE", format!("unexpected answer: {e}")),
-        });
+        return Step::Done(Outcome::Answered(value));
     }
     let limited = code == 429
         || (code == 503 && source == Source::MusicBrainz)

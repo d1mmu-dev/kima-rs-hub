@@ -7,13 +7,14 @@ rust-version.workspace = true
 
 [features]
 # The replay server tests point the client at (`kima_net::testing`).
-testing = ["dep:axum", "dep:base64"]
+testing = ["dep:axum"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
-base64 = { workspace = true, optional = true }
+base64.workspace = true
 kima-core.workspace = true
 kima-db.workspace = true
+form_urlencoded.workspace = true
 percent-encoding.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls", "json", "gzip"] }

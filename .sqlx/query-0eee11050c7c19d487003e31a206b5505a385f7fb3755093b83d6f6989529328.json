@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO http_cache (key, source, request, outcome, body, fetched_at, expires_at)\n           VALUES ($1, $2, $3, $4, $5, now(), now() + make_interval(secs => $6))\n           ON CONFLICT (key) DO UPDATE\n           SET source = EXCLUDED.source,\n               request = EXCLUDED.request,\n               outcome = EXCLUDED.outcome,\n               body = EXCLUDED.body,\n               fetched_at = EXCLUDED.fetched_at,\n               expires_at = EXCLUDED.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0eee11050c7c19d487003e31a206b5505a385f7fb3755093b83d6f6989529328"
+}

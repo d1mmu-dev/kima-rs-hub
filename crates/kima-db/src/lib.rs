@@ -16,6 +16,7 @@ pub mod plays;
 pub mod ratings;
 pub mod search;
 pub mod settings;
+pub mod settings_kv;
 pub mod stars;
 pub mod subsonic;
 pub mod user_settings;

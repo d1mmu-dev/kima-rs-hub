@@ -23,6 +23,8 @@ pub struct Config {
     /// `KIMA_LIBRARY_SYNC_CRON`: 5-field cron (UTC) of the safety-net reconcile; `None` when `off`.
     /// The expression is validated where it is parsed (startup in `kima-server`).
     pub library_sync_cron: Option<String>,
+    /// `KIMA_IDENTIFY=off`: no outbound lookups, whatever the admin setting says (D-111).
+    pub identify_env_off: bool,
 }
 
 /// How the library folder is watched for changes (`KIMA_WATCH_MODE`).
@@ -146,6 +148,20 @@ impl Config {
             Some(raw) => Some(raw),
         };
 
+        let identify_env_off = match value("KIMA_IDENTIFY") {
+            None => false,
+            Some(raw) => match raw.to_ascii_lowercase().as_str() {
+                "on" => false,
+                "off" => true,
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        name: "KIMA_IDENTIFY",
+                        value: raw,
+                    });
+                }
+            },
+        };
+
         Ok(Self {
             database_url,
             data_dir: value("KIMA_DATA_DIR")
@@ -167,6 +183,7 @@ impl Config {
             artwork_cache_mb,
             public_url,
             library_sync_cron,
+            identify_env_off,
         })
     }
 }
@@ -254,6 +271,36 @@ mod tests {
         assert_eq!(
             cron(&[("KIMA_LIBRARY_SYNC_CRON", "*/15 * * * *")]),
             Some("*/15 * * * *".to_string())
+        );
+    }
+
+    #[test]
+    fn identify_default_on_and_off() {
+        let off = |extra: &[(&str, &str)]| {
+            let mut pairs = vec![("DATABASE_URL", "postgres://x")];
+            pairs.extend_from_slice(extra);
+            Config::from_lookup(lookup(&pairs))
+                .unwrap()
+                .identify_env_off
+        };
+        assert!(!off(&[]));
+        assert!(!off(&[("KIMA_IDENTIFY", "on")]));
+        assert!(!off(&[("KIMA_IDENTIFY", " ON ")]));
+        assert!(off(&[("KIMA_IDENTIFY", "off")]));
+        assert!(off(&[("KIMA_IDENTIFY", "Off")]));
+    }
+
+    #[test]
+    fn identify_invalid_fails() {
+        assert_eq!(
+            Config::from_lookup(lookup(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("KIMA_IDENTIFY", "maybe")
+            ])),
+            Err(ConfigError::Invalid {
+                name: "KIMA_IDENTIFY",
+                value: "maybe".into()
+            })
         );
     }
 

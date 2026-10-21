@@ -29,6 +29,10 @@ pub struct Config {
     pub contact: String,
     /// `MUSICBRAINZ_BASE_URL`: MusicBrainz or a mirror, without a trailing slash.
     pub musicbrainz_base_url: String,
+    /// `KIMA_FINGERPRINT_WORKERS`: fingerprint pool size; half the cores, at least 1 (spec §9.3).
+    pub fingerprint_workers: usize,
+    /// `ACOUSTID_DISABLED=true` (any case): no AcoustID rung, `fpcalc: false` (upstream's name).
+    pub acoustid_disabled: bool,
 }
 
 /// `KIMA_CONTACT` when unset.
@@ -189,6 +193,24 @@ impl Config {
             },
         };
 
+        let fingerprint_workers = match value("KIMA_FINGERPRINT_WORKERS") {
+            None => std::thread::available_parallelism()
+                .map_or(1, |n| n.get() / 2)
+                .max(1),
+            Some(raw) => match raw.parse::<usize>() {
+                Ok(n) if n > 0 => n,
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        name: "KIMA_FINGERPRINT_WORKERS",
+                        value: raw,
+                    });
+                }
+            },
+        };
+        // Upstream compares with `'true'`; any other value leaves AcoustID on.
+        let acoustid_disabled =
+            value("ACOUSTID_DISABLED").is_some_and(|v| v.eq_ignore_ascii_case("true"));
+
         Ok(Self {
             database_url,
             data_dir: value("KIMA_DATA_DIR")
@@ -213,6 +235,8 @@ impl Config {
             identify_env_off,
             contact: value("KIMA_CONTACT").unwrap_or_else(|| DEFAULT_CONTACT.into()),
             musicbrainz_base_url,
+            fingerprint_workers,
+            acoustid_disabled,
         })
     }
 }
@@ -358,6 +382,52 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn fingerprint_workers_default_half_cores() {
+        let config = Config::from_lookup(lookup(&[("DATABASE_URL", "postgres://x")])).unwrap();
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert_eq!(config.fingerprint_workers, (cores / 2).max(1));
+        let config = Config::from_lookup(lookup(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("KIMA_FINGERPRINT_WORKERS", " 3 "),
+        ]))
+        .unwrap();
+        assert_eq!(config.fingerprint_workers, 3);
+    }
+
+    #[test]
+    fn fingerprint_workers_zero_invalid() {
+        for bad in ["0", "-1", "two", "1.5"] {
+            assert_eq!(
+                Config::from_lookup(lookup(&[
+                    ("DATABASE_URL", "postgres://x"),
+                    ("KIMA_FINGERPRINT_WORKERS", bad)
+                ])),
+                Err(ConfigError::Invalid {
+                    name: "KIMA_FINGERPRINT_WORKERS",
+                    value: bad.into()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn acoustid_disabled_parses() {
+        let disabled = |extra: &[(&str, &str)]| {
+            let mut pairs = vec![("DATABASE_URL", "postgres://x")];
+            pairs.extend_from_slice(extra);
+            Config::from_lookup(lookup(&pairs))
+                .unwrap()
+                .acoustid_disabled
+        };
+        assert!(!disabled(&[]));
+        assert!(disabled(&[("ACOUSTID_DISABLED", "true")]));
+        assert!(disabled(&[("ACOUSTID_DISABLED", " TRUE ")]));
+        assert!(!disabled(&[("ACOUSTID_DISABLED", "false")]));
+        assert!(!disabled(&[("ACOUSTID_DISABLED", "1")]));
+        assert!(!disabled(&[("ACOUSTID_DISABLED", "yes")]));
     }
 
     #[test]

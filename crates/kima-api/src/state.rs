@@ -77,6 +77,9 @@ pub struct AppState {
     pub identify: IdentifySwitch,
     /// The one outbound HTTP client (spec §7). `Net::disabled()` unless `with_net` is used.
     pub net: Arc<Net>,
+    /// Whether fingerprints can be made: ffmpeg was found at startup and `ACOUSTID_DISABLED`
+    /// is not set (spec §9.4). `GET /api/system/features` answers it as `fpcalc`.
+    pub fpcalc: bool,
     /// Failed password sign-ins, per (client IP, username).
     pub login_limit: Arc<LoginLimiter>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
@@ -109,6 +112,7 @@ impl AppState {
             public_url: None,
             transcoder: None,
             cipher,
+            fpcalc: false,
             login_limit: Arc::new(LoginLimiter::new()),
             password_permits: Arc::new(AtomicU64::new(0)),
         }
@@ -132,6 +136,11 @@ impl AppState {
 
     pub fn with_net(mut self, net: Arc<Net>) -> Self {
         self.net = net;
+        self
+    }
+
+    pub fn with_fpcalc(mut self, fpcalc: bool) -> Self {
+        self.fpcalc = fpcalc;
         self
     }
 

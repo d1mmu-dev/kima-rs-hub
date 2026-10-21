@@ -12,6 +12,7 @@ rust-version = "1.85"
 kima-core = { path = "crates/kima-core" }
 kima-api = { path = "crates/kima-api" }
 kima-db = { path = "crates/kima-db" }
+kima-ident = { path = "crates/kima-ident" }
 kima-jobs = { path = "crates/kima-jobs" }
 kima-library = { path = "crates/kima-library" }
 kima-net = { path = "crates/kima-net" }
@@ -43,6 +44,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 lofty = "0.25"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false }
+rusty-chromaprint = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

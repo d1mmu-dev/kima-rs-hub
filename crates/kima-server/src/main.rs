@@ -77,6 +77,12 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("reading the source pauses")?;
     net.set_concurrency(kv.enrichment_concurrency);
+    // Fingerprinting needs ffmpeg; AcoustID can be switched off by env (spec §9.4).
+    let ffmpeg = kima_ident::chromaprint::ffmpeg_available().await;
+    if !ffmpeg {
+        warn!("ffmpeg not found: fingerprinting is unavailable");
+    }
+    let fpcalc = ffmpeg && !config.acoustid_disabled;
     let state = AppState::with_shutdown(pool.clone(), &secrets.session_secret, shutdown.clone())
         .with_cipher(cipher)
         .with_identify(identify)
@@ -85,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
         .with_shared_library_root(library_root.clone())
         .with_organize_target(config.organize_target.clone())
         .with_public_url(config.public_url.clone())
+        .with_fpcalc(fpcalc)
         .with_artwork_cache_mb(config.artwork_cache_mb)
         .with_transcoder(kima_library::transcode::Transcoder::new(
             config.data_dir.join("transcode"),

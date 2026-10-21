@@ -6,3 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 description = "Shared test helpers; only ever a dev-dependency."
+
+[dependencies]
+lofty.workspace = true

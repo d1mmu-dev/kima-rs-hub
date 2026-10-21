@@ -1506,6 +1506,9 @@ dependencies = [
 [[package]]
 name = "kima-test-support"
 version = "0.1.0"
+dependencies = [
+ "lofty",
+]
 
 [[package]]
 name = "kqueue"

@@ -467,4 +467,51 @@ mod system {
             .assert_status_ok();
         assert!(state.identify.enabled());
     }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn locked_switch_keeps_stored_value_across_saves(pool: PgPool) {
+        let (server, state, admin, _) = setup(pool.clone(), |s| {
+            s.with_identify(IdentifySwitch::new(true, true))
+        })
+        .await;
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "autoEnrichMetadata": true }))
+            .await
+            .assert_status_ok();
+        let mut posted = get(&server, &admin).await;
+        assert_eq!(posted["autoEnrichMetadata"], false);
+        posted["enrichmentConcurrency"] = json!(4);
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&posted)
+            .await
+            .assert_status_ok();
+        let kv = kima_db::settings_kv::load(&pool, &state.cipher)
+            .await
+            .unwrap();
+        assert!(kv.auto_enrich_metadata, "stored true survives the save");
+        assert_eq!(kv.enrichment_concurrency, 4);
+        let body = get(&server, &admin).await;
+        assert_eq!(body["autoEnrichMetadata"], false);
+        assert_eq!(body["autoEnrichMetadataLocked"], true);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn unlocked_post_of_false_is_stored(pool: PgPool) {
+        let (server, state, admin, _) = setup(pool.clone(), |s| s).await;
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "autoEnrichMetadata": false }))
+            .await
+            .assert_status_ok();
+        let kv = kima_db::settings_kv::load(&pool, &state.cipher)
+            .await
+            .unwrap();
+        assert!(!kv.auto_enrich_metadata);
+        assert!(!state.identify.enabled());
+    }
 }

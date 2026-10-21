@@ -77,7 +77,10 @@ fn secret_change(key: Key, value: &Value) -> Result<Option<Change>, ApiError> {
     }
 }
 
-fn changes(fields: &Map<String, Value>) -> Result<(Option<bool>, Vec<Change>), ApiError> {
+fn changes(
+    fields: &Map<String, Value>,
+    locked: bool,
+) -> Result<(Option<bool>, Vec<Change>), ApiError> {
     let mut registration_open = None;
     if let Some(v) = fields.get("registrationOpen") {
         registration_open = Some(
@@ -95,6 +98,11 @@ fn changes(fields: &Map<String, Value>) -> Result<(Option<bool>, Vec<Change>), A
             Key::FanartEnabled | Key::AutoEnrichMetadata => {
                 if !value.is_boolean() {
                     return Err(invalid(format!("{} must be a boolean", key.name())));
+                }
+                // Locked by KIMA_IDENTIFY=off, GET reports false whatever is stored, and the
+                // frontend posts that back with every save: ignore it so the stored value lives.
+                if key == Key::AutoEnrichMetadata && locked && *value == Value::Bool(false) {
+                    continue;
                 }
                 out.push(Change::Plain(key, value.clone()));
             }
@@ -125,7 +133,7 @@ async fn update(
     ApiJson(fields): ApiJson<Map<String, Value>>,
 ) -> Result<Json<Value>, ApiError> {
     // Validate everything first, so a rejected body stores nothing.
-    let (registration_open, changes) = changes(&fields)?;
+    let (registration_open, changes) = changes(&fields, state.identify.locked())?;
     let mut switch = None;
     for change in changes {
         match change {

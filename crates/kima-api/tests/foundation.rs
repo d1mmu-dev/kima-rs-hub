@@ -244,3 +244,18 @@ async fn admin_user_admits_admin(pool: PgPool) {
     res.assert_status_ok();
     res.assert_text("root");
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn features_fpcalc_reflects_state(pool: PgPool) {
+    for fpcalc in [false, true] {
+        let state = common::state(pool.clone()).with_fpcalc(fpcalc);
+        let (_, token) = common::user_with_token(&state, &format!("ana{fpcalc}")).await;
+        let server = TestServer::new(kima_api::router(state)).unwrap();
+        let body: Value = server
+            .get("/api/system/features")
+            .authorization_bearer(&token)
+            .await
+            .json();
+        assert_eq!(body["fpcalc"], json!(fpcalc));
+    }
+}

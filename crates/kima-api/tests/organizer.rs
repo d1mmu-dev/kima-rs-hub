@@ -74,7 +74,9 @@ async fn run_jobs(ctx: &LibraryCtx) {
             break;
         }
         for job in jobs {
-            kima_library::jobs::run(ctx, &job.payload).await.unwrap();
+            kima_library::jobs::run(ctx, &job.payload, &Default::default())
+                .await
+                .unwrap();
             kima_jobs::queue::complete(&ctx.pool, &job).await.unwrap();
         }
     }

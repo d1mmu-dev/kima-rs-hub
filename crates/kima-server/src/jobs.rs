@@ -11,12 +11,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-/// Lease for `library` jobs. A first reconcile of a large library (or an organizer run) can
-/// take hours, and the worker does not renew leases yet (heartbeats are planned for M3). With
-/// the default 5 min lease, a job on its final attempt would be reaped as "lease expired"
-/// while still running; 6 h keeps a long run from being reaped.
-pub const LIBRARY_LEASE: Duration = Duration::from_secs(6 * 3600);
-
 /// Maps a queue name to the handler that runs its jobs, with that queue's worker settings.
 #[derive(Default)]
 pub struct Registry {
@@ -51,17 +45,16 @@ impl Registry {
     }
 
     /// Registers the `library` queue (reconciles, single-file updates, organizer runs).
-    /// Concurrency 1: those jobs must never overlap. Lease: [`LIBRARY_LEASE`].
+    /// Concurrency 1: those jobs must never overlap. Default lease: long runs keep their claim
+    /// through the worker's heartbeat.
     pub fn register_library(&mut self, ctx: LibraryCtx) {
-        let mut config = WorkerConfig::new(library_jobs::QUEUE, 1);
-        config.lease = LIBRARY_LEASE;
-        self.register_config(config, library_jobs::handler(ctx));
+        self.register(library_jobs::QUEUE, 1, library_jobs::handler(ctx));
     }
 }
 
 /// Startup step for the `library` queue; call before [`spawn_all`]. Requeues jobs left
 /// `running` by a process that died (kima runs as a single process, so nothing can really be
-/// running yet; otherwise a killed reconcile would block the startup one for its 6 h lease),
+/// running yet; otherwise a killed reconcile would block the startup one until its lease ran out),
 /// then queues a reconcile unless one is already pending.
 pub async fn prepare_library_queue(pool: &PgPool) -> sqlx::Result<()> {
     let recovered = kima_jobs::queue::requeue_running(pool, library_jobs::QUEUE).await?;

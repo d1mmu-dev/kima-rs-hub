@@ -390,3 +390,156 @@ async fn enqueue_unless_queued_with_key_skips_only_queued_duplicates(pool: PgPoo
     assert!(add("a.flac").await.is_some());
     assert_eq!(add("a.flac").await, None);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn renew_extends_only_our_claim(pool: PgPool) {
+    let id = queue::enqueue(&pool, "q", json!({}), 3).await.unwrap();
+    let job = queue::claim(&pool, "q", 1, Duration::from_secs(1))
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(queue::renew(&pool, &job, LEASE).await.unwrap());
+    let far: bool = sqlx::query_scalar(
+        "SELECT locked_until > now() + interval '30 seconds' FROM jobs WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(far, "lease not extended");
+    // Once the claim is gone (reset to queued), renewing changes nothing.
+    sqlx::query("UPDATE jobs SET state = 'queued' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!queue::renew(&pool, &job, LEASE).await.unwrap());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn fail_permanent_fails_before_the_last_attempt(pool: PgPool) {
+    let id = queue::enqueue(&pool, "q", json!({}), 5).await.unwrap();
+    let job = queue::claim(&pool, "q", 1, LEASE).await.unwrap().remove(0);
+    assert!(queue::fail_permanent(&pool, &job, "nope").await.unwrap());
+    let (state, attempts, error, _) = state_of(&pool, id).await;
+    assert_eq!(
+        (state.as_str(), attempts, error.as_deref()),
+        ("failed", 1, Some("nope"))
+    );
+    // Same guard as `fail`: a second call is a stale outcome.
+    assert!(!queue::fail_permanent(&pool, &job, "again").await.unwrap());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_at_waits_until_run_at(pool: PgPool) {
+    let run_at = time::OffsetDateTime::now_utc() + Duration::from_secs(2);
+    let id = queue::enqueue_at(&pool, "q", json!({}), 3, run_at)
+        .await
+        .unwrap();
+    assert!(
+        queue::claim(&pool, "q", 10, LEASE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let jobs = queue::claim(&pool, "q", 10, LEASE).await.unwrap();
+    assert_eq!(jobs.iter().map(|j| j.id).collect::<Vec<_>>(), vec![id]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_at_in_the_future_does_not_notify(pool: PgPool) {
+    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+        .await
+        .unwrap();
+    listener.listen(queue::NOTIFY_CHANNEL).await.unwrap();
+    let later = time::OffsetDateTime::now_utc() + Duration::from_secs(3600);
+    queue::enqueue_at(&pool, "q", json!({}), 3, later)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), listener.recv())
+            .await
+            .is_err(),
+        "a delayed job must not wake the workers"
+    );
+    queue::enqueue(&pool, "q", json!({}), 3).await.unwrap();
+    let n = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("a due job wakes the workers")
+        .unwrap();
+    assert_eq!(n.payload(), "q");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reschedule_queued_moves_to_now(pool: PgPool) {
+    let later = time::OffsetDateTime::now_utc() + Duration::from_secs(3600);
+    let id = queue::enqueue_at(&pool, "q", json!({"kind": "cycle"}), 3, later)
+        .await
+        .unwrap();
+    queue::enqueue_at(&pool, "q", json!({"kind": "other"}), 3, later)
+        .await
+        .unwrap();
+    assert!(
+        queue::claim(&pool, "q", 10, LEASE)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        queue::reschedule_queued(&pool, "q", "cycle", time::OffsetDateTime::now_utc())
+            .await
+            .unwrap()
+    );
+    let jobs = queue::claim(&pool, "q", 10, LEASE).await.unwrap();
+    assert_eq!(jobs.iter().map(|j| j.id).collect::<Vec<_>>(), vec![id]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reschedule_queued_without_job_is_false(pool: PgPool) {
+    let now = time::OffsetDateTime::now_utc();
+    assert!(
+        !queue::reschedule_queued(&pool, "q", "cycle", now)
+            .await
+            .unwrap()
+    );
+    // A running job is not queued: it is left alone.
+    queue::enqueue(&pool, "q", json!({"kind": "cycle"}), 3)
+        .await
+        .unwrap();
+    queue::claim(&pool, "q", 10, LEASE).await.unwrap();
+    assert!(
+        !queue::reschedule_queued(&pool, "q", "cycle", now)
+            .await
+            .unwrap()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_at_unless_queued_with_key_dedupes_queued(pool: PgPool) {
+    let later = time::OffsetDateTime::now_utc() + Duration::from_secs(3600);
+    let add = |album: &'static str| {
+        let pool = pool.clone();
+        async move {
+            queue::enqueue_at_unless_queued_with_key(
+                &pool,
+                "q",
+                json!({"kind": "album", "album": album}),
+                3,
+                "album",
+                later,
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let first = add("a").await.expect("queued");
+    assert_eq!(add("a").await, None);
+    assert!(add("b").await.is_some());
+    let delayed: bool = sqlx::query_scalar("SELECT run_at > now() FROM jobs WHERE id = $1")
+        .bind(first)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(delayed);
+}

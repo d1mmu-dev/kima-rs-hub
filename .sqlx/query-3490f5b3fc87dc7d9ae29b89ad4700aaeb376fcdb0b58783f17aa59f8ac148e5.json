@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE jobs SET run_at = $3\n           WHERE state = 'queued'\n             AND id = (SELECT id FROM jobs\n                       WHERE queue = $1 AND state = 'queued' AND payload ->> 'kind' = $2\n                       ORDER BY created_at, id\n                       LIMIT 1\n                       FOR UPDATE)\n           RETURNING run_at <= now() AS \"due!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "due!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "3490f5b3fc87dc7d9ae29b89ad4700aaeb376fcdb0b58783f17aa59f8ac148e5"
+}

@@ -29,6 +29,7 @@ use kima_db::organizer::{self as db, JournalRow, NewRow, Run};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -81,8 +82,9 @@ pub enum OrganizeError {
     /// state with the reason recorded.
     #[error("{0}")]
     Refused(String),
-    /// A test hook stopped the run mid-way.
-    #[error("stopped by a test hook")]
+    /// The job's cancel token fired (shutdown or a lost claim), or a test hook stopped the run
+    /// mid-way. The journal keeps what was done; the next run resumes from it.
+    #[error("organizer run interrupted")]
     Interrupted,
 }
 
@@ -137,7 +139,18 @@ pub async fn resume_interrupted(pool: &kima_db::PgPool) -> sqlx::Result<usize> {
 /// The job body. A failure ends the run as `failed` (an apply can be started again and resumes
 /// from the journal); only a database error that also prevents recording that is returned.
 pub async fn run_job(ctx: &LibraryCtx, run_id: Uuid, action: Action) -> Result<()> {
-    match run_action(ctx, run_id, action, &Hooks::default()).await {
+    run_job_cancellable(ctx, run_id, action, &CancellationToken::new()).await
+}
+
+/// [`run_job`], returning [`OrganizeError::Interrupted`] at the next row boundary once `cancel`
+/// fires. The run is left as it is (not failed), to be resumed from the journal.
+pub async fn run_job_cancellable(
+    ctx: &LibraryCtx,
+    run_id: Uuid,
+    action: Action,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    match run_action_cancellable(ctx, run_id, action, &Hooks::default(), cancel).await {
         Ok(()) => Ok(()),
         Err(OrganizeError::Interrupted) => Err(OrganizeError::Interrupted),
         Err(OrganizeError::Refused(reason)) => {
@@ -159,13 +172,23 @@ pub async fn run_action(
     action: Action,
     hooks: &Hooks,
 ) -> Result<()> {
+    run_action_cancellable(ctx, run_id, action, hooks, &CancellationToken::new()).await
+}
+
+async fn run_action_cancellable(
+    ctx: &LibraryCtx,
+    run_id: Uuid,
+    action: Action,
+    hooks: &Hooks,
+    cancel: &CancellationToken,
+) -> Result<()> {
     let run = db::get_run(&ctx.pool, run_id)
         .await?
         .ok_or_else(|| OrganizeError::Invalid(format!("organizer run {run_id} not found")))?;
     match action {
         Action::Preview => preview(ctx, run).await,
-        Action::Apply => apply(ctx, run, hooks).await,
-        Action::Undo => undo(ctx, run, hooks).await,
+        Action::Apply => apply(ctx, run, hooks, cancel).await,
+        Action::Undo => undo(ctx, run, hooks, cancel).await,
         Action::SwitchRoot => switch_root(ctx, run).await,
     }
 }
@@ -652,6 +675,7 @@ struct Runner<'a> {
     source: PathBuf,
     target: PathBuf,
     hooks: &'a Hooks,
+    cancel: &'a CancellationToken,
     finished: usize,
     progress: Progress,
     /// Paths given to the watcher's ignore set during the current row.
@@ -693,7 +717,7 @@ struct Op {
 }
 
 impl<'a> Runner<'a> {
-    fn new(ctx: &'a LibraryCtx, run: Run, hooks: &'a Hooks) -> Self {
+    fn new(ctx: &'a LibraryCtx, run: Run, hooks: &'a Hooks, cancel: &'a CancellationToken) -> Self {
         let source = PathBuf::from(&run.source_root);
         let target = PathBuf::from(&run.target_root);
         Self {
@@ -702,6 +726,7 @@ impl<'a> Runner<'a> {
             source,
             target,
             hooks,
+            cancel,
             finished: 0,
             progress: Progress {
                 total: 0,
@@ -736,8 +761,11 @@ impl<'a> Runner<'a> {
         });
     }
 
-    /// Before a row: the test hook's plain stop.
+    /// Before a row: stop once the job is cancelled, or at the test hook's plain stop.
     fn checkpoint(&self) -> Result<()> {
+        if self.cancel.is_cancelled() {
+            return Err(OrganizeError::Interrupted);
+        }
         if self.hooks.stop_after == Some(self.finished) && !self.hooks.stop_mid_row {
             return Err(OrganizeError::Interrupted);
         }
@@ -842,7 +870,12 @@ fn stage_name(row: &JournalRow, dst_rel: &str, dir: Dir) -> String {
 // ---------------------------------------------------------------------------------------------
 // Apply
 
-async fn apply(ctx: &LibraryCtx, run: Run, hooks: &Hooks) -> Result<()> {
+async fn apply(
+    ctx: &LibraryCtx,
+    run: Run,
+    hooks: &Hooks,
+    cancel: &CancellationToken,
+) -> Result<()> {
     if run.state != "applying" {
         return Err(OrganizeError::Invalid(format!(
             "run is {}, not applying",
@@ -857,7 +890,7 @@ async fn apply(ctx: &LibraryCtx, run: Run, hooks: &Hooks) -> Result<()> {
             current.display()
         )));
     }
-    let mut r = Runner::new(ctx, run, hooks);
+    let mut r = Runner::new(ctx, run, hooks, cancel);
     let res = if r.is_move() {
         move_rows(&mut r, Dir::Forward).await
     } else {
@@ -1390,7 +1423,7 @@ async fn finish(r: &Runner<'_>, dir: Dir) -> Result<()> {
 // ---------------------------------------------------------------------------------------------
 // Undo
 
-async fn undo(ctx: &LibraryCtx, run: Run, hooks: &Hooks) -> Result<()> {
+async fn undo(ctx: &LibraryCtx, run: Run, hooks: &Hooks, cancel: &CancellationToken) -> Result<()> {
     if run.state != "undoing" {
         return Err(OrganizeError::Invalid(format!(
             "run is {}, not undoing",
@@ -1401,7 +1434,7 @@ async fn undo(ctx: &LibraryCtx, run: Run, hooks: &Hooks) -> Result<()> {
         db::revert_undo(&ctx.pool, run.id, &reason).await?;
         return Err(OrganizeError::Refused(reason));
     }
-    let mut r = Runner::new(ctx, run, hooks);
+    let mut r = Runner::new(ctx, run, hooks, cancel);
     let res = if r.is_move() {
         move_rows(&mut r, Dir::Back).await
     } else {

@@ -198,6 +198,7 @@ async fn answers_transient_on_network_error(pool: PgPool) {
     );
     let out = acoustid::identify(&net, KEY, "fp", 200, None).await;
     assert!(matches!(out, Outcome::Transient(_)), "{out:?}");
+    assert_eq!(out.code(), Some("NETWORK"), "{out:?}");
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -262,6 +263,10 @@ async fn sends_the_live_verified_request_shape(pool: PgPool) {
     // Only a request with exactly this body is answered; anything else gets the replay's 599.
     assert!(matches!(out, Outcome::Absent(_)), "{out:?}");
     assert_eq!(replay.asked(), vec!["POST /lookup".to_string()]);
+    assert_eq!(
+        replay.content_types(),
+        vec!["application/x-www-form-urlencoded".to_string()]
+    );
     assert!(!body.contains("track="));
     assert!(!body.contains("recordings%2Breleasegroups"));
 }

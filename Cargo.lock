@@ -1388,6 +1388,7 @@ dependencies = [
  "kima-library",
  "kima-net",
  "kima-test-support",
+ "percent-encoding",
  "regex",
  "rusty-chromaprint",
  "serde",
@@ -1398,6 +1399,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
+ "tracing",
  "unicode-normalization",
  "uuid",
 ]

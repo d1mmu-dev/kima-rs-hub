@@ -1,0 +1,8 @@
+[
+  {
+    "method": "POST",
+    "url": "/lookup",
+    "status": 200,
+    "body": {"status": "ok", "results": [{"id": "cluster", "score": 0.95, "recordings": [{"id": "00000000-0000-4000-8000-000000000006", "title": "Day 6", "duration": 586}, {"id": "00000000-0000-4000-8000-000000000002", "title": "Day 2", "duration": 515.8}]}]}
+  }
+]

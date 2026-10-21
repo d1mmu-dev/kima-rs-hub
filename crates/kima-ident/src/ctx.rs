@@ -22,7 +22,7 @@ pub struct IdentCtx {
 }
 
 /// Process configuration for identification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct IdentConfig {
     /// ffmpeg was found at startup (spec §9.4): the fingerprint stage is offered.
     pub fingerprinting: bool,
@@ -30,6 +30,31 @@ pub struct IdentConfig {
     pub fingerprint_workers: usize,
     /// `ACOUSTID_DISABLED=true`.
     pub acoustid_disabled: bool,
+    /// `ACOUSTID_CLIENT_KEY`: second in the key order (spec §8.4). A secret.
+    pub acoustid_env_key: Option<String>,
+}
+
+// Never prints the key.
+impl std::fmt::Debug for IdentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentConfig")
+            .field("fingerprinting", &self.fingerprinting)
+            .field("fingerprint_workers", &self.fingerprint_workers)
+            .field("acoustid_disabled", &self.acoustid_disabled)
+            .field(
+                "acoustid_env_key",
+                &self.acoustid_env_key.as_ref().map(|_| ".."),
+            )
+            .finish()
+    }
+}
+
+impl IdentCtx {
+    /// The AcoustID client key now: setting, env, default (spec §8.4).
+    pub async fn acoustid_key(&self) -> Option<String> {
+        crate::acoustid::resolve_client_key(&self.settings, self.config.acoustid_env_key.as_deref())
+            .await
+    }
 }
 
 impl IdentConfig {
@@ -47,6 +72,7 @@ impl Default for IdentConfig {
             fingerprinting: true,
             fingerprint_workers: Self::default_fingerprint_workers(),
             acoustid_disabled: false,
+            acoustid_env_key: None,
         }
     }
 }

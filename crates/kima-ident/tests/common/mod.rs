@@ -40,6 +40,7 @@ pub fn ident_ctx(pool: &PgPool, root: &Path, bases: Bases) -> IdentCtx {
             fingerprinting: true,
             fingerprint_workers: 2,
             acoustid_disabled: false,
+            acoustid_env_key: None,
         },
     }
 }

@@ -6,6 +6,7 @@
 //! message.
 
 pub mod fingerprint;
+pub mod recording;
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -199,6 +200,19 @@ pub fn lost_worker(claim: &Claim) -> FailureRecord {
             claim.redelivered
         ),
     )
+}
+
+/// How one claim ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimResult {
+    Done,
+    /// Closed `failed`, or parked `pending` (a paused source).
+    Failed,
+    /// The claim was no longer current (or the track is gone); its report and writes were
+    /// dropped.
+    Stale,
+    /// Cancelled before it finished; left `working` for the lease to expire.
+    Abandoned,
 }
 
 /// What one batch of a stage did. `claimed − done − failed` claims were stale or abandoned.

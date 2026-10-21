@@ -17,6 +17,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+pub use super::ClaimResult;
 use super::{BatchReport, REDELIVERY_CAP, STAGE_TIMEOUT, StageFailure, lost_worker, record_for};
 use crate::IdentCtx;
 use crate::chromaprint::{DecodeError, fingerprint_file};
@@ -28,17 +29,6 @@ pub const SOURCE: &str = "ffmpeg";
 /// Slack on top of ffmpeg's own [`STAGE_TIMEOUT`] for the file checks around it; past it
 /// the whole attempt is a `TIMEOUT`.
 const OUTER_GRACE: Duration = Duration::from_secs(5);
-
-/// How one claim ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClaimResult {
-    Done,
-    Failed,
-    /// The claim was no longer current; the report (and any fingerprint) was dropped.
-    Stale,
-    /// Cancelled before it finished; left `working` for the lease to expire.
-    Abandoned,
-}
 
 /// Claims up to [`BATCH`] tracks and fingerprints them, at most `fingerprint_workers` at
 /// once. Nothing is claimed when fingerprinting is unavailable or `cancel` already fired.

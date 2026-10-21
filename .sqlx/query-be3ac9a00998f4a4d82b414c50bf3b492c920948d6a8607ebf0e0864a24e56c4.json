@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM album_genres\n                          WHERE album_id = $1 AND source = 'musicbrainz') AS \"has!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "has!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "be3ac9a00998f4a4d82b414c50bf3b492c920948d6a8607ebf0e0864a24e56c4"
+}

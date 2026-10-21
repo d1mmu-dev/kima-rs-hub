@@ -11,6 +11,7 @@ use kima_db::settings_kv::SettingsCache;
 use kima_library::scan::LibraryRoot;
 use kima_library::transcode::Transcoder;
 use kima_library::watch::{IgnoreSet, SharedStatus, WatchStatus};
+use kima_net::Net;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -74,6 +75,8 @@ pub struct AppState {
     pub settings: SettingsCache,
     /// Whether outbound lookups may run: `autoEnrichMetadata` and `KIMA_IDENTIFY` (D-111).
     pub identify: IdentifySwitch,
+    /// The one outbound HTTP client (spec §7). `Net::disabled()` unless `with_net` is used.
+    pub net: Arc<Net>,
     /// Failed password sign-ins, per (client IP, username).
     pub login_limit: Arc<LoginLimiter>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
@@ -91,6 +94,7 @@ impl AppState {
         Self {
             settings: SettingsCache::new(pool.clone(), cipher.clone()),
             identify: IdentifySwitch::new(false, true),
+            net: Arc::new(Net::disabled()),
             pool,
             jwt: Arc::new(JwtKeys::new(session_secret)),
             events: EventBus::new(1024),
@@ -123,6 +127,11 @@ impl AppState {
 
     pub fn with_identify(mut self, identify: IdentifySwitch) -> Self {
         self.identify = identify;
+        self
+    }
+
+    pub fn with_net(mut self, net: Arc<Net>) -> Self {
+        self.net = net;
         self
     }
 

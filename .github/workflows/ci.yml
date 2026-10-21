@@ -30,6 +30,8 @@ jobs:
       DATABASE_URL: postgres://kima:kima@localhost:5432/kima
       SQLX_OFFLINE: "true"
       CI: "true"
+      # No test reaches the real network: kima-net panics on any host but this machine.
+      KIMA_NET_DENY_REAL: "1"
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg

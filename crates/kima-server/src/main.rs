@@ -61,12 +61,26 @@ async fn main() -> anyhow::Result<()> {
     let kv = kima_db::settings_kv::load(&pool, &cipher)
         .await
         .context("reading the key-value settings")?;
+    let identify =
+        kima_core::identify::IdentifySwitch::new(config.identify_env_off, kv.auto_enrich_metadata);
+    // The one outbound HTTP client (spec §5): pauses survive restarts.
+    let net = kima_net::Net::new(
+        kima_net::NetConfig::production(
+            env!("CARGO_PKG_VERSION"),
+            &config.contact,
+            &config.musicbrainz_base_url,
+        ),
+        pool.clone(),
+        identify.clone(),
+    );
+    net.load_pauses()
+        .await
+        .context("reading the source pauses")?;
+    net.set_concurrency(kv.enrichment_concurrency);
     let state = AppState::with_shutdown(pool.clone(), &secrets.session_secret, shutdown.clone())
         .with_cipher(cipher)
-        .with_identify(kima_core::identify::IdentifySwitch::new(
-            config.identify_env_off,
-            kv.auto_enrich_metadata,
-        ))
+        .with_identify(identify)
+        .with_net(std::sync::Arc::new(net))
         .with_data_dir(config.data_dir.clone())
         .with_shared_library_root(library_root.clone())
         .with_organize_target(config.organize_target.clone())

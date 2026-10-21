@@ -30,6 +30,8 @@ fn config() -> Config {
         public_url: None,
         library_sync_cron: None,
         identify_env_off: false,
+        contact: kima_core::config::DEFAULT_CONTACT.into(),
+        musicbrainz_base_url: kima_core::config::DEFAULT_MUSICBRAINZ_BASE_URL.into(),
     }
 }
 

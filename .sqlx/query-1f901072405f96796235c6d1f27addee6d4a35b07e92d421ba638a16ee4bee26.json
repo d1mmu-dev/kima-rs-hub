@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM source_pauses WHERE source = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1f901072405f96796235c6d1f27addee6d4a35b07e92d421ba638a16ee4bee26"
+}

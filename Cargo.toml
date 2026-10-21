@@ -14,6 +14,7 @@ kima-api = { path = "crates/kima-api" }
 kima-db = { path = "crates/kima-db" }
 kima-jobs = { path = "crates/kima-jobs" }
 kima-library = { path = "crates/kima-library" }
+kima-net = { path = "crates/kima-net" }
 kima-subsonic = { path = "crates/kima-subsonic" }
 kima-test-support = { path = "crates/kima-test-support" }
 
@@ -27,6 +28,7 @@ hex = "0.4"
 hkdf = "0.13"
 hmac = "0.13"
 md-5 = "0.11"
+percent-encoding = "2"
 form_urlencoded = "1"
 quick-xml = "0.37"
 notify-debouncer-full = "0.7"

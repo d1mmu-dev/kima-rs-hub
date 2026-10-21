@@ -8,6 +8,7 @@ pub mod api_keys;
 pub mod attention;
 pub mod bookmarks;
 pub mod browse;
+pub mod http_cache;
 pub mod library;
 pub mod organizer;
 pub mod playback;

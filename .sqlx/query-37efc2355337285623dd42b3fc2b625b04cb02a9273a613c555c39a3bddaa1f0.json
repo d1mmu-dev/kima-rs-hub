@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.id AS \"id!\" FROM UNNEST($1::text[]) WITH ORDINALITY AS u(key, ord)\n           JOIN genres g ON g.key = u.key\n           ORDER BY u.ord",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "37efc2355337285623dd42b3fc2b625b04cb02a9273a613c555c39a3bddaa1f0"
+}

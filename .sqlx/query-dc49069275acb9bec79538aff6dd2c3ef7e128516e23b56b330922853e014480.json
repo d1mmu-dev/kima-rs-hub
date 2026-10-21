@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM genres g\n         WHERE NOT EXISTS (SELECT 1 FROM track_genres x WHERE x.genre_id = g.id)\n           AND NOT EXISTS (SELECT 1 FROM album_genres x WHERE x.genre_id = g.id)\n           AND NOT EXISTS (SELECT 1 FROM artist_genres x WHERE x.genre_id = g.id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "dc49069275acb9bec79538aff6dd2c3ef7e128516e23b56b330922853e014480"
+}

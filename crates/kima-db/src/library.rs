@@ -50,7 +50,40 @@ pub struct ResolvedTrack {
     pub mtime: OffsetDateTime,
     pub fingerprint: [u8; 32],
     pub guessed: Guessed,
+    /// MusicBrainz ids as read from the file (spec §8.1).
+    pub ids: TagIds,
+    /// Normalised; stored with `isrc_source = 'id3'`.
+    pub isrc: Option<String>,
+    pub disc_total: Option<i32>,
+    pub track_total: Option<i32>,
+    /// The album artist's MBID by spec §8.1's artist rule, decided by the scanner.
+    pub artist_mbid_candidate: Option<Uuid>,
 }
+
+/// The MusicBrainz ids a file carries.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TagIds {
+    pub recording: Option<Uuid>,
+    pub release_track: Option<Uuid>,
+    pub release: Option<Uuid>,
+    pub release_group: Option<Uuid>,
+    pub artists: Vec<Uuid>,
+    pub album_artists: Vec<Uuid>,
+}
+
+/// What [`upsert_track`] wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Upserted {
+    pub track: Uuid,
+    pub album: Uuid,
+    pub artist: Uuid,
+    /// The row existed and its stored content fingerprint differed.
+    pub content_changed: bool,
+}
+
+/// MusicBrainz's Various Artists id; never looked up.
+pub const VARIOUS_ARTISTS_MBID: Uuid = uuid::uuid!("89ad4ac3-39f7-470e-963a-56509c546377");
+const VARIOUS_ARTISTS_KEY: &str = "various artists";
 
 #[derive(Debug, Clone)]
 pub struct TrackRow {
@@ -77,11 +110,14 @@ fn is_well_capitalised(s: &str) -> bool {
     s.chars().any(char::is_lowercase) && s.chars().any(char::is_uppercase)
 }
 
-/// Finds or creates the artist and album, then upserts the track by path. A re-seen
-/// path clears `missing_since`. Returns the track id.
-pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Result<Uuid> {
+/// Finds or creates the artist and album, then upserts the track by path, with its tag ids,
+/// ISRC and totals. A re-seen path clears `missing_since`. A file ISRC is stored with
+/// `isrc_source = 'id3'`; a file without one clears an `id3` value and keeps any other. A new
+/// Various Artists row is created with its MBID and `enrichment_status = 'completed'`.
+pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Result<Upserted> {
+    let va = t.album_artist_key == VARIOUS_ARTISTS_KEY;
     let artist_id = sqlx::query_scalar!(
-        r#"INSERT INTO artists (id, name, name_key) VALUES ($1, $2, $3)
+        r#"INSERT INTO artists (id, name, name_key, mbid, enrichment_status) VALUES ($1, $2, $3, $5, $6)
            ON CONFLICT (name_key) DO UPDATE
            SET name = CASE WHEN $4 AND NOT (artists.name <> lower(artists.name)
                                             AND artists.name <> upper(artists.name))
@@ -90,7 +126,9 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
         Uuid::now_v7(),
         t.album_artist,
         t.album_artist_key,
-        is_well_capitalised(&t.album_artist)
+        is_well_capitalised(&t.album_artist),
+        va.then_some(VARIOUS_ARTISTS_MBID),
+        if va { "completed" } else { "pending" }
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -111,16 +149,39 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
     .fetch_one(&mut *tx)
     .await?;
 
-    sqlx::query_scalar!(
+    let previous: Option<Vec<u8>> =
+        sqlx::query_scalar!("SELECT fingerprint FROM tracks WHERE path = $1", t.path)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+    let track_id = sqlx::query_scalar!(
         r#"INSERT INTO tracks (id, album_id, artist_name, title, year, disc, track_no, duration_secs,
-                               codec, bitrate, path, size, mtime, fingerprint, guessed)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                               codec, bitrate, path, size, mtime, fingerprint, guessed,
+                               tag_recording_mbid, tag_release_track_mbid, tag_release_mbid,
+                               tag_release_group_mbid, tag_artist_mbids, tag_album_artist_mbids,
+                               disc_total, track_total, isrc, isrc_source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                   $16, $17, $18, $19, $20, $21, $22, $23, $24,
+                   CASE WHEN $24::text IS NULL THEN NULL ELSE 'id3' END)
            ON CONFLICT (path) DO UPDATE
            SET album_id = EXCLUDED.album_id, artist_name = EXCLUDED.artist_name,
                title = EXCLUDED.title, year = EXCLUDED.year, disc = EXCLUDED.disc, track_no = EXCLUDED.track_no,
                duration_secs = EXCLUDED.duration_secs, codec = EXCLUDED.codec,
                bitrate = EXCLUDED.bitrate, size = EXCLUDED.size, mtime = EXCLUDED.mtime,
                fingerprint = EXCLUDED.fingerprint, guessed = EXCLUDED.guessed,
+               tag_recording_mbid = EXCLUDED.tag_recording_mbid,
+               tag_release_track_mbid = EXCLUDED.tag_release_track_mbid,
+               tag_release_mbid = EXCLUDED.tag_release_mbid,
+               tag_release_group_mbid = EXCLUDED.tag_release_group_mbid,
+               tag_artist_mbids = EXCLUDED.tag_artist_mbids,
+               tag_album_artist_mbids = EXCLUDED.tag_album_artist_mbids,
+               disc_total = EXCLUDED.disc_total, track_total = EXCLUDED.track_total,
+               isrc = CASE WHEN EXCLUDED.isrc IS NOT NULL THEN EXCLUDED.isrc
+                           WHEN tracks.isrc_source = 'id3' THEN NULL
+                           ELSE tracks.isrc END,
+               isrc_source = CASE WHEN EXCLUDED.isrc IS NOT NULL THEN EXCLUDED.isrc_source
+                                  WHEN tracks.isrc_source = 'id3' THEN NULL
+                                  ELSE tracks.isrc_source END,
                missing_since = NULL, updated_at = now()
            RETURNING id"#,
         Uuid::now_v7(),
@@ -138,8 +199,87 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
         t.mtime,
         t.fingerprint.as_slice(),
         Json(&t.guessed) as Json<&Guessed>,
+        t.ids.recording,
+        t.ids.release_track,
+        t.ids.release,
+        t.ids.release_group,
+        &t.ids.artists,
+        &t.ids.album_artists,
+        t.disc_total,
+        t.track_total,
+        t.isrc,
     )
     .fetch_one(&mut *tx)
+    .await?;
+    Ok(Upserted {
+        track: track_id,
+        album: album_id,
+        artist: artist_id,
+        content_changed: previous.is_some_and(|f| f.as_slice() != t.fingerprint.as_slice()),
+    })
+}
+
+/// Sets the album's `release_mbid` and `release_group_mbid` to the mode of its present tracks'
+/// tag values, ties to the smallest UUID. Each is written (with source `tag`) only while the
+/// stored source is NULL or `tag`: an `autotag` or `user` value wins over tags (R2).
+pub async fn refresh_album_mbids(conn: &mut PgConnection, album: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"WITH rel AS (
+               SELECT tag_release_mbid AS m FROM tracks
+               WHERE album_id = $1 AND missing_since IS NULL AND tag_release_mbid IS NOT NULL
+               GROUP BY tag_release_mbid ORDER BY count(*) DESC, tag_release_mbid LIMIT 1),
+           rg AS (
+               SELECT tag_release_group_mbid AS m FROM tracks
+               WHERE album_id = $1 AND missing_since IS NULL AND tag_release_group_mbid IS NOT NULL
+               GROUP BY tag_release_group_mbid ORDER BY count(*) DESC, tag_release_group_mbid LIMIT 1)
+           UPDATE albums SET
+               release_mbid = CASE WHEN release_mbid_source IS NULL OR release_mbid_source = 'tag'
+                                   THEN (SELECT m FROM rel) ELSE release_mbid END,
+               release_mbid_source = CASE WHEN release_mbid_source IS NULL OR release_mbid_source = 'tag'
+                                          THEN CASE WHEN EXISTS (SELECT 1 FROM rel) THEN 'tag' END
+                                          ELSE release_mbid_source END,
+               release_group_mbid = CASE WHEN release_group_mbid_source IS NULL
+                                              OR release_group_mbid_source = 'tag'
+                                         THEN (SELECT m FROM rg) ELSE release_group_mbid END,
+               release_group_mbid_source = CASE WHEN release_group_mbid_source IS NULL
+                                                     OR release_group_mbid_source = 'tag'
+                                                THEN CASE WHEN EXISTS (SELECT 1 FROM rg) THEN 'tag' END
+                                                ELSE release_group_mbid_source END
+           WHERE id = $1"#,
+        album
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Sets the artist's MBID from tags (`mbid_source = 'tag'`) only while it has none. Returns
+/// whether it was set.
+pub async fn set_artist_mbid_if_unset(
+    conn: &mut PgConnection,
+    artist: Uuid,
+    mbid: Uuid,
+) -> sqlx::Result<bool> {
+    let r = sqlx::query!(
+        "UPDATE artists SET mbid = $2, mbid_source = 'tag' WHERE id = $1 AND mbid IS NULL",
+        artist,
+        mbid
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// The artists of the given albums.
+pub async fn artists_of_albums(
+    conn: &mut PgConnection,
+    albums: &[Uuid],
+) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar!(
+        "SELECT DISTINCT artist_id FROM albums WHERE id = ANY($1)",
+        albums
+    )
+    .fetch_all(&mut *conn)
     .await
 }
 
@@ -306,15 +446,19 @@ pub async fn paths_under(pool: &PgPool, dir_prefix: &str) -> sqlx::Result<Vec<St
     .await
 }
 
-/// Clears the missing flag of tracks whose file is back at the same path, unchanged.
-/// Returns how many rows changed.
+/// Clears the missing flag of tracks whose file is back at the same path, unchanged, and
+/// reopens their `FILE_MISSING` stage rows. Returns how many tracks changed.
 pub async fn clear_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> {
-    let r = sqlx::query!(
+    let mut tx = pool.begin().await?;
+    let ids = sqlx::query_scalar!(
         "UPDATE tracks SET missing_since = NULL, updated_at = now()
-         WHERE path = ANY($1) AND missing_since IS NOT NULL",
+         WHERE path = ANY($1) AND missing_since IS NOT NULL
+         RETURNING id",
         paths
     )
-    .execute(pool)
+    .fetch_all(&mut *tx)
     .await?;
-    Ok(r.rows_affected())
+    crate::stages::reopen_file_missing_many(&mut tx, &ids).await?;
+    tx.commit().await?;
+    Ok(ids.len() as u64)
 }

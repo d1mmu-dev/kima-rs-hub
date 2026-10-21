@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO album_genres (album_id, genre_id, source, rank)\n               SELECT album_id, genre_id, 'file', (rn - 1)::int2 FROM (\n                   SELECT t.album_id, tg.genre_id,\n                          row_number() OVER (PARTITION BY t.album_id\n                                             ORDER BY count(DISTINCT t.id) DESC, g.name, g.id) AS rn\n                   FROM tracks t\n                   JOIN track_genres tg ON tg.track_id = t.id AND tg.source = 'file'\n                   JOIN genres g ON g.id = tg.genre_id\n                   WHERE t.album_id = ANY($1) AND t.missing_since IS NULL\n                   GROUP BY t.album_id, tg.genre_id, g.name, g.id\n               ) ranked\n               WHERE rn <= $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6a352b407f5a8973ce493d68a87375c6c01a72990be945241af74bd72b253630"
+}

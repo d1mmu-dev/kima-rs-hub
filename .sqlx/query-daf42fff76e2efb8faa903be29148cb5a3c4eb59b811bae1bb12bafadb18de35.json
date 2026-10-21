@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH rel AS (\n               SELECT tag_release_mbid AS m FROM tracks\n               WHERE album_id = $1 AND missing_since IS NULL AND tag_release_mbid IS NOT NULL\n               GROUP BY tag_release_mbid ORDER BY count(*) DESC, tag_release_mbid LIMIT 1),\n           rg AS (\n               SELECT tag_release_group_mbid AS m FROM tracks\n               WHERE album_id = $1 AND missing_since IS NULL AND tag_release_group_mbid IS NOT NULL\n               GROUP BY tag_release_group_mbid ORDER BY count(*) DESC, tag_release_group_mbid LIMIT 1)\n           UPDATE albums SET\n               release_mbid = CASE WHEN release_mbid_source IS NULL OR release_mbid_source = 'tag'\n                                   THEN (SELECT m FROM rel) ELSE release_mbid END,\n               release_mbid_source = CASE WHEN release_mbid_source IS NULL OR release_mbid_source = 'tag'\n                                          THEN CASE WHEN EXISTS (SELECT 1 FROM rel) THEN 'tag' END\n                                          ELSE release_mbid_source END,\n               release_group_mbid = CASE WHEN release_group_mbid_source IS NULL\n                                              OR release_group_mbid_source = 'tag'\n                                         THEN (SELECT m FROM rg) ELSE release_group_mbid END,\n               release_group_mbid_source = CASE WHEN release_group_mbid_source IS NULL\n                                                     OR release_group_mbid_source = 'tag'\n                                                THEN CASE WHEN EXISTS (SELECT 1 FROM rg) THEN 'tag' END\n                                                ELSE release_group_mbid_source END\n           WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "daf42fff76e2efb8faa903be29148cb5a3c4eb59b811bae1bb12bafadb18de35"
+}

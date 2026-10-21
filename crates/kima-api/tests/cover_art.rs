@@ -43,10 +43,16 @@ async fn album_with_track(pool: &PgPool, path: &str) -> Uuid {
                 fp
             },
             guessed: Guessed::default(),
+            ids: Default::default(),
+            isrc: None,
+            disc_total: None,
+            track_total: None,
+            artist_mbid_candidate: None,
         },
     )
     .await
-    .unwrap();
+    .unwrap()
+    .track;
     tx.commit().await.unwrap();
     sqlx::query_scalar!("SELECT album_id FROM tracks WHERE id = $1", track)
         .fetch_one(pool)

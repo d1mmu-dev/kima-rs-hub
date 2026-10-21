@@ -13,13 +13,15 @@ use std::time::{Duration, Instant, SystemTime};
 
 use kima_core::events::{Event, EventBus};
 use kima_db::PgPool;
-use kima_db::library::{self, IndexedTrack, ResolvedTrack};
+use kima_db::genres::{self, GenreSource};
+use kima_db::library::{self, IndexedTrack, ResolvedTrack, TagIds};
+use kima_db::{lyrics, stages};
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::resolve::{Resolved, resolve};
+use crate::resolve::{ArtistFrom, Resolved, parse_credit, resolve};
 use crate::tags::{self, RawTags};
 use crate::{fingerprint, names};
 
@@ -396,6 +398,41 @@ fn to_track(p: &Prepared, album_year: Option<i32>) -> ResolvedTrack {
         mtime: p.disk.mtime,
         fingerprint: p.fingerprint,
         guessed,
+        ids: TagIds {
+            recording: p.raw.recording_mbid,
+            release_track: p.raw.release_track_mbid,
+            release: p.raw.release_mbid,
+            release_group: p.raw.release_group_mbid,
+            artists: p.raw.artist_mbids.clone(),
+            album_artists: p.raw.album_artist_mbids.clone(),
+        },
+        isrc: p.raw.isrc.clone(),
+        disc_total: p.raw.disc_total.and_then(|n| i32::try_from(n).ok()),
+        track_total: p.raw.track_total.and_then(|n| i32::try_from(n).ok()),
+        artist_mbid_candidate: artist_mbid_candidate(&p.raw, r),
+    }
+}
+
+/// The album artist's MBID by spec §8.1 (upstream `primaryArtistMbid`): the single
+/// album-artist id when the album artist came from the AlbumArtist tag; the first artist id
+/// when it came from the Artist tag and there is one id per credited artist. Compilations get
+/// none (Various Artists carries its own).
+fn artist_mbid_candidate(raw: &RawTags, r: &Resolved) -> Option<Uuid> {
+    if r.is_compilation {
+        return None;
+    }
+    match r.album_artist_from {
+        ArtistFrom::AlbumArtistTag => match raw.album_artist_mbids.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        },
+        ArtistFrom::ArtistTag => {
+            let featured = parse_credit(raw.artist.as_deref()?, None).featured.len();
+            (raw.artist_mbids.len() == 1 + featured)
+                .then(|| raw.artist_mbids.first().copied())
+                .flatten()
+        }
+        ArtistFrom::Path | ArtistFrom::Unknown => None,
     }
 }
 
@@ -405,12 +442,22 @@ struct StoreResult {
     /// The row already existed (here or re-pointed from elsewhere) and is now on another album,
     /// so its old album may be empty.
     album_moved: bool,
+    /// The album the row was on before, if it existed.
+    old_album: Option<Uuid>,
+    upserted: library::Upserted,
 }
 
-/// Stores one file in its own transaction. For a path with no row (`repoint`), first tries to
-/// re-point a missing track with the same fingerprint; the re-point and the metadata upsert
-/// commit or roll back together, so a failed upsert never leaves a half-moved track.
-async fn store(pool: &PgPool, t: &ResolvedTrack, repoint: bool) -> sqlx::Result<StoreResult> {
+/// Stores one file in its own transaction: the row with its tag ids, the file's genres, its
+/// embedded lyrics (or the removal of an `embedded` row), and the stage reopen. For a path with
+/// no row (`repoint`), first tries to re-point a missing track with the same fingerprint; the
+/// re-point and the metadata upsert commit or roll back together, so a failed upsert never
+/// leaves a half-moved track.
+async fn store(
+    pool: &PgPool,
+    t: &ResolvedTrack,
+    raw: &RawTags,
+    repoint: bool,
+) -> sqlx::Result<StoreResult> {
     let mut tx = pool.begin().await?;
     let repointed = if repoint {
         library::repoint_by_fingerprint_in(&mut tx, &t.fingerprint, &t.path).await?
@@ -418,8 +465,21 @@ async fn store(pool: &PgPool, t: &ResolvedTrack, repoint: bool) -> sqlx::Result<
         None
     };
     let old_album = library::album_of_path(&mut tx, &t.path).await?;
-    library::upsert_track(&mut tx, t).await?;
-    let new_album = library::album_of_path(&mut tx, &t.path).await?;
+    let up = library::upsert_track(&mut tx, t).await?;
+    genres::replace_track_genres(&mut tx, up.track, GenreSource::File, &raw.genres).await?;
+    match &raw.lyrics {
+        Some(l) => {
+            lyrics::upsert_embedded(&mut tx, up.track, l.plain.as_deref(), l.synced.as_deref())
+                .await?
+        }
+        None => lyrics::delete_embedded(&mut tx, up.track).await?,
+    }
+    if up.content_changed {
+        stages::reopen_for_changed_file(&mut tx, up.track).await?;
+    } else {
+        // A re-point, or a missing row re-read at its own path: the file is back.
+        stages::reopen_file_missing(&mut tx, up.track).await?;
+    }
     tx.commit().await?;
     let stored = match (repointed, old_album) {
         (Some(id), _) => Stored::Repointed(id),
@@ -428,8 +488,74 @@ async fn store(pool: &PgPool, t: &ResolvedTrack, repoint: bool) -> sqlx::Result<
     };
     Ok(StoreResult {
         stored,
-        album_moved: old_album.is_some() && old_album != new_album,
+        album_moved: old_album.is_some() && old_album != Some(up.album),
+        old_album,
+        upserted: up,
     })
+}
+
+/// The most common value, ties to the smallest.
+fn mode_uuid(values: &[Uuid]) -> Option<Uuid> {
+    let mut counts: BTreeMap<Uuid, usize> = BTreeMap::new();
+    for v in values {
+        *counts.entry(*v).or_default() += 1;
+    }
+    let mut best: Option<(Uuid, usize)> = None;
+    for (v, n) in counts {
+        if best.is_none_or(|(_, b)| n > b) {
+            best = Some((v, n));
+        }
+    }
+    best.map(|(v, _)| v)
+}
+
+/// Albums and artists a folder's stores touched, for the per-folder refresh.
+#[derive(Default)]
+struct Touched {
+    albums: HashSet<Uuid>,
+    artists: HashSet<Uuid>,
+    /// Artist MBID candidates read per artist.
+    candidates: HashMap<Uuid, Vec<Uuid>>,
+}
+
+impl Touched {
+    fn add(&mut self, r: &StoreResult, t: &ResolvedTrack) {
+        self.albums.insert(r.upserted.album);
+        self.albums.extend(r.old_album);
+        self.artists.insert(r.upserted.artist);
+        if let Some(c) = t.artist_mbid_candidate {
+            self.candidates
+                .entry(r.upserted.artist)
+                .or_default()
+                .push(c);
+        }
+    }
+}
+
+/// After a folder: album MBIDs (mode of the tags, R2), artist MBIDs from tags where unset, and
+/// the file-derived album and artist genres, for everything the folder touched.
+async fn refresh_touched(pool: &PgPool, touched: Touched) -> sqlx::Result<()> {
+    if touched.albums.is_empty() && touched.candidates.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    let mut albums: Vec<Uuid> = touched.albums.into_iter().collect();
+    albums.sort_unstable();
+    for &album in &albums {
+        library::refresh_album_mbids(&mut tx, album).await?;
+    }
+    for (artist, candidates) in &touched.candidates {
+        if let Some(mbid) = mode_uuid(candidates) {
+            library::set_artist_mbid_if_unset(&mut tx, *artist, mbid).await?;
+        }
+    }
+    // An old album's artist loses the moved track's genres too.
+    let mut artists = touched.artists;
+    artists.extend(library::artists_of_albums(&mut tx, &albums).await?);
+    let mut artists: Vec<Uuid> = artists.into_iter().collect();
+    artists.sort_unstable();
+    genres::recompute_file_genres(&mut tx, &albums, &artists).await?;
+    tx.commit().await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,6 +586,7 @@ async fn process_folder(
     known: &HashMap<String, IndexedTrack>,
 ) -> Result<FolderResult, ScanError> {
     let mut out = FolderResult::default();
+    let mut touched = Touched::default();
     let mut prepared = Vec::with_capacity(changed.len());
     for disk in changed {
         out.tags_read += 1;
@@ -492,8 +619,9 @@ async fn process_folder(
         let year = years.get(&group_key(&p.resolved)).copied().flatten();
         let track = to_track(p, year);
         let rel = p.disk.rel.clone();
-        match store(&ctx.pool, &track, !known.contains_key(&rel)).await {
+        match store(&ctx.pool, &track, &p.raw, !known.contains_key(&rel)).await {
             Ok(r) => {
+                touched.add(&r, &track);
                 out.album_moved |= r.album_moved;
                 out.stored.push((rel, r.stored));
             }
@@ -529,8 +657,10 @@ async fn process_folder(
         };
         // Re-read tags may have moved it to another group; use that group's year if known.
         let year = years.get(&group_key(&p.resolved)).copied().unwrap_or(year);
-        match store(&ctx.pool, &to_track(&p, year), false).await {
+        let track = to_track(&p, year);
+        match store(&ctx.pool, &track, &p.raw, false).await {
             Ok(r) => {
+                touched.add(&r, &track);
                 out.album_moved |= r.album_moved;
                 out.stored.push((s.path.clone(), Stored::Updated));
             }
@@ -538,6 +668,7 @@ async fn process_folder(
             Err(e) => return Err(e.into()),
         }
     }
+    refresh_touched(&ctx.pool, touched).await?;
     Ok(out)
 }
 

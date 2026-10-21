@@ -6,8 +6,9 @@
 //!
 //! ffmpeg runs on untrusted files: the input is always `file:<absolute path>` (so a name
 //! starting with `-` or holding `:` is neither an option nor a protocol) with
-//! `-protocol_whitelist file` (a playlist cannot reach the network), never through a shell; stdout is bounded, stderr keeps its first 2000 bytes, a timeout kills and reaps the
-//! child, and stdout is only fingerprinted after a clean exit.
+//! `-protocol_whitelist file` (a playlist cannot reach the network), never through a shell;
+//! stdout is bounded, stderr keeps its first 2000 bytes, a timeout kills and reaps the child,
+//! and stdout is only fingerprinted after a clean exit.
 
 use std::ffi::OsString;
 use std::path::Path;

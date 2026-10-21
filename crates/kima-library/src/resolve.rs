@@ -542,6 +542,7 @@ mod tests {
     fn upstream_parse_credit_keeps_band_names_whole() {
         for name in [
             "Dance With the Dead",
+            "Dancing With The Dead",
             "Nick Cave & The Bad Seeds",
             "Bob Marley & The Wailers",
             "Tom Petty and the Heartbreakers",

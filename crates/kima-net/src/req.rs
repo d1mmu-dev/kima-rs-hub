@@ -2,12 +2,47 @@
 
 use std::time::Duration;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+
 use crate::source::Host;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Method {
     Get,
     Post,
+}
+
+impl Method {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Post => "POST",
+        }
+    }
+}
+
+/// Query values: everything but RFC 3986's unreserved characters is escaped (a space is `%20`).
+const QUERY: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// One query component, percent-encoded as it is sent.
+pub(crate) fn encode(s: &str) -> String {
+    utf8_percent_encode(s, QUERY).to_string()
+}
+
+/// `?k=v&k=v` for `pairs` in their order, or nothing for none.
+pub(crate) fn query_string<'a>(pairs: impl IntoIterator<Item = &'a (String, String)>) -> String {
+    let mut out = String::new();
+    for (i, (k, v)) in pairs.into_iter().enumerate() {
+        out.push(if i == 0 { '?' } else { '&' });
+        out.push_str(&encode(k));
+        out.push('=');
+        out.push_str(&encode(v));
+    }
+    out
 }
 
 /// One outbound request. Built with [`Req::get`] or [`Req::post_form`] and the builders.

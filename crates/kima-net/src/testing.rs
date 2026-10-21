@@ -6,8 +6,7 @@
 //! POST entry that names one, the SHA-256 of the body. Several entries for one request are
 //! served in order, the last one repeating.
 
-use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -16,82 +15,12 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, he
 use axum::response::Response;
 use base64::Engine;
 use percent_encoding::percent_decode_str;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
-/// One recorded exchange. `url` is a path with query (`/release-group/x?fmt=json`) or a full
-/// URL, whose scheme and host are ignored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Entry {
-    pub method: String,
-    pub url: String,
-    pub status: u16,
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-    /// The answer, sent as JSON.
-    #[serde(default)]
-    pub body: serde_json::Value,
-    /// The answer as raw bytes instead of `body` (non-JSON answers).
-    #[serde(default)]
-    pub body_base64: Option<String>,
-    /// For POST: only a request whose body has this SHA-256 (lowercase hex) matches.
-    #[serde(default)]
-    pub request_body_sha256: Option<String>,
-}
-
-/// A fixture: a list of entries.
-#[derive(Debug, Clone, Default)]
-pub struct Recording(pub Vec<Entry>);
-
-/// Upstream's `{source, recordedAt, replies: {"<path?query>": {status, body}}}`.
-#[derive(Deserialize)]
-struct Upstream {
-    replies: BTreeMap<String, UpstreamReply>,
-}
-
-#[derive(Deserialize)]
-struct UpstreamReply {
-    status: u16,
-    #[serde(default)]
-    body: serde_json::Value,
-}
-
-impl Recording {
-    /// Reads a fixture: a JSON list of entries, or upstream's recorded-replies object (each reply
-    /// becomes a GET entry). Panics on a missing or malformed file: it is a broken test.
-    pub fn load(path: impl AsRef<Path>) -> Recording {
-        let path = path.as_ref();
-        let text = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("reading fixture {}: {e}", path.display()));
-        if let Ok(entries) = serde_json::from_str::<Vec<Entry>>(&text) {
-            return Recording(entries);
-        }
-        let upstream: Upstream = serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("parsing fixture {}: {e}", path.display()));
-        Recording(
-            upstream
-                .replies
-                .into_iter()
-                .map(|(url, reply)| Entry {
-                    method: "GET".into(),
-                    url,
-                    status: reply.status,
-                    headers: BTreeMap::new(),
-                    body: reply.body,
-                    body_base64: None,
-                    request_body_sha256: None,
-                })
-                .collect(),
-        )
-    }
-}
+pub use crate::record::{Entry, Recording};
 
 /// Lowercase hex SHA-256 of a request body, for [`Entry::request_body_sha256`].
 pub fn body_sha256(body: &str) -> String {
-    Sha256::digest(body.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::cache::sha256_hex(body.as_bytes())
 }
 
 /// Method, path, sorted decoded query pairs, body hash (POST entries that name one).

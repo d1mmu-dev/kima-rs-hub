@@ -1,8 +1,88 @@
-//! Outbound HTTP state (spec §6.2): `source_pauses`, a source that rate-limited us, kept across
-//! restarts. The response cache (`http_cache`) arrives with the cache clauses of D-109.
+//! Outbound HTTP state (spec §6.2, §7.4): the response cache (`http_cache`) and
+//! `source_pauses`, a source that rate-limited us. Both survive restarts.
+
+use std::time::Duration;
 
 use sqlx::PgPool;
 use time::OffsetDateTime;
+
+/// What a cached row says: a real answer or the source's "no such thing".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheOutcome {
+    Answered,
+    Absent,
+}
+
+impl CacheOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CacheOutcome::Answered => "answered",
+            CacheOutcome::Absent => "absent",
+        }
+    }
+}
+
+/// The unexpired row under `key`: its outcome and body.
+pub async fn get(
+    pool: &PgPool,
+    key: &str,
+) -> sqlx::Result<Option<(CacheOutcome, serde_json::Value)>> {
+    let row = sqlx::query!(
+        "SELECT outcome, body FROM http_cache WHERE key = $1 AND expires_at > now()",
+        key
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| {
+        let outcome = match r.outcome.as_str() {
+            "answered" => CacheOutcome::Answered,
+            "absent" => CacheOutcome::Absent,
+            _ => return None,
+        };
+        Some((outcome, r.body))
+    }))
+}
+
+/// Stores an answer or an absence under `key` for `ttl` from now, replacing any row.
+/// `request` is the canonical request with secrets stripped (for debugging).
+pub async fn put(
+    pool: &PgPool,
+    key: &str,
+    source: &str,
+    request: &str,
+    outcome: CacheOutcome,
+    body: &serde_json::Value,
+    ttl: Duration,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"INSERT INTO http_cache (key, source, request, outcome, body, fetched_at, expires_at)
+           VALUES ($1, $2, $3, $4, $5, now(), now() + make_interval(secs => $6))
+           ON CONFLICT (key) DO UPDATE
+           SET source = EXCLUDED.source,
+               request = EXCLUDED.request,
+               outcome = EXCLUDED.outcome,
+               body = EXCLUDED.body,
+               fetched_at = EXCLUDED.fetched_at,
+               expires_at = EXCLUDED.expires_at"#,
+        key,
+        source,
+        request,
+        outcome.as_str(),
+        body,
+        ttl.as_secs_f64()
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Deletes the expired rows; returns how many.
+pub async fn prune_expired(pool: &PgPool) -> sqlx::Result<u64> {
+    let done = sqlx::query!("DELETE FROM http_cache WHERE expires_at < now()")
+        .execute(pool)
+        .await?;
+    Ok(done.rows_affected())
+}
 
 /// Pauses `source` until `until`, counting one more consecutive rate-limited outcome. Returns
 /// the new count (1 for a source with no row).

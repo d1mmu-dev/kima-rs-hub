@@ -139,9 +139,10 @@ async fn classify_statuses(pool: PgPool) {
         ),
     ];
     for (host, path, build, expected) in cases {
-        // A fresh client each time, so one case's pause cannot answer for the next.
+        // A fresh client each time, so one case's pause cannot answer for the next; no cache,
+        // so one case's cached answer cannot either (the cache has its own tests).
         let out = net(&replay, &pool)
-            .get_json::<Value>(build(Req::get(host, path)))
+            .get_json::<Value>(build(Req::get(host, path)).no_cache())
             .await;
         assert_eq!(kind(&out), expected, "{host:?} {path}: {out:?}");
     }

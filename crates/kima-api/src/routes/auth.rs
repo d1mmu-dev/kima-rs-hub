@@ -54,31 +54,25 @@ async fn login(
         return Err(ApiError::Unauthorized("Invalid credentials"));
     }
 
-    // Before any lookup or hashing, so a blocked guess costs nothing. The attempt is counted as
-    // a failure now (parallel or abandoned requests cannot dodge the backoff) and cleared only
-    // on success.
+    // A blocked typed name is refused before any database work or hashing (no charge here).
     let now = Instant::now();
-    let attempt = state
+    state
         .login_limit
-        .begin(ip, &username, now)
+        .check(ip, &username, now)
         .map_err(rate_limited)?;
 
     // The database folds case its own way (`lower()` under its locale), Rust another. Also
     // count the attempt on the key of the database's fold of the typed name: every spelling that
     // reaches an account shares that fold, so none gets a separate budget. The fold comes from
     // the typed name alone, charged whether or not the account exists, so the limiter's answers
-    // reveal nothing about existence (spec §5.7).
+    // reveal nothing about existence (spec §5.7). The attempts are counted as failures now
+    // (parallel or abandoned requests cannot dodge the backoff) and cleared only on success;
+    // if any key is blocked, none is charged.
     let lookup = users::sign_in_lookup(&state.pool, &username).await?;
-    let fold_attempt = if lookup.fold.to_lowercase() == username.to_lowercase() {
-        None
-    } else {
-        Some(
-            state
-                .login_limit
-                .begin(ip, &lookup.fold, now)
-                .map_err(rate_limited)?,
-        )
-    };
+    let attempts = state
+        .login_limit
+        .begin_all(ip, &[&username, &lookup.fold], now)
+        .map_err(rate_limited)?;
     let found = lookup.user;
     let password = body.password;
     let permit = state.password_permit().await?;
@@ -100,9 +94,8 @@ async fn login(
     let Some(user) = found.filter(|_| valid) else {
         return Err(ApiError::Unauthorized("Invalid credentials"));
     };
-    attempt.success();
-    if let Some(fold) = fold_attempt {
-        fold.success();
+    for attempt in attempts {
+        attempt.success();
     }
     Ok(Json(json!({
         "token": state.jwt.issue_access(user.id, &user.username, &user.role, user.token_version),

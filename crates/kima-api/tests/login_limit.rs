@@ -147,9 +147,10 @@ async fn observe(res: axum_test::TestResponse) -> (u16, Option<String>, String) 
     (res.status_code().as_u16(), retry_after, res.text())
 }
 
-/// Five failures as `noisy`, then one sign-in as `probe` with the account's password, against a
-/// fresh limiter.
-async fn fold_probe(pool: &PgPool, noisy: &str, probe: &str) -> (u16, Option<String>, String) {
+/// Five failures as `noisy`, then one sign-in with a **wrong** password as the database's own
+/// fold of `noisy`, against a fresh limiter. Whatever the database locale, that fold is charged
+/// (or equals the typed key), so the probe is refused before any hashing.
+async fn fold_probe(pool: &PgPool, noisy: &str) -> (u16, Option<String>, String) {
     let state = common::state(pool.clone());
     let server = server_from(&state, [10, 0, 0, 1]);
     for _ in 0..5 {
@@ -157,7 +158,8 @@ async fn fold_probe(pool: &PgPool, noisy: &str, probe: &str) -> (u16, Option<Str
             .await
             .assert_status_unauthorized();
     }
-    observe(login_as(&server, probe, "password1").await).await
+    let probe = db_fold(pool, noisy).await;
+    observe(login_as(&server, &probe, "wrong-password").await).await
 }
 
 async fn db_fold(pool: &PgPool, name: &str) -> String {
@@ -169,32 +171,27 @@ async fn db_fold(pool: &PgPool, name: &str) -> String {
 }
 
 /// Spec §5.7: the limiter reveals nothing about whether an account exists. Rust lowercases `İ`
-/// (U+0130) to `i` + U+0307, Postgres under `en_US` to plain `i`, so `İvy` and `ivy` are
-/// different Rust keys but the same account. Failures as `İvy` must then block `ivy` the same
-/// way whether or not `ivy` exists (M2 final review I2).
+/// (U+0130) to `i` + U+0307, Postgres under `en_US` to plain `i` (under `C` it stays `İ`). Failures
+/// as `İvy` must block the database's fold of that name the same way whether or not the account
+/// exists (M2 final review I2).
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn fold_variant_failures_answer_the_same_for_known_and_unknown_names(pool: PgPool) {
-    let unknown = fold_probe(&pool, "\u{130}vy", "ivy").await;
+    let unknown = fold_probe(&pool, "\u{130}vy").await;
     common::user_with_token(&common::state(pool.clone()), "ivy").await;
-    let known = fold_probe(&pool, "\u{130}vy", "ivy").await;
+    let known = fold_probe(&pool, "\u{130}vy").await;
     assert_eq!(known, unknown, "the answer must not depend on existence");
-    if db_fold(&pool, "\u{130}vy").await == "ivy" {
-        // The database folds like en_US: every spelling of the account shares one budget.
-        assert_eq!(known.0, 429, "{known:?}");
-    }
+    assert_eq!(known.0, 429, "{known:?}");
 }
 
-/// Postgres folds `ΑΣ` to `ασ`, while Rust (final sigma) folds it to `ας`. Failures typed as
-/// `ΑΣ` are charged on the database fold `ασ` too, so a sign-in as `ασ` is refused before any
-/// hashing, exactly as for a name nobody holds.
+/// Postgres under `en_US` folds `ΑΣ` to `ασ`, while Rust (final sigma) folds it to `ας`. Failures
+/// typed as `ΑΣ` are charged on the database fold too, so a sign-in as that fold is refused
+/// before any hashing, exactly as for a name nobody holds.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn database_fold_key_is_charged_whether_or_not_the_account_exists(pool: PgPool) {
-    let unknown = fold_probe(&pool, "ΑΣ", "ασ").await;
+    let unknown = fold_probe(&pool, "ΑΣ").await;
     common::user_with_token(&common::state(pool.clone()), "ΑΣ").await;
-    let known = fold_probe(&pool, "ΑΣ", "ασ").await;
+    let known = fold_probe(&pool, "ΑΣ").await;
     assert_eq!(known, unknown, "the answer must not depend on existence");
-    if db_fold(&pool, "ΑΣ").await == "ασ" {
-        assert_eq!(known.0, 429, "{known:?}");
-        assert_eq!(known.1.as_deref(), Some("2"));
-    }
+    assert_eq!(known.0, 429, "{known:?}");
+    assert_eq!(known.1.as_deref(), Some("2"));
 }

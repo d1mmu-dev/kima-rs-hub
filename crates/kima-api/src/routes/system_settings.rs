@@ -135,6 +135,7 @@ async fn update(
     // Validate everything first, so a rejected body stores nothing.
     let (registration_open, changes) = changes(&fields, state.identify.locked())?;
     let mut switch = None;
+    let mut concurrency = None;
     for change in changes {
         match change {
             Change::Secret(key, value) => {
@@ -145,6 +146,9 @@ async fn update(
                 if key == Key::AutoEnrichMetadata {
                     switch = value.as_bool();
                 }
+                if key == Key::EnrichmentConcurrency {
+                    concurrency = value.as_u64();
+                }
             }
         }
     }
@@ -152,6 +156,10 @@ async fn update(
     state.settings.replace(kv);
     if let Some(on) = switch {
         state.identify.set_setting(on);
+    }
+    if let Some(n) = concurrency {
+        // Validated to 1-5 above.
+        state.net.set_concurrency(n as u8);
     }
     let patch = SettingsPatch {
         registration_open,

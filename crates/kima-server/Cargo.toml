@@ -18,6 +18,7 @@ kima-core.workspace = true
 kima-db.workspace = true
 kima-jobs.workspace = true
 kima-library.workspace = true
+kima-net.workspace = true
 kima-subsonic.workspace = true
 sqlx.workspace = true
 tokio.workspace = true

@@ -138,6 +138,9 @@ New in kima-rs:
 | `KIMA_ORGANIZE_TARGET` | unset | Writable directory for the organizer's copy mode. Unset means copy mode is unavailable. |
 | `KIMA_LIBRARY_SYNC_CRON` | `0 4 * * *` | Five-field cron (UTC) of the daily safety-net reconcile. `off` disables it. An invalid expression stops startup. |
 | `KIMA_PUBLIC_URL` | unset | Where clients reach this server, such as `https://music.example.com`. Must start with `http://` or `https://`; a trailing `/` is stripped. Used in the `hls` playlist and shown on the settings page. |
+| `KIMA_CONTACT` | `https://github.com/d1mmu-dev/kima-rs-hub` | Contact sent in the User-Agent of every outbound request (`kima-rs/<version> ( <contact> )`), as MusicBrainz asks. |
+| `MUSICBRAINZ_BASE_URL` | `https://musicbrainz.org/ws/2` | MusicBrainz or a mirror (upstream's name). Must start with `http://` or `https://`; a trailing `/` is stripped. |
+| `KIMA_NET_DENY_REAL` | unset | `1` makes any outbound request to a host other than this machine panic. Set in CI so no test reaches the network. |
 | `KIMA_TRANSCODE_CACHE_MB` | `2048` | Size cap of the transcode cache under `KIMA_DATA_DIR`, in MB. |
 | `KIMA_ARTWORK_CACHE_MB` | `512` | Size cap of the cover-art cache under `KIMA_DATA_DIR/artwork`, in MB. The oldest albums are dropped first. `0` means nothing is kept, so every request rebuilds. |
 

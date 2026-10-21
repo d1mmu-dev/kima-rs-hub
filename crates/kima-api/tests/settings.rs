@@ -379,6 +379,28 @@ mod system {
     }
 
     #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn post_concurrency_resizes_net(pool: PgPool) {
+        use kima_net::{Bases, Net, NetConfig, Source};
+        let net = std::sync::Arc::new(Net::new(
+            NetConfig::for_tests(Bases::all("http://127.0.0.1:9")),
+            pool.clone(),
+            IdentifySwitch::new(false, true),
+        ));
+        let (server, _, admin, _) = setup(pool, |s| s.with_net(net.clone())).await;
+        assert_eq!(net.concurrency(Source::Wikidata), Some(3));
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "enrichmentConcurrency": 2 }))
+            .await
+            .assert_status_ok();
+        // Scaled, but never above the burst.
+        assert_eq!(net.concurrency(Source::Wikidata), Some(5));
+        assert_eq!(net.concurrency(Source::MusicBrainz), Some(1));
+        assert_eq!(net.concurrency(Source::Deezer), Some(10));
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
     async fn post_unknown_fields_ignored(pool: PgPool) {
         let (server, _, admin, _) = setup(pool, |s| s).await;
         server

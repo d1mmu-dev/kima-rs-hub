@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO source_pauses (source, paused_until, reason) VALUES ($1, $2, $3)\n           ON CONFLICT (source) DO UPDATE\n           SET paused_until = EXCLUDED.paused_until,\n               reason = EXCLUDED.reason,\n               consecutive = source_pauses.consecutive + 1\n           RETURNING consecutive",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "consecutive",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "999aa7751680807c02e305046402c5f067bed426b5857f625c083b07a0e8a50b"
+}

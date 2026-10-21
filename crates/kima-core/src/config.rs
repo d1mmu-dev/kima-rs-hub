@@ -25,6 +25,25 @@ pub struct Config {
     pub library_sync_cron: Option<String>,
     /// `KIMA_IDENTIFY=off`: no outbound lookups, whatever the admin setting says (D-111).
     pub identify_env_off: bool,
+    /// `KIMA_CONTACT`: the contact in the outbound User-Agent (spec §7.1).
+    pub contact: String,
+    /// `MUSICBRAINZ_BASE_URL`: MusicBrainz or a mirror, without a trailing slash.
+    pub musicbrainz_base_url: String,
+}
+
+/// `KIMA_CONTACT` when unset.
+pub const DEFAULT_CONTACT: &str = "https://github.com/d1mmu-dev/kima-rs-hub";
+/// `MUSICBRAINZ_BASE_URL` when unset.
+pub const DEFAULT_MUSICBRAINZ_BASE_URL: &str = "https://musicbrainz.org/ws/2";
+
+/// `raw` without trailing slashes, when it is an `http://` or `https://` URL with a host.
+fn http_base(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_end_matches('/');
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))?;
+    let host = rest.split('/').next().unwrap_or("");
+    (!host.is_empty()).then(|| trimmed.to_string())
 }
 
 /// How the library folder is watched for changes (`KIMA_WATCH_MODE`).
@@ -123,6 +142,14 @@ impl Config {
             })?,
         };
 
+        let musicbrainz_base_url = match value("MUSICBRAINZ_BASE_URL") {
+            None => DEFAULT_MUSICBRAINZ_BASE_URL.to_string(),
+            Some(raw) => http_base(&raw).ok_or(ConfigError::Invalid {
+                name: "MUSICBRAINZ_BASE_URL",
+                value: raw,
+            })?,
+        };
+
         let public_url = match value("KIMA_PUBLIC_URL") {
             None => None,
             Some(raw) => {
@@ -184,6 +211,8 @@ impl Config {
             public_url,
             library_sync_cron,
             identify_env_off,
+            contact: value("KIMA_CONTACT").unwrap_or_else(|| DEFAULT_CONTACT.into()),
+            musicbrainz_base_url,
         })
     }
 }
@@ -288,6 +317,47 @@ mod tests {
         assert!(!off(&[("KIMA_IDENTIFY", " ON ")]));
         assert!(off(&[("KIMA_IDENTIFY", "off")]));
         assert!(off(&[("KIMA_IDENTIFY", "Off")]));
+    }
+
+    #[test]
+    fn contact_default() {
+        let config = Config::from_lookup(lookup(&[("DATABASE_URL", "postgres://x")])).unwrap();
+        assert_eq!(config.contact, "https://github.com/d1mmu-dev/kima-rs-hub");
+        assert_eq!(config.musicbrainz_base_url, "https://musicbrainz.org/ws/2");
+        let config = Config::from_lookup(lookup(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("KIMA_CONTACT", " ops@example.org "),
+        ]))
+        .unwrap();
+        assert_eq!(config.contact, "ops@example.org");
+    }
+
+    #[test]
+    fn musicbrainz_base_trailing_slash_stripped() {
+        let base = |v: &str| {
+            Config::from_lookup(lookup(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("MUSICBRAINZ_BASE_URL", v),
+            ]))
+            .map(|c| c.musicbrainz_base_url)
+        };
+        assert_eq!(
+            base("http://mb.lan:5000/ws/2/"),
+            Ok("http://mb.lan:5000/ws/2".into())
+        );
+        assert_eq!(
+            base("https://musicbrainz.org/ws/2"),
+            Ok("https://musicbrainz.org/ws/2".into())
+        );
+        for bad in ["mb.lan/ws/2", "ftp://mb.lan", "https://", "http:///"] {
+            assert_eq!(
+                base(bad),
+                Err(ConfigError::Invalid {
+                    name: "MUSICBRAINZ_BASE_URL",
+                    value: bad.into()
+                })
+            );
+        }
     }
 
     #[test]

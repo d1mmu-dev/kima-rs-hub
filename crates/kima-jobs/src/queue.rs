@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use sqlx::PgPool;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 pub const NOTIFY_CHANNEL: &str = "kima_jobs";
@@ -14,31 +15,94 @@ pub struct Job {
     pub max_attempts: i32,
 }
 
-/// Adds a job and wakes the workers listening on [`NOTIFY_CHANNEL`] (on commit).
+/// Adds a job, due now, and wakes the workers listening on [`NOTIFY_CHANNEL`] (on commit).
 pub async fn enqueue(
     pool: &PgPool,
     queue: &str,
     payload: serde_json::Value,
     max_attempts: i32,
 ) -> sqlx::Result<Uuid> {
+    enqueue_at(
+        pool,
+        queue,
+        payload,
+        max_attempts,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+}
+
+/// Adds a job that is not claimed before `run_at`. Wakes the workers only when it is already
+/// due; a later job is found by their poll (within `poll_interval` of `run_at`).
+pub async fn enqueue_at(
+    pool: &PgPool,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+    run_at: OffsetDateTime,
+) -> sqlx::Result<Uuid> {
     let id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
-    sqlx::query!(
-        "INSERT INTO jobs (id, queue, payload, max_attempts) VALUES ($1, $2, $3, $4)",
+    let due = sqlx::query_scalar!(
+        r#"INSERT INTO jobs (id, queue, payload, max_attempts, run_at) VALUES ($1, $2, $3, $4, $5)
+           RETURNING run_at <= now() AS "due!""#,
         id,
         queue,
         payload,
-        max_attempts
+        max_attempts,
+        run_at
     )
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
+    if due {
+        notify(&mut tx, queue).await?;
+    }
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Wakes the workers of `queue` when `tx` commits.
+async fn notify(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, queue: &str) -> sqlx::Result<()> {
+    // `pg_notify` returns `void`, which the query macros cannot type; hence a plain query.
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(NOTIFY_CHANNEL)
         .bind(queue)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
+    Ok(())
+}
+
+/// Moves the oldest `queued` job on `queue` whose payload `kind` is `kind` to `run_at`, waking
+/// the workers if it is now due. Returns `false` when no such job is waiting.
+pub async fn reschedule_queued(
+    pool: &PgPool,
+    queue: &str,
+    kind: &str,
+    run_at: OffsetDateTime,
+) -> sqlx::Result<bool> {
+    let mut tx = pool.begin().await?;
+    // `state = 'queued'` is repeated outside the subquery: if a worker claims the row while we
+    // wait for its lock, the re-check on the updated row skips it.
+    let due = sqlx::query_scalar!(
+        r#"UPDATE jobs SET run_at = $3
+           WHERE state = 'queued'
+             AND id = (SELECT id FROM jobs
+                       WHERE queue = $1 AND state = 'queued' AND payload ->> 'kind' = $2
+                       ORDER BY created_at, id
+                       LIMIT 1
+                       FOR UPDATE)
+           RETURNING run_at <= now() AS "due!""#,
+        queue,
+        kind,
+        run_at
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if due == Some(true) {
+        notify(&mut tx, queue).await?;
+    }
     tx.commit().await?;
-    Ok(id)
+    Ok(due.is_some())
 }
 
 /// Takes up to `limit` due jobs, including ones whose worker's lease ran out.
@@ -114,6 +178,36 @@ pub async fn fail(pool: &PgPool, job: &Job, error: &str) -> sqlx::Result<bool> {
     Ok(result.rows_affected() == 1)
 }
 
+/// Fails the claimed attempt for good, whatever attempts remain (a non-retryable error).
+/// Returns `false` if the job is no longer ours, in which case nothing changes.
+pub async fn fail_permanent(pool: &PgPool, job: &Job, error: &str) -> sqlx::Result<bool> {
+    let result = sqlx::query!(
+        "UPDATE jobs SET state = 'failed', locked_until = NULL, last_error = $2, finished_at = now()
+         WHERE id = $1 AND state = 'running' AND attempts = $3",
+        job.id,
+        error,
+        job.attempts
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Extends the claimed attempt's lease to `lease` from now (the worker's heartbeat). Returns
+/// `false` if the claim is lost (the job was reaped, reclaimed or reset), changing nothing.
+pub async fn renew(pool: &PgPool, job: &Job, lease: Duration) -> sqlx::Result<bool> {
+    let result = sqlx::query!(
+        "UPDATE jobs SET locked_until = now() + make_interval(secs => $3)
+         WHERE id = $1 AND state = 'running' AND attempts = $2",
+        job.id,
+        job.attempts,
+        lease.as_secs_f64()
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// Fails jobs whose lease ran out on their final attempt (their worker died).
 pub async fn reap(pool: &PgPool) -> sqlx::Result<u64> {
     let result = sqlx::query!(
@@ -128,7 +222,7 @@ pub async fn reap(pool: &PgPool) -> sqlx::Result<u64> {
 
 /// Puts every `running` job on `queue` back to `queued`, due now, keeping its attempt count.
 /// Call at startup, before any worker starts: jobs left `running` belong to a process that
-/// died, and would otherwise wait out their lease (6 h on the `library` queue).
+/// died, and would otherwise wait out their lease.
 ///
 /// Assumes a single kima process owns the queue (true for M1; running several instances
 /// against one database is a non-goal). With several processes this would steal live jobs.
@@ -205,11 +299,7 @@ pub async fn enqueue_unless_pending(
     .fetch_optional(&mut *tx)
     .await?;
     if id.is_some() {
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(NOTIFY_CHANNEL)
-            .bind(queue)
-            .execute(&mut *tx)
-            .await?;
+        notify(&mut tx, queue).await?;
     }
     tx.commit().await?;
     Ok(id)
@@ -258,34 +348,51 @@ pub async fn enqueue_unless_queued_with_key(
     max_attempts: i32,
     key: &str,
 ) -> sqlx::Result<Option<Uuid>> {
+    enqueue_at_unless_queued_with_key(
+        pool,
+        queue,
+        payload,
+        max_attempts,
+        key,
+        OffsetDateTime::now_utc(),
+    )
+    .await
+}
+
+/// Like [`enqueue_unless_queued_with_key`], for a job not claimed before `run_at`. A queued
+/// duplicate counts whatever its own `run_at`. Wakes the workers only when the new job is due.
+pub async fn enqueue_at_unless_queued_with_key(
+    pool: &PgPool,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+    key: &str,
+    run_at: OffsetDateTime,
+) -> sqlx::Result<Option<Uuid>> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('kima_jobs_enqueue:' || $1))")
         .bind(queue)
         .execute(&mut *tx)
         .await?;
-    let id = Uuid::now_v7();
-    let inserted: Option<Uuid> = sqlx::query_scalar(
-        "INSERT INTO jobs (id, queue, payload, max_attempts)
-         SELECT $1::uuid, $2::text, $3::jsonb, $4::int4
-         WHERE NOT EXISTS (SELECT 1 FROM jobs
-                           WHERE queue = $2 AND state = 'queued'
-                             AND payload ->> $5 IS NOT DISTINCT FROM $3::jsonb ->> $5)
-         RETURNING id",
+    let inserted = sqlx::query!(
+        r#"INSERT INTO jobs (id, queue, payload, max_attempts, run_at)
+           SELECT $1::uuid, $2::text, $3::jsonb, $4::int4, $6::timestamptz
+           WHERE NOT EXISTS (SELECT 1 FROM jobs
+                             WHERE queue = $2 AND state = 'queued'
+                               AND payload ->> $5::text IS NOT DISTINCT FROM $3::jsonb ->> $5::text)
+           RETURNING id, run_at <= now() AS "due!""#,
+        Uuid::now_v7(),
+        queue,
+        payload,
+        max_attempts,
+        key,
+        run_at
     )
-    .bind(id)
-    .bind(queue)
-    .bind(&payload)
-    .bind(max_attempts)
-    .bind(key)
     .fetch_optional(&mut *tx)
     .await?;
-    if inserted.is_some() {
-        sqlx::query("SELECT pg_notify($1, $2)")
-            .bind(NOTIFY_CHANNEL)
-            .bind(queue)
-            .execute(&mut *tx)
-            .await?;
+    if inserted.as_ref().is_some_and(|r| r.due) {
+        notify(&mut tx, queue).await?;
     }
     tx.commit().await?;
-    Ok(inserted)
+    Ok(inserted.map(|r| r.id))
 }

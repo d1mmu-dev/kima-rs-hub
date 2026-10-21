@@ -158,7 +158,7 @@ async fn drain(ctx: &LibraryCtx) {
     .await
     .unwrap();
     for (id, payload) in rows {
-        jobs::run(ctx, &payload).await.unwrap();
+        jobs::run(ctx, &payload, &Default::default()).await.unwrap();
         sqlx::query("UPDATE jobs SET state = 'done' WHERE id = $1")
             .bind(id)
             .execute(&ctx.pool)

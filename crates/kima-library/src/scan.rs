@@ -15,6 +15,7 @@ use kima_core::events::{Event, EventBus};
 use kima_db::PgPool;
 use kima_db::library::{self, IndexedTrack, ResolvedTrack};
 use time::OffsetDateTime;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -134,6 +135,10 @@ pub enum ScanError {
     Db(#[from] sqlx::Error),
     #[error("scan task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
+    /// The job's cancel token fired (shutdown or a lost claim); the run stopped between
+    /// folders. What was stored so far stays; the next reconcile finishes the rest.
+    #[error("scan cancelled")]
+    Cancelled,
 }
 
 /// A file found on disk.
@@ -540,6 +545,23 @@ async fn process_folder(
 /// vanished ones missing, purges tracks missing past the grace period and prunes empty
 /// albums and artists. A missing or unreadable root is an error and changes nothing.
 pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
+    reconcile_cancellable(ctx, &CancellationToken::new()).await
+}
+
+/// [`reconcile`], stopping with [`ScanError::Cancelled`] once `cancel` fires: checked after the
+/// walk (before anything is marked missing), between folders, and before the purge.
+pub async fn reconcile_cancellable(
+    ctx: &LibraryCtx,
+    cancel: &CancellationToken,
+) -> Result<ScanReport, ScanError> {
+    let check = || {
+        if cancel.is_cancelled() {
+            Err(ScanError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    check()?;
     let root = ctx.root.get();
     let walked = tokio::task::spawn_blocking(move || walk(&root)).await??;
     let mut report = ScanReport {
@@ -590,6 +612,7 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
         );
     }
 
+    check()?;
     // Mark vanished files missing first, so a moved file's old row can be re-pointed below.
     // Files an unfinished organizer run parked under a hidden staging name are not walked,
     // but they are there: their tracks are not missing.
@@ -620,6 +643,7 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
     progress.advance(report.unchanged + restore.len());
 
     for (folder, files) in changed {
+        check()?;
         let n = files.len();
         let siblings = settled.get(folder.as_str()).map_or(&[][..], Vec::as_slice);
         let result = process_folder(ctx, files, siblings, &index).await?;
@@ -640,6 +664,7 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
         progress.advance(n);
     }
 
+    check()?;
     if !report.root_empty_guard {
         report.purged = library::purge_missing(&ctx.pool, MISSING_GRACE).await? as usize;
     }

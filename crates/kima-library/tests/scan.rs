@@ -826,3 +826,94 @@ async fn reconcile_publishes_progress(pool: PgPool) {
         serde_json::json!({"type":"library:progress","job":"scan","done":1,"total":1})
     );
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reconcile_cancellable_stops_between_folders(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let gone = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "A/B/02.flac",
+        tags("A", "B", "two", "2000", "2"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    std::fs::remove_file(gone).unwrap();
+    make_audio(
+        dir.path(),
+        "C/D/01.flac",
+        tags("C", "D", "new", "2001", "1"),
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let result = scan::reconcile_cancellable(&c, &cancel).await;
+    assert!(
+        matches!(result, Err(scan::ScanError::Cancelled)),
+        "{result:?}"
+    );
+    assert_eq!(missing_count(&pool).await, 0, "nothing marked missing");
+    assert_eq!(count(&pool, "tracks").await, 2, "nothing added");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn library_job_reports_changes_and_calls_on_change(pool: PgPool) {
+    use kima_jobs::worker::{JobCtx, JobError};
+    use kima_library::jobs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let reconcile = serde_json::json!({"kind": "reconcile"});
+
+    let bad = jobs::run(&c, &serde_json::json!({"kind": "nope"}), &cancel).await;
+    assert!(matches!(bad, Err(JobError::Permanent(_))), "{bad:?}");
+    // An empty library: nothing changed.
+    assert!(!jobs::run(&c, &reconcile, &cancel).await.unwrap());
+    if !require_ffmpeg() {
+        return;
+    }
+    make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let on_change: jobs::OnChange = {
+        let calls = calls.clone();
+        Arc::new(move |_pool| {
+            let calls = calls.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+    };
+    let handler = jobs::handler_with(c.clone(), on_change);
+    let job = kima_jobs::queue::Job {
+        id: Uuid::now_v7(),
+        queue: jobs::QUEUE.into(),
+        payload: reconcile.clone(),
+        attempts: 1,
+        max_attempts: 3,
+    };
+    let job_ctx = JobCtx {
+        cancel: cancel.clone(),
+    };
+    handler(job.clone(), job_ctx.clone()).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "a track was added");
+    handler(job, job_ctx).await.unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "nothing changed the second time"
+    );
+}

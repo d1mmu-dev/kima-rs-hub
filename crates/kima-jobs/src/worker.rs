@@ -8,18 +8,57 @@ use sqlx::PgPool;
 use sqlx::postgres::PgListener;
 use tokio::sync::Semaphore;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::queue::{self, Job, NOTIFY_CHANNEL};
 
-pub type Handler = Arc<dyn Fn(Job) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
+/// Why a job attempt failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobError {
+    /// Retried after [`queue::backoff`], until `max_attempts` is reached.
+    Retry(String),
+    /// Never retried: the job fails at once, whatever attempts remain.
+    Permanent(String),
+}
+
+impl From<String> for JobError {
+    fn from(message: String) -> Self {
+        Self::Retry(message)
+    }
+}
+
+impl std::fmt::Display for JobError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retry(message) | Self::Permanent(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for JobError {}
+
+/// What a running job gets besides its row.
+#[derive(Debug, Clone)]
+pub struct JobCtx {
+    /// Fires on shutdown and when the job's claim is lost (its lease could not be renewed
+    /// because the job was reaped or reclaimed). Long handlers check it between units of work
+    /// and return early; the outcome of a lost claim is not recorded.
+    pub cancel: CancellationToken,
+}
+
+pub type Handler =
+    Arc<dyn Fn(Job, JobCtx) -> BoxFuture<'static, Result<(), JobError>> + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     pub queue: String,
     pub concurrency: usize,
     pub lease: Duration,
+    /// How often a running job's lease is renewed. Well under `lease`, so a slow renewal or
+    /// two does not let the claim lapse.
+    pub heartbeat: Duration,
     pub poll_interval: Duration,
     /// Minimum time between attempts to re-establish a lost LISTEN connection.
     pub listen_retry: Duration,
@@ -31,18 +70,29 @@ impl WorkerConfig {
             queue: queue.into(),
             concurrency: concurrency.max(1),
             lease: Duration::from_secs(300),
+            heartbeat: Duration::from_secs(300) / 4,
             poll_interval: Duration::from_secs(5),
             listen_retry: Duration::from_secs(30),
         }
     }
 }
 
+/// A handler that needs neither the cancel token nor permanent errors: an `Err` is retried.
 pub fn handler<F, Fut>(f: F) -> Handler
 where
     F: Fn(Job) -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    Fut: Future<Output = Result<(), String>> + Send + 'static,
 {
-    Arc::new(move |job| Box::pin(f(job)))
+    Arc::new(move |job, _ctx| f(job).map(|r| r.map_err(JobError::Retry)).boxed())
+}
+
+/// A handler given the job's [`JobCtx`].
+pub fn handler_ctx<F, Fut>(f: F) -> Handler
+where
+    F: Fn(Job, JobCtx) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), JobError>> + Send + 'static,
+{
+    Arc::new(move |job, ctx| Box::pin(f(job, ctx)))
 }
 
 /// Runs `handler` for jobs on `config.queue`, at most `config.concurrency` at a time,
@@ -76,8 +126,9 @@ pub fn spawn_worker(
                             let permit =
                                 permits.clone().acquire_owned().await.expect("never closed");
                             let (pool, handler) = (pool.clone(), handler.clone());
+                            let (config, shutdown) = (config.clone(), shutdown.clone());
                             running.spawn(async move {
-                                run_one(&pool, &handler, job).await;
+                                run_one(&pool, &handler, &config, &shutdown, job).await;
                                 drop(permit);
                             });
                         }
@@ -152,14 +203,29 @@ async fn notified(listener: &mut Option<PgListener>) -> bool {
     }
 }
 
-async fn run_one(pool: &PgPool, handler: &Handler, job: Job) {
+async fn run_one(
+    pool: &PgPool,
+    handler: &Handler,
+    config: &WorkerConfig,
+    shutdown: &CancellationToken,
+    job: Job,
+) {
+    let cancel = shutdown.child_token();
+    let ctx = JobCtx {
+        cancel: cancel.clone(),
+    };
     // Lazy, so a panic before the handler returns its future is caught too.
-    let outcome = AssertUnwindSafe(async { handler(job.clone()).await })
-        .catch_unwind()
-        .await;
+    let work = AssertUnwindSafe(async { handler(job.clone(), ctx).await }).catch_unwind();
+    // Polled in this task next to the handler, so it stops as soon as the handler returns.
+    let heartbeat = keep_claim(pool, &job, config.lease, config.heartbeat, &cancel);
+    let outcome = tokio::select! {
+        outcome = work => outcome,
+        never = heartbeat => match never {},
+    };
     let recorded = match outcome {
         Ok(Ok(())) => queue::complete(pool, &job).await,
-        Ok(Err(message)) => queue::fail(pool, &job, &message).await,
+        Ok(Err(JobError::Retry(message))) => queue::fail(pool, &job, &message).await,
+        Ok(Err(JobError::Permanent(message))) => queue::fail_permanent(pool, &job, &message).await,
         Err(_) => queue::fail(pool, &job, "handler panicked").await,
     };
     match recorded {
@@ -169,5 +235,32 @@ async fn run_one(pool: &PgPool, handler: &Handler, job: Job) {
             "job outcome dropped: claim lost (lease expired and the job was reclaimed or reaped)"
         ),
         Err(error) => warn!(%error, job = %job.id, "could not record job outcome"),
+    }
+}
+
+/// Renews `job`'s lease every `heartbeat`. When a renewal finds the claim gone, cancels
+/// `cancel`, logs once and stops renewing. A database error is logged and retried on the next
+/// beat: the lease is still ours until it runs out. Never returns.
+async fn keep_claim(
+    pool: &PgPool,
+    job: &Job,
+    lease: Duration,
+    heartbeat: Duration,
+    cancel: &CancellationToken,
+) -> std::convert::Infallible {
+    let heartbeat = heartbeat.max(Duration::from_millis(1));
+    let mut beats = tokio::time::interval_at(tokio::time::Instant::now() + heartbeat, heartbeat);
+    beats.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        beats.tick().await;
+        match queue::renew(pool, job, lease).await {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(job = %job.id, queue = %job.queue, "job claim lost; cancelling the job");
+                cancel.cancel();
+                return std::future::pending().await;
+            }
+            Err(error) => warn!(%error, job = %job.id, "renewing the job lease failed"),
+        }
     }
 }

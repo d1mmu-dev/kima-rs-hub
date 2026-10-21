@@ -86,14 +86,14 @@ async fn startup_reconcile_is_not_queued_twice(pool: PgPool) {
 }
 
 /// A reconcile left `running` by a killed process must not block the startup reconcile for
-/// its 6 h lease: startup requeues it (instead of adding a second one).
+/// its lease: startup requeues it (instead of adding a second one).
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn startup_requeues_a_reconcile_left_running(pool: PgPool) {
     let stuck = kima_library::jobs::enqueue_reconcile(&pool)
         .await
         .unwrap()
         .unwrap();
-    queue::claim(&pool, "library", 1, kima_server::jobs::LIBRARY_LEASE)
+    queue::claim(&pool, "library", 1, Duration::from_secs(300))
         .await
         .unwrap();
     kima_server::jobs::prepare_library_queue(&pool)
@@ -151,7 +151,7 @@ async fn library_root_setting_overrides_music_path(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn library_queue_is_serial_with_a_long_lease(pool: PgPool) {
+async fn library_queue_uses_default_lease(pool: PgPool) {
     let mut registry = Registry::new();
     registry.register_library(LibraryCtx {
         pool: pool.clone(),
@@ -161,9 +161,10 @@ async fn library_queue_is_serial_with_a_long_lease(pool: PgPool) {
         ignore: Default::default(),
     });
     let config = registry.config("library").unwrap();
+    let default = kima_jobs::worker::WorkerConfig::new("library", 1);
     assert_eq!(config.concurrency, 1);
-    assert_eq!(config.lease, kima_server::jobs::LIBRARY_LEASE);
-    assert_eq!(config.lease, Duration::from_secs(6 * 3600));
+    assert_eq!(config.lease, default.lease);
+    assert_eq!(config.heartbeat, default.heartbeat);
 }
 
 /// Review Focus 4, at startup: a run left `applying` whose job is gone (it died on its final

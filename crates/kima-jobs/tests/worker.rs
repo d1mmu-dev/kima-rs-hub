@@ -1,8 +1,10 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use kima_db::PgPool;
 use kima_jobs::queue;
-use kima_jobs::worker::{WorkerConfig, handler, spawn_worker};
+use kima_jobs::worker::{JobCtx, JobError, WorkerConfig, handler, handler_ctx, spawn_worker};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -314,4 +316,215 @@ async fn listen_is_retried_when_the_first_attempt_fails(pool: PgPool) {
         .unwrap();
     assert_eq!(got, json!({"n": 10}));
     shutdown.cancel();
+}
+
+async fn row(pool: &PgPool, id: uuid::Uuid) -> (String, i32, Option<String>) {
+    sqlx::query_as("SELECT state, attempts, last_error FROM jobs WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[test]
+fn job_error_from_string_is_retry_and_displays_its_message() {
+    assert_eq!(
+        JobError::from("boom".to_string()),
+        JobError::Retry("boom".into())
+    );
+    assert_eq!(JobError::Permanent("nope".into()).to_string(), "nope");
+    assert_eq!(JobError::Retry("boom".into()).to_string(), "boom");
+}
+
+#[test]
+fn heartbeat_defaults_to_a_quarter_lease() {
+    let config = WorkerConfig::new("q", 1);
+    assert_eq!(config.lease, Duration::from_secs(300));
+    assert_eq!(config.heartbeat, config.lease / 4);
+}
+
+/// Spec §24.3: a job running for several leases keeps its claim, so a second worker polling
+/// the same queue never reclaims it.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn job_longer_than_three_leases_completes(pool: PgPool) {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let shutdown = CancellationToken::new();
+    let config = |poll| WorkerConfig {
+        lease: Duration::from_secs(1),
+        heartbeat: Duration::from_millis(250),
+        poll_interval: poll,
+        ..WorkerConfig::new("long", 1)
+    };
+    let slow = {
+        let runs = runs.clone();
+        handler(move |_job| {
+            let runs = runs.clone();
+            async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(3500)).await;
+                Ok(())
+            }
+        })
+    };
+    let first = spawn_worker(
+        pool.clone(),
+        config(Duration::from_millis(100)),
+        slow.clone(),
+        shutdown.clone(),
+    );
+    let id = queue::enqueue(&pool, "long", json!({}), 3).await.unwrap();
+    wait_for_state(&pool, id, "running").await;
+    let second = spawn_worker(
+        pool.clone(),
+        config(Duration::from_millis(100)),
+        slow,
+        shutdown.clone(),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let (state, attempts, _) = loop {
+        let r = row(&pool, id).await;
+        if (r.0 != "running" && r.0 != "queued") || tokio::time::Instant::now() > deadline {
+            break r;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!((state.as_str(), attempts), ("done", 1));
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "the handler ran more than once"
+    );
+    shutdown.cancel();
+    for w in [first, second] {
+        tokio::time::timeout(Duration::from_secs(10), w)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn lost_claim_cancels_token(pool: PgPool) {
+    let heartbeat = Duration::from_millis(500);
+    let (started_tx, mut started) = mpsc::unbounded_channel();
+    let (cancelled_tx, mut cancelled) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let _worker = spawn_worker(
+        pool.clone(),
+        WorkerConfig {
+            lease: Duration::from_secs(30),
+            heartbeat,
+            ..fast("lost", 1)
+        },
+        handler_ctx(move |_job, ctx: JobCtx| {
+            let (started_tx, cancelled_tx) = (started_tx.clone(), cancelled_tx.clone());
+            async move {
+                started_tx.send(()).unwrap();
+                ctx.cancel.cancelled().await;
+                cancelled_tx.send(()).unwrap();
+                Ok(())
+            }
+        }),
+        shutdown.clone(),
+    );
+    let id = queue::enqueue(&pool, "lost", json!({}), 3).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.recv())
+        .await
+        .expect("job never started")
+        .unwrap();
+    // The claim is taken away (run_at pushed out so the worker cannot simply claim it again).
+    sqlx::query(
+        "UPDATE jobs SET state = 'queued', run_at = now() + interval '1 hour' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    tokio::time::timeout(heartbeat * 2, cancelled.recv())
+        .await
+        .expect("token not cancelled within two heartbeats")
+        .unwrap();
+    // Give the worker time to (wrongly) record the outcome, then check it did not.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(row(&pool, id).await.0, "queued");
+    shutdown.cancel();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn permanent_error_fails_at_once(pool: PgPool) {
+    let shutdown = CancellationToken::new();
+    let _worker = spawn_worker(
+        pool.clone(),
+        fast("perm", 1),
+        handler_ctx(|_job, _ctx| async { Err(JobError::Permanent("nope".into())) }),
+        shutdown.clone(),
+    );
+    let id = queue::enqueue(&pool, "perm", json!({}), 5).await.unwrap();
+    let (attempts, error) = wait_for_state(&pool, id, "failed").await;
+    assert_eq!((attempts, error.as_deref()), (1, Some("nope")));
+    shutdown.cancel();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn string_error_still_retries(pool: PgPool) {
+    let shutdown = CancellationToken::new();
+    let _worker = spawn_worker(
+        pool.clone(),
+        fast("retry", 1),
+        handler(|_job| async { Err("flaky".to_string()) }),
+        shutdown.clone(),
+    );
+    let id = queue::enqueue(&pool, "retry", json!({}), 5).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (state, attempts, error) = row(&pool, id).await;
+        if error.is_some() {
+            assert_eq!(
+                (state.as_str(), attempts, error.as_deref()),
+                ("queued", 1, Some("flaky"))
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "failure never recorded"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    shutdown.cancel();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn shutdown_cancels_job_token(pool: PgPool) {
+    let (started_tx, mut started) = mpsc::unbounded_channel();
+    let (cancelled_tx, mut cancelled) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let worker = spawn_worker(
+        pool.clone(),
+        fast("stop", 1),
+        handler_ctx(move |_job, ctx: JobCtx| {
+            let (started_tx, cancelled_tx) = (started_tx.clone(), cancelled_tx.clone());
+            async move {
+                started_tx.send(()).unwrap();
+                ctx.cancel.cancelled().await;
+                cancelled_tx.send(()).unwrap();
+                Err(JobError::Retry("cancelled".into()))
+            }
+        }),
+        shutdown.clone(),
+    );
+    queue::enqueue(&pool, "stop", json!({}), 3).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.recv())
+        .await
+        .expect("job never started")
+        .unwrap();
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), cancelled.recv())
+        .await
+        .expect("job token not cancelled on shutdown")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), worker)
+        .await
+        .expect("worker did not stop")
+        .unwrap();
 }

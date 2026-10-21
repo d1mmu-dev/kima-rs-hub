@@ -4,10 +4,12 @@
 
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use kima_db::PgPool;
 use kima_jobs::queue;
-use kima_jobs::worker::{self, Handler};
+use kima_jobs::worker::{self, Handler, JobError};
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use uuid::Uuid;
 
@@ -82,13 +84,21 @@ pub async fn enqueue_path(pool: &PgPool, rel: &str) -> sqlx::Result<Option<Uuid>
     .await
 }
 
-/// Runs one library job. An `Err` makes the queue retry it.
-pub async fn run(ctx: &LibraryCtx, payload: &serde_json::Value) -> Result<(), String> {
+/// Runs one library job. Returns whether it added, updated, re-pointed, restored or marked
+/// missing any track. A malformed payload fails for good; any other error is retried. Once
+/// `cancel` fires, a reconcile stops between folders and an organizer run between rows.
+pub async fn run(
+    ctx: &LibraryCtx,
+    payload: &serde_json::Value,
+    cancel: &CancellationToken,
+) -> Result<bool, JobError> {
     let job: LibraryJob = serde_json::from_value(payload.clone())
-        .map_err(|e| format!("invalid library job payload: {e}"))?;
+        .map_err(|e| JobError::Permanent(format!("invalid library job payload: {e}")))?;
     match job {
         LibraryJob::Reconcile => {
-            let r = scan::reconcile(ctx).await.map_err(|e| e.to_string())?;
+            let r = scan::reconcile_cancellable(ctx, cancel)
+                .await
+                .map_err(|e| JobError::Retry(e.to_string()))?;
             info!(
                 added = r.added,
                 updated = r.updated,
@@ -100,13 +110,13 @@ pub async fn run(ctx: &LibraryCtx, payload: &serde_json::Value) -> Result<(), St
                 failed = r.failed.len(),
                 "library reconcile finished"
             );
-            Ok(())
+            Ok(r.added + r.updated + r.repointed + r.restored + r.missing > 0)
         }
         LibraryJob::Path { path } => {
-            match scan::update_path(ctx, &path)
+            let outcome = scan::update_path(ctx, &path)
                 .await
-                .map_err(|e| e.to_string())?
-            {
+                .map_err(|e| JobError::Retry(e.to_string()))?;
+            match &outcome {
                 // A file that cannot be read is reported, not retried: the next change event
                 // (or reconcile) picks it up again.
                 PathOutcome::Failed(reason) => {
@@ -117,20 +127,42 @@ pub async fn run(ctx: &LibraryCtx, payload: &serde_json::Value) -> Result<(), St
                 }
                 outcome => tracing::debug!(%path, ?outcome, "library file updated"),
             }
-            Ok(())
+            Ok(matches!(
+                outcome,
+                PathOutcome::Added
+                    | PathOutcome::Updated
+                    | PathOutcome::Repointed
+                    | PathOutcome::MarkedMissing
+            ))
         }
-        LibraryJob::Organize { run_id, action } => organize::run_job(ctx, run_id, action)
-            .await
-            .map_err(|e| e.to_string()),
+        LibraryJob::Organize { run_id, action } => {
+            organize::run_job_cancellable(ctx, run_id, action, cancel)
+                .await
+                .map_err(|e| JobError::Retry(e.to_string()))?;
+            Ok(false)
+        }
     }
 }
 
+/// Called with the pool after a library job that changed tracks (see [`run`]).
+pub type OnChange = Arc<dyn Fn(PgPool) -> BoxFuture<'static, ()> + Send + Sync>;
+
 /// The `library` queue handler, dispatching on the payload's `kind`.
 pub fn handler(ctx: LibraryCtx) -> Handler {
+    handler_with(ctx, Arc::new(|_pool| Box::pin(async {})))
+}
+
+/// [`handler`], calling `on_change` after each job that changed tracks.
+pub fn handler_with(ctx: LibraryCtx, on_change: OnChange) -> Handler {
     let ctx = Arc::new(ctx);
-    worker::handler(move |job| {
-        let ctx = ctx.clone();
-        async move { run(&ctx, &job.payload).await }
+    worker::handler_ctx(move |job, job_ctx| {
+        let (ctx, on_change) = (ctx.clone(), on_change.clone());
+        async move {
+            if run(&ctx, &job.payload, &job_ctx.cancel).await? {
+                on_change(ctx.pool.clone()).await;
+            }
+            Ok(())
+        }
     })
 }
 

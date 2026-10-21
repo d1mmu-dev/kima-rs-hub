@@ -1,0 +1,8 @@
+[
+  {
+    "method": "POST",
+    "url": "/lookup",
+    "status": 200,
+    "body": {"status": "error", "error": {"message": "rate limit exceeded"}}
+  }
+]

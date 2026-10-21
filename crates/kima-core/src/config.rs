@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Config {
     pub database_url: String,
     pub data_dir: PathBuf,
@@ -33,6 +33,43 @@ pub struct Config {
     pub fingerprint_workers: usize,
     /// `ACOUSTID_DISABLED=true` (any case): no AcoustID rung, `fpcalc: false` (upstream's name).
     pub acoustid_disabled: bool,
+    /// `ACOUSTID_CLIENT_KEY`: the AcoustID client key after the stored setting (spec §8.4). A
+    /// secret: never printed.
+    pub acoustid_client_key: Option<String>,
+}
+
+// Never prints a secret.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hidden = |v: &Option<String>| v.as_ref().map(|_| "..");
+        f.debug_struct("Config")
+            .field("database_url", &self.database_url)
+            .field("data_dir", &self.data_dir)
+            .field("music_path", &self.music_path)
+            .field("bind_addr", &self.bind_addr)
+            .field("frontend_dir", &self.frontend_dir)
+            .field("allowed_origins", &self.allowed_origins)
+            .field("log_level", &self.log_level)
+            .field("session_secret", &hidden(&self.session_secret))
+            .field(
+                "settings_encryption_key",
+                &hidden(&self.settings_encryption_key),
+            )
+            .field("watch_mode", &self.watch_mode)
+            .field("watch_poll_secs", &self.watch_poll_secs)
+            .field("organize_target", &self.organize_target)
+            .field("transcode_cache_mb", &self.transcode_cache_mb)
+            .field("artwork_cache_mb", &self.artwork_cache_mb)
+            .field("public_url", &self.public_url)
+            .field("library_sync_cron", &self.library_sync_cron)
+            .field("identify_env_off", &self.identify_env_off)
+            .field("contact", &self.contact)
+            .field("musicbrainz_base_url", &self.musicbrainz_base_url)
+            .field("fingerprint_workers", &self.fingerprint_workers)
+            .field("acoustid_disabled", &self.acoustid_disabled)
+            .field("acoustid_client_key", &hidden(&self.acoustid_client_key))
+            .finish()
+    }
 }
 
 /// `KIMA_CONTACT` when unset.
@@ -237,6 +274,7 @@ impl Config {
             musicbrainz_base_url,
             fingerprint_workers,
             acoustid_disabled,
+            acoustid_client_key: value("ACOUSTID_CLIENT_KEY"),
         })
     }
 }
@@ -428,6 +466,34 @@ mod tests {
         assert!(!disabled(&[("ACOUSTID_DISABLED", "false")]));
         assert!(!disabled(&[("ACOUSTID_DISABLED", "1")]));
         assert!(!disabled(&[("ACOUSTID_DISABLED", "yes")]));
+    }
+
+    #[test]
+    fn acoustid_client_key_is_read_trimmed_and_never_printed() {
+        let key = |extra: &[(&str, &str)]| {
+            let mut pairs = vec![("DATABASE_URL", "postgres://x")];
+            pairs.extend_from_slice(extra);
+            Config::from_lookup(lookup(&pairs)).unwrap()
+        };
+        assert_eq!(key(&[]).acoustid_client_key, None);
+        assert_eq!(
+            key(&[("ACOUSTID_CLIENT_KEY", "  ")]).acoustid_client_key,
+            None
+        );
+        let config = key(&[
+            ("ACOUSTID_CLIENT_KEY", " abc123XYZ "),
+            ("SESSION_SECRET", "sess-secret-value"),
+            ("SETTINGS_ENCRYPTION_KEY", "enc-secret-value"),
+        ]);
+        assert_eq!(config.acoustid_client_key.as_deref(), Some("abc123XYZ"));
+        let shown = format!("{config:?}");
+        for secret in ["abc123XYZ", "sess-secret-value", "enc-secret-value"] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+        assert!(
+            shown.contains("acoustid_client_key: Some(\"..\")"),
+            "{shown}"
+        );
     }
 
     #[test]

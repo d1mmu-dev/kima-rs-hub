@@ -28,6 +28,7 @@ fn config(frontend: Option<&Path>, origins: &[&str]) -> Config {
         musicbrainz_base_url: kima_core::config::DEFAULT_MUSICBRAINZ_BASE_URL.into(),
         fingerprint_workers: 1,
         acoustid_disabled: false,
+        acoustid_client_key: None,
     }
 }
 

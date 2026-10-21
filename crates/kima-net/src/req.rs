@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
+use crate::secrets::{REDACTED, is_secret_key, redact_form};
 use crate::source::Host;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,8 +46,9 @@ pub(crate) fn query_string<'a>(pairs: impl IntoIterator<Item = &'a (String, Stri
     out
 }
 
-/// One outbound request. Built with [`Req::get`] or [`Req::post_form`] and the builders.
-#[derive(Debug, Clone)]
+/// One outbound request. Built with [`Req::get`] or [`Req::post_form`] and the builders. Its
+/// `Debug` shows secret values (`api_key`, `client`) as `REDACTED`.
+#[derive(Clone)]
 pub struct Req {
     pub(crate) host: Host,
     pub(crate) method: Method,
@@ -59,6 +61,37 @@ pub struct Req {
     pub(crate) timeout: Option<Duration>,
     pub(crate) max_wait: Option<Duration>,
     pub(crate) no_cache: bool,
+}
+
+// Never prints a secret: query values and form pairs under a secret key are redacted.
+impl std::fmt::Debug for Req {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let query: Vec<(&str, &str)> = self
+            .query
+            .iter()
+            .map(|(k, v)| {
+                let v = if is_secret_key(k) {
+                    REDACTED
+                } else {
+                    v.as_str()
+                };
+                (k.as_str(), v)
+            })
+            .collect();
+        f.debug_struct("Req")
+            .field("host", &self.host)
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field("query", &query)
+            .field("body", &self.body.as_deref().map(redact_form))
+            .field("absent_on_404", &self.absent_on_404)
+            .field("absent_when", &self.absent_when.is_some())
+            .field("budget", &self.budget)
+            .field("timeout", &self.timeout)
+            .field("max_wait", &self.max_wait)
+            .field("no_cache", &self.no_cache)
+            .finish()
+    }
 }
 
 impl Req {

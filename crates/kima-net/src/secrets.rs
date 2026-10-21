@@ -68,8 +68,15 @@ pub(crate) fn redact_url(url: &str) -> String {
 }
 
 /// The secret values one request carries, in every spelling they can come back in.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Secrets(Vec<String>);
+
+// Never prints the values, only how many there are.
+impl std::fmt::Debug for Secrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Secrets({} values)", self.0.len())
+    }
+}
 
 impl Secrets {
     pub(crate) fn of(req: &Req) -> Secrets {
@@ -133,6 +140,33 @@ mod tests {
             "https://x/m?api_key=REDACTED&q=1#f"
         );
         assert_eq!(redact_url("https://x/m"), "https://x/m");
+    }
+
+    #[test]
+    fn debug_never_prints_a_secret() {
+        let req = Req::post_form(
+            Host::AcoustId,
+            "/lookup",
+            "client=s3cret%2FKEY&duration=10&fingerprint=AQ".into(),
+        )
+        .query("api_key", "query-secret-value")
+        .query("q", "shown");
+        let shown = format!("{req:?} {req:#?}");
+        for secret in ["s3cret", "query-secret-value"] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+        assert!(
+            shown.contains("client=REDACTED&duration=10&fingerprint=AQ"),
+            "{shown}"
+        );
+        assert!(shown.contains("shown"), "{shown}");
+
+        let secrets = Secrets::of(&req);
+        let shown = format!("{secrets:?} {secrets:#?}");
+        for secret in ["s3cret", "query-secret-value"] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+        assert!(shown.starts_with("Secrets("), "{shown}");
     }
 
     #[test]

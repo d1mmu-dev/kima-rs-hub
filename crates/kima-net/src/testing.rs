@@ -57,6 +57,7 @@ struct State {
     served: Mutex<HashMap<Key, usize>>,
     asked: Mutex<Vec<String>>,
     user_agents: Mutex<Vec<String>>,
+    content_types: Mutex<Vec<String>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -73,6 +74,13 @@ impl State {
         lock(&self.user_agents).push(
             headers
                 .get(header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string(),
+        );
+        lock(&self.content_types).push(
+            headers
+                .get(header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_string(),
@@ -144,6 +152,7 @@ impl Replay {
             served: Mutex::new(HashMap::new()),
             asked: Mutex::new(Vec::new()),
             user_agents: Mutex::new(Vec::new()),
+            content_types: Mutex::new(Vec::new()),
         });
         let shared = state.clone();
         let app = Router::new().fallback(
@@ -179,6 +188,11 @@ impl Replay {
     /// The User-Agent of every request received, in order.
     pub fn user_agents(&self) -> Vec<String> {
         lock(&self.state.user_agents).clone()
+    }
+
+    /// The `Content-Type` of every request received, in order (empty when none was sent).
+    pub fn content_types(&self) -> Vec<String> {
+        lock(&self.state.content_types).clone()
     }
 }
 

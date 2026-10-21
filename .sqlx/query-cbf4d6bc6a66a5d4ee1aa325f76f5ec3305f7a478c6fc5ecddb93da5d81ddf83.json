@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO album_genres (album_id, genre_id, source, rank)\n         SELECT $1, g, $2, r FROM UNNEST($3::uuid[], $4::int2[]) AS u(g, r)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "UuidArray",
+        "Int2Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cbf4d6bc6a66a5d4ee1aa325f76f5ec3305f7a478c6fc5ecddb93da5d81ddf83"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM album_genres WHERE album_id = ANY($1) AND source = 'file'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "90ab4bfe0fbac7820c87596ff5d6ee708282ef2be904dcaf49056c0966c38b38"
+}

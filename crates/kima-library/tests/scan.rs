@@ -3,7 +3,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use common::{Tags, make_audio, require_ffmpeg};
+use common::{Picard, Tags, make_audio, require_ffmpeg, tag_picard};
 use kima_core::events::EventBus;
 use kima_db::PgPool;
 use kima_db::library::Guessed;
@@ -916,4 +916,800 @@ async fn library_job_reports_changes_and_calls_on_change(pool: PgPool) {
         1,
         "nothing changed the second time"
     );
+}
+
+// ---- Identity tags, file genres, embedded lyrics and stage reopening (M3a Task 10) ----
+
+const REC: &str = "a8b4c3d2-1e0f-4a9b-8c7d-6e5f4a3b2c1d";
+const RTRACK: &str = "b1b2b3b4-c1c2-4d1d-9e1e-f1f2f3f4f5f6";
+const REL_A: &str = "10000000-0000-4000-8000-00000000000a";
+const REL_B: &str = "20000000-0000-4000-8000-00000000000b";
+const RG_A: &str = "30000000-0000-4000-8000-00000000000a";
+const RG_B: &str = "40000000-0000-4000-8000-00000000000b";
+const A1: &str = "e1e2e3e4-0000-4000-8000-000000000001";
+const A2: &str = "e1e2e3e4-0000-4000-8000-000000000002";
+const VA_MBID: &str = "89ad4ac3-39f7-470e-963a-56509c546377";
+
+fn u(s: &str) -> Uuid {
+    Uuid::parse_str(s).unwrap()
+}
+
+/// Writes a fresh file (replacing any old one) with plain tags, then `p` over it, and moves
+/// its mtime forward so a rescan always re-reads it.
+fn picard_audio(root: &Path, rel: &str, t: Tags, p: &Picard<'_>) {
+    let path = make_audio(root, rel, t);
+    tag_picard(&path, p);
+    bump_mtime(&path);
+}
+
+async fn rescan(pool: &PgPool, root: &Path) {
+    let r = scan::reconcile(&ctx(pool, root)).await.unwrap();
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+}
+
+async fn exec(pool: &PgPool, sql: &str, id: Uuid) {
+    sqlx::query(sql).bind(id).execute(pool).await.unwrap();
+}
+
+async fn album_of(pool: &PgPool, path: &str) -> Uuid {
+    sqlx::query_scalar("SELECT album_id FROM tracks WHERE path = $1")
+        .bind(path)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn album_mbids(
+    pool: &PgPool,
+    album: Uuid,
+) -> (Option<Uuid>, Option<String>, Option<Uuid>, Option<String>) {
+    sqlx::query_as(
+        "SELECT release_mbid, release_mbid_source, release_group_mbid, release_group_mbid_source
+         FROM albums WHERE id = $1",
+    )
+    .bind(album)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn artist_mbid(pool: &PgPool, name_key: &str) -> (Option<Uuid>, Option<String>) {
+    sqlx::query_as("SELECT mbid, mbid_source FROM artists WHERE name_key = $1")
+        .bind(name_key)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn track_genre_names(pool: &PgPool, track: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT g.name FROM track_genres tg JOIN genres g ON g.id = tg.genre_id
+         WHERE tg.track_id = $1 AND tg.source = 'file' ORDER BY tg.rank",
+    )
+    .bind(track)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn seed_stages(pool: &PgPool, track: Uuid) {
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status, attempts, redelivered, last_error,
+                                   error_code, error_class, evidence, next_attempt_at)
+         VALUES ($1, 'fingerprint', 'done', 1, 0, NULL, NULL, NULL, '{}', NULL),
+                ($1, 'recording', 'failed', 3, 2, 'boom', 'HTTP_503', NULL, '{\"x\":1}', now())",
+    )
+    .bind(track)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO track_acoustid (track_id, fingerprint, duration_secs) VALUES ($1, 'AQAA', 2)",
+    )
+    .bind(track)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// (status, attempts, redelivered, evidence) per stage, ordered by stage.
+async fn stages(pool: &PgPool, track: Uuid) -> Vec<(String, i16, i16, Option<serde_json::Value>)> {
+    sqlx::query_as(
+        "SELECT status, attempts, redelivered, evidence FROM track_stages
+         WHERE track_id = $1 ORDER BY stage",
+    )
+    .bind(track)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn acoustid_rows(pool: &PgPool, track: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM track_acoustid WHERE track_id = $1")
+        .bind(track)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn picard_tagged_track_stores_ids(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    picard_audio(
+        root,
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+        &Picard {
+            recording: Some(REC),
+            release_track: Some(RTRACK),
+            release: Some(REL_A),
+            release_group: Some(RG_A),
+            artists: vec![A1, A2],
+            album_artists: vec![A1],
+            isrc: Some("us-rc1-76-07839"),
+            disc: Some((1, 2)),
+            track: Some((3, 12)),
+            ..Default::default()
+        },
+    );
+    rescan(&pool, root).await;
+    #[allow(clippy::type_complexity)]
+    let row: (
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<Uuid>,
+        Vec<Uuid>,
+        Vec<Uuid>,
+        Option<i32>,
+        Option<i32>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT tag_recording_mbid, tag_release_track_mbid, tag_release_mbid,
+                tag_release_group_mbid, tag_artist_mbids, tag_album_artist_mbids,
+                disc_total, track_total, isrc, isrc_source
+         FROM tracks WHERE path = 'A/B/01.flac'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            Some(u(REC)),
+            Some(u(RTRACK)),
+            Some(u(REL_A)),
+            Some(u(RG_A)),
+            vec![u(A1), u(A2)],
+            vec![u(A1)],
+            Some(2),
+            Some(12),
+            Some("USRC17607839".to_string()),
+            Some("id3".to_string()),
+        )
+    );
+    let album = album_of(&pool, "A/B/01.flac").await;
+    assert_eq!(
+        album_mbids(&pool, album).await,
+        (
+            Some(u(REL_A)),
+            Some("tag".into()),
+            Some(u(RG_A)),
+            Some("tag".into())
+        )
+    );
+    assert_eq!(
+        artist_mbid(&pool, "a").await,
+        (Some(u(A1)), Some("tag".into()))
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn album_mbids_are_mode_ties_smallest(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (n, rel, rg) in [(1, REL_B, RG_B), (2, REL_A, RG_A), (3, REL_A, RG_A)] {
+        picard_audio(
+            root,
+            &format!("A/Three/0{n}.flac"),
+            tags("A", "Three", "t", "2000", &n.to_string()),
+            &Picard {
+                release: Some(rel),
+                release_group: Some(rg),
+                ..Default::default()
+            },
+        );
+    }
+    // A tie: the larger id comes first in the folder.
+    for (n, rel, rg) in [(1, REL_B, RG_B), (2, REL_A, RG_A)] {
+        picard_audio(
+            root,
+            &format!("A/Two/0{n}.flac"),
+            tags("A", "Two", "t", "2000", &n.to_string()),
+            &Picard {
+                release: Some(rel),
+                release_group: Some(rg),
+                ..Default::default()
+            },
+        );
+    }
+    rescan(&pool, root).await;
+    for album in ["A/Three/01.flac", "A/Two/01.flac"] {
+        let id = album_of(&pool, album).await;
+        let (rel, _, rg, _) = album_mbids(&pool, id).await;
+        assert_eq!((rel, rg), (Some(u(REL_A)), Some(u(RG_A))), "{album}");
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn rescan_keeps_user_and_autotag_album_mbids(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let file = |rel: &'static str, rg: &'static str| Picard {
+        release: Some(rel),
+        release_group: Some(rg),
+        ..Default::default()
+    };
+    picard_audio(
+        root,
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+        &file(REL_A, RG_A),
+    );
+    rescan(&pool, root).await;
+    let album = album_of(&pool, "A/B/01.flac").await;
+    let user = Uuid::now_v7();
+    let auto = Uuid::now_v7();
+    sqlx::query(
+        "UPDATE albums SET release_group_mbid = $2, release_group_mbid_source = 'user',
+                           release_mbid = $3, release_mbid_source = 'autotag' WHERE id = $1",
+    )
+    .bind(album)
+    .bind(user)
+    .bind(auto)
+    .execute(&pool)
+    .await
+    .unwrap();
+    picard_audio(
+        root,
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+        &file(REL_B, RG_B),
+    );
+    rescan(&pool, root).await;
+    assert_eq!(album_of(&pool, "A/B/01.flac").await, album);
+    assert_eq!(
+        album_mbids(&pool, album).await,
+        (
+            Some(auto),
+            Some("autotag".into()),
+            Some(user),
+            Some("user".into())
+        )
+    );
+    // The editor's Reset clears the value and its source; the next read fills it from tags.
+    exec(
+        &pool,
+        "UPDATE albums SET release_group_mbid = NULL, release_group_mbid_source = NULL WHERE id = $1",
+        album,
+    )
+    .await;
+    bump_mtime(&root.join("A/B/01.flac"));
+    rescan(&pool, root).await;
+    assert_eq!(
+        album_mbids(&pool, album).await,
+        (
+            Some(auto),
+            Some("autotag".into()),
+            Some(u(RG_B)),
+            Some("tag".into())
+        )
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn artist_mbid_from_album_artist_tag(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    picard_audio(
+        root,
+        "AA/B/01.flac",
+        Tags {
+            album_artist: Some("AA".into()),
+            artist: Some("Someone feat. Other".into()),
+            album: Some("B".into()),
+            title: Some("t".into()),
+            ..Default::default()
+        },
+        &Picard {
+            album_artists: vec![A1],
+            artists: vec![A2],
+            ..Default::default()
+        },
+    );
+    rescan(&pool, root).await;
+    assert_eq!(
+        artist_mbid(&pool, "aa").await,
+        (Some(u(A1)), Some("tag".into()))
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn artist_mbid_from_artist_tag_with_featured(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    picard_audio(
+        root,
+        "X/B/01.flac",
+        Tags {
+            artist: Some("A feat. B".into()),
+            album: Some("B".into()),
+            title: Some("t".into()),
+            ..Default::default()
+        },
+        &Picard {
+            artists: vec![A1, A2],
+            ..Default::default()
+        },
+    );
+    rescan(&pool, root).await;
+    assert_eq!(
+        artist_mbid(&pool, "a").await,
+        (Some(u(A1)), Some("tag".into()))
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn artist_mbid_skipped_when_counts_disagree(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Two album-artist ids for one album artist.
+    picard_audio(
+        root,
+        "AA/B/01.flac",
+        Tags {
+            album_artist: Some("AA".into()),
+            album: Some("B".into()),
+            title: Some("t".into()),
+            ..Default::default()
+        },
+        &Picard {
+            album_artists: vec![A1, A2],
+            ..Default::default()
+        },
+    );
+    // Two artist ids for an artist credit without featured artists.
+    picard_audio(
+        root,
+        "Solo/B/01.flac",
+        Tags {
+            artist: Some("Solo".into()),
+            album: Some("B".into()),
+            title: Some("t".into()),
+            ..Default::default()
+        },
+        &Picard {
+            artists: vec![A1, A2],
+            ..Default::default()
+        },
+    );
+    // An album-artist tag with only artist ids: the album-artist list decides.
+    picard_audio(
+        root,
+        "Other/B/01.flac",
+        Tags {
+            album_artist: Some("Other".into()),
+            artist: Some("Other".into()),
+            album: Some("B".into()),
+            title: Some("t".into()),
+            ..Default::default()
+        },
+        &Picard {
+            artists: vec![A1],
+            ..Default::default()
+        },
+    );
+    rescan(&pool, root).await;
+    for key in ["aa", "solo", "other"] {
+        assert_eq!(artist_mbid(&pool, key).await, (None, None), "{key}");
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn artist_mbid_never_replaces_user(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let p = Picard {
+        album_artists: vec![A1],
+        ..Default::default()
+    };
+    picard_audio(root, "A/B/01.flac", tags("A", "B", "one", "2000", "1"), &p);
+    rescan(&pool, root).await;
+    let user = Uuid::now_v7();
+    sqlx::query("UPDATE artists SET mbid = $1, mbid_source = 'user' WHERE name_key = 'a'")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    picard_audio(root, "A/B/01.flac", tags("A", "B", "one", "2000", "1"), &p);
+    rescan(&pool, root).await;
+    assert_eq!(
+        artist_mbid(&pool, "a").await,
+        (Some(user), Some("user".into()))
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn file_isrc_wins_over_musicbrainz(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let t = || tags("A", "B", "one", "2000", "1");
+    picard_audio(root, "A/B/01.flac", t(), &Picard::default());
+    rescan(&pool, root).await;
+    let id = track_id(&pool, "A/B/01.flac").await;
+    let isrc = |pool: PgPool| async move {
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT isrc, isrc_source FROM tracks WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    exec(
+        &pool,
+        "UPDATE tracks SET isrc = 'GBAYE0000001', isrc_source = 'musicbrainz' WHERE id = $1",
+        id,
+    )
+    .await;
+    // A file without an ISRC leaves the MusicBrainz one.
+    bump_mtime(&root.join("A/B/01.flac"));
+    rescan(&pool, root).await;
+    assert_eq!(
+        isrc(pool.clone()).await,
+        (Some("GBAYE0000001".into()), Some("musicbrainz".into()))
+    );
+    picard_audio(
+        root,
+        "A/B/01.flac",
+        t(),
+        &Picard {
+            isrc: Some("USRC17607839"),
+            ..Default::default()
+        },
+    );
+    rescan(&pool, root).await;
+    assert_eq!(
+        isrc(pool.clone()).await,
+        (Some("USRC17607839".into()), Some("id3".into()))
+    );
+    // Removing it from the file clears an `id3` value.
+    picard_audio(root, "A/B/01.flac", t(), &Picard::default());
+    rescan(&pool, root).await;
+    assert_eq!(isrc(pool.clone()).await, (None, None));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn file_genres_replaced_wholesale(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let t = || tags("A", "B", "one", "2000", "1");
+    picard_audio(
+        root,
+        "A/B/01.flac",
+        t(),
+        &Picard {
+            genres: vec!["Rock", "Pop"],
+            ..Default::default()
+        },
+    );
+    rescan(&pool, root).await;
+    let id = track_id(&pool, "A/B/01.flac").await;
+    assert_eq!(track_genre_names(&pool, id).await, vec!["Rock", "Pop"]);
+    picard_audio(
+        root,
+        "A/B/01.flac",
+        t(),
+        &Picard {
+            genres: vec!["Jazz"],
+            ..Default::default()
+        },
+    );
+    rescan(&pool, root).await;
+    assert_eq!(track_genre_names(&pool, id).await, vec!["Jazz"]);
+    picard_audio(root, "A/B/01.flac", t(), &Picard::default());
+    rescan(&pool, root).await;
+    assert!(track_genre_names(&pool, id).await.is_empty());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn album_and_artist_file_genres_top5_by_track_count(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let files: [(&str, Vec<&str>); 5] = [
+        ("A/One/01.flac", vec!["A", "B", "C", "D", "E", "F", "G"]),
+        ("A/One/02.flac", vec!["G", "F"]),
+        ("A/One/03.flac", vec!["G"]),
+        ("A/Two/01.flac", vec!["B"]),
+        ("A/Two/02.flac", vec!["B"]),
+    ];
+    for (n, (rel, genres)) in files.iter().enumerate() {
+        let album = rel.split('/').nth(1).unwrap();
+        picard_audio(
+            root,
+            rel,
+            tags("A", album, "t", "2000", &(n + 1).to_string()),
+            &Picard {
+                genres: genres.clone(),
+                ..Default::default()
+            },
+        );
+    }
+    rescan(&pool, root).await;
+    let album = album_of(&pool, "A/One/01.flac").await;
+    let album_genres: Vec<String> = sqlx::query_scalar(
+        "SELECT g.name FROM album_genres x JOIN genres g ON g.id = x.genre_id
+         WHERE x.album_id = $1 AND x.source = 'file' ORDER BY x.rank",
+    )
+    .bind(album)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(album_genres, vec!["G", "F", "A", "B", "C"]);
+    let artist_genres: Vec<String> = sqlx::query_scalar(
+        "SELECT g.name FROM artist_genres x JOIN genres g ON g.id = x.genre_id
+         JOIN artists a ON a.id = x.artist_id
+         WHERE a.name_key = 'a' AND x.source = 'file' ORDER BY x.rank",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(artist_genres, vec!["B", "G", "F", "A", "C"]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn embedded_lyrics_upserted_then_removed(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let t = || tags("A", "B", "one", "2000", "1");
+    let with = Picard {
+        uslt: Some("Hello there"),
+        ..Default::default()
+    };
+    picard_audio(root, "A/B/01.flac", t(), &with);
+    rescan(&pool, root).await;
+    let id = track_id(&pool, "A/B/01.flac").await;
+    let row = |pool: PgPool| async move {
+        sqlx::query_as::<_, (Option<String>, Option<String>, String, Option<i32>)>(
+            "SELECT plain_lyrics, synced_lyrics, source, lrclib_id FROM track_lyrics WHERE track_id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        row(pool.clone()).await,
+        Some((Some("Hello there".into()), None, "embedded".into(), None))
+    );
+    // Lyrics gone from the file: the embedded row goes too (D-115).
+    picard_audio(root, "A/B/01.flac", t(), &Picard::default());
+    rescan(&pool, root).await;
+    assert_eq!(row(pool.clone()).await, None);
+    // An LRCLIB row is kept while the file has none, and replaced once it gains some.
+    exec(
+        &pool,
+        "INSERT INTO track_lyrics (track_id, plain_lyrics, source, lrclib_id)
+         VALUES ($1, 'from lrclib', 'lrclib', 7)",
+        id,
+    )
+    .await;
+    bump_mtime(&root.join("A/B/01.flac"));
+    rescan(&pool, root).await;
+    assert_eq!(
+        row(pool.clone()).await,
+        Some((Some("from lrclib".into()), None, "lrclib".into(), Some(7)))
+    );
+    picard_audio(
+        root,
+        "A/B/01.flac",
+        t(),
+        &Picard {
+            uslt: Some("[00:01.00] synced"),
+            ..Default::default()
+        },
+    );
+    rescan(&pool, root).await;
+    assert_eq!(
+        row(pool.clone()).await,
+        Some((
+            None,
+            Some("[00:01.00] synced".into()),
+            "embedded".into(),
+            None
+        ))
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn changed_file_reopens_stages_and_drops_fingerprint(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_audio(root, "A/B/01.flac", tags("A", "B", "one", "2000", "1"));
+    rescan(&pool, root).await;
+    let id = track_id(&pool, "A/B/01.flac").await;
+    seed_stages(&pool, id).await;
+    // Same content, new mtime: re-read, nothing reopened.
+    bump_mtime(&root.join("A/B/01.flac"));
+    rescan(&pool, root).await;
+    assert_eq!(stages(&pool, id).await[0].0, "done");
+    assert_eq!(acoustid_rows(&pool, id).await, 1);
+
+    make_audio(
+        root,
+        "A/B/01.flac",
+        tags("A", "B", "one, edited", "2000", "1"),
+    );
+    bump_mtime(&root.join("A/B/01.flac"));
+    rescan(&pool, root).await;
+    assert_eq!(track_id(&pool, "A/B/01.flac").await, id);
+    let reason = serde_json::json!({"reason": "file changed"});
+    assert_eq!(
+        stages(&pool, id).await,
+        vec![
+            ("pending".into(), 0, 0, Some(reason.clone())),
+            ("pending".into(), 0, 0, Some(reason)),
+        ]
+    );
+    let cleared: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM track_stages WHERE track_id = $1 AND next_attempt_at IS NULL
+           AND last_error IS NULL AND error_code IS NULL AND error_class IS NULL",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cleared.0, 2);
+    assert_eq!(acoustid_rows(&pool, id).await, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn sibling_reread_does_not_reopen(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_audio(root, "A/B/01.flac", tags("A", "B", "one", "2001", "1"));
+    make_audio(root, "A/B/02.flac", tags("A", "B", "two", "1999", "2"));
+    make_audio(root, "A/B/03.flac", tags("A", "B", "three", "1999", "3"));
+    rescan(&pool, root).await;
+    let sibling = track_id(&pool, "A/B/03.flac").await;
+    seed_stages(&pool, sibling).await;
+    // 02 moves to 2001, so the album year moves and 03 is re-read with unchanged content.
+    make_audio(root, "A/B/02.flac", tags("A", "B", "two", "2001", "2"));
+    bump_mtime(&root.join("A/B/02.flac"));
+    let r = scan::reconcile(&ctx(&pool, root)).await.unwrap();
+    assert_eq!(r.tags_read, 3, "{r:?}");
+    let year: Option<i32> = sqlx::query_scalar(
+        "SELECT b.year FROM tracks t JOIN albums b ON b.id = t.album_id WHERE t.id = $1",
+    )
+    .bind(sibling)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(year, Some(2001));
+    let st = stages(&pool, sibling).await;
+    assert_eq!(st[0].0, "done");
+    assert_eq!(st[1].0, "failed");
+    assert_eq!(acoustid_rows(&pool, sibling).await, 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn restore_reopens_file_missing(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_audio(root, "A/B/01.flac", tags("A", "B", "one", "2000", "1"));
+    make_audio(root, "A/B/02.flac", tags("A", "B", "two", "2000", "2"));
+    // Keeps the library non-empty, so the unmounted-disk guard does not hold.
+    make_audio(root, "K/K/01.flac", tags("K", "K", "keep", "2000", "1"));
+    rescan(&pool, root).await;
+    let one = track_id(&pool, "A/B/01.flac").await;
+    let two = track_id(&pool, "A/B/02.flac").await;
+    let park = tempfile::tempdir().unwrap();
+    for (name, id) in [("01.flac", one), ("02.flac", two)] {
+        std::fs::rename(root.join("A/B").join(name), park.path().join(name)).unwrap();
+        sqlx::query(
+            "INSERT INTO track_stages (track_id, stage, status, attempts, error_class, last_error)
+             VALUES ($1, 'fingerprint', 'failed', 1, 'FILE_MISSING', 'gone'),
+                    ($1, 'recording', 'failed', 4, 'PERMANENT', 'no')",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    rescan(&pool, root).await;
+    assert_eq!(missing_count(&pool).await, 2);
+    // 01 comes back where it was (a restore); 02 comes back elsewhere (a re-point).
+    std::fs::rename(park.path().join("01.flac"), root.join("A/B/01.flac")).unwrap();
+    std::fs::create_dir_all(root.join("A/C")).unwrap();
+    std::fs::rename(park.path().join("02.flac"), root.join("A/C/02.flac")).unwrap();
+    let r = scan::reconcile(&ctx(&pool, root)).await.unwrap();
+    assert_eq!((r.restored, r.repointed), (1, 1), "{r:?}");
+    for id in [one, two] {
+        let st = stages(&pool, id).await;
+        assert_eq!(st[0].0, "pending", "fingerprint reopened");
+        assert_eq!(st[0].1, 0);
+        assert_eq!(st[1].0, "failed", "other classes untouched");
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn va_artist_created_with_mbid(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_audio(
+        root,
+        "Comp/Now/01.flac",
+        Tags {
+            artist: Some("Singer".into()),
+            album: Some("Now".into()),
+            title: Some("t".into()),
+            compilation: true,
+            ..Default::default()
+        },
+    );
+    rescan(&pool, root).await;
+    let row: (Option<Uuid>, String) = sqlx::query_as(
+        "SELECT mbid, enrichment_status FROM artists WHERE name_key = 'various artists'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (Some(u(VA_MBID)), "completed".to_string()));
 }

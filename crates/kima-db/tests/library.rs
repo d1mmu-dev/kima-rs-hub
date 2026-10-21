@@ -25,12 +25,17 @@ fn track(artist: &str, album: &str, year: Option<i32>, title: &str, path: &str) 
         mtime: OffsetDateTime::now_utc(),
         fingerprint: [7; 32],
         guessed: Guessed::default(),
+        ids: Default::default(),
+        isrc: None,
+        disc_total: None,
+        track_total: None,
+        artist_mbid_candidate: None,
     }
 }
 
 async fn upsert(pool: &PgPool, t: &ResolvedTrack) -> uuid::Uuid {
     let mut tx = pool.begin().await.unwrap();
-    let id = library::upsert_track(&mut tx, t).await.unwrap();
+    let id = library::upsert_track(&mut tx, t).await.unwrap().track;
     tx.commit().await.unwrap();
     id
 }
@@ -337,4 +342,91 @@ async fn clear_missing_restores_rows(pool: PgPool) {
     assert_eq!(library::clear_missing(&pool, &paths).await.unwrap(), 1);
     assert_eq!(library::clear_missing(&pool, &paths).await.unwrap(), 0);
     assert!(!library::scan_index(&pool, None).await.unwrap()[0].missing);
+}
+
+// ---- M3a Task 10: upsert result, genres, lyrics ----
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn upsert_reports_content_change(pool: PgPool) {
+    let mut t = track("A", "B", None, "x", "/m/1");
+    let mut tx = pool.begin().await.unwrap();
+    let first = library::upsert_track(&mut tx, &t).await.unwrap();
+    assert!(!first.content_changed, "a new row has nothing to compare");
+    let same = library::upsert_track(&mut tx, &t).await.unwrap();
+    assert_eq!(
+        (same.track, same.album, same.artist),
+        (first.track, first.album, first.artist)
+    );
+    assert!(!same.content_changed);
+    t.fingerprint = [8; 32];
+    assert!(
+        library::upsert_track(&mut tx, &t)
+            .await
+            .unwrap()
+            .content_changed
+    );
+    tx.commit().await.unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn track_genres_skip_markers_and_repeats(pool: PgPool) {
+    use kima_db::genres::{self, GenreSource};
+    let id = upsert(&pool, &track("A", "B", None, "x", "/m/1")).await;
+    let names: Vec<String> = ["Rock", "_internal", "rock", " Hip  Hop ", ""]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut conn = pool.acquire().await.unwrap();
+    genres::replace_track_genres(&mut conn, id, GenreSource::MusicBrainz, &names)
+        .await
+        .unwrap();
+    let rows: Vec<(String, String, i16)> = sqlx::query_as(
+        "SELECT g.name, g.key, tg.rank FROM track_genres tg JOIN genres g ON g.id = tg.genre_id
+         WHERE tg.track_id = $1 ORDER BY tg.rank",
+    )
+    .bind(id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("Rock".into(), "rock".into(), 0),
+            ("Hip  Hop".into(), "hip hop".into(), 1)
+        ]
+    );
+    // Another source of the same track is independent; clearing one leaves the other.
+    genres::replace_track_genres(&mut conn, id, GenreSource::File, &["Jazz".to_string()])
+        .await
+        .unwrap();
+    genres::replace_track_genres(&mut conn, id, GenreSource::MusicBrainz, &[])
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "track_genres").await, 1);
+    assert_eq!(genres::prune_unused(&pool).await.unwrap(), 2);
+    assert_eq!(count(&pool, "genres").await, 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn delete_embedded_keeps_other_sources(pool: PgPool) {
+    use kima_db::lyrics;
+    let id = upsert(&pool, &track("A", "B", None, "x", "/m/1")).await;
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("INSERT INTO track_lyrics (track_id, source) VALUES ($1, 'none')")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    lyrics::delete_embedded(&mut conn, id).await.unwrap();
+    assert_eq!(count(&pool, "track_lyrics").await, 1);
+    lyrics::upsert_embedded(&mut conn, id, Some("words"), None)
+        .await
+        .unwrap();
+    let src: String = sqlx::query_scalar("SELECT source FROM track_lyrics")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(src, "embedded");
+    lyrics::delete_embedded(&mut conn, id).await.unwrap();
+    assert_eq!(count(&pool, "track_lyrics").await, 0);
 }

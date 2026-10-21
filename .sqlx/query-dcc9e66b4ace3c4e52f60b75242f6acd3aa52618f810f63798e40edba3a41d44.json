@@ -1,0 +1,45 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tracks (id, album_id, artist_name, title, year, disc, track_no, duration_secs,\n                               codec, bitrate, path, size, mtime, fingerprint, guessed,\n                               tag_recording_mbid, tag_release_track_mbid, tag_release_mbid,\n                               tag_release_group_mbid, tag_artist_mbids, tag_album_artist_mbids,\n                               disc_total, track_total, isrc, isrc_source)\n           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,\n                   $16, $17, $18, $19, $20, $21, $22, $23, $24,\n                   CASE WHEN $24::text IS NULL THEN NULL ELSE 'id3' END)\n           ON CONFLICT (path) DO UPDATE\n           SET album_id = EXCLUDED.album_id, artist_name = EXCLUDED.artist_name,\n               title = EXCLUDED.title, year = EXCLUDED.year, disc = EXCLUDED.disc, track_no = EXCLUDED.track_no,\n               duration_secs = EXCLUDED.duration_secs, codec = EXCLUDED.codec,\n               bitrate = EXCLUDED.bitrate, size = EXCLUDED.size, mtime = EXCLUDED.mtime,\n               fingerprint = EXCLUDED.fingerprint, guessed = EXCLUDED.guessed,\n               tag_recording_mbid = EXCLUDED.tag_recording_mbid,\n               tag_release_track_mbid = EXCLUDED.tag_release_track_mbid,\n               tag_release_mbid = EXCLUDED.tag_release_mbid,\n               tag_release_group_mbid = EXCLUDED.tag_release_group_mbid,\n               tag_artist_mbids = EXCLUDED.tag_artist_mbids,\n               tag_album_artist_mbids = EXCLUDED.tag_album_artist_mbids,\n               disc_total = EXCLUDED.disc_total, track_total = EXCLUDED.track_total,\n               isrc = CASE WHEN EXCLUDED.isrc IS NOT NULL THEN EXCLUDED.isrc\n                           WHEN tracks.isrc_source = 'id3' THEN NULL\n                           ELSE tracks.isrc END,\n               isrc_source = CASE WHEN EXCLUDED.isrc IS NOT NULL THEN EXCLUDED.isrc_source\n                                  WHEN tracks.isrc_source = 'id3' THEN NULL\n                                  ELSE tracks.isrc_source END,\n               missing_since = NULL, updated_at = now()\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Text",
+        "Int4",
+        "Text",
+        "Int8",
+        "Timestamptz",
+        "Bytea",
+        "Jsonb",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "Int4",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dcc9e66b4ace3c4e52f60b75242f6acd3aa52618f810f63798e40edba3a41d44"
+}

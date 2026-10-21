@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE track_stages\n         SET status = 'pending', attempts = 0, redelivered = 0, next_attempt_at = NULL,\n             last_error = NULL, error_code = NULL, error_class = NULL,\n             started_at = NULL, finished_at = NULL, updated_at = now()\n         WHERE track_id = ANY($1) AND error_class = 'FILE_MISSING'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "31af38d6d4518cfbe731a64798d81a1f5bc69c7ed02c562a62f29de2f7ccc1d8"
+}

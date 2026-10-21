@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE track_stages\n           SET status = 'pending', attempts = 0, redelivered = 0, next_attempt_at = NULL,\n               last_error = NULL, error_code = NULL, error_class = NULL,\n               evidence = '{\"reason\":\"file changed\"}'::jsonb,\n               started_at = NULL, finished_at = NULL, updated_at = now()\n           WHERE track_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f54264c0654a7edb8e7f3ef057e3b651a62398523608299e69fe1e76eea373e8"
+}

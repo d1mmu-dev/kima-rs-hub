@@ -18,6 +18,17 @@ pub struct Resolved {
     pub track: u32,
     pub is_compilation: bool,
     pub guessed: Guessed,
+    /// Where the album artist came from (before a compilation turns it into Various Artists).
+    pub album_artist_from: ArtistFrom,
+}
+
+/// The source of a resolved album artist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtistFrom {
+    AlbumArtistTag,
+    ArtistTag,
+    Path,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,15 +347,22 @@ pub fn resolve(raw: &RawTags, rel_path: &Path) -> Resolved {
             .map(|s| parse_credit(s, None).primary)
             .filter(|p| !p.is_empty())
     };
-    let mut album_artist = tag_credit(&raw.album_artist).or_else(|| tag_credit(&raw.artist));
+    let mut album_artist_from = ArtistFrom::AlbumArtistTag;
+    let mut album_artist = tag_credit(&raw.album_artist);
+    if album_artist.is_none() {
+        album_artist_from = ArtistFrom::ArtistTag;
+        album_artist = tag_credit(&raw.artist);
+    }
     if album_artist.is_none()
         && let Some(a) = info.artist.clone()
     {
         g.artist_from_path = true;
+        album_artist_from = ArtistFrom::Path;
         album_artist = Some(a);
     }
     let album_artist = album_artist.unwrap_or_else(|| {
         g.unknown_artist = true;
+        album_artist_from = ArtistFrom::Unknown;
         "Unknown Artist".to_string()
     });
     let track_artist = raw
@@ -424,6 +442,7 @@ pub fn resolve(raw: &RawTags, rel_path: &Path) -> Resolved {
         track,
         is_compilation,
         guessed: g,
+        album_artist_from,
     }
 }
 
@@ -437,6 +456,28 @@ mod tests {
     }
     fn res(r: &RawTags, p: &str) -> Resolved {
         resolve(r, Path::new(p))
+    }
+
+    #[test]
+    fn album_artist_source_is_recorded() {
+        let mut r = raw();
+        r.album_artist = Some("AA".into());
+        r.artist = Some("T".into());
+        assert_eq!(
+            res(&r, "x/y/1.mp3").album_artist_from,
+            ArtistFrom::AlbumArtistTag
+        );
+        r.album_artist = Some("  ".into());
+        assert_eq!(
+            res(&r, "x/y/1.mp3").album_artist_from,
+            ArtistFrom::ArtistTag
+        );
+        r.artist = None;
+        assert_eq!(
+            res(&r, "Band/Album/1.mp3").album_artist_from,
+            ArtistFrom::Path
+        );
+        assert_eq!(res(&r, "1.mp3").album_artist_from, ArtistFrom::Unknown);
     }
 
     // --- ported from upstream musicScanner.test.ts / artistIdentity.test.ts ---

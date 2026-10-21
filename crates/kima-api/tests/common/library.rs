@@ -67,10 +67,16 @@ pub async fn seed(pool: &PgPool, s: Seed<'_>) -> Seeded {
             mtime: OffsetDateTime::now_utc(),
             fingerprint: [1; 32],
             guessed: Guessed::default(),
+            ids: Default::default(),
+            isrc: None,
+            disc_total: None,
+            track_total: None,
+            artist_mbid_candidate: None,
         },
     )
     .await
-    .unwrap();
+    .unwrap()
+    .track;
     tx.commit().await.unwrap();
     let (album, artist): (Uuid, Uuid) = sqlx::query_as(
         "SELECT t.album_id, al.artist_id FROM tracks t JOIN albums al ON al.id = t.album_id

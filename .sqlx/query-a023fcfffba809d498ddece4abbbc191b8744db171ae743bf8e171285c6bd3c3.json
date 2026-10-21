@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO jobs (id, queue, payload, max_attempts, run_at) VALUES ($1, $2, $3, $4, $5)\n           RETURNING run_at <= now() AS \"due!\"",
+  "query": "INSERT INTO jobs (id, queue, payload, max_attempts, run_at)\n           VALUES ($1, $2, $3, $4, COALESCE($5, now()))\n           RETURNING run_at <= now() AS \"due!\"",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       null
     ]
   },
-  "hash": "196acb48ba4824efb85623c5870ab822c9d4aa0b29a8f307f047fc23797c8ab7"
+  "hash": "a023fcfffba809d498ddece4abbbc191b8744db171ae743bf8e171285c6bd3c3"
 }

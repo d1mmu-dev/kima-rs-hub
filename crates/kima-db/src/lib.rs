@@ -10,6 +10,7 @@ pub mod bookmarks;
 pub mod browse;
 pub mod genres;
 pub mod http_cache;
+pub mod identity;
 pub mod library;
 pub mod lyrics;
 pub mod organizer;

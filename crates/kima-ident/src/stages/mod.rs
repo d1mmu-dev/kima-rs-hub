@@ -5,6 +5,8 @@
 //! library root or an io `NotFound`; any other io error is `Transient`, classified by its
 //! message.
 
+pub mod fingerprint;
+
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -197,4 +199,14 @@ pub fn lost_worker(claim: &Claim) -> FailureRecord {
             claim.redelivered
         ),
     )
+}
+
+/// What one batch of a stage did. `claimed − done − failed` claims were stale or abandoned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BatchReport {
+    pub claimed: usize,
+    /// Closed `done` by this batch.
+    pub done: usize,
+    /// Closed `failed` (or parked) by this batch.
+    pub failed: usize,
 }

@@ -810,6 +810,14 @@ pub async fn reconcile_cancellable(
     Ok(report)
 }
 
+/// `root.join(rel)` when `rel` is made only of `Component::Normal` parts (the M1 rule), so the
+/// result cannot leave `root`; `None` for an empty, absolute or `..`-bearing path.
+pub fn library_path(root: &Path, rel: &str) -> Option<PathBuf> {
+    let p = Path::new(rel);
+    let normal = !rel.is_empty() && p.components().all(|c| matches!(c, Component::Normal(_)));
+    normal.then(|| root.join(p))
+}
+
 /// A relative path made only of normal, non-hidden components, or `None`.
 fn clean_rel(rel: &str) -> Option<String> {
     let mut parts = Vec::new();
@@ -986,6 +994,20 @@ mod tests {
         assert_eq!(clean_rel(""), None);
         assert_eq!(clean_rel(".hidden/x.mp3"), None);
         assert_eq!(clean_rel("A/._x.mp3"), None);
+    }
+
+    #[test]
+    fn library_path_stays_under_root() {
+        let root = Path::new("/music");
+        assert_eq!(
+            library_path(root, "A/x.flac"),
+            Some(PathBuf::from("/music/A/x.flac"))
+        );
+        assert_eq!(library_path(root, "../x.flac"), None);
+        assert_eq!(library_path(root, "A/../../x.flac"), None);
+        assert_eq!(library_path(root, "/etc/passwd"), None);
+        assert_eq!(library_path(root, "./x.flac"), None);
+        assert_eq!(library_path(root, ""), None);
     }
 
     #[test]

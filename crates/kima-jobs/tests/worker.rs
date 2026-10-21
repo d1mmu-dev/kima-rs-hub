@@ -3,9 +3,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use kima_db::PgPool;
-use kima_jobs::queue;
-use kima_jobs::worker::{JobCtx, JobError, WorkerConfig, handler, handler_ctx, spawn_worker};
+use kima_jobs::queue::{self, NOTIFY_CHANNEL};
+use kima_jobs::worker::{
+    JobCtx, JobError, ListenConnect, WorkerConfig, handler, handler_ctx, spawn_worker,
+};
 use serde_json::json;
+use sqlx::postgres::PgListener;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -169,14 +172,48 @@ async fn panic_before_the_future_is_recorded(pool: PgPool) {
     shutdown.cancel();
 }
 
+/// Terminates every backend whose current query is LISTEN, waiting (bounded) until one exists.
+async fn terminate_listen_backend(pool: &PgPool) {
+    let mut killed = 0;
+    for _ in 0..100 {
+        killed = sqlx::query_scalar::<_, i64>(
+            "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity \
+             WHERE datname = current_database() AND query ILIKE 'LISTEN%'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if killed > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(killed > 0, "never found the LISTEN backend");
+}
+
+fn counting_connect(calls: Arc<AtomicUsize>, fail_on: Option<usize>) -> ListenConnect {
+    Arc::new(move |pool: PgPool| {
+        let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+        Box::pin(async move {
+            if Some(n) == fail_on {
+                return Err(sqlx::Error::PoolTimedOut);
+            }
+            let mut listener = PgListener::connect_with(&pool).await?;
+            listener.listen(NOTIFY_CHANNEL).await?;
+            Ok(listener)
+        })
+    })
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn listen_is_retried_after_failure(pool: PgPool) {
+async fn reconnect_failure_uses_retry_arm(pool: PgPool) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let shutdown = CancellationToken::new();
-    // The poll interval is long, so only NOTIFY can wake the worker in time.
+    let calls = Arc::new(AtomicUsize::new(0));
     let config = WorkerConfig {
         poll_interval: Duration::from_secs(30),
         listen_retry: Duration::from_millis(200),
+        listen_connect: counting_connect(calls.clone(), Some(2)),
         ..WorkerConfig::new("scan", 1)
     };
     let _worker = spawn_worker(
@@ -192,33 +229,59 @@ async fn listen_is_retried_after_failure(pool: PgPool) {
         shutdown.clone(),
     );
 
-    // Kill the LISTEN backend, as a database restart or a network blip would.
-    let mut killed = 0;
-    for _ in 0..50 {
-        killed = sqlx::query_scalar::<_, i64>(
-            "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity \
-             WHERE datname = current_database() AND query ILIKE 'LISTEN%'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        if killed > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    terminate_listen_backend(&pool).await;
+    // The 2nd call (the immediate reconnect) fails; the retry arm makes the 3rd.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while calls.load(Ordering::SeqCst) < 3 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no third listen_connect call: {}",
+            calls.load(Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(killed > 0, "never found the LISTEN backend");
 
-    // Give the worker time to notice and re-listen, then enqueue.
-    tokio::time::sleep(Duration::from_millis(600)).await;
     queue::enqueue(&pool, "scan", json!({"n": 7}), 1)
         .await
         .unwrap();
     let got = tokio::time::timeout(Duration::from_secs(1), rx.recv())
         .await
-        .expect("job not picked up without a poll")
+        .expect("job not picked up after the retry arm reconnected")
         .unwrap();
     assert_eq!(got, json!({"n": 7}));
+    shutdown.cancel();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn jobs_enqueued_during_reconnect_run_promptly(pool: PgPool) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let config = WorkerConfig {
+        poll_interval: Duration::from_secs(3600),
+        ..WorkerConfig::new("scan", 1)
+    };
+    let _worker = spawn_worker(
+        pool.clone(),
+        config,
+        handler(move |job| {
+            let tx = tx.clone();
+            async move {
+                tx.send(job.payload).unwrap();
+                Ok(())
+            }
+        }),
+        shutdown.clone(),
+    );
+
+    terminate_listen_backend(&pool).await;
+    queue::enqueue(&pool, "scan", json!({"n": 3}), 1)
+        .await
+        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("job enqueued during the reconnect was not swept")
+        .unwrap();
+    assert_eq!(got, json!({"n": 3}));
     shutdown.cancel();
 }
 

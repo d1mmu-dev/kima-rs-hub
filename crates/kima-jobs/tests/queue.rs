@@ -543,3 +543,44 @@ async fn enqueue_at_unless_queued_with_key_dedupes_queued(pool: PgPool) {
         .unwrap();
     assert!(delayed);
 }
+
+/// A plain enqueue takes its `run_at` from the database clock, not the app's: an app clock
+/// ahead of the database host must not delay a "due now" job or suppress its NOTIFY.
+/// `run_at = created_at` holds only when both come from the same transaction's `now()`.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn plain_enqueue_takes_run_at_from_the_database_clock(pool: PgPool) {
+    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+        .await
+        .unwrap();
+    listener.listen(queue::NOTIFY_CHANNEL).await.unwrap();
+    let plain = queue::enqueue(&pool, "q", json!({}), 3).await.unwrap();
+    let keyed = queue::enqueue_unless_queued_with_key(
+        &pool,
+        "q",
+        json!({"kind": "path", "path": "a.flac"}),
+        3,
+        "path",
+    )
+    .await
+    .unwrap()
+    .expect("queued");
+    for id in [plain, keyed] {
+        let db_clock: bool =
+            sqlx::query_scalar("SELECT run_at = created_at FROM jobs WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            db_clock,
+            "run_at of {id} did not come from the database's now()"
+        );
+    }
+    for _ in 0..2 {
+        let n = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+            .await
+            .expect("a due job wakes the workers")
+            .unwrap();
+        assert_eq!(n.payload(), "q");
+    }
+}

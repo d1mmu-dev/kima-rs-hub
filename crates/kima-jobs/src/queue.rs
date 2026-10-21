@@ -22,14 +22,7 @@ pub async fn enqueue(
     payload: serde_json::Value,
     max_attempts: i32,
 ) -> sqlx::Result<Uuid> {
-    enqueue_at(
-        pool,
-        queue,
-        payload,
-        max_attempts,
-        OffsetDateTime::now_utc(),
-    )
-    .await
+    insert(pool, queue, payload, max_attempts, None).await
 }
 
 /// Adds a job that is not claimed before `run_at`. Wakes the workers only when it is already
@@ -41,10 +34,23 @@ pub async fn enqueue_at(
     max_attempts: i32,
     run_at: OffsetDateTime,
 ) -> sqlx::Result<Uuid> {
+    insert(pool, queue, payload, max_attempts, Some(run_at)).await
+}
+
+/// Inserts a job due at `run_at`, or at the database's `now()` when `None`: the app's clock
+/// may differ from the database's, and a "due now" job must be claimable and notified at once.
+async fn insert(
+    pool: &PgPool,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+    run_at: Option<OffsetDateTime>,
+) -> sqlx::Result<Uuid> {
     let id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
     let due = sqlx::query_scalar!(
-        r#"INSERT INTO jobs (id, queue, payload, max_attempts, run_at) VALUES ($1, $2, $3, $4, $5)
+        r#"INSERT INTO jobs (id, queue, payload, max_attempts, run_at)
+           VALUES ($1, $2, $3, $4, COALESCE($5, now()))
            RETURNING run_at <= now() AS "due!""#,
         id,
         queue,
@@ -348,15 +354,7 @@ pub async fn enqueue_unless_queued_with_key(
     max_attempts: i32,
     key: &str,
 ) -> sqlx::Result<Option<Uuid>> {
-    enqueue_at_unless_queued_with_key(
-        pool,
-        queue,
-        payload,
-        max_attempts,
-        key,
-        OffsetDateTime::now_utc(),
-    )
-    .await
+    insert_unless_queued_with_key(pool, queue, payload, max_attempts, key, None).await
 }
 
 /// Like [`enqueue_unless_queued_with_key`], for a job not claimed before `run_at`. A queued
@@ -369,6 +367,18 @@ pub async fn enqueue_at_unless_queued_with_key(
     key: &str,
     run_at: OffsetDateTime,
 ) -> sqlx::Result<Option<Uuid>> {
+    insert_unless_queued_with_key(pool, queue, payload, max_attempts, key, Some(run_at)).await
+}
+
+/// The body of the two `*_unless_queued_with_key` calls; `None` means the database's `now()`.
+async fn insert_unless_queued_with_key(
+    pool: &PgPool,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+    key: &str,
+    run_at: Option<OffsetDateTime>,
+) -> sqlx::Result<Option<Uuid>> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('kima_jobs_enqueue:' || $1))")
         .bind(queue)
@@ -376,7 +386,7 @@ pub async fn enqueue_at_unless_queued_with_key(
         .await?;
     let inserted = sqlx::query!(
         r#"INSERT INTO jobs (id, queue, payload, max_attempts, run_at)
-           SELECT $1::uuid, $2::text, $3::jsonb, $4::int4, $6::timestamptz
+           SELECT $1::uuid, $2::text, $3::jsonb, $4::int4, COALESCE($6::timestamptz, now())
            WHERE NOT EXISTS (SELECT 1 FROM jobs
                              WHERE queue = $2 AND state = 'queued'
                                AND payload ->> $5::text IS NOT DISTINCT FROM $3::jsonb ->> $5::text)

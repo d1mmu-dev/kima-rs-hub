@@ -2,6 +2,7 @@
 
 pub mod chromaprint;
 mod mbid;
+pub mod stages;
 pub mod text;
 
 pub use mbid::Mbid;

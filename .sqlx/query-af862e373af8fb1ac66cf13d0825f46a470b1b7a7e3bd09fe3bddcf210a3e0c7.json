@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE track_stages\n         SET status = $4, next_attempt_at = $5, attempts = attempts + $6,\n             error_code = $7, error_class = $8, last_error = $9,\n             finished_at = CASE WHEN $10 THEN now() ELSE NULL END, updated_at = now()\n         WHERE track_id = $1 AND stage = $2 AND status = 'working' AND started_at = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Timestamptz",
+        "Int2",
+        "Text",
+        "Text",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "af862e373af8fb1ac66cf13d0825f46a470b1b7a7e3bd09fe3bddcf210a3e0c7"
+}

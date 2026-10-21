@@ -3,6 +3,7 @@
 pub mod chromaprint;
 mod ctx;
 mod mbid;
+pub mod musicbrainz;
 pub mod stages;
 pub mod text;
 

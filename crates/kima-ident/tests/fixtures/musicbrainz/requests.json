@@ -1,0 +1,85 @@
+[
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release-group/48117b90-a16e-34ca-a514-19c702df1158",
+  "query": [
+   [
+    "inc",
+    "releases+genres"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release/bd3bb36e-16c8-438f-850e-dfbf4d1478f0",
+  "query": [
+   [
+    "inc",
+    "recordings+isrcs+labels+genres+artist-credits"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/isrc/USRC17607839",
+  "query": [
+   [
+    "inc",
+    "artist-credits"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/recording",
+  "query": [
+   [
+    "query",
+    "recording:\"Daydreaming\" AND artist:\"Paramore\""
+   ],
+   [
+    "limit",
+    "50"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/recording",
+  "query": [
+   [
+    "query",
+    "Daydreaming AND artist:Paramore"
+   ],
+   [
+    "limit",
+    "50"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ }
+]

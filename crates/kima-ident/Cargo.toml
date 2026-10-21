@@ -24,5 +24,6 @@ unicode-normalization.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+kima-net = { workspace = true, features = ["testing"] }
 kima-test-support.workspace = true
 tempfile.workspace = true

@@ -1282,3 +1282,60 @@ async fn run_batch_enriches_the_claimed_artists(pool: PgPool) {
     assert_eq!(row(&pool, a).await.status, "completed");
     assert_eq!(row(&pool, b).await.status, "unresolvable");
 }
+
+// ---- review fixes (Task 21 round 1) ----
+
+/// The Wikidata image end to end: the `P18` file becomes a Commons URL under the `commons` base
+/// (the replay server here), which is downloaded, re-encoded and stored.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn wikidata_image_is_downloaded_and_stored(pool: PgPool) {
+    let a = seed(&pool, "Perturbator", "Dangerous Days").await;
+    set_mbid(&pool, a, M, "tag").await;
+    let commons_path = kima_ident::wikidata::commons_url("", "Perturbator live.jpg");
+    let w = known("Perturbator", M)
+        .get(&sparql_url(M), sparql(Some("Q42")))
+        .get(
+            "/wiki/Special:EntityData/Q42.json",
+            json!({"entities": {"Q42": {"claims": {"P18": [
+                {"rank": "normal", "mainsnak": {"datavalue": {"value": "Perturbator live.jpg"}}}
+            ]}}}}),
+        )
+        .image(&commons_path, &jpeg(1800, 600, 7));
+    let f = fx(&pool, w, World::default()).await;
+
+    assert_eq!(enrich(&f, a).await, ArtistResult::Completed);
+
+    let r = row(&pool, a).await;
+    assert_eq!(r.image_source.as_deref(), Some("wikidata"));
+    assert_eq!(r.image_path, Some(format!("{a}.jpg")));
+    let img = image::load_from_memory(&stored(&f, a).unwrap()).unwrap();
+    assert_eq!((img.width(), img.height()), (1500, 500));
+    assert!(
+        f.asked().iter().any(|q| q.contains("/wikipedia/commons/")),
+        "{:?}",
+        f.asked()
+    );
+    // fanart.tv ranks below Wikidata: not asked once Wikidata's image is stored.
+    assert!(
+        f.asked().iter().all(|q| !q.contains("/music/")),
+        "{:?}",
+        f.asked()
+    );
+}
+
+/// A `failed` artist waits out the retry grace (15 min, database clock) before it is claimed
+/// again, so a short outage cannot run it to the failure cap.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_failed_artist_waits_out_the_retry_grace(pool: PgPool) {
+    assert_eq!(
+        identity::FAILED_RETRY_GRACE,
+        std::time::Duration::from_secs(15 * 60)
+    );
+    let a = seed(&pool, "Perturbator", "Dangerous Days").await;
+    set(&pool, a, "enrichment_status = 'failed', enrichment_failures = 1, last_enriched_at = now() - interval '14 minutes'").await;
+    assert!(identity::claim_artists(&pool, 10).await.unwrap().is_empty());
+    set(&pool, a, "last_enriched_at = now() - interval '16 minutes'").await;
+    let claimed = identity::claim_artists(&pool, 10).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, a);
+}

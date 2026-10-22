@@ -216,7 +216,10 @@ async fn wikidata_takes_the_preferred_image(pool: PgPool) {
 fn p18_prefers_preferred_then_normal_never_deprecated() {
     let claim = |rank: &str, file: &str| json!({"rank": rank, "mainsnak": {"datavalue": {"value": file, "type": "string"}}});
     let entity = |claims: Vec<Value>| json!({"claims": {"P18": claims}});
-    let file = |e: &Value| wikidata::image_of(e).map(|u| u.rsplit('/').next().unwrap().to_string());
+    let file = |e: &Value| {
+        wikidata::image_of(e, kima_net::COMMONS_BASE)
+            .map(|u| u.rsplit('/').next().unwrap().to_string())
+    };
     assert_eq!(
         file(&entity(vec![
             claim("normal", "A.jpg"),
@@ -244,7 +247,7 @@ fn p18_prefers_preferred_then_normal_never_deprecated() {
         json!({"claims": {"P18": [{"rank": "normal", "mainsnak": {"datavalue": {"value": ""}}}]}}),
         json!({"claims": {"P18": [{"rank": "normal", "mainsnak": {"datavalue": {"value": "x".repeat(300)}}}]}}),
     ] {
-        assert_eq!(wikidata::image_of(&e), None, "{e}");
+        assert_eq!(wikidata::image_of(&e, kima_net::COMMONS_BASE), None, "{e}");
     }
 }
 
@@ -252,22 +255,25 @@ fn p18_prefers_preferred_then_normal_never_deprecated() {
 fn commons_url_uses_md5_path() {
     // md5("Example.jpg") = a91fe217...: Commons' own example file.
     assert_eq!(
-        wikidata::commons_url("Example.jpg"),
+        wikidata::commons_url(kima_net::COMMONS_BASE, "Example.jpg"),
         "https://upload.wikimedia.org/wikipedia/commons/a/a9/Example.jpg"
     );
     // Spaces become underscores before hashing; the name is encoded as `encodeURIComponent`
     // encodes it (parentheses kept). md5("Paul_McCartney_(1964).jpg") = abbfb9f3...
     assert_eq!(
-        wikidata::commons_url("Paul McCartney (1964).jpg"),
+        wikidata::commons_url(kima_net::COMMONS_BASE, "Paul McCartney (1964).jpg"),
         "https://upload.wikimedia.org/wikipedia/commons/a/ab/Paul_McCartney_(1964).jpg"
     );
     // md5("Björk_Cannes_2000.jpg") = 73f10278...
     assert_eq!(
-        wikidata::commons_url("Björk Cannes 2000.jpg"),
+        wikidata::commons_url(kima_net::COMMONS_BASE, "Björk Cannes 2000.jpg"),
         "https://upload.wikimedia.org/wikipedia/commons/7/73/Bj%C3%B6rk_Cannes_2000.jpg"
     );
     // A name that would break the URL is encoded.
-    assert!(wikidata::commons_url("a/b?c#d&e.jpg").ends_with("/a%2Fb%3Fc%23d%26e.jpg"));
+    assert!(
+        wikidata::commons_url(kima_net::COMMONS_BASE, "a/b?c#d&e.jpg")
+            .ends_with("/a%2Fb%3Fc%23d%26e.jpg")
+    );
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -276,12 +282,15 @@ async fn summary_404_is_no_bio_not_failure(pool: PgPool) {
     // The article is gone; the image still comes from the entity.
     entries[2].status = 404;
     entries[2].body = json!({"type": "https://mediawiki.org/wiki/HyperSwitch/errors/not_found"});
-    let (_replay, net) = net_for(&pool, entries).await;
+    let (replay, net) = net_for(&pool, entries).await;
     let info = answered(wikidata::lookup(&net, mbid(BEATLES)).await);
     assert_eq!(info.bio, None);
     assert_eq!(
-        info.image_url.as_deref(),
-        Some("https://upload.wikimedia.org/wikipedia/commons/d/df/The_Fabs.JPG")
+        info.image_url,
+        Some(format!(
+            "{}/wikipedia/commons/d/df/The_Fabs.JPG",
+            replay.url()
+        ))
     );
 }
 
@@ -296,9 +305,13 @@ async fn wikidata_beatles_bio_and_image(pool: PgPool) {
             .starts_with("The Beatles were an English rock band"),
         "{info:?}"
     );
+    // The Commons host is the test base (production: `COMMONS_BASE`).
     assert_eq!(
-        info.image_url.as_deref(),
-        Some("https://upload.wikimedia.org/wikipedia/commons/d/df/The_Fabs.JPG")
+        info.image_url,
+        Some(format!(
+            "{}/wikipedia/commons/d/df/The_Fabs.JPG",
+            replay.url()
+        ))
     );
     let asked = replay.asked();
     assert_eq!(asked.len(), 3, "{asked:?}");

@@ -322,6 +322,14 @@ impl Net {
         }
     }
 
+    /// The Wikimedia Commons base image URLs are built on ([`Bases::commons`]); the production
+    /// host for a disabled client.
+    pub fn commons_base(&self) -> &str {
+        self.live.as_ref().map_or(crate::source::COMMONS_BASE, |l| {
+            l.cfg.bases.commons.as_str()
+        })
+    }
+
     /// A source's concurrency cap now; `None` for a disabled client.
     pub fn concurrency(&self, source: Source) -> Option<u32> {
         Some(self.live.as_ref()?.gates[&source].concurrency())

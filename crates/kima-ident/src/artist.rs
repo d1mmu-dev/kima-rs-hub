@@ -203,6 +203,12 @@ struct Gathered {
 }
 
 /// Normalises `bytes` and stores them as the artist's image, off the async threads.
+///
+/// CARRIED (Task 21 review I2, to the task that writes user images, spec §16.3): the file is
+/// written to `<id>.jpg` before `save_artist_outcome` checks the row's `image_source`, so a
+/// `user` image set while this artist is enriching could be overwritten on disk (the row keeps
+/// `user`); likewise a guard-drop deletes the file after the commit. The user-image writer
+/// must lock the artist row (or use a distinct file name) to close this.
 async fn store_image(ctx: &IdentCtx, artist: Uuid, bytes: Vec<u8>) -> Result<(), String> {
     let data_dir = ctx.library.data_dir.clone();
     tokio::task::spawn_blocking(move || {

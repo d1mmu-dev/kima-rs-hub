@@ -1713,3 +1713,46 @@ async fn va_artist_created_with_mbid(pool: PgPool) {
     .unwrap();
     assert_eq!(row, (Some(u(VA_MBID)), "completed".to_string()));
 }
+
+/// Carry (Task 17 M1): the recording stage's answer locks track then album; a re-read of the
+/// same file must take the track first too, so the two queue up instead of deadlocking.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reread_locks_track_before_album(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let file = make_audio(dir.path(), "A/B/01.flac", tags("A", "B", "t", "2001", "1"));
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::Added
+    );
+    let t = track_id(&pool, "A/B/01.flac").await;
+    // The file changes on disk.
+    let f = std::fs::File::options().write(true).open(&file).unwrap();
+    f.set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    drop(f);
+
+    // The recording stage's order: track, then album.
+    let mut answer = pool.begin().await.unwrap();
+    let album = kima_db::identity::lock_track(&mut answer, t)
+        .await
+        .unwrap()
+        .unwrap();
+    let reread = {
+        let c = c.clone();
+        tokio::spawn(async move { scan::update_path(&c, "A/B/01.flac").await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    kima_db::identity::fill_album_blank(&mut answer, album, Some("Label"))
+        .await
+        .expect("no deadlock: the re-read waits on the track before touching the album");
+    answer.commit().await.unwrap();
+    assert_eq!(
+        reread.await.unwrap().unwrap(),
+        PathOutcome::Updated,
+        "the re-read finishes after the answer"
+    );
+}

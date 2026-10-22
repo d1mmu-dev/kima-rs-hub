@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists SET enrichment_status = 'pending' WHERE enrichment_status = 'enriching'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b6672da3c461e1889da1340cc49dbdf525687bb9f09adfa8b3b7aaf9ad1210ef"
+}

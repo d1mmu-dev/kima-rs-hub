@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE enrichment_state\n         SET status = 'idle', current_phase = NULL\n         WHERE status = 'stopping' OR (status = 'running' AND $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7f90891815b79cd60a3e9e7e01d372782923f60882967b4d0ec9e8e4cab707a0"
+}

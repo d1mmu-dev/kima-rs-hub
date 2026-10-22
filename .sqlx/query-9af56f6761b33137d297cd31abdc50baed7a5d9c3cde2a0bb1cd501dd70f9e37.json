@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE enrichment_state\n         SET current_phase = $1,\n             last_activity = CASE WHEN $2 THEN now() ELSE last_activity END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9af56f6761b33137d297cd31abdc50baed7a5d9c3cde2a0bb1cd501dd70f9e37"
+}

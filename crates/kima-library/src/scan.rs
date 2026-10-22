@@ -464,6 +464,8 @@ async fn store(
     } else {
         None
     };
+    // Locks the track row (if any) before the album upsert locks the album: the recording
+    // stage locks track then album, and the same order keeps the two from deadlocking.
     let old_album = library::album_of_path(&mut tx, &t.path).await?;
     let up = library::upsert_track(&mut tx, t).await?;
     genres::replace_track_genres(&mut tx, up.track, GenreSource::File, &raw.genres).await?;

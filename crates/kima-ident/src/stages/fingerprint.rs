@@ -3,9 +3,8 @@
 //!
 //! Decodes run on untrusted files: each is bounded by [`STAGE_TIMEOUT`], at most
 //! `fingerprint_workers` run at once, and cancellation abandons the batch at once, leaving
-//! unfinished claims `working` for the lease to expire.
+//! claims in flight `working` for the lease to expire and releasing the ones not started.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use kima_db::identity;
@@ -13,12 +12,12 @@ use kima_db::stages::{self, Claim, Stage};
 use kima_library::scan::library_path;
 use kima_net::Failure;
 use time::OffsetDateTime;
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 pub use super::ClaimResult;
-use super::{BatchReport, REDELIVERY_CAP, STAGE_TIMEOUT, StageFailure, lost_worker, record_for};
+use super::{
+    BatchReport, REDELIVERY_CAP, STAGE_TIMEOUT, StageFailure, lost_worker, record_for, run_claims,
+};
 use crate::IdentCtx;
 use crate::chromaprint::{DecodeError, fingerprint_file};
 
@@ -33,46 +32,30 @@ const OUTER_GRACE: Duration = Duration::from_secs(5);
 /// Claims up to [`BATCH`] tracks and fingerprints them, at most `fingerprint_workers` at
 /// once. Nothing is claimed when fingerprinting is unavailable or `cancel` already fired.
 pub async fn run_batch(ctx: &IdentCtx, cancel: &CancellationToken) -> sqlx::Result<BatchReport> {
-    let mut report = BatchReport::default();
-    if !ctx.config.fingerprinting || cancel.is_cancelled() {
-        return Ok(report);
+    run_batch_until(ctx, cancel, &CancellationToken::new()).await
+}
+
+/// [`run_batch`]; once `stop` fires no further claim starts (the rest are released to
+/// `pending`) and the ones in flight finish. `cancel` also abandons those in flight.
+pub async fn run_batch_until(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    stop: &CancellationToken,
+) -> sqlx::Result<BatchReport> {
+    if !ctx.config.fingerprinting || cancel.is_cancelled() || stop.is_cancelled() {
+        return Ok(BatchReport::default());
     }
     let claims = stages::claim(&ctx.pool, Stage::Fingerprint, BATCH, true).await?;
-    report.claimed = claims.len();
-
-    let permits = Arc::new(Semaphore::new(ctx.config.fingerprint_workers.max(1)));
-    let mut set = JoinSet::new();
-    for claim in claims {
-        let permit = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => break,
-            p = permits.clone().acquire_owned() => p.expect("the semaphore is never closed"),
-        };
-        let ctx = ctx.clone();
-        let cancel = cancel.clone();
-        set.spawn(async move {
-            let _permit = permit;
-            run_claim(&ctx, &claim, &cancel).await
-        });
-    }
-
-    let mut first_err = None;
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok(Ok(ClaimResult::Done)) => report.done += 1,
-            Ok(Ok(ClaimResult::Failed)) => report.failed += 1,
-            Ok(Ok(ClaimResult::Stale | ClaimResult::Abandoned)) => {}
-            Ok(Err(e)) => {
-                first_err.get_or_insert(e);
-            }
-            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Err(_) => {}
-        }
-    }
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(report),
-    }
+    let workers = ctx.config.fingerprint_workers;
+    run_claims(
+        ctx,
+        claims,
+        workers,
+        cancel,
+        stop,
+        |ctx, claim, cancel| async move { run_claim(&ctx, &claim, &cancel).await },
+    )
+    .await
 }
 
 /// Runs one claim to its report. A claim redelivered [`REDELIVERY_CAP`] times closes as

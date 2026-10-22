@@ -133,6 +133,32 @@ pub async fn report_done(
     Ok(r.rows_affected() == 1)
 }
 
+/// Gives back claims that were taken but never started (a batch cancelled or stopped before
+/// their turn): each goes back to `pending`, due now, its claim token cleared. Claims that are
+/// no longer current are left alone. A lapse the claim counted (`redelivered`) stays counted:
+/// that earlier worker really was lost. Returns rows changed.
+pub async fn release(pool: &PgPool, claims: &[Claim]) -> sqlx::Result<u64> {
+    if claims.is_empty() {
+        return Ok(0);
+    }
+    let tracks: Vec<Uuid> = claims.iter().map(|c| c.track_id).collect();
+    let stages: Vec<&str> = claims.iter().map(|c| c.stage.as_str()).collect();
+    let tokens: Vec<OffsetDateTime> = claims.iter().map(|c| c.started_at).collect();
+    let r = sqlx::query!(
+        "UPDATE track_stages s
+         SET status = 'pending', next_attempt_at = NULL, started_at = NULL, updated_at = now()
+         FROM UNNEST($1::uuid[], $2::text[], $3::timestamptz[]) AS c(track_id, stage, started_at)
+         WHERE s.track_id = c.track_id AND s.stage = c.stage AND s.status = 'working'
+           AND s.started_at = c.started_at",
+        &tracks,
+        &stages as &[&str],
+        &tokens
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
 /// How a failed claim closes. `pending_until` set: parked `pending` until then (a paused
 /// source). Otherwise `failed`, due again at `retry_at`, or terminal when it is `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]

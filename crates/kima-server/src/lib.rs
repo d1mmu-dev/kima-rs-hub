@@ -14,6 +14,8 @@ use tracing::Span;
 pub mod frontend;
 pub mod jobs;
 
+use kima_jobs::schedule::{Cron, EnqueueFn};
+
 /// Upstream's Next.js `headers()` block, now applied by the server to every response.
 const SECURITY_HEADERS: &[(&str, &str)] = &[
     (
@@ -87,4 +89,67 @@ fn cors(origins: &[String]) -> CorsLayer {
         .filter_map(|o| HeaderValue::from_str(o).ok())
         .collect();
     layer.allow_origin(AllowOrigin::list(list))
+}
+
+/// The scheduler's entries (spec §5): `library-sync` when `KIMA_LIBRARY_SYNC_CRON` is not `off`
+/// (`sync`, parsed at startup), and always `http-cache-prune` (03:17 UTC daily: expired cache
+/// rows, then unused genres) and `enrich-kick` (every ten minutes: a backstop for a lost
+/// self-reschedule; a paused or halted pipeline stays so).
+pub fn schedule_entries(
+    _config: &Config,
+    sync: Option<Cron>,
+) -> Vec<(&'static str, Cron, EnqueueFn)> {
+    let mut entries: Vec<(&'static str, Cron, EnqueueFn)> = Vec::new();
+    if let Some(cron) = sync {
+        entries.push(("library-sync", cron, library_sync_job()));
+    }
+    entries.push((
+        "http-cache-prune",
+        Cron::parse("17 3 * * *").expect("a valid cron expression"),
+        prune_job(),
+    ));
+    entries.push((
+        "enrich-kick",
+        Cron::parse("*/10 * * * *").expect("a valid cron expression"),
+        enrich_kick_job(),
+    ));
+    entries
+}
+
+/// Queues the incremental reconcile; it dedupes against one already queued or running.
+fn library_sync_job() -> EnqueueFn {
+    std::sync::Arc::new(|pool| {
+        Box::pin(async move {
+            kima_library::jobs::enqueue_reconcile(&pool)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+    })
+}
+
+/// Expired response-cache rows, then genres nothing refers to.
+fn prune_job() -> EnqueueFn {
+    std::sync::Arc::new(|pool| {
+        Box::pin(async move {
+            let cache = kima_db::http_cache::prune_expired(&pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            let genres = kima_db::genres::prune_unused(&pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            tracing::info!(cache, genres, "pruned the response cache and unused genres");
+            Ok(())
+        })
+    })
+}
+
+fn enrich_kick_job() -> EnqueueFn {
+    std::sync::Arc::new(|pool| {
+        Box::pin(async move {
+            kima_ident::coordinator::kick(&pool)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })
 }

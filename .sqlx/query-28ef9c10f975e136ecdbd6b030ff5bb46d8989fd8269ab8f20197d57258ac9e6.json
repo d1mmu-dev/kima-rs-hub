@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO genres (id, name, key)\n         SELECT id, name, key FROM UNNEST($1::uuid[], $2::text[], $3::text[]) AS u(id, name, key)\n         ORDER BY key COLLATE \"C\"\n         ON CONFLICT (key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "TextArray",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "28ef9c10f975e136ecdbd6b030ff5bb46d8989fd8269ab8f20197d57258ac9e6"
+}

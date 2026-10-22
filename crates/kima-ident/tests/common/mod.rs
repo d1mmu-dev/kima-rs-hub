@@ -17,15 +17,21 @@ use uuid::Uuid;
 
 /// An [`IdentCtx`] over `pool` with the library at `root`; a test `Net` with the switch on.
 pub fn ident_ctx(pool: &PgPool, root: &Path, bases: Bases) -> IdentCtx {
+    ident_ctx_with(pool, root, bases, IdentifySwitch::new(false, true))
+}
+
+/// [`ident_ctx`] with the given identification switch.
+pub fn ident_ctx_with(
+    pool: &PgPool,
+    root: &Path,
+    bases: Bases,
+    switch: IdentifySwitch,
+) -> IdentCtx {
     let cipher = Arc::new(Cipher::from_secret("kima-ident tests"));
     let events = EventBus::new(64);
     IdentCtx {
         pool: pool.clone(),
-        net: Arc::new(Net::new(
-            NetConfig::for_tests(bases),
-            pool.clone(),
-            IdentifySwitch::new(false, true),
-        )),
+        net: Arc::new(Net::new(NetConfig::for_tests(bases), pool.clone(), switch)),
         cipher: cipher.clone(),
         events: events.clone(),
         library: LibraryCtx {
@@ -42,6 +48,7 @@ pub fn ident_ctx(pool: &PgPool, root: &Path, bases: Bases) -> IdentCtx {
             acoustid_disabled: false,
             acoustid_env_key: None,
         },
+        last_cycle: Default::default(),
     }
 }
 

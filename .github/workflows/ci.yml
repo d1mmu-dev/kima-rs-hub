@@ -82,6 +82,10 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       SQLX_OFFLINE: "true"
+      # kima under test makes no outbound lookups (identification off), and kima-net refuses
+      # any host but this machine should one slip through.
+      KIMA_IDENTIFY: "off"
+      KIMA_NET_DENY_REAL: "1"
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -108,6 +112,8 @@ jobs:
           MUSIC_PATH="$RUNNER_TEMP/music" \
           KIMA_ORGANIZE_TARGET="$RUNNER_TEMP/organized" \
           KIMA_WATCH_MODE=poll \
+          KIMA_IDENTIFY=off \
+          KIMA_NET_DENY_REAL=1 \
           PORT=3030 \
           nohup target/debug/kima > "$RUNNER_TEMP/kima.log" 2>&1 &
           for i in $(seq 1 60); do

@@ -430,3 +430,66 @@ async fn delete_embedded_keeps_other_sources(pool: PgPool) {
     lyrics::delete_embedded(&mut conn, id).await.unwrap();
     assert_eq!(count(&pool, "track_lyrics").await, 0);
 }
+
+/// Carry (Task 17 M2): genre rows are inserted in key order, so two transactions naming the
+/// same new genres in opposite orders queue up instead of deadlocking.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn genre_inserts_in_opposite_orders_do_not_deadlock(pool: PgPool) {
+    use kima_db::genres::{self, GenreSource};
+    let t1 = upsert(&pool, &track("A", "B", None, "x", "/m/1")).await;
+    let t2 = upsert(&pool, &track("A", "B", None, "y", "/m/2")).await;
+    let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+    let mut a = pool.begin().await.unwrap();
+    genres::replace_track_genres(&mut a, t1, GenreSource::File, &names(&["alpha"]))
+        .await
+        .unwrap();
+    let other = {
+        let pool = pool.clone();
+        let n = names(&["beta", "alpha"]);
+        tokio::spawn(async move {
+            let mut b = pool.begin().await.unwrap();
+            genres::replace_track_genres(&mut b, t2, GenreSource::File, &n).await?;
+            b.commit().await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    genres::replace_track_genres(&mut a, t1, GenreSource::MusicBrainz, &names(&["beta"]))
+        .await
+        .expect("no deadlock");
+    a.commit().await.unwrap();
+    other.await.unwrap().expect("no deadlock");
+    assert_eq!(count(&pool, "genres").await, 2);
+    assert_eq!(count(&pool, "track_genres").await, 4);
+}
+
+/// Carry (Task 10/7): pruning cannot delete a genre a concurrent transaction just took: the
+/// prune waits for it, then sees its reference.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn prune_waits_for_a_concurrent_genre_reference(pool: PgPool) {
+    use kima_db::genres::{self, GenreSource};
+    let t1 = upsert(&pool, &track("A", "B", None, "x", "/m/1")).await;
+    // "rock" exists and nothing refers to it.
+    let mut conn = pool.acquire().await.unwrap();
+    genres::replace_track_genres(&mut conn, t1, GenreSource::File, &["Rock".to_string()])
+        .await
+        .unwrap();
+    genres::replace_track_genres(&mut conn, t1, GenreSource::File, &[])
+        .await
+        .unwrap();
+    drop(conn);
+
+    let mut a = pool.begin().await.unwrap();
+    genres::replace_track_genres(&mut a, t1, GenreSource::File, &["rock".to_string()])
+        .await
+        .unwrap();
+    let prune = {
+        let pool = pool.clone();
+        tokio::spawn(async move { genres::prune_unused(&pool).await })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    a.commit().await.unwrap();
+    assert_eq!(prune.await.unwrap().unwrap(), 0);
+    assert_eq!(count(&pool, "track_genres").await, 1);
+    assert_eq!(count(&pool, "genres").await, 1);
+}

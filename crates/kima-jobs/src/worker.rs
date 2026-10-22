@@ -44,7 +44,9 @@ impl std::error::Error for JobError {}
 pub struct JobCtx {
     /// Fires on shutdown and when the job's claim is lost (its lease could not be renewed
     /// because the job was reaped or reclaimed). Long handlers check it between units of work
-    /// and return early; the outcome of a lost claim is not recorded.
+    /// and return early; the outcome of a lost claim is not recorded. A handler that returns
+    /// [`JobError::Retry`] once shutdown has begun gets its attempt back (the job is queued
+    /// again, due now); `Ok` completes the job and `Permanent` fails it as usual.
     pub cancel: CancellationToken,
 }
 
@@ -254,6 +256,9 @@ async fn run_one(
     };
     let recorded = match outcome {
         Ok(Ok(())) => queue::complete(pool, &job).await,
+        // Gave up because the process is shutting down: the attempt is given back, so a
+        // restart (or several) never fails a job that was only interrupted.
+        Ok(Err(JobError::Retry(_))) if shutdown.is_cancelled() => queue::release(pool, &job).await,
         Ok(Err(JobError::Retry(message))) => queue::fail(pool, &job, &message).await,
         Ok(Err(JobError::Permanent(message))) => queue::fail_permanent(pool, &job, &message).await,
         Err(_) => queue::fail(pool, &job, "handler panicked").await,

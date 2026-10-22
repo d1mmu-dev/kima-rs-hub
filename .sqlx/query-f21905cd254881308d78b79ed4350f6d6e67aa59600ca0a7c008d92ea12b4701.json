@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE track_stages s\n         SET status = 'pending', next_attempt_at = NULL, started_at = NULL, updated_at = now()\n         FROM UNNEST($1::uuid[], $2::text[], $3::timestamptz[]) AS c(track_id, stage, started_at)\n         WHERE s.track_id = c.track_id AND s.stage = c.stage AND s.status = 'working'\n           AND s.started_at = c.started_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "TextArray",
+        "TimestamptzArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f21905cd254881308d78b79ed4350f6d6e67aa59600ca0a7c008d92ea12b4701"
+}

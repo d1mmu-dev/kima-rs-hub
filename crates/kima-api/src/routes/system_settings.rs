@@ -155,7 +155,12 @@ async fn update(
     let kv: KvSettings = settings_kv::load(&state.pool, &state.cipher).await?;
     state.settings.replace(kv);
     if let Some(on) = switch {
+        let was_on = state.identify.enabled();
         state.identify.set_setting(on);
+        // Turning identification on wakes the coordinator (spec §15.3).
+        if !was_on && state.identify.enabled() {
+            kima_ident::coordinator::kick(&state.pool).await?;
+        }
     }
     if let Some(n) = concurrency {
         // Validated to 1-5 above.

@@ -5,20 +5,17 @@
 //! then stores the answer: a report that finds its claim no longer current (lapsed, reopened by
 //! a changed file, or the track purged) rolls everything back, so a stale answer writes nothing.
 //! The stage never writes album identity, album year or artist MBIDs. Cancellation abandons the
-//! batch at once, leaving unfinished claims `working` for the lease to expire.
-
-use std::sync::Arc;
+//! batch at once, leaving claims in flight `working` for the lease to expire and releasing the
+//! ones not started.
 
 use kima_db::genres::{self, GenreSource};
 use kima_db::identity;
 use kima_db::stages::{self, Claim, Stage};
 use time::OffsetDateTime;
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 pub use super::ClaimResult;
-use super::{BatchReport, REDELIVERY_CAP, StageFailure, lost_worker, record_for};
+use super::{BatchReport, REDELIVERY_CAP, StageFailure, lost_worker, record_for, run_claims};
 use crate::IdentCtx;
 use crate::matching::{self, Answer, LadderResult, no_match_evidence};
 
@@ -30,9 +27,18 @@ const NO_MATCH_SOURCE: &str = "acoustid";
 /// Claims up to [`BATCH`] tracks and identifies them, at most `enrichmentConcurrency` at once.
 /// Nothing is claimed when `cancel` already fired.
 pub async fn run_batch(ctx: &IdentCtx, cancel: &CancellationToken) -> sqlx::Result<BatchReport> {
-    let mut report = BatchReport::default();
-    if cancel.is_cancelled() {
-        return Ok(report);
+    run_batch_until(ctx, cancel, &CancellationToken::new()).await
+}
+
+/// [`run_batch`]; once `stop` fires no further claim starts (the rest are released to
+/// `pending`) and the ones in flight finish. `cancel` also abandons those in flight.
+pub async fn run_batch_until(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    stop: &CancellationToken,
+) -> sqlx::Result<BatchReport> {
+    if cancel.is_cancelled() || stop.is_cancelled() {
+        return Ok(BatchReport::default());
     }
     let claims = stages::claim(
         &ctx.pool,
@@ -41,9 +47,8 @@ pub async fn run_batch(ctx: &IdentCtx, cancel: &CancellationToken) -> sqlx::Resu
         ctx.config.fingerprinting,
     )
     .await?;
-    report.claimed = claims.len();
     if claims.is_empty() {
-        return Ok(report);
+        return Ok(BatchReport::default());
     }
     // A failed settings read runs one at a time rather than failing the batch.
     let in_flight = ctx
@@ -52,40 +57,15 @@ pub async fn run_batch(ctx: &IdentCtx, cancel: &CancellationToken) -> sqlx::Resu
         .await
         .map_or(1, |kv| usize::from(kv.enrichment_concurrency))
         .max(1);
-
-    let permits = Arc::new(Semaphore::new(in_flight));
-    let mut set = JoinSet::new();
-    for claim in claims {
-        let permit = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => break,
-            p = permits.clone().acquire_owned() => p.expect("the semaphore is never closed"),
-        };
-        let ctx = ctx.clone();
-        let cancel = cancel.clone();
-        set.spawn(async move {
-            let _permit = permit;
-            run_claim(&ctx, &claim, &cancel).await
-        });
-    }
-
-    let mut first_err = None;
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok(Ok(ClaimResult::Done)) => report.done += 1,
-            Ok(Ok(ClaimResult::Failed)) => report.failed += 1,
-            Ok(Ok(ClaimResult::Stale | ClaimResult::Abandoned)) => {}
-            Ok(Err(e)) => {
-                first_err.get_or_insert(e);
-            }
-            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Err(_) => {}
-        }
-    }
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(report),
-    }
+    run_claims(
+        ctx,
+        claims,
+        in_flight,
+        cancel,
+        stop,
+        |ctx, claim, cancel| async move { run_claim(&ctx, &claim, &cancel).await },
+    )
+    .await
 }
 
 /// Runs one claim to its report. A claim redelivered [`REDELIVERY_CAP`] times closes as

@@ -1,6 +1,7 @@
 //! What every identification stage needs, built once per process.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use kima_core::cipher::Cipher;
 use kima_core::events::EventBus;
@@ -19,6 +20,8 @@ pub struct IdentCtx {
     pub library: LibraryCtx,
     pub settings: SettingsCache,
     pub config: IdentConfig,
+    /// When the last enrichment cycle started (spec §10.6 `MIN_INTERVAL_MS`); shared by clones.
+    pub last_cycle: Arc<Mutex<Option<Instant>>>,
 }
 
 /// Process configuration for identification.

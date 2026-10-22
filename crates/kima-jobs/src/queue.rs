@@ -354,7 +354,7 @@ pub async fn enqueue_unless_queued_with_key(
     max_attempts: i32,
     key: &str,
 ) -> sqlx::Result<Option<Uuid>> {
-    insert_unless_queued_with_key(pool, queue, payload, max_attempts, key, None).await
+    insert_unless_queued_with_key(pool, queue, payload, max_attempts, key, RunAt::Now).await
 }
 
 /// Like [`enqueue_unless_queued_with_key`], for a job not claimed before `run_at`. A queued
@@ -367,18 +367,45 @@ pub async fn enqueue_at_unless_queued_with_key(
     key: &str,
     run_at: OffsetDateTime,
 ) -> sqlx::Result<Option<Uuid>> {
-    insert_unless_queued_with_key(pool, queue, payload, max_attempts, key, Some(run_at)).await
+    insert_unless_queued_with_key(pool, queue, payload, max_attempts, key, RunAt::At(run_at)).await
 }
 
-/// The body of the two `*_unless_queued_with_key` calls; `None` means the database's `now()`.
+/// Like [`enqueue_at_unless_queued_with_key`], due `delay` after the database's `now()`: the
+/// database clock is the one claims compare `run_at` with.
+pub async fn enqueue_in_unless_queued_with_key(
+    pool: &PgPool,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+    key: &str,
+    delay: Duration,
+) -> sqlx::Result<Option<Uuid>> {
+    insert_unless_queued_with_key(pool, queue, payload, max_attempts, key, RunAt::In(delay)).await
+}
+
+/// When a job inserted by [`insert_unless_queued_with_key`] is due.
+enum RunAt {
+    /// The database's `now()`.
+    Now,
+    At(OffsetDateTime),
+    /// The database's `now()` plus this.
+    In(Duration),
+}
+
+/// The body of the `*_unless_queued_with_key` calls.
 async fn insert_unless_queued_with_key(
     pool: &PgPool,
     queue: &str,
     payload: serde_json::Value,
     max_attempts: i32,
     key: &str,
-    run_at: Option<OffsetDateTime>,
+    run_at: RunAt,
 ) -> sqlx::Result<Option<Uuid>> {
+    let (at, delay) = match run_at {
+        RunAt::Now => (None, Duration::ZERO),
+        RunAt::At(t) => (Some(t), Duration::ZERO),
+        RunAt::In(d) => (None, d),
+    };
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('kima_jobs_enqueue:' || $1))")
         .bind(queue)
@@ -386,7 +413,8 @@ async fn insert_unless_queued_with_key(
         .await?;
     let inserted = sqlx::query!(
         r#"INSERT INTO jobs (id, queue, payload, max_attempts, run_at)
-           SELECT $1::uuid, $2::text, $3::jsonb, $4::int4, COALESCE($6::timestamptz, now())
+           SELECT $1::uuid, $2::text, $3::jsonb, $4::int4,
+                  COALESCE($6::timestamptz, now() + make_interval(secs => $7::float8))
            WHERE NOT EXISTS (SELECT 1 FROM jobs
                              WHERE queue = $2 AND state = 'queued'
                                AND payload ->> $5::text IS NOT DISTINCT FROM $3::jsonb ->> $5::text)
@@ -396,7 +424,8 @@ async fn insert_unless_queued_with_key(
         payload,
         max_attempts,
         key,
-        run_at
+        at,
+        delay.as_secs_f64()
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -405,4 +434,74 @@ async fn insert_unless_queued_with_key(
     }
     tx.commit().await?;
     Ok(inserted.map(|r| r.id))
+}
+
+/// Makes a job with the same payload `key` text as `payload` due now: the oldest one still
+/// `queued` on `queue` is moved to the database's `now()` (never later than it was), else a new
+/// one is inserted, due now. One transaction under the same per-queue lock as the
+/// `*_unless_queued_with_key` inserts, so concurrent callers leave exactly one queued job, and
+/// a job queued for later by someone else cannot slip in between the two steps. Returns the
+/// job's id; wakes the workers.
+pub async fn advance_or_enqueue_with_key(
+    pool: &PgPool,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+    key: &str,
+) -> sqlx::Result<Uuid> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('kima_jobs_enqueue:' || $1))")
+        .bind(queue)
+        .execute(&mut *tx)
+        .await?;
+    let moved = sqlx::query_scalar!(
+        r#"UPDATE jobs SET run_at = LEAST(run_at, now())
+           WHERE state = 'queued'
+             AND id = (SELECT id FROM jobs
+                       WHERE queue = $1 AND state = 'queued'
+                         AND payload ->> $2::text IS NOT DISTINCT FROM $3::jsonb ->> $2::text
+                       ORDER BY created_at, id
+                       LIMIT 1
+                       FOR UPDATE)
+           RETURNING id"#,
+        queue,
+        key,
+        payload
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let id = match moved {
+        Some(id) => id,
+        None => {
+            sqlx::query_scalar!(
+                "INSERT INTO jobs (id, queue, payload, max_attempts) VALUES ($1, $2, $3, $4)
+                 RETURNING id",
+                Uuid::now_v7(),
+                queue,
+                payload,
+                max_attempts
+            )
+            .fetch_one(&mut *tx)
+            .await?
+        }
+    };
+    notify(&mut tx, queue).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Gives a claimed attempt back: the job returns to `queued`, due now, with the attempt it was
+/// claimed with uncounted. For a job that stopped only because the process is shutting down,
+/// so a restart does not use up its attempts. Returns `false` if the job is no longer ours.
+pub async fn release(pool: &PgPool, job: &Job) -> sqlx::Result<bool> {
+    let result = sqlx::query!(
+        "UPDATE jobs SET state = 'queued', locked_until = NULL, run_at = now(),
+                         attempts = GREATEST(attempts - 1, 0)
+         WHERE id = $1 AND state = 'running' AND attempts = $2",
+        job.id,
+        job.attempts
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }

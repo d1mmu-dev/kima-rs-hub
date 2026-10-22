@@ -584,3 +584,67 @@ async fn plain_enqueue_takes_run_at_from_the_database_clock(pool: PgPool) {
         assert_eq!(n.payload(), "q");
     }
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_in_uses_the_database_clock(pool: PgPool) {
+    let id = queue::enqueue_in_unless_queued_with_key(
+        &pool,
+        "q",
+        serde_json::json!({"kind": "k"}),
+        3,
+        "kind",
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .unwrap()
+    .expect("inserted");
+    let secs: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM run_at - now())::float8 FROM jobs WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!((59.0..=60.5).contains(&secs), "{secs}");
+    // A queued one with the same key wins.
+    let again = queue::enqueue_in_unless_queued_with_key(
+        &pool,
+        "q",
+        serde_json::json!({"kind": "k"}),
+        3,
+        "kind",
+        std::time::Duration::ZERO,
+    )
+    .await
+    .unwrap();
+    assert_eq!(again, None);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn advance_or_enqueue_moves_a_queued_job_to_now(pool: PgPool) {
+    let later = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+    let id = queue::enqueue_at(&pool, "q", serde_json::json!({"kind": "k"}), 3, later)
+        .await
+        .unwrap();
+    let got =
+        queue::advance_or_enqueue_with_key(&pool, "q", serde_json::json!({"kind": "k"}), 3, "kind")
+            .await
+            .unwrap();
+    assert_eq!(got, id);
+    let due: bool = sqlx::query_scalar("SELECT run_at <= now() FROM jobs WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(due);
+    // None queued: one is inserted, due now.
+    sqlx::query("UPDATE jobs SET state = 'done'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let new =
+        queue::advance_or_enqueue_with_key(&pool, "q", serde_json::json!({"kind": "k"}), 3, "kind")
+            .await
+            .unwrap();
+    assert_ne!(new, id);
+}

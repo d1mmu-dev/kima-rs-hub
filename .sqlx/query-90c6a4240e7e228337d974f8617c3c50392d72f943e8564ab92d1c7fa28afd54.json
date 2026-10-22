@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE enrichment_state SET\n             status = CASE WHEN status = 'paused' THEN 'paused'\n                           WHEN status = 'stopping' OR halted THEN 'idle'\n                           ELSE 'running' END,\n             current_phase = CASE WHEN status = 'stopping' OR (halted AND status <> 'paused')\n                                  THEN NULL ELSE current_phase END,\n             started_at = CASE WHEN status = 'idle' AND NOT halted THEN now()\n                               ELSE started_at END\n           RETURNING status, halted, current_phase, started_at, paused_at, stopped_at,\n                     last_error, last_activity",
+  "query": "UPDATE enrichment_state SET\n             status = CASE WHEN status = 'paused' THEN 'paused'\n                           WHEN status = 'stopping' OR halted THEN 'idle'\n                           ELSE 'running' END,\n             current_phase = CASE WHEN status = 'stopping' OR (halted AND status <> 'paused')\n                                  THEN NULL ELSE current_phase END,\n             started_at = CASE WHEN status = 'idle' AND NOT halted THEN now()\n                               ELSE started_at END,\n             last_activity = CASE WHEN status = 'idle' AND NOT halted THEN now()\n                                  ELSE last_activity END\n           RETURNING status, halted, current_phase, started_at, paused_at, stopped_at,\n                     last_error, last_activity",
   "describe": {
     "columns": [
       {
@@ -58,5 +58,5 @@
       false
     ]
   },
-  "hash": "aa0a31e78995ac5112655e11441e00d1a1fdcab307844f9e49e6dac24b74d77b"
+  "hash": "90c6a4240e7e228337d974f8617c3c50392d72f943e8564ab92d1c7fa28afd54"
 }

@@ -1,15 +1,24 @@
 //! Operator controls behind `/api/enrichment` (spec §10.7, upstream
 //! `B/services/enrichmentState.ts`, `unifiedEnrichment.ts:1388-1459,2948-2983`,
 //! `B/services/enrichmentRestart.ts`). Every control but pause kicks the coordinator, after
-//! its own transaction has committed.
+//! its own transaction has committed. A kick that fails then is logged and the control still
+//! succeeds: its change happened, and the `enrich-kick` schedule is the backstop.
 
 use kima_db::PgPool;
 use kima_db::enrichment::{self, AcoustidNow, State, Status};
 pub use kima_db::enrichment::{SyncCounts, WipeCounts};
 use kima_db::settings_kv::{self, Key};
 
-use super::kick;
+use tracing::warn;
+
 use crate::IdentCtx;
+
+/// Kicks after a committed control; a failure is logged, never returned.
+async fn kick(pool: &PgPool) {
+    if let Err(error) = super::kick(pool).await {
+        warn!(%error, "could not kick the enrichment coordinator after a control");
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ControlError {
@@ -34,7 +43,7 @@ pub async fn resume(pool: &PgPool) -> Result<State, ControlError> {
     let st = enrichment::resume(pool)
         .await?
         .map_err(|s| wrong("resume", s))?;
-    kick(pool).await?;
+    kick(pool).await;
     Ok(st)
 }
 
@@ -50,7 +59,7 @@ fn wrong(action: &str, s: Status) -> ControlError {
 pub async fn stop(pool: &PgPool) -> sqlx::Result<State> {
     let st = enrichment::stop(pool).await?;
     if st.status != Status::Idle {
-        kick(pool).await?;
+        kick(pool).await;
     }
     Ok(st)
 }
@@ -58,7 +67,7 @@ pub async fn stop(pool: &PgPool) -> sqlx::Result<State> {
 /// Sync ("Sync New"): lifts a stop and a pause, kicks, and answers what is owed.
 pub async fn sync(pool: &PgPool) -> sqlx::Result<SyncCounts> {
     let counts = enrichment::sync(pool).await?;
-    kick(pool).await?;
+    kick(pool).await;
     Ok(counts)
 }
 
@@ -76,7 +85,7 @@ async fn acoustid_now(ctx: &IdentCtx) -> AcoustidNow {
 /// or terminal is touched. Returns rows reopened (`queued`).
 pub async fn retry_failed_and_blocked(ctx: &IdentCtx) -> sqlx::Result<u64> {
     let n = enrichment::retry_failed(&ctx.pool, acoustid_now(ctx).await).await?;
-    kick(&ctx.pool).await?;
+    kick(&ctx.pool).await;
     Ok(n)
 }
 
@@ -85,14 +94,14 @@ pub async fn retry_failed_and_blocked(ctx: &IdentCtx) -> sqlx::Result<u64> {
 /// (`reopened`).
 pub async fn redecide_everything(ctx: &IdentCtx) -> sqlx::Result<u64> {
     let n = enrichment::redecide(&ctx.pool, acoustid_now(ctx).await).await?;
-    kick(&ctx.pool).await?;
+    kick(&ctx.pool).await;
     Ok(n)
 }
 
 /// Wipe and re-run (spec §10.7, one transaction); kicks after the commit.
 pub async fn wipe_and_rerun(pool: &PgPool) -> sqlx::Result<WipeCounts> {
     let counts = enrichment::wipe(pool).await?;
-    kick(pool).await?;
+    kick(pool).await;
     Ok(counts)
 }
 

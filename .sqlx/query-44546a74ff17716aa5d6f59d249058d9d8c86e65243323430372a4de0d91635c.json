@@ -1,0 +1,72 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH due AS (\n               SELECT a.id, a.last_enriched_at FROM artists a\n               WHERE a.name_key <> $2\n                 AND (a.enrichment_status IN ('pending', 'failed')\n                      OR (a.enrichment_status = 'unresolvable'\n                          AND (a.last_enriched_at IS NULL\n                               OR a.last_enriched_at < now() - interval '7 days')))\n                 AND EXISTS (SELECT 1 FROM albums al JOIN tracks t ON t.album_id = al.id\n                             WHERE al.artist_id = a.id AND t.missing_since IS NULL)\n               ORDER BY a.last_enriched_at NULLS FIRST, a.id\n               LIMIT $1\n               FOR NO KEY UPDATE OF a SKIP LOCKED)\n           UPDATE artists a SET enrichment_status = 'enriching'\n           FROM due\n           WHERE a.id = due.id AND a.enrichment_status <> 'enriching'\n           RETURNING a.id, a.name, a.mbid, a.mbid_source, a.image_source,\n                     a.enrichment_failures, due.last_enriched_at,\n                     ARRAY(SELECT al.title FROM albums al\n                           WHERE al.artist_id = a.id\n                             AND EXISTS (SELECT 1 FROM tracks t\n                                         WHERE t.album_id = al.id AND t.missing_since IS NULL)\n                           ORDER BY al.title, al.id LIMIT $3) AS \"album_titles!\",\n                     ARRAY(SELECT DISTINCT CASE WHEN strpos(t.path, '/') > 0\n                                                THEN regexp_replace(t.path, '/[^/]*$', '')\n                                                ELSE '' END AS dir\n                           FROM albums al JOIN tracks t ON t.album_id = al.id\n                           WHERE al.artist_id = a.id AND t.missing_since IS NULL\n                           ORDER BY dir LIMIT $3) AS \"album_dirs!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "mbid_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "image_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "enrichment_failures",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_enriched_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "album_titles!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 8,
+        "name": "album_dirs!",
+        "type_info": "TextArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "44546a74ff17716aa5d6f59d249058d9d8c86e65243323430372a4de0d91635c"
+}

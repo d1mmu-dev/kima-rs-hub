@@ -428,3 +428,189 @@ pub fn evict_to(data_dir: &Path, max_bytes: u64) -> std::io::Result<u64> {
     }
     Ok(removed)
 }
+
+// ---- artist images (spec §12.3, §12.6) ----
+
+/// The folder under the data directory that holds downloaded and copied artist images. Not
+/// part of the evictable cover cache: these cannot be rebuilt without the network.
+pub const ARTIST_IMAGES_DIR: &str = "artist-images";
+
+/// The long side of a stored artist image, at most.
+pub const MAX_STORED_SIDE: u32 = 1500;
+/// Quality of a stored artist image.
+pub const STORED_QUALITY: u8 = 90;
+/// A local artist image must be larger than this (upstream `imageStorage.ts`).
+pub const MIN_LOCAL_IMAGE_BYTES: u64 = 1000;
+/// The largest local artist image read (the download limit, spec §12.6).
+pub const MAX_LOCAL_IMAGE_BYTES: u64 = 15 * 1024 * 1024;
+/// Untrusted images: the largest width or height decoded, and the most pixels.
+const MAX_UNTRUSTED_SIDE: u32 = 12_000;
+const MAX_UNTRUSTED_PIXELS: u64 = 50_000_000;
+
+/// The names a local artist image may have, in order (upstream `imageStorage.ts:136-139`).
+const LOCAL_ARTIST_NAMES: [&str; 6] = [
+    "artist.jpg",
+    "artist.png",
+    "artist.webp",
+    "folder.jpg",
+    "folder.png",
+    "folder.webp",
+];
+
+/// Where the artist's stored image lives: `<data_dir>/artist-images/<id>.jpg`. The name comes
+/// from the id alone, so nothing an answer or a file says can steer it.
+pub fn artist_image_path(data_dir: &Path, artist: Uuid) -> PathBuf {
+    data_dir
+        .join(ARTIST_IMAGES_DIR)
+        .join(format!("{}.jpg", artist.hyphenated()))
+}
+
+fn untrusted_limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_UNTRUSTED_SIDE);
+    limits.max_image_height = Some(MAX_UNTRUSTED_SIDE);
+    limits.max_alloc = Some(MAX_ALLOC);
+    limits
+}
+
+/// Decodes untrusted image bytes and re-encodes them as JPEG q90, at most 1500 px on the long
+/// side (spec §12.6), so nothing but a valid image is ever stored. The header's dimensions are
+/// checked before any pixel is decoded (decompression bombs), and the decode itself runs under
+/// width, height and allocation limits. Blocking.
+pub fn normalize_image(bytes: &[u8]) -> Result<Vec<u8>, ArtworkError> {
+    if bytes.len() as u64 > MAX_LOCAL_IMAGE_BYTES {
+        return Err(ArtworkError::TooLarge);
+    }
+    let reader = || -> Result<ImageReader<Cursor<&[u8]>>, ArtworkError> {
+        let mut r = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+        r.limits(untrusted_limits());
+        Ok(r)
+    };
+    let (w, h) = reader()?.into_dimensions()?;
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_UNTRUSTED_PIXELS {
+        return Err(ArtworkError::TooLarge);
+    }
+    let mut img = reader()?.decode()?;
+    if img.width().max(img.height()) > MAX_STORED_SIDE {
+        img = img.resize(MAX_STORED_SIDE, MAX_STORED_SIDE, FilterType::Lanczos3);
+    }
+    let rgb = DynamicImage::ImageRgb8(img.to_rgb8());
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, STORED_QUALITY).encode_image(&rgb)?;
+    Ok(jpeg)
+}
+
+/// Writes the artist's stored image atomically (a temp file in the same folder, then a
+/// rename). The folder is created when missing; a symlink in its place is refused. Blocking.
+pub fn store_artist_image(data_dir: &Path, artist: Uuid, jpeg: &[u8]) -> std::io::Result<()> {
+    let dir = data_dir.join(ARTIST_IMAGES_DIR);
+    std::fs::create_dir_all(&dir)?;
+    if !is_real_dir(&dir) {
+        return Err(std::io::Error::other(
+            "the artist image folder is not a directory",
+        ));
+    }
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+    tmp.write_all(jpeg)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(artist_image_path(data_dir, artist))
+        .map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Deletes the artist's stored image, and nothing else: only
+/// [`artist_image_path`]`(data_dir, artist)`, unlinked (a symlink there is removed, never
+/// followed). Gone already is fine. Blocking.
+pub fn remove_artist_image(data_dir: &Path, artist: Uuid) -> std::io::Result<()> {
+    let path = artist_image_path(data_dir, artist);
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if m.is_dir() => Ok(()),
+        Ok(_) => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// A relative path of plain components only: no root, no `..`, no `.`.
+fn plain_rel(p: &Path) -> bool {
+    p.components().all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// A regular file (not a symlink) larger than [`MIN_LOCAL_IMAGE_BYTES`].
+fn usable_local_image(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| {
+        m.file_type().is_file()
+            && m.len() > MIN_LOCAL_IMAGE_BYTES
+            && m.len() <= MAX_LOCAL_IMAGE_BYTES
+    })
+}
+
+/// The artist's image in the library (spec §12.3 step 2, upstream `imageStorage.ts:119-173`):
+/// for each album folder (relative to `root`), the folders above it, nearest first, up to but
+/// not including the root, each holding `artist.(jpg|png|webp)` or `folder.(jpg|png|webp)`
+/// (exact names, in that order) that is a regular file larger than 1000 bytes and not a
+/// symlink. A folder that is absolute, holds `..`, or resolves (through a symlink) outside the
+/// root is skipped. Blocking.
+pub fn find_local_artist_image(root: &Path, album_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let root = std::fs::canonicalize(root).ok()?;
+    let mut seen = std::collections::HashSet::new();
+    for album in album_dirs {
+        if album.as_os_str().is_empty() || !plain_rel(album) {
+            continue;
+        }
+        let mut dir = album.parent();
+        while let Some(rel) = dir {
+            if rel.as_os_str().is_empty() {
+                break;
+            }
+            dir = rel.parent();
+            if !seen.insert(rel.to_path_buf()) {
+                continue;
+            }
+            let Ok(real) = std::fs::canonicalize(root.join(rel)) else {
+                continue;
+            };
+            if real == root || !real.starts_with(&root) || !is_real_dir(&real) {
+                continue;
+            }
+            if let Some(found) = LOCAL_ARTIST_NAMES
+                .iter()
+                .map(|n| real.join(n))
+                .find(|p| usable_local_image(p))
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Reads a local artist image found by [`find_local_artist_image`], refusing it if it was
+/// swapped for a symlink or another file since (the opened file must be the one checked).
+/// Blocking.
+pub fn read_local_image(path: &Path) -> std::io::Result<Vec<u8>> {
+    let before = std::fs::symlink_metadata(path)?;
+    if !before.file_type().is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    let file = std::fs::File::open(path)?;
+    let opened = file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (before.dev(), before.ino()) != (opened.dev(), opened.ino()) {
+            return Err(std::io::Error::other(
+                "the file changed while it was opened",
+            ));
+        }
+    }
+    if !opened.is_file() || opened.len() > MAX_LOCAL_IMAGE_BYTES {
+        return Err(std::io::Error::other("not a usable image file"));
+    }
+    let mut buf = Vec::new();
+    file.take(MAX_LOCAL_IMAGE_BYTES + 1).read_to_end(&mut buf)?;
+    Ok(buf)
+}

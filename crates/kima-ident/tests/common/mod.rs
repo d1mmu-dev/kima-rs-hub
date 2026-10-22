@@ -58,10 +58,13 @@ pub fn dead_bases() -> Bases {
     Bases::production("http://127.0.0.1:9")
 }
 
-/// Inserts a present track at `path` (relative to the root) with `duration_secs`.
+/// Inserts a present track at `path` (relative to the root) with `duration_secs`. Its artist
+/// is `completed`, so the coordinator's artists phase leaves it alone.
 pub async fn track(pool: &PgPool, path: &str, duration_secs: i32) -> Uuid {
     let artist = Uuid::new_v4();
-    sqlx::query("INSERT INTO artists (id, name, name_key) VALUES ($1, 'a', $2)")
+    sqlx::query(
+        "INSERT INTO artists (id, name, name_key, enrichment_status) VALUES ($1, 'a', $2, 'completed')",
+    )
         .bind(artist)
         .bind(artist.to_string())
         .execute(pool)

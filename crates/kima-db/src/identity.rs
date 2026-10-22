@@ -224,3 +224,264 @@ pub async fn album_has_mb_genres(conn: &mut PgConnection, album: Uuid) -> sqlx::
     .fetch_one(&mut *conn)
     .await
 }
+
+// ---- artist enrichment (spec §10.5, §12) ----
+
+/// Artist enrichment claims every artist with a present track except this one (spec §6.3).
+const VARIOUS_ARTISTS_KEY: &str = "various artists";
+/// The most album titles and album folders a claim carries per artist.
+pub const MAX_CLAIM_ALBUMS: i64 = 100;
+
+/// An artist claimed for enrichment (`enrichment_status = 'enriching'`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistForEnrichment {
+    pub id: Uuid,
+    pub name: String,
+    pub mbid: Option<Uuid>,
+    /// `tag`, `search`, `user` or `autotag`.
+    pub mbid_source: Option<String>,
+    /// `local`, `wikidata`, `fanart`, `deezer` or `user`.
+    pub image_source: Option<String>,
+    pub enrichment_failures: i16,
+    /// Titles of the artist's albums that have a present track, at most [`MAX_CLAIM_ALBUMS`].
+    pub album_titles: Vec<String>,
+    /// The folders (relative to the library root, `""` for the root) holding the artist's
+    /// present tracks, at most [`MAX_CLAIM_ALBUMS`].
+    pub album_dirs: Vec<String>,
+}
+
+/// Claims up to `n` artists for enrichment (spec §10.5): `pending` or `failed`, or
+/// `unresolvable` and last tried over 7 days ago, with a present track, Various Artists aside;
+/// oldest `last_enriched_at` first (never tried first), then id. Each is set `enriching`; a row
+/// another claimer holds is skipped.
+pub async fn claim_artists(pool: &PgPool, n: i64) -> sqlx::Result<Vec<ArtistForEnrichment>> {
+    let rows = sqlx::query!(
+        r#"WITH due AS (
+               SELECT a.id, a.last_enriched_at FROM artists a
+               WHERE a.name_key <> $2
+                 AND (a.enrichment_status IN ('pending', 'failed')
+                      OR (a.enrichment_status = 'unresolvable'
+                          AND (a.last_enriched_at IS NULL
+                               OR a.last_enriched_at < now() - interval '7 days')))
+                 AND EXISTS (SELECT 1 FROM albums al JOIN tracks t ON t.album_id = al.id
+                             WHERE al.artist_id = a.id AND t.missing_since IS NULL)
+               ORDER BY a.last_enriched_at NULLS FIRST, a.id
+               LIMIT $1
+               FOR NO KEY UPDATE OF a SKIP LOCKED)
+           UPDATE artists a SET enrichment_status = 'enriching'
+           FROM due
+           WHERE a.id = due.id AND a.enrichment_status <> 'enriching'
+           RETURNING a.id, a.name, a.mbid, a.mbid_source, a.image_source,
+                     a.enrichment_failures, due.last_enriched_at,
+                     ARRAY(SELECT al.title FROM albums al
+                           WHERE al.artist_id = a.id
+                             AND EXISTS (SELECT 1 FROM tracks t
+                                         WHERE t.album_id = al.id AND t.missing_since IS NULL)
+                           ORDER BY al.title, al.id LIMIT $3) AS "album_titles!",
+                     ARRAY(SELECT DISTINCT CASE WHEN strpos(t.path, '/') > 0
+                                                THEN regexp_replace(t.path, '/[^/]*$', '')
+                                                ELSE '' END AS dir
+                           FROM albums al JOIN tracks t ON t.album_id = al.id
+                           WHERE al.artist_id = a.id AND t.missing_since IS NULL
+                           ORDER BY dir LIMIT $3) AS "album_dirs!""#,
+        n,
+        VARIOUS_ARTISTS_KEY,
+        MAX_CLAIM_ALBUMS,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut rows: Vec<_> = rows.into_iter().collect();
+    rows.sort_by(|a, b| {
+        a.last_enriched_at
+            .is_some()
+            .cmp(&b.last_enriched_at.is_some())
+            .then(a.last_enriched_at.cmp(&b.last_enriched_at))
+            .then(a.id.cmp(&b.id))
+    });
+    Ok(rows
+        .into_iter()
+        .map(|r| ArtistForEnrichment {
+            id: r.id,
+            name: r.name,
+            mbid: r.mbid,
+            mbid_source: r.mbid_source,
+            image_source: r.image_source,
+            enrichment_failures: r.enrichment_failures,
+            album_titles: r.album_titles,
+            album_dirs: r.album_dirs,
+        })
+        .collect())
+}
+
+/// Gives claimed artists back (`enriching` → `pending`): claims a stopped or cancelled batch did
+/// not finish.
+pub async fn release_artists(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let r = sqlx::query!(
+        "UPDATE artists SET enrichment_status = 'pending'
+         WHERE id = ANY($1) AND enrichment_status = 'enriching'",
+        ids
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// Whether the artist row exists.
+pub async fn artist_exists(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (SELECT 1 FROM artists WHERE id = $1) AS "e!""#,
+        id
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// An artist's enrichment status after a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtistStatus {
+    Pending,
+    Completed,
+    Failed,
+    Unresolvable,
+}
+
+impl ArtistStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArtistStatus::Pending => "pending",
+            ArtistStatus::Completed => "completed",
+            ArtistStatus::Failed => "failed",
+            ArtistStatus::Unresolvable => "unresolvable",
+        }
+    }
+}
+
+/// What a run does to one stored value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Change<T> {
+    /// Leave it as stored (a failed source never records "none").
+    #[default]
+    Keep,
+    Set(T),
+    Clear,
+}
+
+impl<T> Change<T> {
+    fn mode(&self) -> &'static str {
+        match self {
+            Change::Keep => "keep",
+            Change::Set(_) => "set",
+            Change::Clear => "clear",
+        }
+    }
+
+    fn value(&self) -> Option<&T> {
+        match self {
+            Change::Set(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+/// The outcome of one artist's enrichment, written by [`save_artist_outcome`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArtistWrite {
+    pub status: ArtistStatus,
+    pub failures: i16,
+    /// `(code, message)` for `last_error_code` and `last_error`.
+    pub error: Change<(String, String)>,
+    /// `(mbid, mbid_source)`. Never applied over a `user` or `autotag` MBID.
+    pub mbid: Change<(Uuid, String)>,
+    pub bio: Change<String>,
+    /// `(image_path, image_source)`. Never applied over a `user` image.
+    pub image: Change<(String, String)>,
+    /// `artists."similar"`: `[{name, mbid|null, match}]`.
+    pub similar: Change<serde_json::Value>,
+    /// The artist's `musicbrainz` genres: `Set` replaces them (top first), `Clear` deletes them.
+    pub mb_genres: Change<Vec<String>>,
+}
+
+impl ArtistWrite {
+    /// A write that changes nothing but the status and the failure count.
+    pub fn status(status: ArtistStatus, failures: i16) -> ArtistWrite {
+        ArtistWrite {
+            status,
+            failures,
+            error: Change::Keep,
+            mbid: Change::Keep,
+            bio: Change::Keep,
+            image: Change::Keep,
+            similar: Change::Keep,
+            mb_genres: Change::Keep,
+        }
+    }
+}
+
+/// Writes a run's outcome in one transaction: the artist row first (locked by the update),
+/// then its genres, the order every writer of artists and genres keeps. Applied only while the
+/// artist is still `enriching` (a wipe or a restart in between wins); returns whether it was.
+/// `last_enriched_at` is now.
+pub async fn save_artist_outcome(pool: &PgPool, id: Uuid, out: &ArtistWrite) -> sqlx::Result<bool> {
+    let mut tx = pool.begin().await?;
+    let error = out.error.value();
+    let mbid = out.mbid.value();
+    let image = out.image.value();
+    let updated = sqlx::query_scalar!(
+        r#"UPDATE artists SET
+               enrichment_status = $2, enrichment_failures = $3, last_enriched_at = now(),
+               last_error = CASE $4 WHEN 'keep' THEN last_error WHEN 'set' THEN $5 ELSE NULL END,
+               last_error_code = CASE $4 WHEN 'keep' THEN last_error_code WHEN 'set' THEN $6
+                                         ELSE NULL END,
+               mbid = CASE WHEN $7 = 'keep' OR mbid_source IN ('user', 'autotag') THEN mbid
+                           WHEN $7 = 'set' THEN $8 ELSE NULL END,
+               mbid_source = CASE WHEN $7 = 'keep' OR mbid_source IN ('user', 'autotag')
+                                  THEN mbid_source
+                                  WHEN $7 = 'set' THEN $9 ELSE NULL END,
+               bio = CASE $10 WHEN 'keep' THEN bio WHEN 'set' THEN $11 ELSE NULL END,
+               image_path = CASE WHEN $12 = 'keep' OR image_source = 'user' THEN image_path
+                                 WHEN $12 = 'set' THEN $13 ELSE NULL END,
+               image_source = CASE WHEN $12 = 'keep' OR image_source = 'user' THEN image_source
+                                   WHEN $12 = 'set' THEN $14 ELSE NULL END,
+               "similar" = CASE $15 WHEN 'keep' THEN "similar" WHEN 'set' THEN $16
+                                    ELSE NULL END
+           WHERE id = $1 AND enrichment_status = 'enriching'
+           RETURNING id"#,
+        id,
+        out.status.as_str(),
+        out.failures,
+        out.error.mode(),
+        error.map(|e| e.1.as_str()),
+        error.map(|e| e.0.as_str()),
+        out.mbid.mode(),
+        mbid.map(|m| m.0),
+        mbid.map(|m| m.1.as_str()),
+        out.bio.mode(),
+        out.bio.value().map(String::as_str),
+        out.image.mode(),
+        image.map(|i| i.0.as_str()),
+        image.map(|i| i.1.as_str()),
+        out.similar.mode(),
+        out.similar.value(),
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if updated.is_none() {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let source = crate::genres::GenreSource::MusicBrainz;
+    match &out.mb_genres {
+        Change::Keep => {}
+        Change::Set(names) => {
+            crate::genres::replace_artist_genres(&mut tx, id, source, names).await?;
+        }
+        Change::Clear => {
+            crate::genres::replace_artist_genres(&mut tx, id, source, &[]).await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(true)
+}

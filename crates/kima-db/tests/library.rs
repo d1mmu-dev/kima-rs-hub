@@ -186,7 +186,13 @@ async fn prune_empty_removes_orphans(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    library::prune_empty(&pool).await.unwrap();
+    let a: uuid::Uuid = sqlx::query_scalar("SELECT id FROM artists WHERE name = 'A'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let pruned = library::prune_empty(&pool).await.unwrap();
+    assert_eq!(pruned.albums.len(), 1);
+    assert_eq!(pruned.artists, vec![a]);
     assert_eq!(count(&pool, "albums").await, 1);
     assert_eq!(count(&pool, "artists").await, 1);
 }

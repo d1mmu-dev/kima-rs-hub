@@ -195,6 +195,11 @@ async fn sync_clears_halt_and_counts(pool: PgPool) {
     let t2 = track(&pool).await;
     let t3 = track(&pool).await;
     let t4 = track(&pool).await;
+    // The helper's artists are `completed`; these are owed but t3's.
+    sqlx::query("UPDATE artists SET enrichment_status = 'pending'")
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query(
         "UPDATE artists SET enrichment_status = 'completed'
          WHERE id = (SELECT al.artist_id FROM tracks t JOIN albums al ON al.id = t.album_id

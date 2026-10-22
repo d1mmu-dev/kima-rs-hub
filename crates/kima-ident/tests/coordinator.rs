@@ -650,3 +650,80 @@ async fn cancel_releases_unstarted_claims(pool: PgPool) {
         vec![waiting]
     );
 }
+
+/// Task 21: the artists phase runs before the tracks phase, inside the network phases.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn artists_phase_runs_before_tracks(pool: PgPool) {
+    let rec = rec_id(1);
+    let replay = Replay::start(Recording(vec![
+        details(&rec),
+        get(
+            "/artist?query=Nobody&limit=10&fmt=json",
+            json!({"artists": []}),
+        ),
+    ]))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    let t = track(&pool, "a.wav", Some(&rec)).await;
+    sqlx::query(
+        "UPDATE artists SET name = 'Nobody', enrichment_status = 'pending'
+         WHERE id = (SELECT al.artist_id FROM tracks t JOIN albums al ON al.id = t.album_id
+                     WHERE t.id = $1)",
+    )
+    .bind(t)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = cycle(&ctx).await;
+
+    assert_eq!(report.artists.claimed, 1);
+    assert_eq!(report.artists.done, 1);
+    assert_eq!(report.tracks.done, 1);
+    let status: String = sqlx::query_scalar("SELECT enrichment_status FROM artists")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "unresolvable");
+    let asked = replay.asked();
+    let artist_at = asked.iter().position(|a| a.contains("/artist?")).unwrap();
+    let track_at = asked
+        .iter()
+        .position(|a| a.contains("/recording/"))
+        .unwrap();
+    assert!(artist_at < track_at, "{asked:?}");
+}
+
+/// Task 21: while MusicBrainz is paused the artists phase is skipped like the tracks phase.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn paused_musicbrainz_skips_artists_phase(pool: PgPool) {
+    let replay = Replay::start(Recording(vec![])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    track(&pool, "a.wav", None).await;
+    sqlx::query("UPDATE artists SET enrichment_status = 'pending'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO source_pauses (source, paused_until, reason)
+         VALUES ('musicbrainz', now() + interval '10 minutes', 'HTTP 503')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    ctx.net.load_pauses().await.unwrap();
+
+    let report = cycle(&ctx).await;
+
+    assert_eq!(report.artists.claimed, 0);
+    assert!(replay.asked().is_empty());
+    let status: String = sqlx::query_scalar("SELECT enrichment_status FROM artists")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "pending");
+}

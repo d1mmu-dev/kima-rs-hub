@@ -308,8 +308,8 @@ fn network_may_run(ctx: &IdentCtx, cancel: &CancellationToken, stop: &Cancellati
     go_on(cancel, stop) && ctx.net.enabled() && ctx.net.paused_until(Source::MusicBrainz).is_none()
 }
 
-/// Step 4: the network phases, only while identification is on: artists (batches of 10), then
-/// tracks, each skipped while MusicBrainz is paused. The switch and the pause are checked
+/// Step 4: the network phases, only while identification is on: one batch of 10 artists, then
+/// tracks until none is left, each skipped while MusicBrainz is paused. The switch and the pause are checked
 /// before every batch.
 async fn network_phases(
     ctx: &IdentCtx,
@@ -321,6 +321,11 @@ async fn network_phases(
     NetworkOutcome { artists, tracks }
 }
 
+/// Artist batches per cycle: one, as upstream (`enrichArtistsBatch` once per cycle), so the
+/// tracks phase always runs and an artist that just ended (a paused source leaves it
+/// `pending`) is not claimed again in the same cycle.
+pub const ARTIST_BATCHES_PER_CYCLE: usize = 1;
+
 async fn artists_phase(
     ctx: &IdentCtx,
     cancel: &CancellationToken,
@@ -328,7 +333,10 @@ async fn artists_phase(
 ) -> PhaseOutcome {
     let mut out = PhaseOutcome::default();
     let mut marked = false;
-    while network_may_run(ctx, cancel, stop) {
+    for _ in 0..ARTIST_BATCHES_PER_CYCLE {
+        if !network_may_run(ctx, cancel, stop) {
+            break;
+        }
         match artist::run_batch_until(ctx, cancel, stop).await {
             Ok(b) => {
                 let changed = b.done + b.failed > 0;

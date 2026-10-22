@@ -250,16 +250,24 @@ pub struct ArtistForEnrichment {
     pub album_dirs: Vec<String>,
 }
 
-/// Claims up to `n` artists for enrichment (spec §10.5): `pending` or `failed`, or
-/// `unresolvable` and last tried over 7 days ago, with a present track, Various Artists aside;
-/// oldest `last_enriched_at` first (never tried first), then id. Each is set `enriching`; a row
-/// another claimer holds is skipped.
+/// How long a `failed` artist waits before it is claimed again (upstream
+/// `FAILED_JOB_RETRY_GRACE_MS`, 15 min: a failed job holds its id until then). The claim
+/// writes the same 15 minutes as an SQL interval, on the database clock.
+pub const FAILED_RETRY_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Claims up to `n` artists for enrichment (spec §10.5): `pending`, `failed` and last tried
+/// over [`FAILED_RETRY_GRACE`] ago, or `unresolvable` and last tried over 7 days ago, with a
+/// present track, Various Artists aside; oldest `last_enriched_at` first (never tried first),
+/// then id. Each is set `enriching`; a row another claimer holds is skipped.
 pub async fn claim_artists(pool: &PgPool, n: i64) -> sqlx::Result<Vec<ArtistForEnrichment>> {
     let rows = sqlx::query!(
         r#"WITH due AS (
                SELECT a.id, a.last_enriched_at FROM artists a
                WHERE a.name_key <> $2
-                 AND (a.enrichment_status IN ('pending', 'failed')
+                 AND (a.enrichment_status = 'pending'
+                      OR (a.enrichment_status = 'failed'
+                          AND (a.last_enriched_at IS NULL
+                               OR a.last_enriched_at < now() - interval '15 minutes'))
                       OR (a.enrichment_status = 'unresolvable'
                           AND (a.last_enriched_at IS NULL
                                OR a.last_enriched_at < now() - interval '7 days')))

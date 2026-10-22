@@ -194,7 +194,13 @@ pub struct Bases {
     pub listenbrainz: String,
     pub lrclib: String,
     pub coverartarchive: String,
+    /// Wikimedia Commons' file host. Not a [`Host`] (no JSON is read from it): only the base of
+    /// the image URLs Wikidata's `P18` claims become, which are downloaded with `get_bytes`.
+    pub commons: String,
 }
+
+/// Wikimedia Commons' file host in production.
+pub const COMMONS_BASE: &str = "https://upload.wikimedia.org";
 
 impl Bases {
     /// The real services; MusicBrainz from `MUSICBRAINZ_BASE_URL`.
@@ -210,6 +216,7 @@ impl Bases {
             listenbrainz: "https://labs.api.listenbrainz.org".into(),
             lrclib: "https://lrclib.net/api".into(),
             coverartarchive: "https://coverartarchive.org".into(),
+            commons: COMMONS_BASE.into(),
         }
     }
 
@@ -226,7 +233,8 @@ impl Bases {
             deezer: url.clone(),
             listenbrainz: url.clone(),
             lrclib: url.clone(),
-            coverartarchive: url,
+            coverartarchive: url.clone(),
+            commons: url,
         }
     }
 

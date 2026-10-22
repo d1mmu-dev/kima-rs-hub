@@ -727,3 +727,132 @@ async fn paused_musicbrainz_skips_artists_phase(pool: PgPool) {
         .unwrap();
     assert_eq!(status, "pending");
 }
+
+/// A pending artist with a tagged MBID, named `name`, owning a fresh present track.
+async fn pending_artist(
+    pool: &PgPool,
+    rel: &str,
+    name: &str,
+    mbid: &str,
+    tag: Option<&str>,
+) -> (Uuid, Uuid) {
+    let t = track(pool, rel, tag).await;
+    let a: Uuid = sqlx::query_scalar(
+        "UPDATE artists SET name = $2, enrichment_status = 'pending', mbid = $3, mbid_source = 'tag'
+         WHERE id = (SELECT al.artist_id FROM tracks t JOIN albums al ON al.id = t.album_id
+                     WHERE t.id = $1)
+         RETURNING id",
+    )
+    .bind(t)
+    .bind(name)
+    .bind(Uuid::parse_str(mbid).unwrap())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (a, t)
+}
+
+/// Everything MusicBrainz and Wikidata say of `name`/`mbid`: it is this artist, no genres, no
+/// Wikidata item.
+fn artist_answers(name: &str, mbid: &str) -> Vec<Entry> {
+    let q = format!("SELECT ?item WHERE {{ ?item wdt:P434 \"{mbid}\" }} LIMIT 1");
+    vec![
+        get(
+            &format!("/artist/{mbid}?inc=aliases&fmt=json"),
+            json!({"id": mbid, "name": name, "sort-name": name, "aliases": []}),
+        ),
+        get(
+            &format!("/artist/{mbid}?inc=genres&fmt=json"),
+            json!({"id": mbid, "name": name, "genres": []}),
+        ),
+        get(
+            &format!("/sparql?query={q}&format=json"),
+            json!({"results": {"bindings": []}}),
+        ),
+    ]
+}
+
+async fn artist_row(pool: &PgPool, a: Uuid) -> (String, i16) {
+    let r = sqlx::query("SELECT enrichment_status, enrichment_failures FROM artists WHERE id = $1")
+        .bind(a)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (r.get(0), r.get(1))
+}
+
+/// Review I1: with ListenBrainz and Deezer paused every artist ends `pending`; the artists phase
+/// still ends after one batch, the tracks phase runs, and no failure is counted.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn paused_similar_sources_end_the_artists_phase(pool: PgPool) {
+    let rec = rec_id(1);
+    let mut entries = vec![details(&rec)];
+    let ids: Vec<String> = (1..=3)
+        .map(|i| format!("66666666-0000-4000-8000-{i:012}"))
+        .collect();
+    for (i, id) in ids.iter().enumerate() {
+        entries.extend(artist_answers(&format!("Artist {i}"), id));
+    }
+    let replay = Replay::start(Recording(entries)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    let mut artists = Vec::new();
+    for (i, id) in ids.iter().enumerate() {
+        let tag = (i == 0).then_some(rec.as_str());
+        artists.push(
+            pending_artist(&pool, &format!("{i}.wav"), &format!("Artist {i}"), id, tag).await,
+        );
+    }
+    sqlx::query(
+        "INSERT INTO source_pauses (source, paused_until, reason)
+         VALUES ('listenbrainz', now() + interval '10 minutes', 'HTTP 429'),
+                ('deezer', now() + interval '10 minutes', 'HTTP 429')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    ctx.net.load_pauses().await.unwrap();
+
+    let report = tokio::time::timeout(Duration::from_secs(60), cycle(&ctx))
+        .await
+        .expect("the cycle ends");
+
+    assert_eq!(report.artists.claimed, 3);
+    assert_eq!(report.artists.failed, 3, "pending counts as not done");
+    assert!(report.tracks.done >= 1, "{report:?}");
+    for (a, _) in &artists {
+        assert_eq!(artist_row(&pool, *a).await, ("pending".to_string(), 0));
+    }
+    // The next cycle asks again (still paused) and still counts no failure.
+    cycle(&ctx).await;
+    for (a, _) in &artists {
+        assert_eq!(artist_row(&pool, *a).await, ("pending".to_string(), 0));
+    }
+}
+
+/// Review I1: a source outage fails an artist once per retry grace, not once per batch: two
+/// cycles in a row leave it at one failure.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_short_outage_cannot_make_an_artist_unresolvable(pool: PgPool) {
+    let id = "66666666-0000-4000-8000-000000000009";
+    // Wikidata is not recorded: the replay answers 599, a failure.
+    let mut entries = artist_answers("Flaky", id);
+    entries.pop();
+    entries.push(get(
+        &format!("/similar-artists/json?artist_mbids={id}&algorithm=session_based_days_7500_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30"),
+        json!([]),
+    ));
+    entries.push(get("/search/artist?q=Flaky&limit=1", json!({"data": []})));
+    let replay = Replay::start(Recording(entries)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    let (a, _) = pending_artist(&pool, "a.wav", "Flaky", id, None).await;
+
+    for _ in 0..3 {
+        cycle(&ctx).await;
+    }
+
+    assert_eq!(artist_row(&pool, a).await, ("failed".to_string(), 1));
+}

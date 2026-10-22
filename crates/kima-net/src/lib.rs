@@ -19,4 +19,4 @@ pub mod testing;
 pub use client::{Net, NetConfig, redirect_allowed, retry_delay, user_agent};
 pub use outcome::{Evidence, Failure, Outcome};
 pub use req::Req;
-pub use source::{Bases, Host, Limits, Source};
+pub use source::{Bases, COMMONS_BASE, Host, Limits, Source};

@@ -103,14 +103,16 @@ fn summary_path(title: &str) -> String {
     )
 }
 
-/// The Commons URL of `file` (spec §12.2): the MD5 of the name with spaces as underscores picks
+/// The Commons URL of `file` under `base` (spec §12.2; production [`kima_net::COMMONS_BASE`]):
+/// the MD5 of the name with spaces as underscores picks
 /// the directories `{m[0]}/{m[0..2]}`, and the name is percent-encoded as `encodeURIComponent`
 /// encodes it.
-pub fn commons_url(file: &str) -> String {
+pub fn commons_url(base: &str, file: &str) -> String {
     let name = file.replace(' ', "_");
     let hash = hex::encode(Md5::digest(name.as_bytes()));
     format!(
-        "https://upload.wikimedia.org/wikipedia/commons/{}/{}/{}",
+        "{}/wikipedia/commons/{}/{}/{}",
+        base.trim_end_matches('/'),
         &hash[..1],
         &hash[..2],
         utf8_percent_encode(&name, URI_COMPONENT)
@@ -120,7 +122,7 @@ pub fn commons_url(file: &str) -> String {
 /// The `P18` image of an entity as a Commons URL: the first `preferred` claim, else the first
 /// `normal` one; a `deprecated` claim is never taken. A value that is not a non-empty string of
 /// at most 255 characters is no image.
-pub fn image_of(entity: &Value) -> Option<String> {
+pub fn image_of(entity: &Value, base: &str) -> Option<String> {
     let claims = items(entity.pointer("/claims/P18"));
     let ranked = |rank: &str| {
         claims
@@ -132,7 +134,7 @@ pub fn image_of(entity: &Value) -> Option<String> {
     if file.is_empty() || file.chars().count() > MAX_FILE_CHARS {
         return None;
     }
-    Some(commons_url(file))
+    Some(commons_url(base, file))
 }
 
 /// The bio and image of the artist with `mbid` (spec §12.2). No Wikidata item →
@@ -169,7 +171,7 @@ pub async fn lookup(net: &Net, mbid: Mbid) -> Outcome<WikiInfo> {
             .unwrap_or_default(),
         None => return Outcome::Answered(WikiInfo::default()),
     };
-    let image_url = image_of(&entity);
+    let image_url = image_of(&entity, net.commons_base());
     let title = answer::text(entity.pointer("/sitelinks/enwiki/title"), usize::MAX)
         .filter(|t| t.chars().count() <= MAX_TITLE_CHARS);
     let bio = match title {

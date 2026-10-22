@@ -1,0 +1,17 @@
+[
+ {
+  "host": "listenbrainz",
+  "method": "GET",
+  "path": "/similar-artists/json",
+  "query": [
+   [
+    "artist_mbids",
+    "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+   ],
+   [
+    "algorithm",
+    "session_based_days_7500_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30"
+   ]
+  ]
+ }
+]

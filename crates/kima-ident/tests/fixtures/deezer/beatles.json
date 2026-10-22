@@ -1,0 +1,135 @@
+[
+ {
+  "method": "GET",
+  "url": "/search/artist?q=The%20Beatles&limit=1",
+  "status": 200,
+  "body": {
+   "data": [
+    {
+     "id": 1,
+     "name": "The Beatles",
+     "link": "https://www.deezer.com/artist/1",
+     "picture": "https://api.deezer.com/artist/1/image",
+     "picture_small": "https://e-cdns-images.dzcdn.net/images/artist/0a4e1d1e3d4a3b6b8a4d3f0c3c0b5f1e/56x56-000000-80-0-0.jpg",
+     "picture_medium": "https://e-cdns-images.dzcdn.net/images/artist/0a4e1d1e3d4a3b6b8a4d3f0c3c0b5f1e/250x250-000000-80-0-0.jpg",
+     "picture_big": "https://e-cdns-images.dzcdn.net/images/artist/0a4e1d1e3d4a3b6b8a4d3f0c3c0b5f1e/500x500-000000-80-0-0.jpg",
+     "picture_xl": "https://e-cdns-images.dzcdn.net/images/artist/0a4e1d1e3d4a3b6b8a4d3f0c3c0b5f1e/1000x1000-000000-80-0-0.jpg",
+     "nb_album": 64,
+     "nb_fan": 6312345,
+     "radio": true,
+     "tracklist": "https://api.deezer.com/artist/1/top?limit=50",
+     "type": "artist"
+    }
+   ],
+   "total": 1,
+   "next": "https://api.deezer.com/search/artist?q=The%20Beatles&limit=1&index=1"
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/artist/1/related?limit=30",
+  "status": 200,
+  "body": {
+   "data": [
+    {
+     "id": 1424821,
+     "name": "John Lennon",
+     "link": "https://www.deezer.com/artist/1424821",
+     "nb_album": 10,
+     "nb_fan": 1000,
+     "radio": true,
+     "type": "artist"
+    },
+    {
+     "id": 1188,
+     "name": "Paul McCartney",
+     "link": "https://www.deezer.com/artist/1188",
+     "nb_album": 10,
+     "nb_fan": 1000,
+     "radio": true,
+     "type": "artist"
+    },
+    {
+     "id": 1,
+     "name": "The Beatles",
+     "link": "https://www.deezer.com/artist/1",
+     "nb_album": 10,
+     "nb_fan": 1000,
+     "radio": true,
+     "type": "artist"
+    },
+    {
+     "id": 3022,
+     "name": "George Harrison",
+     "link": "https://www.deezer.com/artist/3022",
+     "nb_album": 10,
+     "nb_fan": 1000,
+     "radio": true,
+     "type": "artist"
+    },
+    {
+     "id": 1190,
+     "name": "Wings",
+     "link": "https://www.deezer.com/artist/1190",
+     "nb_album": 10,
+     "nb_fan": 1000,
+     "radio": true,
+     "type": "artist"
+    }
+   ],
+   "total": 5
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/search/album?q=artist%3A%22The%20Beatles%22%20album%3A%22Abbey%20Road%22&limit=5",
+  "status": 200,
+  "body": {
+   "data": [
+    {
+     "id": 12047936,
+     "title": "Abbey Road (Super Deluxe Edition)",
+     "link": "https://www.deezer.com/album/12047936",
+     "cover": "https://api.deezer.com/album/12047936/image",
+     "cover_small": "https://e-cdns-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/56x56-000000-80-0-0.jpg",
+     "cover_medium": "https://e-cdns-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/250x250-000000-80-0-0.jpg",
+     "cover_big": "https://e-cdns-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/500x500-000000-80-0-0.jpg",
+     "cover_xl": "https://e-cdns-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/1000x1000-000000-80-0-0.jpg",
+     "genre_id": 132,
+     "nb_tracks": 17,
+     "record_type": "album",
+     "explicit_lyrics": false,
+     "artist": {
+      "id": 1,
+      "name": "The Beatles",
+      "link": "https://www.deezer.com/artist/1",
+      "type": "artist"
+     },
+     "type": "album"
+    },
+    {
+     "id": 12047952,
+     "title": "Abbey Road",
+     "link": "https://www.deezer.com/album/12047952",
+     "cover": "https://api.deezer.com/album/12047952/image",
+     "cover_small": "https://e-cdns-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/56x56-000000-80-0-0.jpg",
+     "cover_medium": "https://e-cdns-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/250x250-000000-80-0-0.jpg",
+     "cover_big": "https://e-cdns-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/500x500-000000-80-0-0.jpg",
+     "cover_xl": "https://e-cdns-images.dzcdn.net/images/cover/2e018122cb56986277102d2041a592c8/1000x1000-000000-80-0-0.jpg",
+     "genre_id": 132,
+     "nb_tracks": 17,
+     "record_type": "album",
+     "explicit_lyrics": false,
+     "artist": {
+      "id": 1,
+      "name": "The Beatles",
+      "link": "https://www.deezer.com/artist/1",
+      "type": "artist"
+     },
+     "type": "album"
+    }
+   ],
+   "total": 2
+  }
+ }
+]

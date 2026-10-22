@@ -1,0 +1,93 @@
+[
+ {
+  "method": "GET",
+  "url": "/music/b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d?api_key=REDACTED",
+  "status": 200,
+  "body": {
+   "name": "The Beatles",
+   "mbid_id": "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d",
+   "artistbackground": [
+    {
+     "id": "1027",
+     "url": "https://assets.fanart.tv/fanart/music/b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d/artistbackground/the-beatles-4dc6d3f8c2bfc.jpg",
+     "likes": "12"
+    }
+   ],
+   "artistthumb": [
+    {
+     "id": "30117",
+     "url": "https://assets.fanart.tv/fanart/music/b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d/artistthumb/the-beatles-4fb0d1d7b0c8a.jpg",
+     "likes": "9"
+    }
+   ],
+   "hdmusiclogo": [
+    {
+     "id": "7311",
+     "url": "https://assets.fanart.tv/fanart/music/b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d/hdmusiclogo/the-beatles-4f6a1fd1b1ba0.png",
+     "likes": "20"
+    }
+   ],
+   "albums": {
+    "9162580e-5df4-32de-80cc-f45a8d8a9b1d": {
+     "albumcover": [
+      {
+       "id": "7400",
+       "url": "https://assets.fanart.tv/fanart/music/b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d/albumcover/abbey-road-4dcd3e2b1d3f2.jpg",
+       "likes": "5"
+      }
+     ]
+    }
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/music/albums/9162580e-5df4-32de-80cc-f45a8d8a9b1d?api_key=REDACTED",
+  "status": 200,
+  "body": {
+   "name": "The Beatles",
+   "mbid_id": "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d",
+   "albums": {
+    "9162580e-5df4-32de-80cc-f45a8d8a9b1d": {
+     "albumcover": [
+      {
+       "id": "7400",
+       "url": "https://assets.fanart.tv/fanart/music/b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d/albumcover/abbey-road-4dcd3e2b1d3f2.jpg",
+       "likes": "5"
+      }
+     ],
+     "cdart": [
+      {
+       "id": "1501",
+       "url": "https://assets.fanart.tv/fanart/music/b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d/cdart/abbey-road-4e1a6c0e8b9f4.png",
+       "likes": "3",
+       "disc": "1",
+       "size": "1000"
+      }
+     ]
+    }
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/music/00000000-0000-4000-8000-000000000404?api_key=REDACTED",
+  "status": 404,
+  "body": {
+   "status": "error",
+   "error message": "Not found"
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/music/00000000-0000-4000-8000-000000000429?api_key=REDACTED",
+  "status": 429,
+  "body": {
+   "status": "error",
+   "error message": "Too many requests"
+  },
+  "headers": {
+   "retry-after": "1"
+  }
+ }
+]

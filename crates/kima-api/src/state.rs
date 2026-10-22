@@ -80,6 +80,9 @@ pub struct AppState {
     /// Whether fingerprints can be made: ffmpeg was found at startup and `ACOUSTID_DISABLED`
     /// is not set (spec §9.4). `GET /api/system/features` answers it as `fpcalc`.
     pub fpcalc: bool,
+    /// `FANART_API_KEY`, for enrichment when no enabled key is stored (spec §15.1). A secret:
+    /// `AppState` has no `Debug`, and nothing logs or returns it.
+    pub fanart_env_key: Option<String>,
     /// Failed password sign-ins, per (client IP, username).
     pub login_limit: Arc<LoginLimiter>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
@@ -113,6 +116,7 @@ impl AppState {
             transcoder: None,
             cipher,
             fpcalc: false,
+            fanart_env_key: None,
             login_limit: Arc::new(LoginLimiter::new()),
             password_permits: Arc::new(AtomicU64::new(0)),
         }
@@ -141,6 +145,11 @@ impl AppState {
 
     pub fn with_fpcalc(mut self, fpcalc: bool) -> Self {
         self.fpcalc = fpcalc;
+        self
+    }
+
+    pub fn with_fanart_env_key(mut self, key: Option<String>) -> Self {
+        self.fanart_env_key = key;
         self
     }
 

@@ -92,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         .with_organize_target(config.organize_target.clone())
         .with_public_url(config.public_url.clone())
         .with_fpcalc(fpcalc)
+        .with_fanart_env_key(config.fanart_api_key.clone())
         .with_artwork_cache_mb(config.artwork_cache_mb)
         .with_transcoder(kima_library::transcode::Transcoder::new(
             config.data_dir.join("transcode"),
@@ -121,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
             fingerprint_workers: config.fingerprint_workers,
             acoustid_disabled: config.acoustid_disabled,
             acoustid_env_key: config.acoustid_client_key.clone(),
+            fanart_env_key: state.fanart_env_key.clone(),
         },
         last_cycle: Default::default(),
     };

@@ -36,6 +36,9 @@ pub struct Config {
     /// `ACOUSTID_CLIENT_KEY`: the AcoustID client key after the stored setting (spec §8.4). A
     /// secret: never printed.
     pub acoustid_client_key: Option<String>,
+    /// `FANART_API_KEY`: the fanart.tv key when no enabled key is stored (spec §15.1). A secret:
+    /// never printed.
+    pub fanart_api_key: Option<String>,
 }
 
 // Never prints a secret.
@@ -68,6 +71,7 @@ impl std::fmt::Debug for Config {
             .field("fingerprint_workers", &self.fingerprint_workers)
             .field("acoustid_disabled", &self.acoustid_disabled)
             .field("acoustid_client_key", &hidden(&self.acoustid_client_key))
+            .field("fanart_api_key", &hidden(&self.fanart_api_key))
             .finish()
     }
 }
@@ -275,6 +279,7 @@ impl Config {
             fingerprint_workers,
             acoustid_disabled,
             acoustid_client_key: value("ACOUSTID_CLIENT_KEY"),
+            fanart_api_key: value("FANART_API_KEY"),
         })
     }
 }
@@ -494,6 +499,25 @@ mod tests {
             shown.contains("acoustid_client_key: Some(\"..\")"),
             "{shown}"
         );
+    }
+
+    #[test]
+    fn fanart_api_key_is_read_trimmed_and_never_printed() {
+        let key = |extra: &[(&str, &str)]| {
+            let mut pairs = vec![("DATABASE_URL", "postgres://x")];
+            pairs.extend_from_slice(extra);
+            Config::from_lookup(lookup(&pairs)).unwrap()
+        };
+        assert_eq!(key(&[]).fanart_api_key, None);
+        assert_eq!(key(&[("FANART_API_KEY", " ")]).fanart_api_key, None);
+        let config = key(&[("FANART_API_KEY", " fanart-secret-value ")]);
+        assert_eq!(
+            config.fanart_api_key.as_deref(),
+            Some("fanart-secret-value")
+        );
+        let shown = format!("{config:?} {config:#?}");
+        assert!(!shown.contains("fanart-secret-value"), "{shown}");
+        assert!(shown.contains("fanart_api_key: Some(\"..\")"), "{shown}");
     }
 
     #[test]

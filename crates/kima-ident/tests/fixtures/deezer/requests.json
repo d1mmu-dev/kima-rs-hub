@@ -1,0 +1,43 @@
+[
+ {
+  "host": "deezer",
+  "method": "GET",
+  "path": "/search/artist",
+  "query": [
+   [
+    "q",
+    "The Beatles"
+   ],
+   [
+    "limit",
+    "1"
+   ]
+  ]
+ },
+ {
+  "host": "deezer",
+  "method": "GET",
+  "path": "/artist/1/related",
+  "query": [
+   [
+    "limit",
+    "30"
+   ]
+  ]
+ },
+ {
+  "host": "deezer",
+  "method": "GET",
+  "path": "/search/album",
+  "query": [
+   [
+    "q",
+    "artist:\"The Beatles\" album:\"Abbey Road\""
+   ],
+   [
+    "limit",
+    "5"
+   ]
+  ]
+ }
+]

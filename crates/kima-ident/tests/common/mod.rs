@@ -47,6 +47,7 @@ pub fn ident_ctx_with(
             fingerprint_workers: 2,
             acoustid_disabled: false,
             acoustid_env_key: None,
+            fanart_env_key: None,
         },
         last_cycle: Default::default(),
     }

@@ -631,3 +631,286 @@ mod system {
         assert!(!state.identify.enabled());
     }
 }
+
+// ---- POST /api/system-settings/test-fanart (M3a Task 20, spec §15.2, D-110) ----
+
+mod test_fanart {
+    use super::common;
+    use axum_test::{TestResponse, TestServer};
+    use kima_api::AppState;
+    use kima_core::identify::IdentifySwitch;
+    use kima_db::PgPool;
+    use kima_net::testing::{Entry, Recording, Replay};
+    use kima_net::{Bases, Net, NetConfig};
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    const BEATLES: &str = "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d";
+    const ROUTE: &str = "/api/system-settings/test-fanart";
+    /// Contains characters that are percent-encoded on the wire.
+    const STORED: &str = "stored/fanart+KEY-0001";
+    const BODY_KEY: &str = "typed-fanart-KEY-0002";
+
+    fn entry(key: &str, status: u16, body: Value) -> Entry {
+        let encoded: String = key
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        Entry {
+            method: "GET".into(),
+            url: format!("/music/{BEATLES}?api_key={encoded}"),
+            status,
+            headers: BTreeMap::new(),
+            body,
+            body_base64: None,
+            request_body_sha256: None,
+        }
+    }
+
+    fn beatles() -> Value {
+        json!({"name": "The Beatles", "mbid_id": BEATLES, "artistthumb": [{"url": "https://assets.fanart.tv/t.jpg"}]})
+    }
+
+    /// A server whose `Net` answers from `entries`; the switch is shared by the state and `Net`.
+    async fn setup(
+        pool: PgPool,
+        entries: Vec<Entry>,
+        switch: IdentifySwitch,
+    ) -> (TestServer, Replay, AppState, String, String) {
+        let replay = Replay::start(Recording(entries)).await;
+        let net = Arc::new(Net::new(
+            NetConfig::for_tests(Bases::all(&replay.url())),
+            pool.clone(),
+            switch.clone(),
+        ));
+        let state = common::state(pool)
+            .with_identify(switch)
+            .with_net(net)
+            .with_fanart_env_key(Some("env-fanart-KEY-0003".into()));
+        let (_, admin) = common::user_with_token(&state, "ana").await;
+        let (_, user) = common::user_with_token(&state, "ben").await;
+        let server = TestServer::new(kima_api::router(state.clone())).unwrap();
+        (server, replay, state, admin, user)
+    }
+
+    fn on() -> IdentifySwitch {
+        IdentifySwitch::new(false, true)
+    }
+
+    async fn store_key(server: &TestServer, admin: &str) {
+        // Stored but not enabled: the test still uses it.
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(admin)
+            .json(&json!({ "fanartApiKey": STORED, "fanartEnabled": false }))
+            .await
+            .assert_status_ok();
+    }
+
+    async fn press(server: &TestServer, admin: &str, body: Value) -> TestResponse {
+        server
+            .post(ROUTE)
+            .authorization_bearer(admin)
+            .json(&body)
+            .await
+    }
+
+    /// No response body, in any spelling, carries a key.
+    fn no_key_in(res: &TestResponse) {
+        let text = res.text();
+        for k in [
+            STORED,
+            BODY_KEY,
+            "stored%2Ffanart%2BKEY-0001",
+            "env-fanart-KEY-0003",
+        ] {
+            assert!(!text.contains(k), "{text}");
+        }
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn test_fanart_uses_stored_key(pool: PgPool) {
+        let (server, replay, _, admin, _) =
+            setup(pool, vec![entry(STORED, 200, beatles())], on()).await;
+        store_key(&server, &admin).await;
+        for body in [
+            json!({}),
+            json!({ "fanartApiKey": "" }),
+            json!({ "fanartApiKey": "  " }),
+        ] {
+            let res = press(&server, &admin, body).await;
+            res.assert_status_ok();
+            res.assert_json(
+                &json!({"success": true, "message": "Fanart.tv connection successful"}),
+            );
+        }
+        assert_eq!(replay.asked().len(), 3);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn test_fanart_body_key_wins(pool: PgPool) {
+        let (server, replay, _, admin, _) = setup(
+            pool,
+            vec![
+                entry(BODY_KEY, 200, beatles()),
+                entry(STORED, 401, json!({})),
+            ],
+            on(),
+        )
+        .await;
+        store_key(&server, &admin).await;
+        let res = press(
+            &server,
+            &admin,
+            json!({ "fanartApiKey": format!(" {BODY_KEY} ") }),
+        )
+        .await;
+        res.assert_status_ok();
+        res.assert_json(&json!({"success": true, "message": "Fanart.tv connection successful"}));
+        let asked = replay.asked();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].contains(BODY_KEY), "{asked:?}");
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn test_fanart_no_key_400(pool: PgPool) {
+        // No body key and nothing stored: the env key is not used for the test.
+        let (server, replay, _, admin, _) = setup(pool, vec![], on()).await;
+        for body in [
+            json!({}),
+            json!({ "fanartApiKey": "" }),
+            json!({ "fanartApiKey": null }),
+        ] {
+            let res = press(&server, &admin, body).await;
+            res.assert_status_bad_request();
+            res.assert_json(&json!({"error": "API key is required"}));
+        }
+        // No body at all is the same as an empty one.
+        let res = server.post(ROUTE).authorization_bearer(&admin).await;
+        res.assert_status_bad_request();
+        res.assert_json(&json!({"error": "API key is required"}));
+        assert!(replay.asked().is_empty());
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn test_fanart_bad_body_never_echoes(pool: PgPool) {
+        let (server, replay, _, admin, _) = setup(pool, vec![], on()).await;
+        for raw in [
+            format!("\"{BODY_KEY}\""),
+            format!("{{\"fanartApiKey\": \"{BODY_KEY}\""),
+            format!("[\"{BODY_KEY}\"]"),
+        ] {
+            let res = server
+                .post(ROUTE)
+                .authorization_bearer(&admin)
+                .content_type("application/json")
+                .text(raw)
+                .await;
+            res.assert_status_bad_request();
+            no_key_in(&res);
+        }
+        let res = press(&server, &admin, json!({ "fanartApiKey": 12345 })).await;
+        res.assert_status_bad_request();
+        assert!(replay.asked().is_empty());
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn test_fanart_identify_off_409_no_request(pool: PgPool) {
+        for switch in [
+            IdentifySwitch::new(true, true),
+            IdentifySwitch::new(false, false),
+        ] {
+            let (server, replay, _, admin, _) =
+                setup(pool.clone(), vec![entry(BODY_KEY, 200, beatles())], switch).await;
+            let res = press(&server, &admin, json!({ "fanartApiKey": BODY_KEY })).await;
+            res.assert_status(axum::http::StatusCode::CONFLICT);
+            res.assert_json(&json!({"error": "Outbound lookups are turned off"}));
+            assert!(replay.asked().is_empty());
+            sqlx::query("DELETE FROM users")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn test_fanart_rejected_400(pool: PgPool) {
+        let echo = json!({"status": "error", "error message": format!("Invalid API key {STORED}")});
+        let (server, _replay, _, admin, _) = setup(
+            pool,
+            vec![entry(STORED, 401, echo), entry(BODY_KEY, 403, json!({}))],
+            on(),
+        )
+        .await;
+        store_key(&server, &admin).await;
+        for body in [json!({}), json!({ "fanartApiKey": BODY_KEY })] {
+            let res = press(&server, &admin, body).await;
+            res.assert_status_bad_request();
+            res.assert_json(&json!({"error": "Fanart.tv rejected the API key"}));
+            no_key_in(&res);
+        }
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn test_fanart_no_answer_502(pool: PgPool) {
+        let echo = json!({"error": format!("upstream broke for key {BODY_KEY}")});
+        let (server, _replay, _, admin, _) =
+            setup(pool, vec![entry(BODY_KEY, 500, echo)], on()).await;
+        let res = press(&server, &admin, json!({ "fanartApiKey": BODY_KEY })).await;
+        res.assert_status(axum::http::StatusCode::BAD_GATEWAY);
+        res.assert_json(&json!({"error": "Fanart.tv did not answer"}));
+        no_key_in(&res);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn test_fanart_ok(pool: PgPool) {
+        let (server, replay, _, admin, _) =
+            setup(pool, vec![entry(BODY_KEY, 200, beatles())], on()).await;
+        let res = press(&server, &admin, json!({ "fanartApiKey": BODY_KEY })).await;
+        res.assert_status_ok();
+        res.assert_json(&json!({"success": true, "message": "Fanart.tv connection successful"}));
+        no_key_in(&res);
+        assert_eq!(
+            replay.asked(),
+            [format!("GET /music/{BEATLES}?api_key={BODY_KEY}")]
+        );
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn test_fanart_not_cached(pool: PgPool) {
+        let (server, replay, state, admin, _) =
+            setup(pool, vec![entry(BODY_KEY, 200, beatles())], on()).await;
+        for _ in 0..2 {
+            press(&server, &admin, json!({ "fanartApiKey": BODY_KEY }))
+                .await
+                .assert_status_ok();
+        }
+        assert_eq!(replay.asked().len(), 2, "two presses ask twice");
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM http_cache")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn test_fanart_non_admin_403(pool: PgPool) {
+        let (server, replay, _, _, user) =
+            setup(pool, vec![entry(BODY_KEY, 200, beatles())], on()).await;
+        let res = press(&server, &user, json!({ "fanartApiKey": BODY_KEY })).await;
+        res.assert_status_forbidden();
+        res.assert_json(&json!({"error": "Admin access required"}));
+        server
+            .post(ROUTE)
+            .json(&json!({ "fanartApiKey": BODY_KEY }))
+            .await
+            .assert_status_unauthorized();
+        assert!(replay.asked().is_empty());
+    }
+}

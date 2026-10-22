@@ -35,6 +35,8 @@ pub struct IdentConfig {
     pub acoustid_disabled: bool,
     /// `ACOUSTID_CLIENT_KEY`: second in the key order (spec §8.4). A secret.
     pub acoustid_env_key: Option<String>,
+    /// `FANART_API_KEY`: used when no enabled key is stored (spec §15.1). A secret.
+    pub fanart_env_key: Option<String>,
 }
 
 // Never prints the key.
@@ -48,6 +50,10 @@ impl std::fmt::Debug for IdentConfig {
                 "acoustid_env_key",
                 &self.acoustid_env_key.as_ref().map(|_| ".."),
             )
+            .field(
+                "fanart_env_key",
+                &self.fanart_env_key.as_ref().map(|_| ".."),
+            )
             .finish()
     }
 }
@@ -57,6 +63,11 @@ impl IdentCtx {
     pub async fn acoustid_key(&self) -> Option<String> {
         crate::acoustid::resolve_client_key(&self.settings, self.config.acoustid_env_key.as_deref())
             .await
+    }
+
+    /// The fanart.tv key now: the stored key while enabled, else env (spec §15.1).
+    pub async fn fanart_key(&self) -> Option<String> {
+        crate::fanart::resolve_key(&self.settings, self.config.fanart_env_key.as_deref()).await
     }
 }
 
@@ -76,6 +87,26 @@ impl Default for IdentConfig {
             fingerprint_workers: Self::default_fingerprint_workers(),
             acoustid_disabled: false,
             acoustid_env_key: None,
+            fanart_env_key: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_hides_both_keys() {
+        let config = IdentConfig {
+            acoustid_env_key: Some("acoustid-secret-value".into()),
+            fanart_env_key: Some("fanart-secret-value".into()),
+            ..IdentConfig::default()
+        };
+        let shown = format!("{config:?} {config:#?}");
+        for secret in ["acoustid-secret-value", "fanart-secret-value"] {
+            assert!(!shown.contains(secret), "{shown}");
+        }
+        assert!(shown.contains("fanart_env_key: Some(\"..\")"), "{shown}");
     }
 }

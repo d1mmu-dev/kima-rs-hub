@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n             count(*) FILTER (WHERE t.missing_since IS NULL) AS \"total!\",\n             count(*) FILTER (WHERE t.missing_since IS NULL AND s.status = 'done') AS \"done!\",\n             count(*) FILTER (WHERE t.missing_since IS NULL\n                                AND (s.track_id IS NULL OR s.status = 'pending')) AS \"open!\",\n             count(*) FILTER (WHERE t.missing_since IS NULL AND s.status = 'working') AS \"working!\",\n             count(*) FILTER (WHERE t.missing_since IS NULL AND s.status = 'failed'\n                                AND s.next_attempt_at IS NOT NULL) AS \"retrying!\",\n             count(*) FILTER (WHERE t.missing_since IS NULL AND s.status = 'failed'\n                                AND s.next_attempt_at IS NULL\n                                AND s.error_class IS DISTINCT FROM 'FILE_MISSING') AS \"terminal!\",\n             count(*) FILTER (WHERE (s.status = 'failed' AND s.error_class = 'FILE_MISSING')\n                                 OR (t.missing_since IS NOT NULL\n                                     AND (s.track_id IS NULL OR s.status IN ('pending', 'working')\n                                          OR (s.status = 'failed'\n                                              AND s.next_attempt_at IS NOT NULL))))\n               AS \"waiting_missing!\",\n             count(*) FILTER (WHERE $2 AND t.missing_since IS NULL\n                                AND (s.track_id IS NULL OR s.status = 'pending'\n                                     OR (s.status = 'failed' AND s.next_attempt_at IS NOT NULL))\n                                AND NOT COALESCE(f.status = 'done'\n                                                 OR (f.status = 'failed'\n                                                     AND f.next_attempt_at IS NULL), false))\n               AS \"waiting!\"\n           FROM tracks t\n           LEFT JOIN track_stages s ON s.track_id = t.id AND s.stage = $1\n           LEFT JOIN track_stages f ON f.track_id = t.id AND f.stage = 'fingerprint'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "done!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "open!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "working!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "retrying!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "terminal!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "waiting_missing!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "waiting!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f4722aae327a635e4ed082ace55a6af961fcde2839dc427e9e439330a3760f6e"
+}

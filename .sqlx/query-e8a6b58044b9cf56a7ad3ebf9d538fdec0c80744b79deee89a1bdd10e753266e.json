@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE enrichment_state SET\n             halted = false,\n             current_phase = CASE WHEN status IN ('paused', 'stopping') THEN NULL\n                                  ELSE current_phase END,\n             status = CASE WHEN status IN ('paused', 'stopping') THEN 'idle' ELSE status END,\n             paused_at = NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "e8a6b58044b9cf56a7ad3ebf9d538fdec0c80744b79deee89a1bdd10e753266e"
+}

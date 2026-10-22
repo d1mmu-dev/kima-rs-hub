@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM track_genres WHERE source = 'musicbrainz' AND track_id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a70a663919f18070815beb6d7debebf2a032ea3ffceaaceb019c52727675d80c"
+}

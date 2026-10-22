@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n             (SELECT count(*) FROM artists a\n              WHERE a.enrichment_status = 'pending' AND a.name_key <> 'various artists'\n                AND EXISTS (SELECT 1 FROM albums al JOIN tracks t ON t.album_id = al.id\n                            WHERE al.artist_id = a.id AND t.missing_since IS NULL)) AS \"artists!\",\n             (SELECT count(*) FROM tracks t\n              LEFT JOIN track_stages s ON s.track_id = t.id AND s.stage = 'recording'\n              WHERE t.missing_since IS NULL\n                AND (s.track_id IS NULL OR s.status = 'pending')) AS \"tracks!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "artists!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "tracks!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "7af117dc40c7edb56039f50dbd230ab685deced1d10cc41e1bbb7fa8e0546395"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE track_stages\n         SET status = 'pending', next_attempt_at = NULL, updated_at = now()\n         WHERE status = 'failed' AND next_attempt_at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3ed3307bb3573371fc4c86aba5664271afdac58d865028c9ad37f055e724ae0a"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id FROM tracks t\n         JOIN track_stages s ON s.track_id = t.id\n         WHERE s.stage = 'recording' AND s.status IN ('done', 'working')\n         ORDER BY t.id\n         FOR NO KEY UPDATE OF t",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "216bdf4b7708ae9cd6ab0eedb14bfc0937c0fee8906ae80b1f22d10743f54856"
+}

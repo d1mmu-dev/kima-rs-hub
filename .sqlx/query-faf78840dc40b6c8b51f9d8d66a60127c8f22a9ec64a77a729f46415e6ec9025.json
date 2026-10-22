@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tracks\n         SET recording_mbid = NULL, recording_source = NULL,\n             isrc = CASE WHEN isrc_source = 'musicbrainz' THEN NULL ELSE isrc END,\n             isrc_source = CASE WHEN isrc_source = 'musicbrainz' THEN NULL ELSE isrc_source END\n         WHERE id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "faf78840dc40b6c8b51f9d8d66a60127c8f22a9ec64a77a729f46415e6ec9025"
+}

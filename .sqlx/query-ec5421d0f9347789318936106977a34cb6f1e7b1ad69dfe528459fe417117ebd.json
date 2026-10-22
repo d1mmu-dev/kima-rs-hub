@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n             count(*) AS \"total!\",\n             count(*) FILTER (WHERE enrichment_status IN ('completed', 'unresolvable'))\n               AS \"completed!\",\n             count(*) FILTER (WHERE enrichment_status IN ('pending', 'enriching')) AS \"pending!\",\n             count(*) FILTER (WHERE enrichment_status IN ('pending', 'enriching', 'failed'))\n               AS \"owed!\",\n             count(*) FILTER (WHERE enrichment_status = 'failed') AS \"failed!\"\n           FROM artists a\n           WHERE a.name_key <> 'various artists'\n             AND EXISTS (SELECT 1 FROM albums al JOIN tracks t ON t.album_id = al.id\n                         WHERE al.artist_id = a.id AND t.missing_since IS NULL)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "completed!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "pending!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "owed!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "failed!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "ec5421d0f9347789318936106977a34cb6f1e7b1ad69dfe528459fe417117ebd"
+}

@@ -696,3 +696,77 @@ async fn cancelled_batch_claims_nothing(pool: PgPool) {
     assert_eq!(report, BatchReport::default());
     assert!(f.replay.asked().is_empty());
 }
+
+/// Review m1: the answer locks track, then album, then writes genres, the scanner's order. A
+/// re-read of another track of the same album that holds the album and inserts the same
+/// brand-new genres queues behind or ahead of the answer instead of deadlocking.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn answer_locks_album_before_genres(pool: PgPool) {
+    let rec = id(1);
+    let f = fx(&pool, catalogue(&rec)).await;
+    let (_, album) = seed(
+        &pool,
+        Seed {
+            rg: true,
+            ..Seed::default()
+        },
+    )
+    .await;
+    let (other, _) = seed(
+        &pool,
+        Seed {
+            album: Some(album),
+            ..Seed::default()
+        },
+    )
+    .await;
+    // The other track is already identified: only the first is claimed.
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status) VALUES ($1, 'recording', 'done')",
+    )
+    .bind(other)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // The scanner's order for the other track: track, album (upsert), then genres.
+    let mut scan = pool.begin().await.unwrap();
+    kima_db::identity::lock_track(&mut scan, other)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE albums SET is_compilation = is_compilation WHERE id = $1")
+        .bind(album)
+        .execute(&mut *scan)
+        .await
+        .unwrap();
+    let answer = {
+        let ctx = f.ctx.clone();
+        tokio::spawn(async move { recording::run_batch(&ctx, &CancellationToken::new()).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let names: Vec<String> = [
+        "outrun",
+        "synthwave",
+        "electronic",
+        "g1",
+        "g2",
+        "g3",
+        "g4",
+        "g5",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    kima_db::genres::replace_track_genres(
+        &mut scan,
+        other,
+        kima_db::genres::GenreSource::File,
+        &names,
+    )
+    .await
+    .expect("no deadlock");
+    scan.commit().await.unwrap();
+    let report = answer.await.unwrap().expect("no deadlock");
+    assert_eq!((report.claimed, report.done), (1, 1));
+}

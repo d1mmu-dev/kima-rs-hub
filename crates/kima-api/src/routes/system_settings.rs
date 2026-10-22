@@ -157,9 +157,13 @@ async fn update(
     if let Some(on) = switch {
         let was_on = state.identify.enabled();
         state.identify.set_setting(on);
-        // Turning identification on wakes the coordinator (spec §15.3).
-        if !was_on && state.identify.enabled() {
-            kima_ident::coordinator::kick(&state.pool).await?;
+        // Turning identification on wakes the coordinator (spec §15.3). The settings are
+        // already saved, so a failed kick is only logged: `enrich-kick` is the backstop.
+        if !was_on
+            && state.identify.enabled()
+            && let Err(error) = kima_ident::coordinator::kick(&state.pool).await
+        {
+            tracing::warn!(%error, "could not kick the enrichment coordinator");
         }
     }
     if let Some(n) = concurrency {

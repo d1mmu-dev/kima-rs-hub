@@ -258,7 +258,19 @@ async fn run_one(
         Ok(Ok(())) => queue::complete(pool, &job).await,
         // Gave up because the process is shutting down: the attempt is given back, so a
         // restart (or several) never fails a job that was only interrupted.
-        Ok(Err(JobError::Retry(_))) if shutdown.is_cancelled() => queue::release(pool, &job).await,
+        // Logged every time, so a job that keeps triggering a graceful restart is visible.
+        Ok(Err(JobError::Retry(message))) if shutdown.is_cancelled() => {
+            warn!(
+                job = %job.id,
+                queue = %job.queue,
+                kind = job.payload.get("kind").and_then(|k| k.as_str()).unwrap_or(""),
+                attempts = job.attempts - 1,
+                max_attempts = job.max_attempts,
+                error = %message,
+                "job interrupted by shutdown; attempt given back"
+            );
+            queue::release(pool, &job).await
+        }
         Ok(Err(JobError::Retry(message))) => queue::fail(pool, &job, &message).await,
         Ok(Err(JobError::Permanent(message))) => queue::fail_permanent(pool, &job, &message).await,
         Err(_) => queue::fail(pool, &job, "handler panicked").await,

@@ -464,3 +464,97 @@ async fn secrets_scrubbed_from_failure_messages(pool: PgPool) {
     assert!(!f.message.contains("URLKEY777"), "{}", f.message);
     assert!(!f.message.contains('?'), "{}", f.message);
 }
+
+/// Review fix (Task 20): a key a service echoes in an answer or a 404 body, raw or
+/// percent-encoded, in a value or a field name, never reaches the cache, `Evidence` or an
+/// outcome's `Debug`; the rest of the answer still reads.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn echoed_secret_is_scrubbed_from_answers_absences_and_rows(pool: PgPool) {
+    let secret = "s3cret/echo+KEY";
+    let encoded = "s3cret%2Fecho%2BKEY";
+    let echo = json!({
+        "note": format!("key {secret} or {encoded}"),
+        "nested": [{"url": format!("https://x/a?api_key={encoded}")}],
+        secret: "as a field name",
+        "kept": "artistthumb",
+    });
+    let replay = Replay::start(Recording(vec![
+        entry(
+            "GET",
+            &format!("/music/a?api_key={encoded}"),
+            200,
+            echo.clone(),
+        ),
+        entry("GET", &format!("/music/b?api_key={encoded}"), 404, echo),
+    ]))
+    .await;
+    let net = net(&replay, &pool);
+    let req = |p: &str| {
+        Req::get(Host::Fanart, p)
+            .query("api_key", secret)
+            .absent_on_404()
+    };
+
+    let answered: Outcome<Value> = net.get_json(req("/music/a")).await;
+    let absent: Outcome<Value> = net.get_json(req("/music/b")).await;
+    match &answered {
+        Outcome::Answered(v) => {
+            assert_eq!(v["kept"], "artistthumb");
+            assert_eq!(v["note"], "key REDACTED or REDACTED");
+            assert_eq!(v["REDACTED"], "as a field name");
+        }
+        other => panic!("expected an answer, got {other:?}"),
+    }
+    match &absent {
+        Outcome::Absent(e) => assert_eq!(e.0["body"]["kept"], "artistthumb"),
+        other => panic!("expected an absence, got {other:?}"),
+    }
+    // A second read comes from the cache, scrubbed too.
+    let again: Outcome<Value> = net.get_json(req("/music/a")).await;
+    assert_eq!(replay.asked().len(), 2);
+    for out in [&answered, &absent, &again] {
+        let shown = format!("{out:?} {out:#?}");
+        assert!(
+            !shown.contains(secret) && !shown.contains(encoded),
+            "{shown}"
+        );
+    }
+    let rows = rows(&pool).await;
+    assert_eq!(rows.len(), 2);
+    for r in &rows {
+        for text in [&r.key, &r.request, &r.body.to_string()] {
+            assert!(!text.contains(secret) && !text.contains(encoded), "{text}");
+        }
+    }
+}
+
+/// The same scrub covers a form-body secret (AcoustID's `client`): `post_form_json` shares the path.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn echoed_form_secret_is_scrubbed(pool: PgPool) {
+    let secret = "client/echo+KEY";
+    let body = "client=client%2Fecho%2BKEY&duration=200&fingerprint=AQ".to_string();
+    let replay = Replay::start(Recording(vec![entry(
+        "POST",
+        "/lookup",
+        200,
+        json!({"status": "ok", "results": [], "echo": format!("{secret} client%2Fecho%2BKEY")}),
+    )]))
+    .await;
+    let net = net(&replay, &pool);
+    let out: Outcome<Value> = net
+        .post_form_json(Req::post_form(Host::AcoustId, "/lookup", body))
+        .await;
+    let shown = format!("{out:?}");
+    assert!(shown.contains("REDACTED REDACTED"), "{shown}");
+    assert!(
+        !shown.contains("echo+KEY") && !shown.contains("%2Fecho"),
+        "{shown}"
+    );
+    for r in rows(&pool).await {
+        let body = r.body.to_string();
+        assert!(
+            !body.contains("echo+KEY") && !body.contains("%2Fecho"),
+            "{body}"
+        );
+    }
+}

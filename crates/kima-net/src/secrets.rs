@@ -120,6 +120,27 @@ impl Secrets {
         }
         out
     }
+
+    /// `value` with every secret value replaced by `REDACTED` in its strings and field names,
+    /// so an echoed key never reaches the cache or `Evidence` while the rest still reads.
+    pub(crate) fn scrub_json(&self, value: serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        if self.0.is_empty() {
+            return value;
+        }
+        match value {
+            Value::String(s) => Value::String(self.scrub(&s)),
+            Value::Array(items) => {
+                Value::Array(items.into_iter().map(|v| self.scrub_json(v)).collect())
+            }
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(k, v)| (self.scrub(&k), self.scrub_json(v)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -531,6 +531,40 @@ mod system {
         assert_eq!(enrich_jobs(&pool).await, 1);
     }
 
+    /// Review m5: a kick that fails (the job table unavailable) is logged; the save still
+    /// answers 200 and the rest of it (concurrency, registration) still applies.
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn failed_kick_still_saves(pool: PgPool) {
+        use kima_net::{Bases, Net, NetConfig, Source};
+        let switch = IdentifySwitch::new(false, false);
+        let net = std::sync::Arc::new(Net::new(
+            NetConfig::for_tests(Bases::all("http://127.0.0.1:9")),
+            pool.clone(),
+            switch.clone(),
+        ));
+        let (server, state, admin, _) = setup(pool.clone(), |s| {
+            s.with_identify(switch).with_net(net.clone())
+        })
+        .await;
+        sqlx::query("ALTER TABLE jobs RENAME TO jobs_gone")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let res = server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({
+                "autoEnrichMetadata": true,
+                "enrichmentConcurrency": 2,
+                "registrationOpen": false,
+            }))
+            .await;
+        res.assert_status_ok();
+        assert_eq!(res.json::<Value>()["registrationOpen"], false);
+        assert!(state.identify.enabled());
+        assert_eq!(net.concurrency(Source::Wikidata), Some(5));
+    }
+
     #[sqlx::test(migrator = "kima_db::MIGRATOR")]
     async fn locked_switch_on_does_not_kick(pool: PgPool) {
         let (server, _, admin, _) = setup(pool.clone(), |s| {

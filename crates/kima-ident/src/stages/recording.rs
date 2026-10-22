@@ -1,8 +1,8 @@
 //! The recording stage (spec §8.3, §8.5, §10.3): claim tracks whose fingerprint has settled, run
 //! the identification ladder, and close each claim.
 //!
-//! A match is written in one transaction that first locks the track row, then reports `done`,
-//! then stores the answer: a report that finds its claim no longer current (lapsed, reopened by
+//! A match is written in one transaction that first locks the track row and its album, then
+//! reports `done`, then stores the answer: a report that finds its claim no longer current (lapsed, reopened by
 //! a changed file, or the track purged) rolls everything back, so a stale answer writes nothing.
 //! The stage never writes album identity, album year or artist MBIDs. Cancellation abandons the
 //! batch at once, leaving claims in flight `working` for the lease to expire and releasing the
@@ -116,6 +116,9 @@ async fn store(
         tx.rollback().await?;
         return Ok(ClaimResult::Stale);
     };
+    // Track, album, then genres: the scanner's order (it locks the track, upserts the album,
+    // then writes genres), so the two never wait on each other in a cycle.
+    identity::lock_album(&mut tx, album).await?;
     if !stages::report_done(&mut tx, claim, a.rung.as_str(), &a.evidence).await? {
         tx.rollback().await?;
         return Ok(ClaimResult::Stale);
@@ -139,7 +142,8 @@ async fn store(
     // album leaves both alone.
     let from_catalogue = a.album_label.is_some() || !a.album_genres.is_empty();
     if from_catalogue && album == track.album_id {
-        // Locks the album row first, so two tracks of one album fill it one after the other.
+        // The album row is already locked, so two tracks of one album fill it one after the
+        // other.
         identity::fill_album_blank(&mut tx, album, a.album_label.as_deref()).await?;
         if !a.album_genres.is_empty() && !identity::album_has_mb_genres(&mut tx, album).await? {
             genres::replace_album_genres(&mut tx, album, GenreSource::MusicBrainz, &a.album_genres)

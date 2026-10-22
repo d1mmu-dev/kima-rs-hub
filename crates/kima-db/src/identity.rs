@@ -143,6 +143,19 @@ pub async fn lock_track(conn: &mut PgConnection, track: Uuid) -> sqlx::Result<Op
     .await
 }
 
+/// Locks `album`'s row for the answer's transaction, the scanner's strength (`NO KEY UPDATE`).
+/// Taken after the track and before any genre is written, so the answer and a re-read go
+/// track, album, genres in the same order and queue up instead of deadlocking.
+pub async fn lock_album(conn: &mut PgConnection, album: Uuid) -> sqlx::Result<()> {
+    sqlx::query_scalar!(
+        "SELECT id FROM albums WHERE id = $1 FOR NO KEY UPDATE",
+        album
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// Stores the identification answer: `recording_mbid`, `recording_source`, and the ISRC per
 /// `isrc`. Whatever the caller asks, an ISRC whose source is neither NULL nor `musicbrainz` (the
 /// file's) is never replaced or cleared, and a value that is not an ISRC is stored as a clear.

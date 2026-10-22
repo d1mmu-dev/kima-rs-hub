@@ -12,6 +12,7 @@ futures.workspace = true
 httpdate.workspace = true
 kima-core.workspace = true
 kima-db.workspace = true
+kima-ident.workspace = true
 kima-jobs.workspace = true
 kima-library.workspace = true
 kima-net.workspace = true

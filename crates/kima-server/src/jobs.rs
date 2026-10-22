@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use kima_db::PgPool;
+use kima_ident::IdentCtx;
+use kima_ident::coordinator;
 use kima_jobs::worker::{Handler, WorkerConfig, spawn_worker};
 use kima_library::jobs as library_jobs;
 use kima_library::scan::LibraryCtx;
@@ -47,8 +49,19 @@ impl Registry {
     /// Registers the `library` queue (reconciles, single-file updates, organizer runs).
     /// Concurrency 1: those jobs must never overlap. Default lease: long runs keep their claim
     /// through the worker's heartbeat.
+    /// A job that changed tracks kicks the enrichment coordinator (spec §10.6).
     pub fn register_library(&mut self, ctx: LibraryCtx) {
-        self.register(library_jobs::QUEUE, 1, library_jobs::handler(ctx));
+        self.register(
+            library_jobs::QUEUE,
+            1,
+            library_jobs::handler_with(ctx, coordinator::kick_on_change()),
+        );
+    }
+
+    /// Registers the `enrich` queue: the coordinator's cycles (spec §10.6). Concurrency 1;
+    /// default lease, kept by the heartbeat through long cycles.
+    pub fn register_enrich(&mut self, ctx: IdentCtx) {
+        self.register(coordinator::QUEUE, 1, coordinator::handler(ctx));
     }
 }
 

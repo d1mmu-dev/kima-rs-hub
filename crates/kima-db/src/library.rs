@@ -341,11 +341,17 @@ pub async fn repoint_by_fingerprint_in(
     .await
 }
 
-/// The album of the track at `path`, if there is one.
+/// The album of the track at `path`, if there is one, locking that track row for the rest of
+/// the transaction. Taken before the artist and album upserts, so a re-read locks track then
+/// album, in the same order as the recording stage's answer (which locks the track, then
+/// fills the album): the two queue up instead of deadlocking.
 pub async fn album_of_path(conn: &mut PgConnection, path: &str) -> sqlx::Result<Option<Uuid>> {
-    sqlx::query_scalar!("SELECT album_id FROM tracks WHERE path = $1", path)
-        .fetch_optional(&mut *conn)
-        .await
+    sqlx::query_scalar!(
+        "SELECT album_id FROM tracks WHERE path = $1 FOR NO KEY UPDATE",
+        path
+    )
+    .fetch_optional(&mut *conn)
+    .await
 }
 
 /// Deletes tracks missing for longer than `older_than`. Returns how many.

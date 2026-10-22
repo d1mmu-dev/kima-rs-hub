@@ -31,7 +31,9 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 axum-test.workspace = true
+kima-test-support.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true
 uuid.workspace = true
+time = { workspace = true, features = ["macros"] }

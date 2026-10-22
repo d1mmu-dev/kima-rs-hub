@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO jobs (id, queue, payload, max_attempts, run_at)\n           SELECT $1::uuid, $2::text, $3::jsonb, $4::int4,\n                  COALESCE($6::timestamptz, now() + make_interval(secs => $7::float8))\n           WHERE NOT EXISTS (SELECT 1 FROM jobs\n                             WHERE queue = $2 AND state = 'queued'\n                               AND payload ->> $5::text IS NOT DISTINCT FROM $3::jsonb ->> $5::text)\n           RETURNING id, run_at <= now() AS \"due!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "due!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Int4",
+        "Text",
+        "Timestamptz",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "d66d845a0b5024965f92867d02bf6d02beedd6986d35a803aa41335be06aa873"
+}

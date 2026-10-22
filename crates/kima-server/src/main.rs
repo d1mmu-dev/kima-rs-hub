@@ -107,13 +107,36 @@ async fn main() -> anyhow::Result<()> {
         data_dir: config.data_dir.clone(),
         ignore: state.library.ignore.clone(),
     };
+    // Built from the same pieces the HTTP side holds (spec §10.6). `fingerprinting` is the
+    // `fpcalc` feature (ffmpeg present, AcoustID not disabled, spec §9.4).
+    let ident_ctx = kima_ident::IdentCtx {
+        pool: pool.clone(),
+        net: state.net.clone(),
+        cipher: state.cipher.clone(),
+        events: state.events.clone(),
+        library: library_ctx.clone(),
+        settings: state.settings.clone(),
+        config: kima_ident::IdentConfig {
+            fingerprinting: state.fpcalc,
+            fingerprint_workers: config.fingerprint_workers,
+            acoustid_disabled: config.acoustid_disabled,
+            acoustid_env_key: config.acoustid_client_key.clone(),
+        },
+        last_cycle: Default::default(),
+    };
+    info!(config = ?ident_ctx.config, "identification");
     let mut registry = kima_server::jobs::Registry::new();
     registry.register_library(library_ctx.clone());
+    registry.register_enrich(ident_ctx);
     // Before any worker starts: recover library jobs a dead process left running, then queue
     // the safety-net reconcile (spec §4.4).
     kima_server::jobs::prepare_library_queue(&pool)
         .await
         .context("preparing the library job queue")?;
+    // Likewise for the coordinator: requeue its cycle, reset `enriching` artists, kick.
+    kima_ident::coordinator::prepare(&pool)
+        .await
+        .context("preparing the enrichment queue")?;
     let workers = kima_server::jobs::spawn_all(&pool, registry, shutdown.clone());
     // Stopped by the shutdown token. With `KIMA_WATCH_MODE=off` this only records the status.
     let watcher = kima_library::watch::spawn(
@@ -124,14 +147,15 @@ async fn main() -> anyhow::Result<()> {
         state.library.watch_status.clone(),
         shutdown.clone(),
     );
-    // The daily safety-net reconcile (D-091); stopped by the shutdown token.
-    let scheduler = sync_cron
-        .map(|cron| {
-            kima_jobs::schedule::Scheduler::new()
-                .add("library-sync", cron, library_sync_job())
-                .spawn(pool.clone(), shutdown.clone())
-        })
-        .unwrap_or_else(|| tokio::spawn(async {}));
+    // Always runs: the safety-net reconcile when enabled (D-091), the cache prune and the
+    // enrichment backstop kick. Stopped by the shutdown token.
+    let scheduler = kima_server::schedule_entries(&config, sync_cron)
+        .into_iter()
+        .fold(
+            kima_jobs::schedule::Scheduler::new(),
+            |s, (name, cron, f)| s.add(name, cron, f),
+        )
+        .spawn(pool.clone(), shutdown.clone());
     let app = kima_server::app(state, &config);
     let listener = TcpListener::bind(config.bind_addr)
         .await
@@ -169,18 +193,6 @@ async fn main() -> anyhow::Result<()> {
     kima_server::jobs::drain(workers, SHUTDOWN_GRACE).await;
     served?;
     Ok(())
-}
-
-/// Queues the incremental reconcile; it dedupes against one already queued or running.
-fn library_sync_job() -> kima_jobs::schedule::EnqueueFn {
-    std::sync::Arc::new(|pool| {
-        Box::pin(async move {
-            kima_library::jobs::enqueue_reconcile(&pool)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        })
-    })
 }
 
 /// How long in-flight requests get to finish after a shutdown signal.

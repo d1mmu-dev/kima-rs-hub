@@ -62,9 +62,17 @@ async fn genre_ids(conn: &mut PgConnection, names: &[String]) -> sqlx::Result<Ve
     if keys.is_empty() {
         return Ok(Vec::new());
     }
+    // Shared against `prune_unused`'s exclusive hold until this transaction ends, so a prune
+    // never deletes a genre this transaction is about to refer to.
+    sqlx::query!("SELECT pg_advisory_xact_lock_shared($1)", GENRE_PRUNE_LOCK)
+        .execute(&mut *conn)
+        .await?;
+    // In key order: two transactions inserting the same new genres wait on each other's
+    // unique-index entries in one order, so they queue up instead of deadlocking.
     sqlx::query!(
         "INSERT INTO genres (id, name, key)
-         SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::text[])
+         SELECT id, name, key FROM UNNEST($1::uuid[], $2::text[], $3::text[]) AS u(id, name, key)
+         ORDER BY key COLLATE \"C\"
          ON CONFLICT (key) DO NOTHING",
         &new_ids,
         &kept_names,
@@ -189,6 +197,13 @@ pub async fn recompute_file_genres(
     albums: &[Uuid],
     artists: &[Uuid],
 ) -> sqlx::Result<()> {
+    if albums.is_empty() && artists.is_empty() {
+        return Ok(());
+    }
+    // Writes genre references: shared against `prune_unused` (see `genre_ids`).
+    sqlx::query!("SELECT pg_advisory_xact_lock_shared($1)", GENRE_PRUNE_LOCK)
+        .execute(&mut *conn)
+        .await?;
     if !albums.is_empty() {
         sqlx::query!(
             "DELETE FROM album_genres WHERE album_id = ANY($1) AND source = 'file'",
@@ -245,16 +260,30 @@ pub async fn recompute_file_genres(
     Ok(())
 }
 
+/// Advisory lock key serialising [`prune_unused`] against genre references being written
+/// (`hashtext('kima_genres_prune')` would do as well; a constant keeps it obvious).
+const GENRE_PRUNE_LOCK: i64 = 0x6b69_6d61_6765_6e72; // "kimagenr"
+
 /// Deletes genres no track, album or artist refers to. Returns how many.
+///
+/// Holds the genre lock exclusively, so it first waits for every transaction that is writing
+/// genre references (they hold it shared until they end); its `DELETE` then starts after they
+/// committed and sees their references. Without it, a genre that a concurrent transaction had
+/// just looked up could be deleted, taking that transaction's new reference with it.
 pub async fn prune_unused(pool: &PgPool) -> sqlx::Result<u64> {
+    let mut tx = pool.begin().await?;
+    sqlx::query!("SELECT pg_advisory_xact_lock($1)", GENRE_PRUNE_LOCK)
+        .execute(&mut *tx)
+        .await?;
     let r = sqlx::query!(
         "DELETE FROM genres g
          WHERE NOT EXISTS (SELECT 1 FROM track_genres x WHERE x.genre_id = g.id)
            AND NOT EXISTS (SELECT 1 FROM album_genres x WHERE x.genre_id = g.id)
            AND NOT EXISTS (SELECT 1 FROM artist_genres x WHERE x.genre_id = g.id)"
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(r.rows_affected())
 }
 

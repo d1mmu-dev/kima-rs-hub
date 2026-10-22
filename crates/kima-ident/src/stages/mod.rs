@@ -8,13 +8,18 @@
 pub mod fingerprint;
 pub mod recording;
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use kima_db::stages::{Claim, FailureRecord, LAST_ERROR_MAX_CHARS, cut_chars};
+use kima_db::stages::{self as ledger, Claim, FailureRecord, LAST_ERROR_MAX_CHARS, cut_chars};
 use kima_net::{Failure, Outcome};
 use regex::RegexSet;
 use time::OffsetDateTime;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+
+use crate::IdentCtx;
 
 /// How long a claim is held before it is offered again (`STAGE_CLAIM_LEASE_MS`). The claim
 /// statement writes the same 15 minutes as an SQL interval, on the database clock.
@@ -223,4 +228,78 @@ pub struct BatchReport {
     pub done: usize,
     /// Closed `failed` (or parked) by this batch.
     pub failed: usize,
+}
+
+impl std::ops::AddAssign for BatchReport {
+    fn add_assign(&mut self, b: BatchReport) {
+        self.claimed += b.claimed;
+        self.done += b.done;
+        self.failed += b.failed;
+    }
+}
+
+/// Runs `claims` at most `workers` at once, in order. Once `cancel` or `stop` fires no further
+/// claim is started, and the ones not started are released back to `pending` (so a restart
+/// neither waits out their lease nor counts them as redelivered). `stop` lets the claims in
+/// flight finish; `cancel` also abandons them (each `run` watches it), leaving them `working`
+/// for the lease. The first database error is returned after every started claim ended.
+pub(crate) async fn run_claims<F, Fut>(
+    ctx: &IdentCtx,
+    claims: Vec<Claim>,
+    workers: usize,
+    cancel: &CancellationToken,
+    stop: &CancellationToken,
+    run: F,
+) -> sqlx::Result<BatchReport>
+where
+    F: Fn(IdentCtx, Claim, CancellationToken) -> Fut,
+    Fut: Future<Output = sqlx::Result<ClaimResult>> + Send + 'static,
+{
+    let mut report = BatchReport {
+        claimed: claims.len(),
+        ..BatchReport::default()
+    };
+    let permits = Arc::new(Semaphore::new(workers.max(1)));
+    let mut set = JoinSet::new();
+    let mut pending = claims.into_iter();
+    let mut unstarted = Vec::new();
+    while let Some(claim) = pending.next() {
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => None,
+            _ = stop.cancelled() => None,
+            p = permits.clone().acquire_owned() => Some(p.expect("the semaphore is never closed")),
+        };
+        let Some(permit) = permit else {
+            unstarted.push(claim);
+            unstarted.extend(pending);
+            break;
+        };
+        let fut = run(ctx.clone(), claim, cancel.clone());
+        set.spawn(async move {
+            let _permit = permit;
+            fut.await
+        });
+    }
+
+    let mut first_err = None;
+    if let Err(e) = ledger::release(&ctx.pool, &unstarted).await {
+        first_err = Some(e);
+    }
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(Ok(ClaimResult::Done)) => report.done += 1,
+            Ok(Ok(ClaimResult::Failed)) => report.failed += 1,
+            Ok(Ok(ClaimResult::Stale | ClaimResult::Abandoned)) => {}
+            Ok(Err(e)) => {
+                first_err.get_or_insert(e);
+            }
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(_) => {}
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(report),
+    }
 }

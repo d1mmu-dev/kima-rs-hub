@@ -9,6 +9,7 @@ rust-version.workspace = true
 base64.workspace = true
 kima-core.workspace = true
 kima-db.workspace = true
+kima-jobs.workspace = true
 kima-library.workspace = true
 kima-net.workspace = true
 percent-encoding.workspace = true
@@ -26,6 +27,7 @@ unicode-normalization.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 kima-net = { workspace = true, features = ["testing"] }
 kima-test-support.workspace = true
 tempfile.workspace = true

@@ -591,3 +591,42 @@ async fn shutdown_cancels_job_token(pool: PgPool) {
         .expect("worker did not stop")
         .unwrap();
 }
+
+/// A job that gives up because the process is shutting down keeps its attempt: it goes back
+/// to `queued`, due now, with the attempt count it had before it was claimed.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn shutdown_cancelled_job_keeps_its_attempt(pool: PgPool) {
+    let (started_tx, mut started) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let worker = spawn_worker(
+        pool.clone(),
+        fast("keep", 1),
+        handler_ctx(move |_job, ctx: JobCtx| {
+            let started_tx = started_tx.clone();
+            async move {
+                started_tx.send(()).unwrap();
+                ctx.cancel.cancelled().await;
+                Err(JobError::Retry("cancelled".into()))
+            }
+        }),
+        shutdown.clone(),
+    );
+    // One attempt only: burning it would fail the job for good.
+    let id = queue::enqueue(&pool, "keep", json!({}), 1).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), started.recv())
+        .await
+        .expect("job never started")
+        .unwrap();
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), worker)
+        .await
+        .expect("worker did not stop")
+        .unwrap();
+    let (state, attempts, due): (String, i32, bool) =
+        sqlx::query_as("SELECT state, attempts, run_at <= now() FROM jobs WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((state.as_str(), attempts, due), ("queued", 0, true));
+}

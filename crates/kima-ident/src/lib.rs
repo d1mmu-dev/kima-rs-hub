@@ -2,6 +2,7 @@
 
 pub mod acoustid;
 pub mod chromaprint;
+pub mod coordinator;
 mod ctx;
 pub mod matching;
 mod mbid;

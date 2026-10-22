@@ -327,6 +327,12 @@ impl Net {
         Some(self.live.as_ref()?.gates[&source].concurrency())
     }
 
+    /// Whether outbound lookups may run now: a live client with the identification switch on
+    /// (spec §15.3). A disabled client never is.
+    pub fn enabled(&self) -> bool {
+        self.live.as_ref().is_some_and(|l| l.switch.enabled())
+    }
+
     /// When the source's pause ends, if it is paused now.
     pub fn paused_until(&self, source: Source) -> Option<OffsetDateTime> {
         let live = self.live.as_ref()?;

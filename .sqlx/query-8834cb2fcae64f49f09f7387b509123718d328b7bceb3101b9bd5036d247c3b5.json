@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE jobs SET run_at = LEAST(run_at, now())\n           WHERE state = 'queued'\n             AND id = (SELECT id FROM jobs\n                       WHERE queue = $1 AND state = 'queued'\n                         AND payload ->> $2::text IS NOT DISTINCT FROM $3::jsonb ->> $2::text\n                       ORDER BY created_at, id\n                       LIMIT 1\n                       FOR UPDATE)\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8834cb2fcae64f49f09f7387b509123718d328b7bceb3101b9bd5036d247c3b5"
+}

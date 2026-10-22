@@ -490,6 +490,66 @@ mod system {
         assert!(state.identify.enabled());
     }
 
+    async fn enrich_jobs(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE queue = 'enrich'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn turning_switch_on_kicks(pool: PgPool) {
+        let (server, state, admin, _) = setup(pool.clone(), |s| {
+            s.with_identify(IdentifySwitch::new(false, false))
+        })
+        .await;
+        // Saving with the switch staying off, or turning it off, does not kick.
+        for on in [false, false] {
+            server
+                .post("/api/system-settings")
+                .authorization_bearer(&admin)
+                .json(&json!({ "autoEnrichMetadata": on }))
+                .await
+                .assert_status_ok();
+        }
+        assert_eq!(enrich_jobs(&pool).await, 0);
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "autoEnrichMetadata": true }))
+            .await
+            .assert_status_ok();
+        assert!(state.identify.enabled());
+        assert_eq!(enrich_jobs(&pool).await, 1, "turning it on kicks");
+        // Already on: a second save does not kick again (the queued one would absorb it anyway).
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "autoEnrichMetadata": true }))
+            .await
+            .assert_status_ok();
+        assert_eq!(enrich_jobs(&pool).await, 1);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn locked_switch_on_does_not_kick(pool: PgPool) {
+        let (server, _, admin, _) = setup(pool.clone(), |s| {
+            s.with_identify(IdentifySwitch::new(true, false))
+        })
+        .await;
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "autoEnrichMetadata": true }))
+            .await
+            .assert_status_ok();
+        assert_eq!(
+            enrich_jobs(&pool).await,
+            0,
+            "the effective switch stays off"
+        );
+    }
+
     #[sqlx::test(migrator = "kima_db::MIGRATOR")]
     async fn locked_switch_keeps_stored_value_across_saves(pool: PgPool) {
         let (server, state, admin, _) = setup(pool.clone(), |s| {

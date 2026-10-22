@@ -1,0 +1,54 @@
+[
+ {
+  "method": "GET",
+  "url": "/similar-artists/json?artist_mbids=b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d&algorithm=session_based_days_7500_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30",
+  "status": 200,
+  "body": [
+   {
+    "artist_mbid": "ba550d0e-adac-4864-b88b-407cab5e76af",
+    "name": "Paul McCartney",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 2104,
+    "reference_mbid": "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+   },
+   {
+    "artist_mbid": "4d5447d7-c61c-4120-ba1b-d7f471d385b9",
+    "name": "John Lennon",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 3318,
+    "reference_mbid": "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+   },
+   {
+    "artist_mbid": "42a8f507-8412-4611-854f-926571049fa0",
+    "name": "George Harrison",
+    "comment": "",
+    "type": "Person",
+    "gender": null,
+    "score": 1872,
+    "reference_mbid": "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+   },
+   {
+    "artist_mbid": "9beb62b2-88db-4cea-801e-162cd344ee53",
+    "name": "The Rolling Stones",
+    "comment": "",
+    "type": "Group",
+    "gender": null,
+    "score": 955,
+    "reference_mbid": "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+   },
+   {
+    "artist_mbid": "ebfc1398-8d96-47e3-82c3-f782abcdb13d",
+    "name": "The Beach Boys",
+    "comment": "",
+    "type": "Group",
+    "gender": null,
+    "score": 761,
+    "reference_mbid": "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+   }
+  ]
+ }
+]

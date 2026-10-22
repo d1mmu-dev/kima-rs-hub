@@ -1,0 +1,29 @@
+[
+ {
+  "host": "wikidata_sparql",
+  "method": "GET",
+  "path": "/sparql",
+  "query": [
+   [
+    "query",
+    "SELECT ?item WHERE { ?item wdt:P434 \"b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d\" } LIMIT 1"
+   ],
+   [
+    "format",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "wikidata",
+  "method": "GET",
+  "path": "/wiki/Special:EntityData/Q1299.json",
+  "query": []
+ },
+ {
+  "host": "wikipedia",
+  "method": "GET",
+  "path": "/api/rest_v1/page/summary/The%20Beatles",
+  "query": []
+ }
+]

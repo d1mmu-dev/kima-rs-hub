@@ -1,0 +1,94 @@
+[
+ {
+  "method": "GET",
+  "url": "/sparql?query=SELECT%20%3Fitem%20WHERE%20%7B%20%3Fitem%20wdt%3AP434%20%22b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d%22%20%7D%20LIMIT%201&format=json",
+  "status": 200,
+  "body": {
+   "head": {
+    "vars": [
+     "item"
+    ]
+   },
+   "results": {
+    "bindings": [
+     {
+      "item": {
+       "type": "uri",
+       "value": "http://www.wikidata.org/entity/Q1299"
+      }
+     }
+    ]
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/wiki/Special:EntityData/Q1299.json",
+  "status": 200,
+  "body": {
+   "entities": {
+    "Q1299": {
+     "type": "item",
+     "id": "Q1299",
+     "labels": {
+      "en": {
+       "language": "en",
+       "value": "The Beatles"
+      }
+     },
+     "sitelinks": {
+      "enwiki": {
+       "site": "enwiki",
+       "title": "The Beatles",
+       "badges": []
+      }
+     },
+     "claims": {
+      "P434": [
+       {
+        "mainsnak": {
+         "snaktype": "value",
+         "property": "P434",
+         "datavalue": {
+          "value": "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d",
+          "type": "string"
+         },
+         "datatype": "external-id"
+        },
+        "type": "statement",
+        "rank": "normal"
+       }
+      ],
+      "P18": [
+       {
+        "mainsnak": {
+         "snaktype": "value",
+         "property": "P18",
+         "datavalue": {
+          "value": "The Fabs.JPG",
+          "type": "string"
+         },
+         "datatype": "commonsMedia"
+        },
+        "type": "statement",
+        "rank": "normal"
+       }
+      ]
+     }
+    }
+   }
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/api/rest_v1/page/summary/The%20Beatles",
+  "status": 200,
+  "body": {
+   "type": "standard",
+   "title": "The Beatles",
+   "displaytitle": "The Beatles",
+   "lang": "en",
+   "extract": "The Beatles were an English rock band formed in Liverpool in 1960. The core lineup of the band comprised John Lennon, Paul McCartney, George Harrison and Ringo Starr. They are widely regarded as the most influential band in Western popular music."
+  }
+ }
+]

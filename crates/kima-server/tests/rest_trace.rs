@@ -35,6 +35,7 @@ fn config() -> Config {
         fingerprint_workers: 1,
         acoustid_disabled: false,
         acoustid_client_key: None,
+        fanart_api_key: None,
     }
 }
 

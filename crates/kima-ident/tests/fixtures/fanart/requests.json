@@ -1,0 +1,24 @@
+[
+ {
+  "host": "fanart",
+  "method": "GET",
+  "path": "/music/b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d",
+  "query": [
+   [
+    "api_key",
+    "<throwaway key>"
+   ]
+  ]
+ },
+ {
+  "host": "fanart",
+  "method": "GET",
+  "path": "/music/albums/9162580e-5df4-32de-80cc-f45a8d8a9b1d",
+  "query": [
+   [
+    "api_key",
+    "<throwaway key>"
+   ]
+  ]
+ }
+]

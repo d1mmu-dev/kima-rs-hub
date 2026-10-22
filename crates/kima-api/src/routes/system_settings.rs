@@ -1,8 +1,12 @@
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::routing::get;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use kima_db::settings::{self, SettingsPatch, SystemSettings};
 use kima_db::settings_kv::{self, Key, KvSettings};
+use kima_ident::fanart::{self, TestResult};
 use serde_json::{Map, Value, json};
 
 use crate::auth::{AdminUser, AuthUser};
@@ -17,6 +21,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/system-settings", get(show).post(update))
         .route("/system-settings/public-config", get(public_config))
+        .route("/system-settings/test-fanart", post(test_fanart))
 }
 
 /// Any signed-in user. `KIMA_PUBLIC_URL`, empty when unset (D-096).
@@ -175,4 +180,71 @@ async fn update(
         library_root: None,
     };
     Ok(body(settings::update(&state.pool, patch).await?))
+}
+
+/// The key a test-fanart body names: `fanartApiKey` trimmed, or `None` when the body is empty or
+/// the field is absent, `null` or blank. A body that is not a JSON object, or a key that is not a
+/// string or is too long, is a bare 400: no parser message, which could quote the key, is shown.
+fn typed_key(body: &[u8]) -> Result<Option<String>, ApiError> {
+    let bad = || ApiError::BadRequest("Invalid request".into());
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    let Ok(Value::Object(fields)) = serde_json::from_slice::<Value>(body) else {
+        return Err(bad());
+    };
+    match fields.get(Key::FanartApiKey.name()) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            let s = s.trim();
+            if s.chars().count() > MAX_SECRET_CHARS {
+                return Err(bad());
+            }
+            Ok((!s.is_empty()).then(|| s.to_string()))
+        }
+        Some(_) => Err(bad()),
+    }
+}
+
+/// `POST /system-settings/test-fanart` (spec §15.2, D-110): asks fanart.tv for The Beatles with
+/// the body's key, else the stored one (enabled or not). Never cached; the key is never echoed.
+async fn test_fanart(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let key = match typed_key(&body)? {
+        Some(k) => Some(k),
+        None => state
+            .settings
+            .get()
+            .await?
+            .fanart_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string),
+    };
+    let Some(key) = key else {
+        return Err(ApiError::BadRequest("API key is required".into()));
+    };
+    // Checked here as well as in `Net`, so an off switch asks nothing and says why.
+    if !state.identify.enabled() {
+        return Err(ApiError::Conflict("Outbound lookups are turned off"));
+    }
+    Ok(match fanart::test_key(&state.net, &key).await {
+        TestResult::Ok => Json(json!({
+            "success": true,
+            "message": "Fanart.tv connection successful",
+        }))
+        .into_response(),
+        TestResult::Rejected => {
+            ApiError::BadRequest("Fanart.tv rejected the API key".into()).into_response()
+        }
+        TestResult::NoAnswer => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "Fanart.tv did not answer" })),
+        )
+            .into_response(),
+    })
 }

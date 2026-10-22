@@ -2,6 +2,7 @@
 
 pub mod acoustid;
 mod answer;
+pub mod artist;
 pub mod chromaprint;
 pub mod coordinator;
 pub mod coverartarchive;
@@ -12,6 +13,7 @@ pub mod listenbrainz;
 pub mod matching;
 mod mbid;
 pub mod musicbrainz;
+pub mod similar;
 pub mod stages;
 pub mod text;
 pub mod wikidata;

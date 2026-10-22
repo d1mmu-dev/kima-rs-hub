@@ -3,8 +3,8 @@
 //! ([`kima_db::enrichment`]), so it survives restarts.
 //!
 //! A cycle runs the fingerprint phase (local, whenever fingerprinting is available) alongside
-//! the network phases (only while the identification switch is on): artists (Task 21), then
-//! tracks, the recording stage. A watcher re-reads the state at most every
+//! the network phases (only while the identification switch is on): artists, then tracks (the
+//! recording stage), each skipped while MusicBrainz is paused. A watcher re-reads the state at most every
 //! [`STATE_REREAD`]; once it is no longer `running` (paused, stopping, halted) the phases
 //! start nothing new, release what they had claimed but not started, and let the items in
 //! flight finish. The job's cancel token (shutdown, lost claim) abandons in-flight items too.
@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::IdentCtx;
+use crate::artist;
 use crate::stages::{BatchReport, fingerprint, recording};
 
 /// The coordinator's job queue (concurrency 1).
@@ -111,6 +112,7 @@ pub struct CycleReport {
     /// The state let the cycle run (`running`, not halted).
     pub ran: bool,
     pub fingerprint: BatchReport,
+    pub artists: BatchReport,
     pub tracks: BatchReport,
     /// Batches that ended in a database error (recorded as `last_error`, retried next cycle).
     pub errors: usize,
@@ -121,7 +123,7 @@ pub struct CycleReport {
 impl CycleReport {
     /// Whether any item was claimed.
     pub fn any_work(&self) -> bool {
-        self.fingerprint.claimed + self.tracks.claimed > 0
+        self.fingerprint.claimed + self.artists.claimed + self.tracks.claimed > 0
     }
 }
 
@@ -154,8 +156,9 @@ pub async fn run_cycle(
     };
     let ((fp, net), ()) = tokio::join!(phases, watch_state(pool, cancel, &stop));
     report.fingerprint = fp.report;
-    report.tracks = net.report;
-    report.errors = fp.errors + net.errors;
+    report.artists = net.artists.report;
+    report.tracks = net.tracks.report;
+    report.errors = fp.errors + net.artists.errors + net.tracks.errors;
     if cancel.is_cancelled() {
         return Err(JobError::Retry("enrichment cycle cancelled".into()));
     }
@@ -292,20 +295,70 @@ async fn fingerprint_phase(
     out
 }
 
-/// Step 4: the network phases, only while identification is on. Artists come first (Task 21);
-/// then tracks, skipped while MusicBrainz is paused. The switch and the pause are checked
+/// What the network phases did.
+#[derive(Default)]
+struct NetworkOutcome {
+    artists: PhaseOutcome,
+    tracks: PhaseOutcome,
+}
+
+/// Whether a network phase may run another batch: identification on and MusicBrainz, the
+/// first source of both phases, not paused.
+fn network_may_run(ctx: &IdentCtx, cancel: &CancellationToken, stop: &CancellationToken) -> bool {
+    go_on(cancel, stop) && ctx.net.enabled() && ctx.net.paused_until(Source::MusicBrainz).is_none()
+}
+
+/// Step 4: the network phases, only while identification is on: artists (batches of 10), then
+/// tracks, each skipped while MusicBrainz is paused. The switch and the pause are checked
 /// before every batch.
 async fn network_phases(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    stop: &CancellationToken,
+) -> NetworkOutcome {
+    let artists = artists_phase(ctx, cancel, stop).await;
+    let tracks = tracks_phase(ctx, cancel, stop).await;
+    NetworkOutcome { artists, tracks }
+}
+
+async fn artists_phase(
     ctx: &IdentCtx,
     cancel: &CancellationToken,
     stop: &CancellationToken,
 ) -> PhaseOutcome {
     let mut out = PhaseOutcome::default();
     let mut marked = false;
-    while go_on(cancel, stop)
-        && ctx.net.enabled()
-        && ctx.net.paused_until(Source::MusicBrainz).is_none()
-    {
+    while network_may_run(ctx, cancel, stop) {
+        match artist::run_batch_until(ctx, cancel, stop).await {
+            Ok(b) => {
+                let changed = b.done + b.failed > 0;
+                if changed || !marked {
+                    mark(ctx, Phase::Artists, changed).await;
+                    marked = true;
+                }
+                out.report += b;
+                if b.claimed == 0 {
+                    break;
+                }
+            }
+            Err(e) => {
+                out.errors += 1;
+                batch_failed(ctx, Phase::Artists, e).await;
+                break;
+            }
+        }
+    }
+    out
+}
+
+async fn tracks_phase(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    stop: &CancellationToken,
+) -> PhaseOutcome {
+    let mut out = PhaseOutcome::default();
+    let mut marked = false;
+    while network_may_run(ctx, cancel, stop) {
         match recording::run_batch_until(ctx, cancel, stop).await {
             Ok(b) => {
                 let changed = b.done + b.failed > 0;

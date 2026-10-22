@@ -918,18 +918,24 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
     Ok(outcome)
 }
 
-/// Prunes empty albums and artists, then deletes the cover cache of each deleted album.
-/// A cache folder that cannot be removed is logged, not fatal: the rows are already gone.
+/// Prunes empty albums and artists, then (after the commit) deletes the cover cache of each
+/// deleted album and the stored image of each deleted artist. A file that cannot be removed is
+/// logged, not fatal: the rows are already gone.
 async fn prune_empty(ctx: &LibraryCtx) -> Result<(), ScanError> {
-    let albums = library::prune_empty(&ctx.pool).await?;
-    if albums.is_empty() {
+    let pruned = library::prune_empty(&ctx.pool).await?;
+    if pruned.albums.is_empty() && pruned.artists.is_empty() {
         return Ok(());
     }
     let data_dir = ctx.data_dir.clone();
     tokio::task::spawn_blocking(move || {
-        for id in albums {
+        for id in pruned.albums {
             if let Err(e) = crate::artwork::remove_album(&data_dir, id) {
                 warn!(album = %id, error = %e, "could not remove the cover cache of a deleted album");
+            }
+        }
+        for id in pruned.artists {
+            if let Err(e) = crate::artwork::remove_artist_image(&data_dir, id) {
+                warn!(artist = %id, error = %e, "could not remove the image of a deleted artist");
             }
         }
     })

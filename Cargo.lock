@@ -1386,6 +1386,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "hex",
+ "image",
  "kima-core",
  "kima-db",
  "kima-jobs",

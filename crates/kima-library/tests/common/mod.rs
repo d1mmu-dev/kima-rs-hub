@@ -31,3 +31,16 @@ pub fn embed_cover(path: &Path, png: Vec<u8>) {
     );
     tag.save_to_path(path, WriteOptions::default()).unwrap();
 }
+
+/// A PNG of the given size whose pixels vary, so it does not compress below 1000 bytes.
+pub fn noisy_png(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbImage::from_fn(w, h, |x, y| {
+        let v = x
+            .wrapping_mul(2_654_435_761)
+            .wrapping_add(y.wrapping_mul(40_503));
+        image::Rgb([(v >> 3) as u8, (v >> 11) as u8, (v >> 19) as u8])
+    });
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}

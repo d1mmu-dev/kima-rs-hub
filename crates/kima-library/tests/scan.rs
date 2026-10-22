@@ -1756,3 +1756,49 @@ async fn reread_locks_track_before_album(pool: PgPool) {
         "the re-read finishes after the answer"
     );
 }
+
+/// Spec §12.6: `prune_empty` deletes a pruned artist's stored image with its row, and only
+/// that artist's.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn prune_deletes_artist_image(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let p = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "C/D/01.flac",
+        tags("C", "D", "two", "2001", "1"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    let artist_of = |name: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM artists WHERE name = $1")
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let (gone, kept) = (artist_of("A").await, artist_of("C").await);
+    for id in [gone, kept] {
+        kima_library::artwork::store_artist_image(&c.data_dir, id, b"jpeg bytes").unwrap();
+    }
+
+    std::fs::remove_file(p).unwrap();
+    scan::reconcile(&c).await.unwrap();
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '8 days' WHERE title = 'one'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    scan::reconcile(&c).await.unwrap();
+    assert!(!kima_library::artwork::artist_image_path(&c.data_dir, gone).exists());
+    assert!(kima_library::artwork::artist_image_path(&c.data_dir, kept).exists());
+}

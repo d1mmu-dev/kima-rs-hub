@@ -353,3 +353,183 @@ fn reembedded_art_makes_the_stamp_stale() {
     set_mtime(&track, 90);
     assert!(!artwork::stamp_is_fresh(root.path(), &entry_dir));
 }
+
+// ---- artist images (spec §12.3 step 2, §12.6; upstream `imageStorage.test.ts`) ----
+
+mod artist_images {
+    use std::path::{Path, PathBuf};
+
+    use super::common::{noisy_png, png_bytes};
+    use kima_library::artwork;
+    use uuid::Uuid;
+
+    fn put(root: &Path, rel: &str, bytes: &[u8]) -> PathBuf {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    fn dirs(d: &[&str]) -> Vec<PathBuf> {
+        d.iter().map(PathBuf::from).collect()
+    }
+
+    /// Port of "returns true for existing native file" / "missing native file": the stored
+    /// image's place is derived from the artist id alone.
+    #[test]
+    fn artist_image_path_is_the_id_under_artist_images() {
+        let data = Path::new("/data");
+        let id = Uuid::parse_str("0192f0c4-1111-7000-8000-000000000001").unwrap();
+        assert_eq!(
+            artwork::artist_image_path(data, id),
+            PathBuf::from("/data/artist-images/0192f0c4-1111-7000-8000-000000000001.jpg")
+        );
+    }
+
+    /// Port of "returns true for existing native file": the nearest folder above the album
+    /// folders holding `artist.*` or `folder.*` larger than 1000 bytes.
+    #[test]
+    fn finds_the_nearest_artist_image_above_the_albums() {
+        let root = tempfile::tempdir().unwrap();
+        let near = put(root.path(), "Pop/Artist/artist.jpg", &noisy_png(64, 64));
+        put(root.path(), "Pop/folder.png", &noisy_png(64, 64));
+        // The album folder's own folder.jpg is the album's cover, not the artist's.
+        put(
+            root.path(),
+            "Pop/Artist/Album/folder.jpg",
+            &noisy_png(64, 64),
+        );
+        let found = artwork::find_local_artist_image(root.path(), &dirs(&["Pop/Artist/Album"]));
+        assert_eq!(
+            found
+                .as_deref()
+                .map(std::fs::canonicalize)
+                .map(Result::unwrap),
+            Some(std::fs::canonicalize(&near).unwrap())
+        );
+        // Above that: the genre folder's.
+        std::fs::remove_file(&near).unwrap();
+        let found = artwork::find_local_artist_image(root.path(), &dirs(&["Pop/Artist/Album"]));
+        assert!(found.unwrap().ends_with("Pop/folder.png"));
+    }
+
+    /// Port of "returns false for missing native file" and "returns false for null/empty".
+    #[test]
+    fn no_image_or_a_small_one_is_none() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(artwork::find_local_artist_image(root.path(), &[]), None);
+        assert_eq!(
+            artwork::find_local_artist_image(root.path(), &dirs(&["A/B"])),
+            None
+        );
+        // 1000 bytes or fewer is a placeholder.
+        put(root.path(), "A/artist.jpg", &[7u8; 1000]);
+        assert_eq!(
+            artwork::find_local_artist_image(root.path(), &dirs(&["A/B"])),
+            None
+        );
+        // A directory with the right name is not a file.
+        std::fs::create_dir_all(root.path().join("A/folder.jpg")).unwrap();
+        assert_eq!(
+            artwork::find_local_artist_image(root.path(), &dirs(&["A/B"])),
+            None
+        );
+        // Another name, or another case, is not looked at.
+        put(root.path(), "A/Artist.JPG", &noisy_png(64, 64));
+        put(root.path(), "A/cover.jpg", &noisy_png(64, 64));
+        assert_eq!(
+            artwork::find_local_artist_image(root.path(), &dirs(&["A/B"])),
+            None
+        );
+        // The library root itself is not an artist folder.
+        put(root.path(), "artist.jpg", &noisy_png(64, 64));
+        assert_eq!(
+            artwork::find_local_artist_image(root.path(), &dirs(&["A/B"])),
+            None
+        );
+    }
+
+    /// Port of "returns false for path traversal attempts".
+    #[test]
+    fn path_traversal_is_refused() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("music");
+        std::fs::create_dir_all(root.join("A/B")).unwrap();
+        put(outer.path(), "artist.jpg", &noisy_png(64, 64));
+        put(outer.path(), "x/artist.jpg", &noisy_png(64, 64));
+        for bad in ["../x/y", "A/../../x/y", "/etc/x", "../../etc/passwd"] {
+            assert_eq!(
+                artwork::find_local_artist_image(&root, &dirs(&[bad])),
+                None,
+                "{bad}"
+            );
+        }
+    }
+
+    /// Port of "returns false for non-native paths": a symlink, as the image or as a folder on
+    /// the way, never leads out.
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_are_refused() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("music");
+        std::fs::create_dir_all(root.join("A/B")).unwrap();
+        let elsewhere = put(outer.path(), "secret/artist.jpg", &noisy_png(64, 64));
+        std::os::unix::fs::symlink(&elsewhere, root.join("A/artist.jpg")).unwrap();
+        assert_eq!(
+            artwork::find_local_artist_image(&root, &dirs(&["A/B"])),
+            None
+        );
+        // A symlinked artist folder pointing out of the root.
+        std::fs::create_dir_all(outer.path().join("secret/B")).unwrap();
+        std::os::unix::fs::symlink(outer.path().join("secret"), root.join("L")).unwrap();
+        assert_eq!(
+            artwork::find_local_artist_image(&root, &dirs(&["L/B"])),
+            None
+        );
+    }
+
+    #[test]
+    fn stored_image_is_jpeg_at_most_1500px() {
+        let big = noisy_png(3000, 1200);
+        let jpeg = artwork::normalize_image(&big).unwrap();
+        assert_eq!(&jpeg[..3], &[0xFF, 0xD8, 0xFF], "a JPEG");
+        let img = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((img.width(), img.height()), (1500, 600));
+        // A small one keeps its size.
+        let small = artwork::normalize_image(&png_bytes(300, 200, [1, 2, 3])).unwrap();
+        let img = image::load_from_memory(&small).unwrap();
+        assert_eq!((img.width(), img.height()), (300, 200));
+        // Not an image, or a header claiming enormous dimensions, is refused.
+        assert!(artwork::normalize_image(b"not an image at all").is_err());
+        let mut bomb = png_bytes(1, 1, [0, 0, 0]);
+        // IHDR width/height at bytes 16..24: claim 60000 x 60000.
+        bomb[16..20].copy_from_slice(&60000u32.to_be_bytes());
+        bomb[20..24].copy_from_slice(&60000u32.to_be_bytes());
+        assert!(artwork::normalize_image(&bomb).is_err());
+    }
+
+    #[test]
+    fn artist_images_are_stored_and_removed_by_id_only() {
+        let data = tempfile::tempdir().unwrap();
+        let id = Uuid::now_v7();
+        let jpeg = artwork::normalize_image(&noisy_png(40, 40)).unwrap();
+        artwork::store_artist_image(data.path(), id, &jpeg).unwrap();
+        let stored = artwork::artist_image_path(data.path(), id);
+        assert_eq!(std::fs::read(&stored).unwrap(), jpeg);
+        // Only that file is in the folder (no temp file left behind).
+        assert_eq!(
+            std::fs::read_dir(data.path().join("artist-images"))
+                .unwrap()
+                .count(),
+            1
+        );
+        let other = Uuid::now_v7();
+        artwork::remove_artist_image(data.path(), other).unwrap();
+        assert!(stored.exists());
+        artwork::remove_artist_image(data.path(), id).unwrap();
+        assert!(!stored.exists());
+        // Removing again is fine.
+        artwork::remove_artist_image(data.path(), id).unwrap();
+    }
+}

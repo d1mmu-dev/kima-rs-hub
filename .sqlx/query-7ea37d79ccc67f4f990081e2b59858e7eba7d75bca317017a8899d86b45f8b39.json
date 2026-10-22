@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE track_stages s\n         SET status = 'pending', next_attempt_at = NULL, started_at = NULL, finished_at = NULL,\n             updated_at = now()\n         WHERE s.stage = 'recording' AND s.status = 'done'\n           AND s.evidence ->> 'acoustid' = 'skipped'\n           AND CASE s.evidence ->> 'acoustidReason'\n                 WHEN 'no_key' THEN $1\n                 WHEN 'no_fingerprint' THEN EXISTS (SELECT 1 FROM track_acoustid a\n                                                    WHERE a.track_id = s.track_id)\n                 WHEN 'fingerprinting_unavailable' THEN $2\n                 WHEN 'disabled' THEN $3\n                 ELSE false\n               END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bool",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7ea37d79ccc67f4f990081e2b59858e7eba7d75bca317017a8899d86b45f8b39"
+}

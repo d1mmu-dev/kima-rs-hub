@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE track_stages s\n         SET status = 'pending', attempts = 0, redelivered = 0, next_attempt_at = NULL,\n             last_error = NULL, error_code = NULL, error_class = NULL, evidence = NULL,\n             started_at = NULL, finished_at = NULL, updated_at = now()\n         FROM tracks t\n         WHERE t.id = s.track_id\n           AND NOT (s.stage = 'recording' AND t.recording_mbid IS NOT NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "cafbdfbeabd05aee646999b8ffa7f6ca7ab14394419dbab3b2b175a5d2322dfc"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE enrichment_state SET last_error = NULL WHERE last_error IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d807837ada8d1b9730630a15ccf79b8df2e279acef7fae8a345fea1d53194a77"
+}

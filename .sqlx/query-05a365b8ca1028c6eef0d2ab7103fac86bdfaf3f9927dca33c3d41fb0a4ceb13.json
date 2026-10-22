@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE track_stages\n           SET status = 'pending', attempts = 0, redelivered = 0, next_attempt_at = NULL,\n               evidence = '{\"reason\":\"enrichment wiped\"}'::jsonb,\n               started_at = NULL, finished_at = NULL, updated_at = now()\n           WHERE stage = 'recording' AND status IN ('done', 'working')\n             AND track_id = ANY($1)\n           RETURNING track_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "track_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "05a365b8ca1028c6eef0d2ab7103fac86bdfaf3f9927dca33c3d41fb0a4ceb13"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists\n           SET bio = NULL, \"similar\" = NULL, enrichment_status = 'pending',\n               enrichment_failures = 0, last_enriched_at = NULL\n           WHERE name_key <> 'various artists'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b7006c5842f10c3d79513d85f6c244e50796e56fb993e9e2c42400e998679043"
+}

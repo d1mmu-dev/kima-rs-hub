@@ -11,12 +11,15 @@
 
 use std::time::{Duration, Instant};
 
+pub mod control;
+
 use kima_db::PgPool;
-use kima_db::enrichment::{self, Phase};
+use kima_db::enrichment::{self, Phase, State, Status};
 use kima_jobs::queue;
 use kima_jobs::worker::{self, Handler, JobError};
 use kima_library::jobs::OnChange;
 use kima_net::Source;
+use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -36,6 +39,13 @@ pub const NEXT_AFTER_WORK: Duration = Duration::from_secs(5);
 pub const NEXT_WHEN_IDLE: Duration = Duration::from_secs(60);
 /// The state is re-read at most this often while a cycle runs.
 pub const STATE_REREAD: Duration = Duration::from_secs(2);
+/// A running pipeline with no activity for this long is hung (upstream `detectHang`).
+pub const HUNG_AFTER: time::Duration = time::Duration::minutes(15);
+
+/// Whether the pipeline is hung at `now`: `running` and no activity for over [`HUNG_AFTER`].
+pub fn hung(s: &State, now: OffsetDateTime) -> bool {
+    s.status == Status::Running && s.last_activity < now - HUNG_AFTER
+}
 
 fn payload() -> serde_json::Value {
     serde_json::json!({ "kind": CYCLE_KIND })
@@ -150,11 +160,14 @@ pub async fn run_cycle(
         return Err(JobError::Retry("enrichment cycle cancelled".into()));
     }
 
-    // Step 7.
+    // Step 7. A cycle without a batch error clears the last one.
+    if report.errors == 0 {
+        enrichment::clear_error(pool).await.map_err(db)?;
+    }
     let idle = !report.any_work();
     enrichment::end_cycle(pool, idle).await.map_err(db)?;
     let st = enrichment::state(pool).await.map_err(db)?;
-    if st.halted || st.status == enrichment::Status::Paused {
+    if st.halted || st.status == Status::Paused {
         return Ok(report);
     }
     let next = if idle {

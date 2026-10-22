@@ -1,0 +1,87 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH f AS (\n             SELECT s.track_id::text || '__' || s.stage AS id,\n                    CASE s.stage WHEN 'recording' THEN 'track' ELSE 'scan' END AS entity_type,\n                    s.track_id AS entity_id,\n                    t.title AS entity_name,\n                    left(s.last_error, $6) AS error_message,\n                    s.error_code,\n                    s.attempts::int AS retry_count,\n                    COALESCE(s.started_at, s.updated_at) AS first_failed_at,\n                    s.updated_at AS last_failed_at,\n                    jsonb_build_object('stage', s.stage, 'source', s.source,\n                                       'evidence', s.evidence, 'errorClass', s.error_class)\n                      AS metadata\n             FROM track_stages s JOIN tracks t ON t.id = s.track_id\n             WHERE s.status = 'failed' AND s.error_class IS DISTINCT FROM 'FILE_MISSING'\n               AND ((s.stage = 'recording' AND $1) OR (s.stage = 'fingerprint' AND $2))\n             UNION ALL\n             SELECT a.id::text, 'artist', a.id, a.name, left(a.last_error, $6),\n                    a.last_error_code, a.enrichment_failures::int,\n                    a.last_enriched_at, a.last_enriched_at,\n                    jsonb_build_object('status', a.enrichment_status)\n             FROM artists a\n             WHERE $3 AND a.enrichment_status IN ('failed', 'unresolvable')\n               AND a.enrichment_failures > 0),\n           page AS (\n             SELECT * FROM f\n             ORDER BY last_failed_at DESC NULLS LAST, id\n             LIMIT $4 OFFSET $5)\n           SELECT (SELECT count(*) FROM f) AS \"total!\",\n                  p.id, p.entity_type, p.entity_id, p.entity_name, p.error_message,\n                  p.error_code, p.retry_count, p.first_failed_at, p.last_failed_at, p.metadata\n           FROM (SELECT 1) one\n           LEFT JOIN page p ON true\n           ORDER BY p.last_failed_at DESC NULLS LAST, p.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "entity_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "entity_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "entity_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "error_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "retry_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "first_failed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "last_failed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "metadata",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bool",
+        "Bool",
+        "Bool",
+        "Int8",
+        "Int8",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "3090ef9d7d90c8a360827bf42dc26cb24b919754ab64f2a7eef301402a7fa113"
+}

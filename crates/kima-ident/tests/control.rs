@@ -909,6 +909,14 @@ async fn seed(pool: &PgPool) -> Wiped {
         &[gone],
     )
     .await;
+    // A terminal recording that still holds an earlier answer: not reopened, so not cleared.
+    exec(
+        pool,
+        "UPDATE tracks SET recording_mbid = gen_random_uuid(), recording_source = 'search',
+             isrc = 'GBAYE0601499', isrc_source = 'musicbrainz' WHERE id = $1",
+        &[terminal],
+    )
+    .await;
     for t in [trk, id3, asking, terminal, retrying, waiting, gone] {
         exec(
             pool,
@@ -1320,11 +1328,27 @@ async fn wipe_reopens_a_claimed_identification(pool: PgPool) {
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn wipe_clears_only_musicbrainz_isrc(pool: PgPool) {
     let w = seed(&pool).await;
+    let terminal_mbid = track_col(&pool, w.terminal, "recording_mbid").await;
     control::wipe_and_rerun(&pool).await.unwrap();
     assert_eq!(track_col(&pool, w.trk, "isrc").await, Value::Null);
     assert_eq!(track_col(&pool, w.trk, "isrc_source").await, Value::Null);
     assert_eq!(track_col(&pool, w.id3, "isrc").await, "USRC17607839");
     assert_eq!(track_col(&pool, w.id3, "isrc_source").await, "id3");
+    // Only reopened tracks are cleared: the terminal one keeps its answer and ISRC.
+    assert_ne!(terminal_mbid, Value::Null);
+    assert_eq!(
+        track_col(&pool, w.terminal, "recording_mbid").await,
+        terminal_mbid
+    );
+    assert_eq!(
+        track_col(&pool, w.terminal, "recording_source").await,
+        "search"
+    );
+    assert_eq!(track_col(&pool, w.terminal, "isrc").await, "GBAYE0601499");
+    assert_eq!(
+        track_col(&pool, w.terminal, "isrc_source").await,
+        "musicbrainz"
+    );
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -1448,4 +1472,81 @@ async fn concurrency_clamped_and_applied(pool: PgPool) {
             );
         }
     }
+}
+
+// ---- review fixes ----
+
+async fn age_activity(pool: &PgPool, status: &str) {
+    sqlx::query(
+        "UPDATE enrichment_state SET status = $1, halted = false,
+             last_activity = now() - interval '1 hour'",
+    )
+    .bind(status)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Review I1: a transition into `running` is activity (upstream `progressSignature` includes
+/// the status), so a resume after a long pause is not hung.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn resume_after_long_pause_is_not_hung(pool: PgPool) {
+    age_activity(&pool, "paused").await;
+    let st = control::resume(&pool).await.unwrap();
+    assert_eq!(st.status, Status::Running);
+    assert!(!coordinator::hung(&st, OffsetDateTime::now_utc()));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn idle_to_running_cycle_start_is_not_hung(pool: PgPool) {
+    age_activity(&pool, "idle").await;
+    let st = enrichment::begin_cycle(&pool).await.unwrap();
+    assert_eq!(st.status, Status::Running);
+    assert!(!coordinator::hung(&st, OffsetDateTime::now_utc()));
+}
+
+/// A pipeline already running whose counts have not moved is still hung: neither a cycle
+/// start nor a resume (a no-op when running) stamps it.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stuck_running_state_is_still_hung(pool: PgPool) {
+    age_activity(&pool, "running").await;
+    let st = enrichment::begin_cycle(&pool).await.unwrap();
+    assert!(coordinator::hung(&st, OffsetDateTime::now_utc()));
+    let st = control::resume(&pool).await.unwrap();
+    assert!(coordinator::hung(&st, OffsetDateTime::now_utc()));
+    // A phase change alone is no heartbeat either.
+    enrichment::set_phase(&pool, Some(enrichment::Phase::Tracks), false)
+        .await
+        .unwrap();
+    let st = enrichment::state(&pool).await.unwrap();
+    assert!(coordinator::hung(&st, OffsetDateTime::now_utc()));
+}
+
+/// Review m4: a kick that fails after the control committed is logged; the control answers
+/// success, since its change happened.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn controls_succeed_when_the_kick_fails(pool: PgPool) {
+    let (ctx, _dir) = ctx(&pool);
+    let w = seed(&pool).await;
+    sqlx::query("ALTER TABLE jobs RENAME TO jobs_gone")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        coordinator::kick(&pool).await.is_err(),
+        "the kick really fails"
+    );
+
+    let counts = control::wipe_and_rerun(&pool).await.unwrap();
+    assert_eq!(counts.tracks, 4);
+    assert_eq!(status_of(&pool, w.trk, "recording").await, "pending");
+    control::redecide_everything(&ctx).await.unwrap();
+    control::retry_failed_and_blocked(&ctx).await.unwrap();
+    control::sync(&pool).await.unwrap();
+    set_state(&pool, "paused", false).await;
+    assert_eq!(
+        control::resume(&pool).await.unwrap().status,
+        Status::Running
+    );
+    assert_eq!(control::stop(&pool).await.unwrap().status, Status::Stopping);
 }

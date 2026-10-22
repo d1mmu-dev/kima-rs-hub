@@ -124,7 +124,8 @@ pub async fn state(pool: &PgPool) -> sqlx::Result<State> {
 
 /// Step 1-2 of a cycle (§10.6), in one statement: `paused` stays as it is; `stopping`, or any
 /// status while `halted`, becomes `idle` (phase cleared); otherwise `running`, with
-/// `started_at` stamped when it was `idle`. Returns the state after; the cycle runs only when
+/// `started_at` and `last_activity` stamped when it was `idle` (a transition into `running` is
+/// activity, upstream `progressSignature` includes the status). Returns the state after; the cycle runs only when
 /// [`State::may_run`].
 pub async fn begin_cycle(pool: &PgPool) -> sqlx::Result<State> {
     sqlx::query_as!(
@@ -136,7 +137,9 @@ pub async fn begin_cycle(pool: &PgPool) -> sqlx::Result<State> {
              current_phase = CASE WHEN status = 'stopping' OR (halted AND status <> 'paused')
                                   THEN NULL ELSE current_phase END,
              started_at = CASE WHEN status = 'idle' AND NOT halted THEN now()
-                               ELSE started_at END
+                               ELSE started_at END,
+             last_activity = CASE WHEN status = 'idle' AND NOT halted THEN now()
+                                  ELSE last_activity END
            RETURNING status, halted, current_phase, started_at, paused_at, stopped_at,
                      last_error, last_activity"#
     )
@@ -238,7 +241,8 @@ pub async fn pause(pool: &PgPool) -> sqlx::Result<Result<State, Status>> {
     Ok(Ok(st.into()))
 }
 
-/// Resume: from `paused` to `running`; `running` is left as it is. `Ok(Err(status))` from
+/// Resume: from `paused` to `running`, stamping `last_activity` (a resumed pipeline is not
+/// hung); `running` is left as it is. `Ok(Err(status))` from
 /// any other state.
 pub async fn resume(pool: &PgPool) -> sqlx::Result<Result<State, Status>> {
     let mut tx = pool.begin().await?;
@@ -246,7 +250,7 @@ pub async fn resume(pool: &PgPool) -> sqlx::Result<Result<State, Status>> {
     let st = match status {
         Status::Paused => sqlx::query_as!(
             Row,
-            "UPDATE enrichment_state SET status = 'running'
+            "UPDATE enrichment_state SET status = 'running', last_activity = now()
              WHERE status = 'paused'
              RETURNING status, halted, current_phase, started_at, paused_at, stopped_at,
                        last_error, last_activity"

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE enrichment_state SET status = 'running'\n             WHERE status = 'paused'\n             RETURNING status, halted, current_phase, started_at, paused_at, stopped_at,\n                       last_error, last_activity",
+  "query": "UPDATE enrichment_state SET status = 'running', last_activity = now()\n             WHERE status = 'paused'\n             RETURNING status, halted, current_phase, started_at, paused_at, stopped_at,\n                       last_error, last_activity",
   "describe": {
     "columns": [
       {
@@ -58,5 +58,5 @@
       false
     ]
   },
-  "hash": "87a5cde3b187c88aa7c41efa2e099645b7acb0c5b633ca4ddbefa10e5710f0db"
+  "hash": "010116d520947129a07ef46b1d425461ee17d51474a7f9e3373da9650e66259f"
 }

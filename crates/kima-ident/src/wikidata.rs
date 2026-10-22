@@ -136,7 +136,7 @@ pub fn image_of(entity: &Value) -> Option<String> {
 }
 
 /// The bio and image of the artist with `mbid` (spec §12.2). No Wikidata item →
-/// `Answered(WikiInfo::default())`; no English article, or a summary that is 404 → no bio; any
+/// `Answered(WikiInfo::default())`, as is an item whose entity data is 404; no English article, or a summary that is 404 → no bio; any
 /// other failure of any of the three requests is returned as it is.
 pub async fn lookup(net: &Net, mbid: Mbid) -> Outcome<WikiInfo> {
     let bindings = match answer::got(net.get_json::<Sparql>(sparql_request(mbid)).await) {
@@ -148,10 +148,12 @@ pub async fn lookup(net: &Net, mbid: Mbid) -> Outcome<WikiInfo> {
     let Some(id) = item_id(&bindings) else {
         return Outcome::Answered(WikiInfo::default());
     };
+    // A deleted item (404) is no entity: `{}` (spec §12.2). The only read of this URL.
     let req = Req::get(
         Host::Wikidata,
         &format!("/wiki/Special:EntityData/{id}.json"),
-    );
+    )
+    .absent_on_404();
     let mut entities = match answer::got(net.get_json::<Entities>(req).await) {
         Ok(Got::Answered(e)) => e.entities,
         Ok(Got::Absent(_)) => return Outcome::Answered(WikiInfo::default()),

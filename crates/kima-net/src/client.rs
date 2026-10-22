@@ -391,7 +391,13 @@ impl Net {
                 }
             }
         }
-        let out = match self.json_live(live, req, secrets).await {
+        // An echoed key is scrubbed before anything is parsed, stored or returned.
+        let fetched = match self.json_live(live, req, secrets).await {
+            Outcome::Answered(value) => Outcome::Answered(secrets.scrub_json(value)),
+            Outcome::Absent(evidence) => Outcome::Absent(Evidence(secrets.scrub_json(evidence.0))),
+            other => other,
+        };
+        let out = match fetched {
             Outcome::Answered(value) => match serde_json::from_value::<T>(value.clone()) {
                 Ok(t) => {
                     if let Some((key, canonical, (ttl, _))) = &cached {

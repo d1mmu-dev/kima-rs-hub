@@ -1110,3 +1110,31 @@ fn fanart_test_request_is_uncached_with_a_short_timeout() {
     assert!(shown.contains(&format!("/music/{BEATLES}")), "{shown}");
     assert!(!shown.contains("abc-secret-key"), "{shown}");
 }
+
+/// Review fix (Task 20): an item deleted after the SPARQL index saw it (EntityData 404) is no
+/// entity, so `{}` (spec §12.2), cached as an absence like every read of that URL.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn wikidata_deleted_item_is_answered_empty(pool: PgPool) {
+    let (replay, net) = net_for(
+        &pool,
+        vec![
+            entry(&sparql_url(SEED), 200, sparql(Some("Q404"))),
+            entry(&entity_url("Q404"), 404, json!({"error": "not found"})),
+        ],
+    )
+    .await;
+    assert_eq!(
+        answered(wikidata::lookup(&net, mbid(SEED)).await),
+        wikidata::WikiInfo::default()
+    );
+    let rows = cache_rows(&pool).await;
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter()
+            .any(|r| r.2.contains("EntityData") && r.3 == "absent"),
+        "{rows:?}"
+    );
+    // Asked again: both answers come from the cache.
+    answered(wikidata::lookup(&net, mbid(SEED)).await);
+    assert_eq!(replay.asked().len(), 2);
+}

@@ -541,9 +541,11 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
         return Ok(result);
     }
     // §12.7 the album covers, after the artist's own outcome is written, so nothing they do can
-    // discard it or count a failure. They get what is left of the artist's time cap; a source
-    // waiting on its rate limit, or running out of time, puts a completed artist back to
-    // `pending` so the remaining albums are asked again (stored ones drop out).
+    // discard it or count a failure. They get what is left of the artist's time cap (the same
+    // deadline as `gather`, so an artist never takes longer than before). A source waiting on
+    // its rate limit puts a completed artist back to `pending` (bounded by the source's pause);
+    // running out of time does not: the artist stays `completed` and the remaining albums wait
+    // for its next enrichment, so a slow image host cannot make it be claimed every cycle.
     let again =
         match tokio::time::timeout_at(deadline, album_covers::fill_for_artist(ctx, a.id)).await {
             Ok(Outcome::Answered(_) | Outcome::Absent(_)) => false,
@@ -554,7 +556,7 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
             }
             Err(_) => {
                 debug!(artist = %a.id, "album covers ran out of the artist's time; the rest waits");
-                true
+                false
             }
         };
     if again
@@ -571,6 +573,10 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
 /// cleared (another artist's id) is deleted before the commit, unless a user image holds the
 /// place. A user image writer that locks the row before replacing the file can therefore
 /// never have its file overwritten or deleted by a run.
+///
+/// If the commit fails after the rename, the file already holds the new (higher-ranked) image
+/// while the row keeps the old source label; the next run sees the lower rank and records it
+/// again (review m2, accepted).
 ///
 /// The file steps are plain blocking calls on this task, not `spawn_blocking`: a detached
 /// closure would still run after a cancelled run's rollback released the lock. Each is one

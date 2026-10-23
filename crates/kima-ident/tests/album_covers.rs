@@ -510,8 +510,8 @@ async fn enrichment_fills_album_covers(pool: PgPool) {
 }
 
 /// Review I2: a cover fill that hangs past the artist's time cap discards nothing the artist's
-/// run learned and counts no failure; the artist is asked again later. Review I1: the fill,
-/// cut off while it waits on the album row's lock, leaves no file behind.
+/// run learned and counts no failure; the artist stays `completed` (re-review N1). Review I1:
+/// the fill, cut off while it waits on the album row's lock, leaves no file behind.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn a_hung_cover_fill_keeps_the_artist_outcome(pool: PgPool) {
     let (a, days, w) = perturbator(&pool, json!([{"name": "synthwave", "count": 9}])).await;
@@ -531,7 +531,7 @@ async fn a_hung_cover_fill_keeps_the_artist_outcome(pool: PgPool) {
     let started = std::time::Instant::now();
     let result = artist::enrich_one(&f.ctx, &mine).await.unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
-    assert_eq!(result, ArtistResult::Pending);
+    assert_eq!(result, ArtistResult::Completed);
     holder.commit().await.unwrap();
 
     let (status, failures, code, similar): (String, i16, Option<String>, Option<Value>) =
@@ -543,7 +543,7 @@ async fn a_hung_cover_fill_keeps_the_artist_outcome(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!((status.as_str(), failures, code), ("pending", 0, None));
+    assert_eq!((status.as_str(), failures, code), ("completed", 0, None));
     assert_eq!(similar, Some(json!([])));
     let genres: Vec<String> = sqlx::query_scalar(
         "SELECT g.name FROM artist_genres ag JOIN genres g ON g.id = ag.genre_id \
@@ -563,4 +563,50 @@ async fn a_hung_cover_fill_keeps_the_artist_outcome(pool: PgPool) {
         "{:?}",
         album_image_files(&f)
     );
+}
+
+/// Re-review N1: a cover fill that runs out of time on a slow image host leaves the artist
+/// `completed` with no failure counted, and the next cycle does not claim it again.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_fill_timeout_leaves_the_artist_completed(pool: PgPool) {
+    // An image host that accepts connections and never answers.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = listener.local_addr().unwrap();
+    let silent = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    let (a, days, w) = perturbator(&pool, json!([])).await;
+    let w = w.deezer_hit(
+        "Perturbator",
+        "Dangerous Days",
+        &format!("http://{host}/days.jpg"),
+    );
+    let mut f = fx(&pool, w, World::default()).await;
+    f.ctx.config.artist_timeout = std::time::Duration::from_secs(3);
+
+    let mine = claim(&pool, a).await;
+    let started = std::time::Instant::now();
+    let result = artist::enrich_one(&f.ctx, &mine).await.unwrap();
+    let took = started.elapsed();
+    assert!(
+        took >= std::time::Duration::from_secs(2) && took < std::time::Duration::from_secs(20),
+        "{took:?}"
+    );
+    assert_eq!(result, ArtistResult::Completed);
+    let (status, failures, code): (String, i16, Option<String>) = sqlx::query_as(
+        "SELECT enrichment_status, enrichment_failures, last_error_code FROM artists WHERE id = $1",
+    )
+    .bind(a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), failures, code), ("completed", 0, None));
+    assert_eq!(image_of(&pool, days).await, (None, None));
+    // The next cycle's claim passes it by.
+    let next = identity::claim_artists(&pool, 10).await.unwrap();
+    assert!(next.iter().all(|c| c.id != a), "{next:?}");
+    silent.abort();
 }

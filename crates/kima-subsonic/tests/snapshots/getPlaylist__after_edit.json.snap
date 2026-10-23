@@ -41,6 +41,7 @@ source: crates/kima-subsonic/tests/snapshots.rs
           "created": "2026-01-01T00:02:00.000Z",
           "discNumber": 1,
           "duration": 183,
+          "genre": "Rock",
           "id": "00000000-0000-7000-8000-300000000002",
           "isDir": false,
           "parent": "00000000-0000-7000-8000-200000000001",

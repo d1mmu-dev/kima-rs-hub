@@ -4,6 +4,6 @@ source: crates/kima-subsonic/tests/snapshots.rs
 <?xml version="1.0" encoding="UTF-8"?>
 <subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
   <starred>
-    <song id="00000000-0000-7000-8000-300000000002" parent="00000000-0000-7000-8000-200000000001" title="Something" album="Abbey Road" artist="The Beatles" isDir="false" coverArt="00000000-0000-7000-8000-200000000001" duration="183" bitRate="900" track="2" discNumber="1" year="1970" size="30000002" contentType="audio/flac" suffix="flac" albumId="00000000-0000-7000-8000-200000000001" artistId="00000000-0000-7000-8000-100000000001" type="music" created="2026-01-01T00:02:00.000Z" starred="2026-01-01T04:07:00.000Z"/>
+    <song id="00000000-0000-7000-8000-300000000002" parent="00000000-0000-7000-8000-200000000001" title="Something" album="Abbey Road" artist="The Beatles" isDir="false" coverArt="00000000-0000-7000-8000-200000000001" duration="183" bitRate="900" track="2" discNumber="1" year="1970" size="30000002" contentType="audio/flac" suffix="flac" albumId="00000000-0000-7000-8000-200000000001" artistId="00000000-0000-7000-8000-100000000001" type="music" created="2026-01-01T00:02:00.000Z" genre="Rock" starred="2026-01-01T04:07:00.000Z"/>
   </starred>
 </subsonic-response>

@@ -2,6 +2,6 @@
 source: crates/kima-subsonic/tests/snapshots.rs
 ---
 <?xml version="1.0" encoding="UTF-8"?>
-<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
-  <albumList2/>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="failed" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <error code="10" message="byGenre requires genre"/>
 </subsonic-response>

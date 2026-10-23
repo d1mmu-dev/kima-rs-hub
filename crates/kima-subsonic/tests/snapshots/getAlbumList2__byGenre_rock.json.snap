@@ -1,0 +1,44 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "albumList2": {
+      "album": [
+        {
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "coverArt": "00000000-0000-7000-8000-200000000001",
+          "created": "2026-01-01T00:01:00.000Z",
+          "duration": 1040,
+          "genre": "Rock",
+          "id": "00000000-0000-7000-8000-200000000001",
+          "musicBrainzId": "2a2c6d57-2f46-4b5e-9d0a-7e2f4a1d5c11",
+          "name": "Abbey Road",
+          "songCount": 5,
+          "starred": "2026-01-01T04:04:00.000Z",
+          "userRating": 4,
+          "year": 1969
+        },
+        {
+          "artist": "The Beatles",
+          "artistId": "00000000-0000-7000-8000-100000000001",
+          "coverArt": "00000000-0000-7000-8000-200000000002",
+          "created": "2026-01-01T00:02:00.000Z",
+          "duration": 831,
+          "genre": "Rock",
+          "id": "00000000-0000-7000-8000-200000000002",
+          "name": "White Album",
+          "songCount": 4,
+          "year": 1968
+        }
+      ]
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

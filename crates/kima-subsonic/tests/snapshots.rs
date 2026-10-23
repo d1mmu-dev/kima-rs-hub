@@ -691,6 +691,12 @@ snap!(album_lists, |s| {
     .await;
     s.case(
         "getAlbumList2",
+        "byGenre_rock",
+        &alice(&[("type", "byGenre"), ("genre", "rock")]),
+    )
+    .await;
+    s.case(
+        "getAlbumList2",
         "byYear",
         &alice(&[("type", "byYear"), ("fromYear", "1968"), ("toYear", "2009")]),
     )
@@ -816,10 +822,14 @@ snap!(search, |s| {
         },
     )
     .await;
-    s.case(
+    s.case_with(
         "getRandomSongs",
         "genre",
         &alice(&[("size", "500"), ("genre", "Rock")]),
+        Opts {
+            unordered: &["song"],
+            ..NONE
+        },
     )
     .await;
     s.case("getSongsByGenre", "ok", &alice(&[("genre", "Rock")]))

@@ -122,3 +122,62 @@ INSERT INTO playback_state (user_id, playback_type, track_id, queue, current_ind
    {"id":"00000000-0000-7000-8000-300000000007","title":"Dear Prudence","duration":236,"artist":{"id":"00000000-0000-7000-8000-100000000001","name":"The Beatles"},"album":{"id":"00000000-0000-7000-8000-200000000002","title":"White Album","coverArt":"00000000-0000-7000-8000-200000000002"}},
    {"id":"00000000-0000-7000-8000-300000000012","title":"Quicksand","duration":218,"artist":{"id":"00000000-0000-7000-8000-100000000002","name":"La Roux"},"album":{"id":"00000000-0000-7000-8000-200000000003","title":"La Roux","coverArt":"00000000-0000-7000-8000-200000000003"}}]'::jsonb,
  1, false, 12345, 'Phone', '2026-01-01T07:00:00Z', '2026-01-01T07:00:00Z');
+
+-- Identity (M3). MBIDs: artist 1 (Beatles; Various Artists already has MusicBrainz's by migration),
+-- album 1, tracks 1 and 3. Artist 1 has a downloaded image.
+UPDATE artists SET mbid = 'b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d', image_path = 'beatles.jpg',
+                   image_source = 'fanart'
+WHERE id = '00000000-0000-7000-8000-100000000001';
+UPDATE albums SET release_mbid = '2a2c6d57-2f46-4b5e-9d0a-7e2f4a1d5c11'
+WHERE id = '00000000-0000-7000-8000-200000000001';
+UPDATE tracks SET recording_mbid = '9d1c2f0e-6b57-4a46-8a9c-3f3b1a0c7d21'
+WHERE id = '00000000-0000-7000-8000-300000000001';
+UPDATE tracks SET recording_mbid = '5e4a3b2c-1d0f-4e9a-b8c7-6d5e4f3a2b10'
+WHERE id = '00000000-0000-7000-8000-300000000003';
+
+-- Genres. Keys are the case-insensitive match key. "Ghost" is carried only by the missing track.
+INSERT INTO genres (id, name, key) VALUES
+('00000000-0000-7000-8000-b00000000001', 'Rock', 'rock'),
+('00000000-0000-7000-8000-b00000000002', 'Post-Rock', 'post-rock'),
+('00000000-0000-7000-8000-b00000000003', 'Pop', 'pop'),
+('00000000-0000-7000-8000-b00000000004', 'Electronic', 'electronic'),
+('00000000-0000-7000-8000-b00000000005', 'Ghost', 'ghost');
+
+-- Tracks. Effective = MusicBrainz when any, else file: 1 and 2 MusicBrainz Rock (1 also has a file
+-- Pop, shadowed); 3 file Rock; 4 file Post-Rock; 5 MusicBrainz Rock then Pop; 10 file Electronic.
+-- Tracks 11 and 12 (La Roux) and 6-9, 13-19 have none: 11 and 12 take the artist's first genre.
+INSERT INTO track_genres (track_id, genre_id, source, rank) VALUES
+('00000000-0000-7000-8000-300000000001', '00000000-0000-7000-8000-b00000000001', 'musicbrainz', 0),
+('00000000-0000-7000-8000-300000000001', '00000000-0000-7000-8000-b00000000003', 'file', 0),
+('00000000-0000-7000-8000-300000000002', '00000000-0000-7000-8000-b00000000001', 'musicbrainz', 0),
+('00000000-0000-7000-8000-300000000003', '00000000-0000-7000-8000-b00000000001', 'file', 0),
+('00000000-0000-7000-8000-300000000004', '00000000-0000-7000-8000-b00000000002', 'file', 0),
+('00000000-0000-7000-8000-300000000005', '00000000-0000-7000-8000-b00000000001', 'musicbrainz', 0),
+('00000000-0000-7000-8000-300000000005', '00000000-0000-7000-8000-b00000000003', 'musicbrainz', 1),
+('00000000-0000-7000-8000-300000000010', '00000000-0000-7000-8000-b00000000004', 'file', 0),
+('00000000-0000-7000-8000-300000000020', '00000000-0000-7000-8000-b00000000001', 'file', 0),
+('00000000-0000-7000-8000-300000000020', '00000000-0000-7000-8000-b00000000005', 'musicbrainz', 0);
+
+-- Albums: 1 MusicBrainz Rock then Pop; 2 file Rock; 3 MusicBrainz Pop; 5 file Electronic;
+-- 6 (no present track) file Rock.
+INSERT INTO album_genres (album_id, genre_id, source, rank) VALUES
+('00000000-0000-7000-8000-200000000001', '00000000-0000-7000-8000-b00000000001', 'musicbrainz', 0),
+('00000000-0000-7000-8000-200000000001', '00000000-0000-7000-8000-b00000000003', 'musicbrainz', 1),
+('00000000-0000-7000-8000-200000000002', '00000000-0000-7000-8000-b00000000001', 'file', 0),
+('00000000-0000-7000-8000-200000000003', '00000000-0000-7000-8000-b00000000003', 'musicbrainz', 0),
+('00000000-0000-7000-8000-200000000005', '00000000-0000-7000-8000-b00000000004', 'file', 0),
+('00000000-0000-7000-8000-200000000006', '00000000-0000-7000-8000-b00000000001', 'file', 0);
+
+-- Artists: 1 MusicBrainz Rock; 2 MusicBrainz Pop then Electronic (and a shadowed file Rock).
+INSERT INTO artist_genres (artist_id, genre_id, source, rank) VALUES
+('00000000-0000-7000-8000-100000000001', '00000000-0000-7000-8000-b00000000001', 'musicbrainz', 0),
+('00000000-0000-7000-8000-100000000002', '00000000-0000-7000-8000-b00000000003', 'musicbrainz', 0),
+('00000000-0000-7000-8000-100000000002', '00000000-0000-7000-8000-b00000000004', 'musicbrainz', 1),
+('00000000-0000-7000-8000-100000000002', '00000000-0000-7000-8000-b00000000001', 'file', 0);
+
+-- Lyrics: track 1 synced and plain, track 2 a cached miss.
+INSERT INTO track_lyrics (track_id, plain_lyrics, synced_lyrics, source, lrclib_id, fetched_at, updated_at) VALUES
+('00000000-0000-7000-8000-300000000001', E'Here come old flat top\nHe come groovin up slowly',
+ E'[00:01.50]Here come old flat top\n[00:05.00]He come groovin up slowly', 'lrclib', 4242,
+ '2026-01-01T08:00:00Z', '2026-01-01T08:00:00Z'),
+('00000000-0000-7000-8000-300000000002', NULL, NULL, 'none', NULL, '2026-01-01T08:01:00Z', '2026-01-01T08:01:00Z');

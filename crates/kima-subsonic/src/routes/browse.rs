@@ -190,36 +190,38 @@ async fn album_list(
     params: &Params,
 ) -> Result<Vec<AlbumItem>, SubsonicError> {
     let kind = match params.get("type").unwrap_or("newest") {
-        "random" => Some(AlbumListKind::Random),
-        "highest" => Some(AlbumListKind::Highest),
-        "frequent" => Some(AlbumListKind::Frequent),
-        "recent" => Some(AlbumListKind::Recent),
-        "alphabeticalByName" => Some(AlbumListKind::AlphabeticalByName),
-        "alphabeticalByArtist" => Some(AlbumListKind::AlphabeticalByArtist),
-        "starred" => Some(AlbumListKind::Starred),
+        "random" => AlbumListKind::Random,
+        "highest" => AlbumListKind::Highest,
+        "frequent" => AlbumListKind::Frequent,
+        "recent" => AlbumListKind::Recent,
+        "alphabeticalByName" => AlbumListKind::AlphabeticalByName,
+        "alphabeticalByArtist" => AlbumListKind::AlphabeticalByArtist,
+        "starred" => AlbumListKind::Starred,
         "byYear" => {
             let year = |key: &str| {
                 params
                     .int::<i32>(key)?
                     .ok_or_else(|| SubsonicError::missing(key))
             };
-            Some(AlbumListKind::ByYear {
+            AlbumListKind::ByYear {
                 from: year("fromYear")?,
                 to: year("toYear")?,
-            })
+            }
         }
-        // Genres arrive in M3; until then no album has one.
-        "byGenre" => None,
-        _ => Some(AlbumListKind::Newest),
+        "byGenre" => AlbumListKind::ByGenre(
+            params
+                .get("genre")
+                .filter(|g| !g.is_empty())
+                .ok_or_else(|| SubsonicError::new(10, "byGenre requires genre"))?
+                .to_owned(),
+        ),
+        _ => AlbumListKind::Newest,
     };
     let size = params
         .paging::<i64>("size")
         .unwrap_or(DEFAULT_PAGE)
         .clamp(0, MAX_PAGE);
     let offset = params.paging::<i64>("offset").unwrap_or(0).max(0);
-    let Some(kind) = kind else {
-        return Ok(Vec::new());
-    };
     Ok(subsonic::album_list(&app.pool, user.user.id, kind, size, offset).await?)
 }
 

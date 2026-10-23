@@ -5,7 +5,7 @@ source: crates/kima-subsonic/tests/snapshots.rs
 <subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
   <bookmarks>
     <bookmark position="90000" username="alice" comment="resume here" created="2026-01-01T06:00:00.000Z" changed="2026-01-01T06:05:00.000Z">
-      <entry id="00000000-0000-7000-8000-300000000003" parent="00000000-0000-7000-8000-200000000001" title="Maxwell&apos;s Silver Hammer" album="Abbey Road" artist="The Beatles" isDir="false" coverArt="00000000-0000-7000-8000-200000000001" duration="207" bitRate="900" track="3" discNumber="1" year="1969" size="30000003" contentType="audio/flac" suffix="flac" albumId="00000000-0000-7000-8000-200000000001" artistId="00000000-0000-7000-8000-100000000001" type="music" created="2026-01-01T00:03:00.000Z"/>
+      <entry id="00000000-0000-7000-8000-300000000003" parent="00000000-0000-7000-8000-200000000001" title="Maxwell&apos;s Silver Hammer" album="Abbey Road" artist="The Beatles" isDir="false" coverArt="00000000-0000-7000-8000-200000000001" duration="207" bitRate="900" track="3" discNumber="1" year="1969" size="30000003" contentType="audio/flac" suffix="flac" albumId="00000000-0000-7000-8000-200000000001" artistId="00000000-0000-7000-8000-100000000001" type="music" created="2026-01-01T00:03:00.000Z" genre="Rock" musicBrainzId="5e4a3b2c-1d0f-4e9a-b8c7-6d5e4f3a2b10"/>
     </bookmark>
   </bookmarks>
 </subsonic-response>

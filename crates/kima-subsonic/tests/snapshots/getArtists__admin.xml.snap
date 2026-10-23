@@ -5,7 +5,7 @@ source: crates/kima-subsonic/tests/snapshots.rs
 <subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
   <artists ignoredArticles="The A An Le La Les Los Las Die Der Das">
     <index name="B">
-      <artist id="00000000-0000-7000-8000-100000000001" name="The Beatles" albumCount="2" coverArt="ar-00000000-0000-7000-8000-100000000001"/>
+      <artist id="00000000-0000-7000-8000-100000000001" name="The Beatles" albumCount="2" coverArt="ar-00000000-0000-7000-8000-100000000001" musicBrainzId="b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"/>
     </index>
     <index name="R">
       <artist id="00000000-0000-7000-8000-100000000002" name="La Roux" albumCount="2" coverArt="ar-00000000-0000-7000-8000-100000000002"/>

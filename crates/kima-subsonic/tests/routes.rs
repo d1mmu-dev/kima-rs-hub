@@ -222,7 +222,7 @@ fixture_test!(stub_answers, |server, pool| {
             vec![],
             Err((10, "Required parameter is missing: action")),
         ),
-        // Stubs routed by earlier tasks.
+        // Real endpoints that answer empty on a library with no genres.
         ("getGenres", vec![], empty("genres")),
         (
             "getSongsByGenre",
@@ -335,7 +335,6 @@ const UNAFFECTED: &[(&str, Option<u64>)] = &[
     ("getSongsByGenre", Some(10)),
     ("getSimilarSongs", None),
     ("getSimilarSongs2", None),
-    ("getGenres", None),
 ];
 
 /// Unaffected endpoints that answer a playlist or an image, not an envelope. `hls` builds a URL

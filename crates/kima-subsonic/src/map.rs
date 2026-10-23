@@ -72,6 +72,11 @@ fn with_state(node: Node, starred_at: Option<OffsetDateTime>, rating: Option<i16
         .attr_opt("userRating", rating.map(i32::from))
 }
 
+/// A genre name worth sending: not blank.
+fn present(genre: Option<&str>) -> Option<&str> {
+    genre.filter(|g| !g.trim().is_empty())
+}
+
 /// A song as a `Child`. Endpoints that need another element name call `.renamed(..)`.
 pub fn song(item: &SongItem) -> Node {
     let t = &item.track;
@@ -99,7 +104,9 @@ pub fn song(item: &SongItem) -> Node {
         .attr("albumId", t.album_id.to_string())
         .attr("artistId", t.album_artist_id.to_string())
         .attr("type", "music")
-        .attr("created", iso(item.created_at));
+        .attr("created", iso(item.created_at))
+        .attr_opt("genre", present(item.genre.as_deref()))
+        .attr_opt("musicBrainzId", t.recording_mbid.map(|m| m.to_string()));
     with_state(node, item.starred_at, item.rating)
 }
 
@@ -113,7 +120,9 @@ fn album_fields(node: Node, a: &AlbumItem) -> Node {
         .attr("songCount", a.song_count)
         .attr("duration", a.duration_secs)
         .attr_opt("year", a.year.filter(|&y| y > 0))
-        .attr("created", iso(a.created_at));
+        .attr("created", iso(a.created_at))
+        .attr_opt("genre", present(a.genre.as_deref()))
+        .attr_opt("musicBrainzId", a.release_mbid.map(|m| m.to_string()));
     with_state(node, a.starred_at, a.rating)
 }
 
@@ -141,7 +150,8 @@ pub fn artist_id3(a: &ArtistItem) -> Node {
         .attr("id", a.id.to_string())
         .attr("name", &a.name)
         .attr("albumCount", a.album_count)
-        .attr("coverArt", format!("ar-{}", a.id));
+        .attr("coverArt", format!("ar-{}", a.id))
+        .attr_opt("musicBrainzId", a.mbid.map(|m| m.to_string()));
     with_state(node, a.starred_at, a.rating)
 }
 
@@ -153,7 +163,8 @@ pub fn artist_dir(a: &ArtistItem) -> Node {
         .attr("isDir", true)
         .attr("title", &a.name)
         .attr("artist", &a.name)
-        .attr("coverArt", format!("ar-{}", a.id));
+        .attr("coverArt", format!("ar-{}", a.id))
+        .attr_opt("musicBrainzId", a.mbid.map(|m| m.to_string()));
     with_state(node, a.starred_at, a.rating)
 }
 
@@ -223,6 +234,35 @@ mod tests {
         }
     }
 
+    fn album_item() -> AlbumItem {
+        AlbumItem {
+            id: Uuid::from_u128(2),
+            title: "Abbey Road".into(),
+            year: Some(1969),
+            created_at: at(1_767_225_660, 0),
+            artist_id: Uuid::from_u128(1),
+            artist_name: "The Beatles".into(),
+            song_count: 17,
+            duration_secs: 2800,
+            starred_at: None,
+            rating: None,
+            release_mbid: None,
+            genre: None,
+        }
+    }
+
+    fn artist_item() -> ArtistItem {
+        ArtistItem {
+            id: Uuid::from_u128(1),
+            name: "The Beatles".into(),
+            sort_name: "beatles".into(),
+            album_count: 13,
+            starred_at: None,
+            rating: None,
+            mbid: None,
+        }
+    }
+
     fn item() -> SongItem {
         SongItem {
             track: track(Some(320), "mp3"),
@@ -231,6 +271,7 @@ mod tests {
             created_at: at(1_767_225_660, 500),
             starred_at: Some(at(1_767_240_240, 0)),
             rating: Some(4),
+            genre: None,
         }
     }
 
@@ -264,9 +305,11 @@ mod tests {
                 "userRating": 4,
             })
         );
-        // No path and no genre, ever.
+        // Never a path; no genre or MusicBrainz id unless known.
         let xml = write_xml(&song(&item()));
-        assert!(!xml.contains("path=") && !xml.contains("genre="));
+        assert!(
+            !xml.contains("path=") && !xml.contains("genre=") && !xml.contains("musicBrainzId")
+        );
         // The track's own year wins; unstarred and unrated songs carry neither attribute.
         let mut plain = item();
         plain.track.year = Some(1970);
@@ -276,6 +319,43 @@ mod tests {
         assert_eq!(json["year"], 1970);
         assert!(json.get("starred").is_none() && json.get("userRating").is_none());
         assert_eq!(write_json(&song(&plain).renamed("entry")), json);
+    }
+
+    #[test]
+    fn genre_attribute_when_known() {
+        let mut s = item();
+        s.genre = Some("Rock".into());
+        s.track.recording_mbid = Some(Uuid::from_u128(9));
+        let json = write_json(&song(&s));
+        assert_eq!(json["genre"], "Rock");
+        assert_eq!(json["musicBrainzId"], Uuid::from_u128(9).to_string());
+        assert!(write_xml(&song(&s)).contains(r#"genre="Rock""#));
+
+        let mut a = album_item();
+        assert!(write_json(&album_id3(&a)).get("genre").is_none());
+        a.genre = Some("Pop".into());
+        a.release_mbid = Some(Uuid::from_u128(8));
+        for node in [album_id3(&a), album_child(&a)] {
+            let json = write_json(&node);
+            assert_eq!(json["genre"], "Pop");
+            assert_eq!(json["musicBrainzId"], Uuid::from_u128(8).to_string());
+        }
+        // An empty genre is not sent.
+        a.genre = Some(String::new());
+        assert!(write_json(&album_id3(&a)).get("genre").is_none());
+
+        let mut r = artist_item();
+        assert!(write_json(&artist_id3(&r)).get("musicBrainzId").is_none());
+        assert!(write_json(&artist_dir(&r)).get("musicBrainzId").is_none());
+        r.mbid = Some(Uuid::from_u128(7));
+        assert_eq!(
+            write_json(&artist_id3(&r))["musicBrainzId"],
+            Uuid::from_u128(7).to_string()
+        );
+        assert_eq!(
+            write_json(&artist_dir(&r))["musicBrainzId"],
+            Uuid::from_u128(7).to_string()
+        );
     }
 
     #[test]

@@ -470,16 +470,180 @@ fixture_test!(random_songs_size_bounds, |server, _pool| {
     let unique: HashSet<_> = all.iter().collect();
     assert_eq!(unique.len(), 19);
     assert!(!all.contains(&track_id(20).to_string()));
-    // Genres arrive in M3.
-    let res = alice(&server, "getRandomSongs", &[("genre", "Rock")]).await;
-    assert_eq!(res["randomSongs"]["song"], serde_json::json!([]));
 });
 
-fixture_test!(songs_by_genre_missing_10_else_empty, |server, _pool| {
-    assert_failed(&alice(&server, "getSongsByGenre", &[]).await, 10);
-    let res = alice(&server, "getSongsByGenre", &[("genre", "Rock")]).await;
+fixture_test!(random_songs_genre_filter, |server, _pool| {
+    // Effective track genres, case-insensitive exact: Rock is tracks 1, 2, 3 and 5; the missing
+    // track 20 carries it too and stays out.
+    let rock = [1, 2, 3, 5];
+    for genre in ["Rock", "rock", "  ROCK "] {
+        let res = alice(
+            &server,
+            "getRandomSongs",
+            &[("genre", genre), ("size", "500")],
+        )
+        .await;
+        assert_eq!(
+            sorted(ids(&res["randomSongs"]["song"])),
+            sorted(track_ids(&rock)),
+            "{genre}"
+        );
+    }
+    let res = alice(
+        &server,
+        "getRandomSongs",
+        &[("genre", "post-rock"), ("size", "500")],
+    )
+    .await;
+    assert_eq!(ids(&res["randomSongs"]["song"]), track_ids(&[4]));
+    let res = alice(
+        &server,
+        "getRandomSongs",
+        &[("genre", "Nope"), ("size", "500")],
+    )
+    .await;
+    assert_eq!(res["randomSongs"]["song"], serde_json::json!([]));
+    // The size still caps the page, and an empty genre filters nothing.
+    let res = alice(
+        &server,
+        "getRandomSongs",
+        &[("genre", "rock"), ("size", "2")],
+    )
+    .await;
+    assert_eq!(res["randomSongs"]["song"].as_array().unwrap().len(), 2);
+    let res = alice(&server, "getRandomSongs", &[("genre", ""), ("size", "500")]).await;
+    assert_eq!(res["randomSongs"]["song"].as_array().unwrap().len(), 19);
+});
+
+fixture_test!(songs_by_genre_missing_10, |server, _pool| {
+    let res = alice(&server, "getSongsByGenre", &[]).await;
+    assert_failed(&res, 10);
+    assert_eq!(
+        res["error"]["message"],
+        "Required parameter is missing: genre"
+    );
+    let res = alice(&server, "getSongsByGenre", &[("genre", "Nope")]).await;
     assert_eq!(res["status"], "ok");
     assert_eq!(res["songsByGenre"]["song"], serde_json::json!([]));
+});
+
+fixture_test!(songs_by_genre_exact_case_insensitive, |server, _pool| {
+    for genre in ["rock", "ROCK", " Rock "] {
+        let res = alice(&server, "getSongsByGenre", &[("genre", genre)]).await;
+        let got = ids(&res["songsByGenre"]["song"]);
+        // Not track 4 (post-rock), not the missing track 20, not track 1's shadowed file Pop.
+        assert_eq!(got, track_ids(&[1, 5, 3, 2]), "{genre}");
+    }
+    let res = alice(&server, "getSongsByGenre", &[("genre", "post-rock")]).await;
+    assert_eq!(ids(&res["songsByGenre"]["song"]), track_ids(&[4]));
+    let res = alice(&server, "getSongsByGenre", &[("genre", "ock")]).await;
+    assert_eq!(res["songsByGenre"]["song"], serde_json::json!([]));
+    // A percent sign is text, not a pattern.
+    let res = alice(&server, "getSongsByGenre", &[("genre", "%")]).await;
+    assert_eq!(res["songsByGenre"]["song"], serde_json::json!([]));
+    // Track 1 has MusicBrainz Rock, so its file Pop does not count.
+    let res = alice(&server, "getSongsByGenre", &[("genre", "pop")]).await;
+    assert_eq!(ids(&res["songsByGenre"]["song"]), track_ids(&[5]));
+});
+
+fixture_test!(songs_by_genre_paging_and_order, |server, _pool| {
+    let page = |count: &'static str, offset: &'static str| {
+        let server = &server;
+        async move {
+            let res = alice(
+                server,
+                "getSongsByGenre",
+                &[("genre", "rock"), ("count", count), ("offset", offset)],
+            )
+            .await;
+            ids(&res["songsByGenre"]["song"])
+        }
+    };
+    // Come Together, Here Comes the Sun, Maxwell's Silver Hammer, Something.
+    assert_eq!(page("2", "0").await, track_ids(&[1, 5]));
+    assert_eq!(page("2", "2").await, track_ids(&[3, 2]));
+    assert_eq!(page("2", "3").await, track_ids(&[2]));
+    assert_eq!(page("2", "4").await, Vec::<String>::new());
+    assert_eq!(page("0", "0").await.len(), 1, "count clamps to 1..500");
+    assert_eq!(page("9999", "0").await.len(), 4);
+    assert_eq!(page("2", "-5").await, track_ids(&[1, 5]));
+    // The default count is 50.
+    let res = alice(&server, "getSongsByGenre", &[("genre", "rock")]).await;
+    assert_eq!(res["songsByGenre"]["song"].as_array().unwrap().len(), 4);
+});
+
+fixture_test!(song_genre_falls_back_to_artist, |server, _pool| {
+    let song = |n: u128| {
+        let server = &server;
+        async move {
+            let res = alice(server, "getSong", &[("id", &track_id(n).to_string())]).await;
+            res["song"].clone()
+        }
+    };
+    // Own effective genre: MusicBrainz Rock wins over the file's Pop (track 1); file Post-Rock
+    // (4); first of two by rank (5).
+    assert_eq!(song(1).await["genre"], "Rock");
+    assert_eq!(song(4).await["genre"], "Post-Rock");
+    assert_eq!(song(5).await["genre"], "Rock");
+    assert_eq!(song(10).await["genre"], "Electronic");
+    // No track genre: the album artist's first effective genre (La Roux: Pop, not the file Rock).
+    assert_eq!(song(11).await["genre"], "Pop");
+    assert_eq!(song(12).await["genre"], "Pop");
+    // Beatles tracks without their own take the artist's Rock.
+    assert_eq!(song(6).await["genre"], "Rock");
+    // Neither track nor artist genre: no attribute.
+    assert!(song(13).await.get("genre").is_none());
+});
+
+fixture_test!(music_brainz_ids_only_when_present, |server, _pool| {
+    let res = alice(&server, "getAlbum", &[("id", &album_id(1).to_string())]).await;
+    let album = &res["album"];
+    assert_eq!(
+        album["musicBrainzId"],
+        "2a2c6d57-2f46-4b5e-9d0a-7e2f4a1d5c11"
+    );
+    assert_eq!(album["genre"], "Rock");
+    let songs = album["song"].as_array().unwrap();
+    assert_eq!(
+        songs[0]["musicBrainzId"],
+        "9d1c2f0e-6b57-4a46-8a9c-3f3b1a0c7d21"
+    );
+    assert_eq!(
+        songs[2]["musicBrainzId"],
+        "5e4a3b2c-1d0f-4e9a-b8c7-6d5e4f3a2b10"
+    );
+    assert!(songs[1].get("musicBrainzId").is_none());
+    // Albums without a release id.
+    let res = alice(&server, "getAlbum", &[("id", &album_id(3).to_string())]).await;
+    assert!(res["album"].get("musicBrainzId").is_none());
+    assert_eq!(res["album"]["genre"], "Pop");
+    let res = alice(&server, "getAlbum", &[("id", &album_id(4).to_string())]).await;
+    assert!(res["album"].get("genre").is_none());
+    // Artists: the Beatles' own, none for La Roux.
+    let res = alice(&server, "getArtist", &[("id", &artist_id(1).to_string())]).await;
+    assert_eq!(
+        res["artist"]["musicBrainzId"],
+        "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d"
+    );
+    let res = alice(&server, "getArtist", &[("id", &artist_id(2).to_string())]).await;
+    assert!(res["artist"].get("musicBrainzId").is_none());
+    // No null or empty attribute in XML either.
+    let xml = rest_xml(
+        &server,
+        "getArtist",
+        &[("apiKey", FIXTURE_TOKEN), ("id", &artist_id(2).to_string())],
+    )
+    .await;
+    assert!(
+        !xml.contains("musicBrainzId") && !xml.contains("genre=\"\""),
+        "{xml}"
+    );
+    // Search results carry them too.
+    let res = alice(&server, "search3", &[("query", "abbey")]).await;
+    assert_eq!(
+        res["searchResult3"]["album"][0]["musicBrainzId"],
+        "2a2c6d57-2f46-4b5e-9d0a-7e2f4a1d5c11"
+    );
 });
 
 fixture_test!(
@@ -558,10 +722,68 @@ fixture_test!(similar_songs2_empty, |server, _pool| {
     assert_failed(&alice(&server, "getSimilarSongs2", &[]).await, 10);
 });
 
-fixture_test!(genres_empty, |server, _pool| {
+fixture_test!(
+    get_genres_counts_distinct_tracks_and_albums,
+    |server, _pool| {
+        let res = alice(&server, "getGenres", &[]).await;
+        assert_eq!(res["status"], "ok");
+        // Ghost is carried only by the missing track 20; Rock's albums are 1 and 2 (6 has no present
+        // track), Pop's are 1 (second rank) and 3.
+        assert_eq!(
+            res["genres"]["genre"],
+            serde_json::json!([
+                {"songCount": 1, "albumCount": 1, "value": "Electronic"},
+                {"songCount": 1, "albumCount": 2, "value": "Pop"},
+                {"songCount": 1, "albumCount": 0, "value": "Post-Rock"},
+                {"songCount": 4, "albumCount": 2, "value": "Rock"},
+            ])
+        );
+        let xml = rest_xml(&server, "getGenres", &[("apiKey", FIXTURE_TOKEN)]).await;
+        assert!(
+            xml.contains(r#"<genre songCount="4" albumCount="2">Rock</genre>"#),
+            "{xml}"
+        );
+    }
+);
+
+fixture_test!(get_genres_sorted_by_name, |server, pool| {
+    sqlx::query(
+        "INSERT INTO genres (id, name, key) VALUES
+         ('00000000-0000-7000-8000-b00000000010', 'ambient', 'ambient'),
+         ('00000000-0000-7000-8000-b00000000011', 'Zydeco', 'zydeco')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for g in ["ambient", "Zydeco"] {
+        sqlx::query(
+            "INSERT INTO track_genres (track_id, genre_id, source, rank)
+             SELECT $1, id, 'file', 0 FROM genres WHERE name = $2",
+        )
+        .bind(track_id(7))
+        .bind(g)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
     let res = alice(&server, "getGenres", &[]).await;
-    assert_eq!(res["status"], "ok");
-    assert_eq!(res["genres"]["genre"], serde_json::json!([]));
+    let names: Vec<_> = res["genres"]["genre"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["value"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "ambient",
+            "Electronic",
+            "Pop",
+            "Post-Rock",
+            "Rock",
+            "Zydeco"
+        ]
+    );
 });
 
 /// Spec §13: one empty-query page of 500 songs over 10 000 tracks, a tenth of them starred.

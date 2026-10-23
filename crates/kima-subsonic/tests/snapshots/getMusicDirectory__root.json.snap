@@ -10,6 +10,7 @@ source: crates/kima-subsonic/tests/snapshots.rs
           "coverArt": "ar-00000000-0000-7000-8000-100000000001",
           "id": "00000000-0000-7000-8000-100000000001",
           "isDir": true,
+          "musicBrainzId": "b10bbbfc-cf9e-42e0-be17-e2c3e1d2600d",
           "parent": "1",
           "starred": "2026-01-01T04:06:00.000Z",
           "title": "The Beatles"

@@ -9,6 +9,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::browse::TrackRow;
+use crate::genres;
 use crate::stars::StarKind;
 
 #[derive(Debug, Clone, FromRow)]
@@ -19,6 +20,7 @@ pub struct ArtistItem {
     pub album_count: i64,
     pub starred_at: Option<OffsetDateTime>,
     pub rating: Option<i16>,
+    pub mbid: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -33,6 +35,9 @@ pub struct AlbumItem {
     pub duration_secs: i64,
     pub starred_at: Option<OffsetDateTime>,
     pub rating: Option<i16>,
+    pub release_mbid: Option<Uuid>,
+    /// The album's first effective genre, else the album artist's.
+    pub genre: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -45,11 +50,14 @@ pub struct SongItem {
     pub created_at: OffsetDateTime,
     pub starred_at: Option<OffsetDateTime>,
     pub rating: Option<i16>,
+    /// The track's first effective genre, else the album artist's. (The recording id is
+    /// `track.recording_mbid`.)
+    pub genre: Option<String>,
 }
 
 /// `$1` is the calling user in every query below.
 const ARTIST_SELECT: &str = "SELECT ar.id, ar.name, ar.sort_name,
-        count(DISTINCT al.id) AS album_count, s.starred_at, r.rating
+        count(DISTINCT al.id) AS album_count, s.starred_at, r.rating, ar.mbid
     FROM artists ar
     JOIN albums al ON al.artist_id = ar.id
     JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL
@@ -60,7 +68,12 @@ const ARTIST_GROUP: &str = "GROUP BY ar.id, s.starred_at, r.rating";
 const ALBUM_SELECT: &str = "SELECT al.id, al.title, al.year, al.created_at,
         ar.id AS artist_id, ar.name AS artist_name,
         count(t.id) AS song_count, COALESCE(sum(t.duration_secs), 0)::bigint AS duration_secs,
-        s.starred_at, r.rating
+        s.starred_at, r.rating, al.release_mbid,
+        COALESCE(
+            (SELECT g.name FROM album_genres_effective e JOIN genres g ON g.id = e.genre_id
+             WHERE e.album_id = al.id ORDER BY e.rank, g.name, g.id LIMIT 1),
+            (SELECT g.name FROM artist_genres_effective e JOIN genres g ON g.id = e.genre_id
+             WHERE e.artist_id = ar.id ORDER BY e.rank, g.name, g.id LIMIT 1)) AS genre
     FROM albums al
     JOIN artists ar ON ar.id = al.artist_id
     JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL
@@ -71,7 +84,12 @@ const ALBUM_GROUP: &str = "GROUP BY al.id, ar.id, s.starred_at, r.rating";
 const SONG_SELECT: &str = "SELECT t.id, t.title, t.artist_name, t.duration_secs, t.disc, t.track_no,
         t.codec, t.bitrate, t.year, al.id AS album_id, al.title AS album_title, al.year AS album_year,
         ar.id AS album_artist_id, ar.name AS album_artist_name, t.recording_mbid, t.isrc,
-        t.path, t.size, t.created_at, s.starred_at, r.rating
+        t.path, t.size, t.created_at, s.starred_at, r.rating,
+        COALESCE(
+            (SELECT g.name FROM track_genres_effective e JOIN genres g ON g.id = e.genre_id
+             WHERE e.track_id = t.id ORDER BY e.rank, g.name, g.id LIMIT 1),
+            (SELECT g.name FROM artist_genres_effective e JOIN genres g ON g.id = e.genre_id
+             WHERE e.artist_id = ar.id ORDER BY e.rank, g.name, g.id LIMIT 1)) AS genre
     FROM tracks t
     JOIN albums al ON al.id = t.album_id
     JOIN artists ar ON ar.id = al.artist_id
@@ -149,7 +167,16 @@ pub async fn track(pool: &PgPool, user: Uuid, id: Uuid) -> sqlx::Result<Option<S
         .await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `AND`-able condition: the entity (`$col`) has the genre whose key is bound at `$n`, among its
+/// effective genres of `$view`.
+fn has_genre(view: &str, col: &str, entity: &str, n: u8) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM {view} e JOIN genres g ON g.id = e.genre_id
+                 WHERE e.{col} = {entity} AND g.key = ${n})"
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlbumListKind {
     Random,
     Newest,
@@ -168,6 +195,8 @@ pub enum AlbumListKind {
         from: i32,
         to: i32,
     },
+    /// Albums with the genre among their effective genres (case-insensitive exact), by sort name.
+    ByGenre(String),
 }
 
 /// A page of albums for `getAlbumList2`.
@@ -182,6 +211,10 @@ pub async fn album_list(
         "JOIN (SELECT pt.album_id, count(*) AS plays, max(p.played_at) AS last_played
             FROM plays p JOIN tracks pt ON pt.id = p.track_id AND pt.missing_since IS NULL
             WHERE p.user_id = $1 GROUP BY pt.album_id) pc ON pc.album_id = al.id";
+    let genre = match &kind {
+        AlbumListKind::ByGenre(name) => Some(genres::genre_key(name)),
+        _ => None,
+    };
     // (extra join, where, extra group-by columns, order)
     let (join, filter, group, order) = match kind {
         AlbumListKind::Random => (String::new(), String::new(), "", "random()".to_owned()),
@@ -238,26 +271,36 @@ pub async fn album_list(
                 format!("al.year {dir}, al.sort_name ASC, al.id ASC"),
             )
         }
+        AlbumListKind::ByGenre(_) => (
+            String::new(),
+            format!(
+                "WHERE {}",
+                has_genre("album_genres_effective", "album_id", "al.id", 4)
+            ),
+            "",
+            "al.sort_name ASC, al.id ASC".to_owned(),
+        ),
     };
     // The joins have to come before WHERE, and ALBUM_SELECT ends in its last LEFT JOIN.
     let sql = format!(
         "{ALBUM_SELECT} {join} {filter} {ALBUM_GROUP}{group} ORDER BY {order} LIMIT $2 OFFSET $3"
     );
-    sqlx::query_as(&sql)
-        .bind(user)
-        .bind(size)
-        .bind(offset)
-        .fetch_all(pool)
-        .await
+    let query = sqlx::query_as(&sql).bind(user).bind(size).bind(offset);
+    match genre {
+        Some(key) => query.bind(key).fetch_all(pool).await,
+        None => query.fetch_all(pool).await,
+    }
 }
 
 /// Up to `size` random present tracks, optionally only those dated within the years
-/// (`coalesce(track year, album year)`).
+/// (`coalesce(track year, album year)`) and those with the genre among their effective track
+/// genres (case-insensitive exact).
 pub async fn random_tracks(
     pool: &PgPool,
     user: Uuid,
     size: i64,
     years: Option<(i32, i32)>,
+    genre: Option<&str>,
 ) -> sqlx::Result<Vec<SongItem>> {
     let years = years
         .map(|(a, b)| {
@@ -268,13 +311,72 @@ pub async fn random_tracks(
             )
         })
         .unwrap_or_default();
-    let sql =
-        format!("{SONG_SELECT} WHERE t.missing_since IS NULL {years} ORDER BY random() LIMIT $2");
+    let by_genre = genre
+        .map(|_| {
+            format!(
+                "AND {}",
+                has_genre("track_genres_effective", "track_id", "t.id", 3)
+            )
+        })
+        .unwrap_or_default();
+    let sql = format!(
+        "{SONG_SELECT} WHERE t.missing_since IS NULL {years} {by_genre} ORDER BY random() LIMIT $2"
+    );
+    let query = sqlx::query_as(&sql).bind(user).bind(size);
+    match genre {
+        Some(name) => query.bind(genres::genre_key(name)).fetch_all(pool).await,
+        None => query.fetch_all(pool).await,
+    }
+}
+
+/// A page of present tracks with the genre among their effective track genres
+/// (case-insensitive exact on `genres.key`), by lower-cased title, title, id.
+pub async fn songs_by_genre(
+    pool: &PgPool,
+    user: Uuid,
+    genre: &str,
+    count: i64,
+    offset: i64,
+) -> sqlx::Result<Vec<SongItem>> {
+    let sql = format!(
+        "{SONG_SELECT} WHERE t.missing_since IS NULL AND {}
+         ORDER BY lower(t.title) ASC, t.title ASC, t.id ASC LIMIT $3 OFFSET $4",
+        has_genre("track_genres_effective", "track_id", "t.id", 2)
+    );
     sqlx::query_as(&sql)
         .bind(user)
-        .bind(size)
+        .bind(genres::genre_key(genre))
+        .bind(count)
+        .bind(offset)
         .fetch_all(pool)
         .await
+}
+
+/// Every genre with a present track among its effective track genres, with the distinct present
+/// tracks and the distinct albums (with a present track) that carry it among their effective
+/// genres, by name.
+pub async fn genre_counts(pool: &PgPool) -> sqlx::Result<Vec<(String, i64, i64)>> {
+    let rows = sqlx::query!(
+        r#"SELECT g.name,
+               (SELECT count(DISTINCT t.id) FROM track_genres_effective e
+                 JOIN tracks t ON t.id = e.track_id AND t.missing_since IS NULL
+                 WHERE e.genre_id = g.id) AS "songs!",
+               (SELECT count(DISTINCT e.album_id) FROM album_genres_effective e
+                 WHERE e.genre_id = g.id
+                   AND EXISTS (SELECT 1 FROM tracks t
+                               WHERE t.album_id = e.album_id AND t.missing_since IS NULL)) AS "albums!"
+           FROM genres g
+           WHERE EXISTS (SELECT 1 FROM track_genres_effective e
+                         JOIN tracks t ON t.id = e.track_id AND t.missing_since IS NULL
+                         WHERE e.genre_id = g.id)
+           ORDER BY lower(g.name), g.name, g.id"#
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.name, r.songs, r.albums))
+        .collect())
 }
 
 /// The artist's songs, most played first (plays of all users), then by title. The name is matched

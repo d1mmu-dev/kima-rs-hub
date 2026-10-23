@@ -21,8 +21,12 @@ export interface SystemSettings {
     lidarrRemoveJunk: boolean;
     // Artwork & fingerprinting
     fanartEnabled: boolean;
-    fanartApiKey: string;
+    /** "" from the server; null asks it to remove the stored key. */
+    fanartApiKey: string | null;
     acoustidApiKey: string | null;
+    /** A key is stored on the server; its value is never returned. */
+    hasFanartApiKey: boolean;
+    hasAcoustidApiKey: boolean;
     // Audiobookshelf
     audiobookshelfEnabled: boolean;
     audiobookshelfUrl: string;
@@ -47,6 +51,8 @@ export interface SystemSettings {
     maxCacheSizeMb: number;
     autoSync: boolean;
     autoEnrichMetadata: boolean;
+    /** KIMA_IDENTIFY=off on the server: the setting cannot be turned on. */
+    autoEnrichMetadataLocked: boolean;
     soulseekConcurrentDownloads: number;
     // Download Preferences
     downloadSource: "soulseek" | "lidarr";

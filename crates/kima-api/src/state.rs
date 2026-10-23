@@ -1,6 +1,7 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use kima_core::auth::JwtKeys;
 use kima_core::cipher::Cipher;
@@ -8,6 +9,7 @@ use kima_core::events::EventBus;
 use kima_core::identify::IdentifySwitch;
 use kima_db::PgPool;
 use kima_db::settings_kv::SettingsCache;
+use kima_ident::IdentCtx;
 use kima_library::scan::LibraryRoot;
 use kima_library::transcode::Transcoder;
 use kima_library::watch::{IgnoreSet, SharedStatus, WatchStatus};
@@ -83,6 +85,12 @@ pub struct AppState {
     /// `FANART_API_KEY`, for enrichment when no enabled key is stored (spec §15.1). A secret:
     /// `AppState` has no `Debug`, and nothing logs or returns it.
     pub fanart_env_key: Option<String>,
+    /// The identification machinery the process runs, for the enrichment controls. `None` in
+    /// tests, where [`AppState::ident_ctx`] builds one from the other fields.
+    pub ident: Option<IdentCtx>,
+    /// `GET /api/enrichment/progress`, kept for 5 s (upstream memoises it); a control that
+    /// changes the counts drops it.
+    pub progress_memo: Arc<Mutex<Option<(Instant, serde_json::Value)>>>,
     /// Failed password sign-ins, per (client IP, username).
     pub login_limit: Arc<LoginLimiter>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
@@ -117,6 +125,8 @@ impl AppState {
             cipher,
             fpcalc: false,
             fanart_env_key: None,
+            ident: None,
+            progress_memo: Arc::new(Mutex::new(None)),
             login_limit: Arc::new(LoginLimiter::new()),
             password_permits: Arc::new(AtomicU64::new(0)),
         }
@@ -151,6 +161,51 @@ impl AppState {
     pub fn with_fanart_env_key(mut self, key: Option<String>) -> Self {
         self.fanart_env_key = key;
         self
+    }
+
+    /// The process's identification context, so the enrichment controls act with its config.
+    pub fn with_ident(mut self, ident: IdentCtx) -> Self {
+        self.ident = Some(ident);
+        self
+    }
+
+    /// The identification context: the one the process runs, else one built from this state.
+    pub fn ident_ctx(&self) -> IdentCtx {
+        if let Some(ctx) = &self.ident {
+            return ctx.clone();
+        }
+        let data_dir = self.data_dir.clone().unwrap_or_default();
+        IdentCtx {
+            pool: self.pool.clone(),
+            net: self.net.clone(),
+            cipher: self.cipher.clone(),
+            events: self.events.clone(),
+            library: kima_library::scan::LibraryCtx {
+                pool: self.pool.clone(),
+                root: self
+                    .library_root
+                    .clone()
+                    .unwrap_or_else(|| LibraryRoot::new(PathBuf::new())),
+                events: self.events.clone(),
+                data_dir,
+                ignore: self.library.ignore.clone(),
+            },
+            settings: self.settings.clone(),
+            config: kima_ident::IdentConfig {
+                fingerprinting: self.fpcalc,
+                fingerprint_workers: 1,
+                acoustid_disabled: false,
+                acoustid_env_key: None,
+                fanart_env_key: self.fanart_env_key.clone(),
+                artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
+            },
+            last_cycle: Default::default(),
+        }
+    }
+
+    /// Drops the memoised progress answer.
+    pub fn invalidate_progress(&self) {
+        *self.progress_memo.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     pub fn with_public_url(mut self, public_url: Option<String>) -> Self {

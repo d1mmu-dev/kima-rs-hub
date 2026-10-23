@@ -130,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
     info!(config = ?ident_ctx.config, "identification");
     let mut registry = kima_server::jobs::Registry::new();
     registry.register_library(library_ctx.clone());
+    let state = state.with_ident(ident_ctx.clone());
     registry.register_enrich(ident_ctx);
     // Before any worker starts: recover library jobs a dead process left running, then queue
     // the safety-net reconcile (spec §4.4).

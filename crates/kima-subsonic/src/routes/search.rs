@@ -1,4 +1,4 @@
-//! Search, random and top songs, and the genre and similar-song stubs (spec §4.3 #16-#24).
+//! Search, random and top songs, genres, and the similar-song stubs (spec §4.3 #16-#24).
 
 use axum::Router;
 use axum::extract::State;
@@ -209,21 +209,35 @@ async fn get_random_songs(
         (None, None) => None,
         (from, to) => Some((from.unwrap_or(i32::MIN), to.unwrap_or(i32::MAX))),
     };
-    // Genres arrive in M3; until then no track has one.
-    let songs = if params.get("genre").is_some_and(|g| !g.is_empty()) {
-        Vec::new()
-    } else {
-        subsonic::random_tracks(&app.pool, user.user.id, size, years).await?
-    };
+    let genre = params.get("genre").filter(|g| !g.trim().is_empty());
+    let songs = subsonic::random_tracks(&app.pool, user.user.id, size, years, genre).await?;
     Ok(Answer::node(
         Node::new("randomSongs").list("song", songs.iter().map(map::song).collect()),
     ))
 }
 
-async fn get_songs_by_genre(_user: SubsonicUser, params: Params) -> Result<Answer, SubsonicError> {
-    params.required("genre")?;
+/// Present tracks carrying the genre among their effective track genres (case-insensitive exact,
+/// D-114).
+async fn get_songs_by_genre(
+    user: SubsonicUser,
+    State(app): State<AppState>,
+    params: Params,
+) -> Result<Answer, SubsonicError> {
+    let genre = params.required("genre")?;
+    let wanted = params
+        .paging::<i64>("count")
+        .unwrap_or(50)
+        .clamp(1, MAX_PAGE);
+    let songs = subsonic::songs_by_genre(
+        &app.pool,
+        user.user.id,
+        genre,
+        wanted,
+        offset(&params, "offset"),
+    )
+    .await?;
     Ok(Answer::node(
-        Node::new("songsByGenre").list("song", Vec::new()),
+        Node::new("songsByGenre").list("song", songs.iter().map(map::song).collect()),
     ))
 }
 
@@ -257,6 +271,23 @@ async fn get_similar_songs2(_user: SubsonicUser, params: Params) -> Result<Answe
     ))
 }
 
-async fn get_genres(_user: SubsonicUser) -> Result<Answer, SubsonicError> {
-    Ok(Answer::node(Node::new("genres").list("genre", Vec::new())))
+async fn get_genres(
+    _user: SubsonicUser,
+    State(app): State<AppState>,
+) -> Result<Answer, SubsonicError> {
+    let genres = subsonic::genre_counts(&app.pool).await?;
+    Ok(Answer::node(
+        Node::new("genres").list(
+            "genre",
+            genres
+                .into_iter()
+                .map(|(name, songs, albums)| {
+                    Node::new("genre")
+                        .attr("songCount", songs)
+                        .attr("albumCount", albums)
+                        .text(name)
+                })
+                .collect(),
+        ),
+    ))
 }

@@ -603,12 +603,12 @@ fixture_test!(album_list_each_kind, |pool| {
 });
 
 fixture_test!(random_and_top_tracks, |pool| {
-    let all = subsonic::random_tracks(&pool, ALICE, 100, None)
+    let all = subsonic::random_tracks(&pool, ALICE, 100, None, None)
         .await
         .unwrap();
     assert_eq!(all.len(), 19); // not the missing one
     assert_eq!(
-        subsonic::random_tracks(&pool, ALICE, 5, None)
+        subsonic::random_tracks(&pool, ALICE, 5, None, None)
             .await
             .unwrap()
             .len(),
@@ -619,7 +619,7 @@ fixture_test!(random_and_top_tracks, |pool| {
         let pool = pool.clone();
         async move {
             let mut got = ids(
-                &subsonic::random_tracks(&pool, ALICE, 100, Some((from, to)))
+                &subsonic::random_tracks(&pool, ALICE, 100, Some((from, to)), None)
                     .await
                     .unwrap(),
                 |s| s.track.id,

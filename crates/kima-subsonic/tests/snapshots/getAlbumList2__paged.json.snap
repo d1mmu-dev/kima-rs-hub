@@ -23,6 +23,7 @@ source: crates/kima-subsonic/tests/snapshots.rs
           "coverArt": "00000000-0000-7000-8000-200000000003",
           "created": "2026-01-01T00:03:00.000Z",
           "duration": 671,
+          "genre": "Pop",
           "id": "00000000-0000-7000-8000-200000000003",
           "name": "La Roux",
           "songCount": 3,

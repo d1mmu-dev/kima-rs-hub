@@ -265,7 +265,8 @@ fixture_test!(get_album_song_order, |server, _pool| {
     assert_eq!(first["userRating"], 5);
     assert_eq!(first["bitRate"], 900);
     assert_eq!(first["contentType"], "audio/flac");
-    assert!(first.get("path").is_none() && first.get("genre").is_none());
+    assert!(first.get("path").is_none());
+    assert_eq!(first["genre"], "Rock");
     // Another user's stars do not show.
     let res = admin(&server, "getAlbum", &[("id", &album_id(1).to_string())]).await;
     let song = &res["album"]["song"];
@@ -440,15 +441,73 @@ fixture_test!(album_list2_size_capped_500, |server, pool| {
     assert_eq!(junk["albumList2"], res["albumList2"]);
 });
 
-fixture_test!(album_list2_by_genre_empty, |server, _pool| {
+fixture_test!(album_list2_by_genre, |server, _pool| {
+    let names = |res: &Value| -> Vec<String> {
+        res["albumList2"]["album"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // Effective album genres, ordered by sort name. Empty Stage (6) carries Rock but has no
+    // present track.
+    for genre in ["Rock", "rock", " ROCK"] {
+        let res = alice(
+            &server,
+            "getAlbumList2",
+            &[("type", "byGenre"), ("genre", genre)],
+        )
+        .await;
+        assert_eq!(res["status"], "ok");
+        assert_eq!(names(&res), ["Abbey Road", "White Album"], "{genre}");
+        assert_eq!(res["albumList2"]["album"][0]["genre"], "Rock");
+    }
     let res = alice(
         &server,
         "getAlbumList2",
-        &[("type", "byGenre"), ("genre", "Rock")],
+        &[("type", "byGenre"), ("genre", "pop")],
     )
     .await;
-    assert_eq!(res["status"], "ok");
-    assert_eq!(res["albumList2"]["album"], json!([]));
+    assert_eq!(names(&res), ["Abbey Road", "La Roux"]);
+    // No substring match, and an unused genre is an empty list.
+    for genre in ["ock", "Post-Rock", "Nope"] {
+        let res = alice(
+            &server,
+            "getAlbumList2",
+            &[("type", "byGenre"), ("genre", genre)],
+        )
+        .await;
+        assert_eq!(res["status"], "ok");
+        assert_eq!(res["albumList2"]["album"], json!([]), "{genre}");
+    }
+    // Paging.
+    let res = alice(
+        &server,
+        "getAlbumList2",
+        &[
+            ("type", "byGenre"),
+            ("genre", "rock"),
+            ("size", "1"),
+            ("offset", "1"),
+        ],
+    )
+    .await;
+    assert_eq!(names(&res), ["White Album"]);
+    // The legacy folder list takes it too.
+    let res = alice(
+        &server,
+        "getAlbumList",
+        &[("type", "byGenre"), ("genre", "pop")],
+    )
+    .await;
+    assert_eq!(res["albumList"]["album"].as_array().unwrap().len(), 2);
+});
+
+fixture_test!(album_list2_by_genre_missing_10, |server, _pool| {
+    let res = alice(&server, "getAlbumList2", &[("type", "byGenre")]).await;
+    assert_failed(&res, 10);
+    assert_eq!(res["error"]["message"], "byGenre requires genre");
     let xml = rest_xml(
         &server,
         "getAlbumList2",
@@ -456,7 +515,7 @@ fixture_test!(album_list2_by_genre_empty, |server, _pool| {
     )
     .await;
     assert!(
-        xml.contains("<albumList2/>") || xml.contains("<albumList2></albumList2>"),
+        xml.contains(r#"code="10""#) && xml.contains("byGenre requires genre"),
         "{xml}"
     );
 });

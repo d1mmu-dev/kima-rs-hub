@@ -4,7 +4,28 @@ source: crates/kima-subsonic/tests/snapshots.rs
 {
   "subsonic-response": {
     "genres": {
-      "genre": []
+      "genre": [
+        {
+          "albumCount": 1,
+          "songCount": 1,
+          "value": "Electronic"
+        },
+        {
+          "albumCount": 2,
+          "songCount": 1,
+          "value": "Pop"
+        },
+        {
+          "albumCount": 0,
+          "songCount": 1,
+          "value": "Post-Rock"
+        },
+        {
+          "albumCount": 2,
+          "songCount": 4,
+          "value": "Rock"
+        }
+      ]
     },
     "openSubsonic": true,
     "serverVersion": "[redacted]",

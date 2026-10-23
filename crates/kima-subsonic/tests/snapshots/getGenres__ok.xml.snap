@@ -3,5 +3,10 @@ source: crates/kima-subsonic/tests/snapshots.rs
 ---
 <?xml version="1.0" encoding="UTF-8"?>
 <subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
-  <genres/>
+  <genres>
+    <genre songCount="1" albumCount="1">Electronic</genre>
+    <genre songCount="1" albumCount="2">Pop</genre>
+    <genre songCount="1" albumCount="0">Post-Rock</genre>
+    <genre songCount="4" albumCount="2">Rock</genre>
+  </genres>
 </subsonic-response>

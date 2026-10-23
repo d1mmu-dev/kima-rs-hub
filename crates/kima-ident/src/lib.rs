@@ -11,6 +11,8 @@ mod ctx;
 pub mod deezer;
 pub mod fanart;
 pub mod listenbrainz;
+pub mod lrclib;
+pub mod lyrics;
 pub mod matching;
 mod mbid;
 pub mod musicbrainz;

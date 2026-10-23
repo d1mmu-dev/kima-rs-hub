@@ -1,4 +1,4 @@
-//! The library browse API: artists, albums, tracks, shuffle, recently added, scan.
+//! The library browse API: artists, albums, tracks, lyrics, shuffle, recently added, scan.
 //!
 //! Responses carry the keys the forked frontend reads. Fields with no M1 data (MusicBrainz ids,
 //! bios, genres, play counts, user overrides) are present as null, empty or 0.
@@ -15,6 +15,7 @@ mod albums;
 pub(super) mod artists;
 mod attention;
 mod genres;
+mod lyrics;
 mod organizer;
 mod scan;
 mod stream;
@@ -28,6 +29,7 @@ pub fn routes() -> Router<AppState> {
         .merge(scan::routes())
         .merge(attention::routes())
         .merge(genres::routes())
+        .merge(lyrics::routes())
         .merge(organizer::routes())
         .merge(stream::routes())
 }

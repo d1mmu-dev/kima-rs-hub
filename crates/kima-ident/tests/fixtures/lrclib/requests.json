@@ -1,0 +1,24 @@
+[
+ {
+  "host": "lrclib",
+  "method": "GET",
+  "path": "/get",
+  "query": [
+   ["track_name", "Amazing Grace"],
+   ["artist_name", "Judy Collins"],
+   ["album_name", "Whales & Nightingales"],
+   ["duration", "243"]
+  ]
+ },
+ {
+  "host": "lrclib",
+  "method": "GET",
+  "path": "/get",
+  "query": [
+   ["track_name", "No Such Song"],
+   ["artist_name", "Nobody In Particular"],
+   ["album_name", "Nothing Here"],
+   ["duration", "200"]
+  ]
+ }
+]

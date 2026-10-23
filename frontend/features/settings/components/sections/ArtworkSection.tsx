@@ -11,7 +11,24 @@ interface ArtworkSectionProps {
     isTesting: boolean;
 }
 
+const SAVED_PLACEHOLDER = "Saved — type to replace";
+
+/** The stored key's Remove link; `null` in the settings means it was removed and awaits a save. */
+function RemoveLink({ onClick }: { onClick: () => void }) {
+    return (
+        <button
+            type="button"
+            onClick={onClick}
+            className="ml-3 text-xs text-[var(--text-muted)] hover:text-white underline transition-colors"
+        >
+            Remove
+        </button>
+    );
+}
+
 export function ArtworkSection({ settings, onUpdate, onTest, isTesting }: ArtworkSectionProps) {
+    const fanartSaved = settings.hasFanartApiKey && settings.fanartApiKey !== null;
+    const acoustidSaved = settings.hasAcoustidApiKey && settings.acoustidApiKey !== null;
     const fanartTest = useConnectionTest(() => onTest("fanart"), { connected: () => "Connected" });
 
     return (
@@ -35,17 +52,20 @@ export function ArtworkSection({ settings, onUpdate, onTest, isTesting }: Artwor
             {settings.fanartEnabled && (
                 <>
                     <SettingsRow label="API Key">
-                        <SettingsInput
-                            type="password"
-                            value={settings.fanartApiKey}
-                            onChange={(v) => onUpdate({ fanartApiKey: v })}
-                            placeholder="Enter Fanart.tv API key"
-                            className="w-64"
-                        />
+                        <div className="flex items-center">
+                            <SettingsInput
+                                type="password"
+                                value={settings.fanartApiKey ?? ""}
+                                onChange={(v) => onUpdate({ fanartApiKey: v })}
+                                placeholder={fanartSaved ? SAVED_PLACEHOLDER : "Enter Fanart.tv API key"}
+                                className="w-64"
+                            />
+                            {fanartSaved && <RemoveLink onClick={() => onUpdate({ fanartApiKey: null })} />}
+                        </div>
                     </SettingsRow>
 
                     <div className="pt-2">
-                        <ConnectionTestButton connection={fanartTest} disabled={isTesting || !settings.fanartApiKey} />
+                        <ConnectionTestButton connection={fanartTest} disabled={isTesting || !(settings.fanartApiKey || fanartSaved)} />
                     </div>
                 </>
             )}
@@ -58,13 +78,16 @@ export function ArtworkSection({ settings, onUpdate, onTest, isTesting }: Artwor
                 </div>
 
                 <SettingsRow label="AcoustID API Key (Optional)">
-                    <SettingsInput
-                        type="password"
-                        value={settings.acoustidApiKey || ""}
-                        onChange={(v) => onUpdate({ acoustidApiKey: v })}
-                        placeholder="Optional: Your AcoustID API key"
-                        className="w-64"
-                    />
+                    <div className="flex items-center">
+                        <SettingsInput
+                            type="password"
+                            value={settings.acoustidApiKey || ""}
+                            onChange={(v) => onUpdate({ acoustidApiKey: v })}
+                            placeholder={acoustidSaved ? SAVED_PLACEHOLDER : "Optional: Your AcoustID API key"}
+                            className="w-64"
+                        />
+                        {acoustidSaved && <RemoveLink onClick={() => onUpdate({ acoustidApiKey: null })} />}
+                    </div>
                 </SettingsRow>
             </div>
         </SettingsSection>

@@ -16,5 +16,6 @@ export default defineConfig({
         { name: "smoke", testMatch: "smoke.spec.ts" },
         { name: "library", testMatch: "library.spec.ts", dependencies: ["smoke"] },
         { name: "subsonic", testMatch: "subsonic.spec.ts", dependencies: ["smoke"] },
+        { name: "enrichment", testMatch: "enrichment.spec.ts", dependencies: ["smoke"] },
     ],
 });

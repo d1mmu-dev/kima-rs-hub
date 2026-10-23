@@ -987,11 +987,16 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
 
                 <SettingsRow
                     label="Auto enrich metadata"
-                    description="Automatically enrich metadata for new content"
+                    description={
+                        settings.autoEnrichMetadataLocked
+                            ? "Turned off on the server (KIMA_IDENTIFY=off)"
+                            : "Look up MusicBrainz, AcoustID, artist info and lyrics online"
+                    }
                     htmlFor="auto-enrich"
                 >
                     <SettingsToggle
                         id="auto-enrich"
+                        disabled={settings.autoEnrichMetadataLocked}
                         checked={settings.autoEnrichMetadata}
                         onChange={(checked) =>
                             onUpdate({ autoEnrichMetadata: checked })

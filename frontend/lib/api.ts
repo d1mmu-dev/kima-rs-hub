@@ -1008,6 +1008,7 @@ class ApiClient {
         musicCNN: boolean;
         vibeEmbeddings: boolean;
         audiobookshelfEnabled: boolean;
+        fpcalc: boolean;
         library?: boolean;
         podcasts?: boolean;
         audiobooks?: boolean;
@@ -1101,10 +1102,11 @@ class ApiClient {
         });
     }
 
-    async testFanart(apiKey: string) {
+    /** An empty key is left out, so the server tests the stored one. */
+    async testFanart(apiKey?: string | null) {
         return this.request<ServiceTestResult>("/system-settings/test-fanart", {
             method: "POST",
-            body: JSON.stringify({ fanartApiKey: apiKey }),
+            body: JSON.stringify(apiKey?.trim() ? { fanartApiKey: apiKey } : {}),
         });
     }
 

@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { ConnectionTestResult, SystemSettings } from "../types";
+import { systemSettingsBody } from "../systemSettingsBody";
 
 const defaultSystemSettings: SystemSettings = {
     lidarrEnabled: true,
@@ -10,6 +11,8 @@ const defaultSystemSettings: SystemSettings = {
     fanartEnabled: false,
     fanartApiKey: "",
     acoustidApiKey: "",
+    hasFanartApiKey: false,
+    hasAcoustidApiKey: false,
     audiobookshelfEnabled: false,
     audiobookshelfUrl: "http://localhost:13378",
     audiobookshelfApiKey: "",
@@ -27,6 +30,7 @@ const defaultSystemSettings: SystemSettings = {
     maxCacheSizeMb: 10240,
     autoSync: true,
     autoEnrichMetadata: true,
+    autoEnrichMetadataLocked: false,
     soulseekConcurrentDownloads: 4,
     lidarrQualityProfileId: null,
     lidarrMetadataProfileId: null,
@@ -91,7 +95,7 @@ export function useSystemSettings() {
     };
 
     const saveSystemSettings = async (settingsToSave: SystemSettings) => {
-        await api.updateSystemSettings(settingsToSave);
+        await api.updateSystemSettings(systemSettingsBody(settingsToSave));
         await api.updateSettings({ maxCacheSizeMb: settingsToSave.maxCacheSizeMb });
     };
 

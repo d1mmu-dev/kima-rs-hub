@@ -7,6 +7,7 @@ use crate::state::AppState;
 mod api_keys;
 mod auth;
 mod cover_art;
+mod enrichment;
 mod events;
 mod health;
 mod library;
@@ -31,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .merge(stubs::routes())
         .merge(system_settings::routes())
         .merge(events::routes())
+        .merge(enrichment::routes())
         .merge(cover_art::routes())
         .merge(library_watch::routes())
         .merge(library::routes())

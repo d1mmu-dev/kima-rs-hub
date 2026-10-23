@@ -1,0 +1,38 @@
+[
+ {
+  "method": "GET",
+  "url": "/get?track_name=Amazing%20Grace&artist_name=Judy%20Collins&album_name=Whales%20%26%20Nightingales&duration=243",
+  "status": 200,
+  "body": {
+   "id": 3396226,
+   "name": "Amazing Grace",
+   "trackName": "Amazing Grace",
+   "artistName": "Judy Collins",
+   "albumName": "Whales & Nightingales",
+   "duration": 243.0,
+   "instrumental": false,
+   "plainLyrics": "Amazing grace! How sweet the sound\nThat saved a wretch like me!\nI once was lost, but now am found;\nWas blind, but now I see.",
+   "syncedLyrics": "[00:05.10] Amazing grace! How sweet the sound\n[00:17.42] That saved a wretch like me!\n[00:29.80] I once was lost, but now am found;\n[00:42.05] Was blind, but now I see.\n[00:54.30] "
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/get?track_name=No%20Such%20Song&artist_name=Nobody%20In%20Particular&album_name=Nothing%20Here&duration=200",
+  "status": 404,
+  "body": {
+   "code": 404,
+   "name": "TrackNotFound",
+   "message": "Failed to find specified track"
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/get?track_name=Server%20Trouble&artist_name=Nobody%20In%20Particular&album_name=Nothing%20Here&duration=200",
+  "status": 500,
+  "body": {
+   "code": 500,
+   "name": "InternalServerError",
+   "message": "Internal server error"
+  }
+ }
+]

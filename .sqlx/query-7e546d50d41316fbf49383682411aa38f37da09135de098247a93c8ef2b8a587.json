@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT plain_lyrics AS plain, synced_lyrics AS synced, source, fetched_at\n           FROM track_lyrics WHERE track_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "plain",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "synced",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "fetched_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "7e546d50d41316fbf49383682411aa38f37da09135de098247a93c8ef2b8a587"
+}

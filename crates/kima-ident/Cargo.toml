@@ -34,3 +34,4 @@ kima-net = { workspace = true, features = ["testing"] }
 kima-test-support.workspace = true
 tempfile.workspace = true
 image.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

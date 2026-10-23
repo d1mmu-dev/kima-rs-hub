@@ -70,7 +70,7 @@ const ALBUM_GROUP: &str = "GROUP BY al.id, ar.id, s.starred_at, r.rating";
 
 const SONG_SELECT: &str = "SELECT t.id, t.title, t.artist_name, t.duration_secs, t.disc, t.track_no,
         t.codec, t.bitrate, t.year, al.id AS album_id, al.title AS album_title, al.year AS album_year,
-        ar.id AS album_artist_id, ar.name AS album_artist_name,
+        ar.id AS album_artist_id, ar.name AS album_artist_name, t.recording_mbid, t.isrc,
         t.path, t.size, t.created_at, s.starred_at, r.rating
     FROM tracks t
     JOIN albums al ON al.id = t.album_id

@@ -3,7 +3,7 @@
 
 use sqlx::PgPool;
 
-use crate::browse::{ALBUM_SELECT, AlbumRow, ArtistRow, TRACK_SELECT, TrackRow};
+use crate::browse::{ALBUM_SELECT, ARTIST_COLUMNS, AlbumRow, ArtistRow, TRACK_SELECT, TrackRow};
 
 /// Turns user text into a prefix tsquery string: `websearch_to_tsquery('simple', unaccent(q))`
 /// with `:*` on the last term when it is a plain lexeme. `None` when the text has no searchable term.
@@ -27,21 +27,23 @@ pub async fn artists(
     limit: i64,
     offset: i64,
 ) -> sqlx::Result<Vec<ArtistRow>> {
-    sqlx::query_as::<_, ArtistRow>(
-        "SELECT ar.id, ar.name, count(DISTINCT al.id) AS album_count, count(t.id) AS track_count
+    let sql = format!(
+        "SELECT ar.id, ar.name, count(DISTINCT al.id) AS album_count, count(t.id) AS track_count,
+             {ARTIST_COLUMNS}
          FROM artists ar
          JOIN albums al ON al.artist_id = ar.id
          JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL
          WHERE ar.search @@ $1::tsquery
          GROUP BY ar.id
          ORDER BY ts_rank(ar.search, $1::tsquery) DESC, lower(ar.name) ASC, ar.id ASC
-         LIMIT $2 OFFSET $3",
-    )
-    .bind(query)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
+         LIMIT $2 OFFSET $3"
+    );
+    sqlx::query_as::<_, ArtistRow>(&sql)
+        .bind(query)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn albums(

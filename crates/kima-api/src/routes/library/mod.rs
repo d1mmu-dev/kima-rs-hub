@@ -1,7 +1,9 @@
 //! The library browse API: artists, albums, tracks, lyrics, shuffle, recently added, scan.
 //!
-//! Responses carry the keys the forked frontend reads. Fields with no M1 data (MusicBrainz ids,
-//! bios, genres, play counts, user overrides) are present as null, empty or 0.
+//! Responses carry the keys the forked frontend reads. Since M3 they carry what identification
+//! and the MetadataEditor stored (MusicBrainz ids, bios, images, genres, overrides; spec §16.1),
+//! read from the database only: a page view never makes a request (spec §12.8). Fields with no
+//! data yet (play counts, top tracks) are present as null, empty or 0.
 
 use axum::Router;
 use kima_db::browse::{AlbumRow, TrackRow};
@@ -105,6 +107,8 @@ pub(super) fn track_json(t: &TrackRow) -> Value {
         "codec": t.codec,
         "bitrate": t.bitrate,
         "audioFeatures": null,
+        "recordingMbid": t.recording_mbid,
+        "isrc": t.isrc,
         "albumId": t.album_id,
         "artist": { "id": t.album_artist_id, "name": t.artist_name },
         "album": {
@@ -136,16 +140,18 @@ pub(super) fn album_json(a: &AlbumRow) -> Value {
         "playCount": 0,
         "owned": true,
         "type": null,
-        "mbid": null,
-        "rgMbid": null,
+        "mbid": a.release_mbid,
+        "rgMbid": a.release_group_mbid,
+        "label": a.label,
+        // Effective genres are read for the album page only (`albums::detail`).
         "genres": [],
         "location": "LIBRARY",
         "lastSynced": a.created_at.format(&time::format_description::well_known::Rfc3339).ok(),
-        "displayTitle": null,
-        "displayYear": null,
+        "displayTitle": a.display_title,
+        "displayYear": a.display_year,
         "userCoverUrl": null,
-        "userGenres": [],
-        "hasUserOverrides": false,
+        "userGenres": a.user_genres,
+        "hasUserOverrides": a.has_user_overrides(),
         "missingTracks": [],
     })
 }

@@ -13,13 +13,49 @@ pub enum Sort {
     Recent,
 }
 
+/// An artist as the browse API shows it. Every query that builds one selects
+/// [`ARTIST_COLUMNS`]; only the detail query adds the long fields (`bio`, `user_bio`,
+/// `similar`), which default to empty elsewhere.
 #[derive(Debug, Clone, FromRow)]
 pub struct ArtistRow {
     pub id: Uuid,
     pub name: String,
     pub album_count: i64,
     pub track_count: i64,
+    pub mbid: Option<Uuid>,
+    /// The Wikipedia summary (upstream `summary`). Detail only.
+    #[sqlx(default)]
+    pub bio: Option<String>,
+    /// The MetadataEditor's bio (upstream `userSummary`). Detail only.
+    #[sqlx(default)]
+    pub user_bio: Option<String>,
+    pub display_name: Option<String>,
+    /// Whether a stored image exists (`image_path` set); served by the cover route by artist id.
+    pub has_image: bool,
+    /// Whether the stored image came from the MetadataEditor.
+    pub user_image: bool,
+    pub user_genres: Vec<String>,
+    /// `artists."similar"` as stored, `[{name, mbid, match}]`. Detail only.
+    #[sqlx(default)]
+    pub similar: Option<serde_json::Value>,
 }
+
+impl ArtistRow {
+    /// Any MetadataEditor override is set (spec §16.3). Needs `user_bio`, so only a row from
+    /// [`artist`] answers it fully.
+    pub fn has_user_overrides(&self) -> bool {
+        self.display_name.is_some()
+            || self.user_bio.is_some()
+            || !self.user_genres.is_empty()
+            || self.user_image
+    }
+}
+
+/// The [`ArtistRow`] columns past the counts, for a query over `artists ar` grouped by `ar.id`.
+pub(crate) const ARTIST_COLUMNS: &str = "ar.mbid, ar.display_name,
+        (ar.image_path IS NOT NULL) AS has_image,
+        (ar.image_path IS NOT NULL AND ar.image_source = 'user') AS user_image,
+        COALESCE(ar.user_genres, '{}') AS user_genres";
 
 #[derive(Debug, Clone, FromRow)]
 pub struct AlbumRow {
@@ -32,6 +68,24 @@ pub struct AlbumRow {
     pub artist_name: String,
     pub track_count: i64,
     pub duration_secs: i64,
+    pub release_mbid: Option<Uuid>,
+    pub release_group_mbid: Option<Uuid>,
+    pub label: Option<String>,
+    pub display_title: Option<String>,
+    pub display_year: Option<i32>,
+    pub user_genres: Vec<String>,
+    /// Whether the stored cover came from the MetadataEditor.
+    pub user_image: bool,
+}
+
+impl AlbumRow {
+    /// Any MetadataEditor override is set (spec §16.3).
+    pub fn has_user_overrides(&self) -> bool {
+        self.display_title.is_some()
+            || self.display_year.is_some()
+            || !self.user_genres.is_empty()
+            || self.user_image
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -50,11 +104,13 @@ pub struct TrackRow {
     pub album_year: Option<i32>,
     pub album_artist_id: Uuid,
     pub album_artist_name: String,
+    pub recording_mbid: Option<Uuid>,
+    pub isrc: Option<String>,
 }
 
 pub(crate) const TRACK_SELECT: &str = "SELECT t.id, t.title, t.artist_name, t.duration_secs, t.disc, t.track_no,
         t.codec, t.bitrate, t.year, al.id AS album_id, al.title AS album_title, al.year AS album_year,
-        ar.id AS album_artist_id, ar.name AS album_artist_name
+        ar.id AS album_artist_id, ar.name AS album_artist_name, t.recording_mbid, t.isrc
     FROM tracks t
     JOIN albums al ON al.id = t.album_id
     JOIN artists ar ON ar.id = al.artist_id
@@ -63,7 +119,10 @@ pub(crate) const TRACK_SELECT: &str = "SELECT t.id, t.title, t.artist_name, t.du
 pub(crate) const ALBUM_SELECT: &str =
     "SELECT al.id, al.title, al.year, al.is_compilation, al.created_at,
         ar.id AS artist_id, ar.name AS artist_name,
-        count(t.id) AS track_count, COALESCE(sum(t.duration_secs), 0)::bigint AS duration_secs
+        count(t.id) AS track_count, COALESCE(sum(t.duration_secs), 0)::bigint AS duration_secs,
+        al.release_mbid, al.release_group_mbid, al.label, al.display_title, al.display_year,
+        COALESCE(al.user_genres, '{}') AS user_genres,
+        (al.image_path IS NOT NULL AND al.image_source = 'user') AS user_image
     FROM albums al
     JOIN artists ar ON ar.id = al.artist_id
     JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL";
@@ -93,7 +152,8 @@ pub async fn artists(
         Sort::Recent => "track_count DESC, lower(ar.name) ASC, ar.id ASC",
     };
     let sql = format!(
-        "SELECT ar.id, ar.name, count(DISTINCT al.id) AS album_count, count(t.id) AS track_count
+        "SELECT ar.id, ar.name, count(DISTINCT al.id) AS album_count, count(t.id) AS track_count,
+             {ARTIST_COLUMNS}
          FROM artists ar
          JOIN albums al ON al.artist_id = ar.id
          JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL
@@ -120,18 +180,21 @@ pub async fn artists(
     Ok((rows, total))
 }
 
+/// One artist with its long fields (`bio`, `user_bio`, `similar`).
 pub async fn artist(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<ArtistRow>> {
-    sqlx::query_as::<_, ArtistRow>(
-        "SELECT ar.id, ar.name, count(DISTINCT al.id) AS album_count, count(t.id) AS track_count
+    let sql = format!(
+        "SELECT ar.id, ar.name, count(DISTINCT al.id) AS album_count, count(t.id) AS track_count,
+             {ARTIST_COLUMNS}, ar.bio, ar.user_bio, ar.\"similar\"
          FROM artists ar
          JOIN albums al ON al.artist_id = ar.id
          JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL
          WHERE ar.id = $1
-         GROUP BY ar.id",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+         GROUP BY ar.id"
+    );
+    sqlx::query_as::<_, ArtistRow>(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await
 }
 
 /// An artist's albums, oldest year first (no year last), then by title.

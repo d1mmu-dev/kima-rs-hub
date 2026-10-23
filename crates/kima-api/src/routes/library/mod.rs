@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
-mod albums;
+pub(super) mod albums;
 pub(super) mod artists;
 mod attention;
 mod genres;

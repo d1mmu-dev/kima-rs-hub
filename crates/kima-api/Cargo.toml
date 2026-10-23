@@ -37,3 +37,4 @@ tower.workspace = true
 kima-test-support.workspace = true
 lofty.workspace = true
 kima-net = { workspace = true, features = ["testing"] }
+base64.workspace = true

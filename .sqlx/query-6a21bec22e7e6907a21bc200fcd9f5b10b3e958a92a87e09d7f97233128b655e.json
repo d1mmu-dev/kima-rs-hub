@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT release_mbid_source IS NOT DISTINCT FROM 'user' AS \"user_release!\",\n                  release_group_mbid_source IS NOT DISTINCT FROM 'user' AS \"user_group!\",\n                  image_source IS NOT DISTINCT FROM 'user' AS \"user_image!\"\n           FROM albums WHERE id = $1 FOR NO KEY UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_release!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_group!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_image!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "6a21bec22e7e6907a21bc200fcd9f5b10b3e958a92a87e09d7f97233128b655e"
+}

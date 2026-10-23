@@ -68,9 +68,19 @@ async fn detail(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let not_found = || ApiError::NotFound("Album not found");
-    let album = browse::album(&state.pool, parse_id(&id).ok_or_else(not_found)?)
-        .await?
-        .ok_or_else(not_found)?;
+    let id = parse_id(&id).ok_or_else(not_found)?;
+    Ok(Json(album_page(&state, id).await?.ok_or_else(not_found)?))
+}
+
+/// The album page's JSON (spec §16.1); `None` when there is no such album. Also the base of
+/// the MetadataEditor's answers.
+pub(in crate::routes) async fn album_page(
+    state: &AppState,
+    id: Uuid,
+) -> Result<Option<Value>, ApiError> {
+    let Some(album) = browse::album(&state.pool, id).await? else {
+        return Ok(None);
+    };
     let tracks = browse::tracks_of_albums(&state.pool, &[album.id]).await?;
     let effective = genres::effective_for_albums(&state.pool, &[album.id])
         .await?
@@ -78,5 +88,5 @@ async fn detail(
         .unwrap_or_default();
     let mut v = album_with_tracks(&album, &tracks);
     v["genres"] = json!(genres::merged(&album.user_genres, &effective));
-    Ok(Json(v))
+    Ok(Some(v))
 }

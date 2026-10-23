@@ -1,13 +1,13 @@
 //! `/api/enrichment` (spec §16.2, upstream `routes/enrichment.ts`): progress, status, the
 //! operator controls, the failures list and the concurrency setting. Reads need a signed-in
-//! user, writes an admin. The metadata edit and reset routes are Task 27.
+//! user, writes an admin. Also the MetadataEditor's override and reset routes (spec §16.3).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Query, State};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use kima_db::enrichment::{self, FailureFilter, State as Pipeline};
 use kima_ident::coordinator::{self, control, control::ControlError};
@@ -18,6 +18,8 @@ use time::format_description::well_known::Rfc3339;
 use crate::auth::{AdminUser, AuthUser};
 use crate::error::ApiError;
 use crate::state::AppState;
+
+mod editor;
 
 /// How long a progress answer is reused (upstream memoises it too).
 const PROGRESS_TTL: Duration = Duration::from_secs(5);
@@ -45,6 +47,10 @@ pub fn routes() -> Router<AppState> {
             "/enrichment/concurrency",
             get(get_concurrency).put(put_concurrency),
         )
+        .route("/enrichment/artists/{id}/metadata", put(editor::put_artist))
+        .route("/enrichment/albums/{id}/metadata", put(editor::put_album))
+        .route("/enrichment/artists/{id}/reset", post(editor::reset_artist))
+        .route("/enrichment/albums/{id}/reset", post(editor::reset_album))
 }
 
 fn time_json(t: Option<OffsetDateTime>) -> Value {

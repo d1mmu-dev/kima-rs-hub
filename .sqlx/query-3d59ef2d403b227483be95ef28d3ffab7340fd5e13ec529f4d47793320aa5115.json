@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists SET\n             display_name = CASE WHEN $2 THEN $3 ELSE display_name END,\n             user_bio = CASE WHEN $4 THEN $5 ELSE user_bio END,\n             user_genres = CASE WHEN $6 THEN $7::text[] ELSE user_genres END,\n             mbid = CASE WHEN $8 THEN $9 ELSE mbid END,\n             mbid_source = CASE WHEN $8 THEN 'user' ELSE mbid_source END,\n             enrichment_status = CASE WHEN ($8 OR $12) AND name_key <> $13 THEN 'pending'\n                                      ELSE enrichment_status END,\n             image_path = CASE $10 WHEN 'set' THEN $11 WHEN 'clear' THEN NULL\n                                   ELSE image_path END,\n             image_source = CASE $10 WHEN 'set' THEN 'user' WHEN 'clear' THEN NULL\n                                     ELSE image_source END\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Text",
+        "Bool",
+        "Text",
+        "Bool",
+        "TextArray",
+        "Bool",
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3d59ef2d403b227483be95ef28d3ffab7340fd5e13ec529f4d47793320aa5115"
+}

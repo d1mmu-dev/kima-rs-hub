@@ -89,9 +89,19 @@ async fn detail(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let not_found = || ApiError::NotFound("Artist not found");
-    let artist = browse::artist(&state.pool, parse_id(&id).ok_or_else(not_found)?)
-        .await?
-        .ok_or_else(not_found)?;
+    let id = parse_id(&id).ok_or_else(not_found)?;
+    Ok(Json(artist_page(&state, id).await?.ok_or_else(not_found)?))
+}
+
+/// The artist page's JSON (spec §16.1), from stored data only; `None` when there is no such
+/// artist. Also the base of the MetadataEditor's answers.
+pub(in crate::routes) async fn artist_page(
+    state: &AppState,
+    id: Uuid,
+) -> Result<Option<Value>, ApiError> {
+    let Some(artist) = browse::artist(&state.pool, id).await? else {
+        return Ok(None);
+    };
     let albums = browse::artist_albums(&state.pool, artist.id).await?;
     let ids: Vec<Uuid> = albums.iter().map(|a| a.id).collect();
     let tracks = browse::tracks_of_albums(&state.pool, &ids).await?;
@@ -133,7 +143,7 @@ async fn detail(
     v["userHeroUrl"] = Value::Null;
     v["userGenres"] = json!(artist.user_genres);
     v["hasUserOverrides"] = json!(artist.has_user_overrides());
-    Ok(Json(v))
+    Ok(Some(v))
 }
 
 #[derive(Deserialize)]

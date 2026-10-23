@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE albums SET\n             display_title = NULL, display_year = NULL, user_genres = '{}',\n             release_mbid = CASE WHEN $2 THEN NULL ELSE release_mbid END,\n             release_mbid_source = CASE WHEN $2 THEN NULL ELSE release_mbid_source END,\n             release_group_mbid = CASE WHEN $3 THEN NULL ELSE release_group_mbid END,\n             release_group_mbid_source = CASE WHEN $3 THEN NULL\n                                              ELSE release_group_mbid_source END,\n             image_path = CASE WHEN $4 THEN NULL ELSE image_path END,\n             image_source = CASE WHEN $4 THEN NULL ELSE image_source END\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "edb86e15c4a73231b75b77315a4c75b13d87bf164002d7e1e2697473a6576a28"
+}

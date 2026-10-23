@@ -508,8 +508,8 @@ pub async fn save_artist_outcome_in(
     Ok(Some(SavedArtist { image_source }))
 }
 
-/// Puts a `completed` artist back to `pending` (its album covers wait on a source or ran out
-/// of time), so the next cycle asks again. No failure is counted. Returns whether it was
+/// Puts a `completed` artist back to `pending` (its album covers wait on a rate-limited
+/// source), so the next cycle asks again. No failure is counted. Returns whether it was
 /// `completed`.
 pub async fn reopen_completed_artist(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
     let r = sqlx::query!(

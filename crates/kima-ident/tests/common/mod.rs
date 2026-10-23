@@ -34,6 +34,7 @@ pub fn ident_ctx_with(
         net: Arc::new(Net::new(NetConfig::for_tests(bases), pool.clone(), switch)),
         cipher: cipher.clone(),
         events: events.clone(),
+        progress_events: kima_ident::events::ProgressEvents::new(events.clone()),
         library: LibraryCtx {
             pool: pool.clone(),
             root: root.to_path_buf().into(),

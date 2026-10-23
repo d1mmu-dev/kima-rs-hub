@@ -9,6 +9,7 @@ pub mod coordinator;
 pub mod coverartarchive;
 mod ctx;
 pub mod deezer;
+pub mod events;
 pub mod fanart;
 pub mod listenbrainz;
 pub mod lrclib;

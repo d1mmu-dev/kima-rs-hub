@@ -3,6 +3,9 @@
 //! `B/services/enrichmentRestart.ts`). Every control but pause kicks the coordinator, after
 //! its own transaction has committed. A kick that fails then is logged and the control still
 //! succeeds: its change happened, and the `enrich-kick` schedule is the backstop.
+//!
+//! The routes announce each control's change as an `enrichment:progress` event (spec §17):
+//! [`announce_state`] when the control answers the state, [`announce`] when it does not.
 
 use kima_db::PgPool;
 use kima_db::enrichment::{self, AcoustidNow, State, Status};
@@ -12,6 +15,21 @@ use kima_db::settings_kv::{self, Key};
 use tracing::warn;
 
 use crate::IdentCtx;
+use crate::events::ProgressEvents;
+
+/// Announces the state a control left (spec §17).
+pub fn announce_state(events: &ProgressEvents, st: &State) {
+    events.notify(st.current_phase, st.status);
+}
+
+/// Reads the state a control left and announces it. A failed read is logged only: the
+/// control's change happened, and the next one or the coordinator announces again.
+pub async fn announce(pool: &PgPool, events: &ProgressEvents) {
+    match enrichment::state(pool).await {
+        Ok(st) => announce_state(events, &st),
+        Err(error) => warn!(%error, "reading the enrichment state to announce it failed"),
+    }
+}
 
 /// Kicks after a committed control; a failure is logged, never returned.
 async fn kick(pool: &PgPool) {

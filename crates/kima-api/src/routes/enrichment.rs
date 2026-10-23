@@ -122,6 +122,7 @@ async fn status(State(state): State<AppState>, _user: AuthUser) -> Result<Json<V
 
 async fn pause(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Value>, ApiError> {
     let s = control::pause(&state.pool).await.map_err(control_error)?;
+    control::announce_state(&state.progress_events, &s);
     Ok(Json(
         json!({"message": "Enrichment paused", "state": state_json(&s)}),
     ))
@@ -129,6 +130,7 @@ async fn pause(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<
 
 async fn resume(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Value>, ApiError> {
     let s = control::resume(&state.pool).await.map_err(control_error)?;
+    control::announce_state(&state.progress_events, &s);
     Ok(Json(
         json!({"message": "Enrichment resumed", "state": state_json(&s)}),
     ))
@@ -136,6 +138,7 @@ async fn resume(State(state): State<AppState>, _admin: AdminUser) -> Result<Json
 
 async fn stop(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Value>, ApiError> {
     let s = control::stop(&state.pool).await?;
+    control::announce_state(&state.progress_events, &s);
     Ok(Json(
         json!({"message": "Enrichment stopping...", "state": state_json(&s)}),
     ))
@@ -143,6 +146,7 @@ async fn stop(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<V
 
 async fn sync(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Value>, ApiError> {
     let counts = control::sync(&state.pool).await?;
+    control::announce(&state.pool, &state.progress_events).await;
     Ok(Json(json!({
         "message": "Incremental sync started",
         "description": "Processing new and pending items only",
@@ -156,6 +160,7 @@ async fn retry_failed_and_blocked(
 ) -> Result<Json<Value>, ApiError> {
     let queued = control::retry_failed_and_blocked(&state.ident_ctx()).await?;
     state.invalidate_progress();
+    control::announce(&state.pool, &state.progress_events).await;
     Ok(Json(json!({
         "message": "Failed and blocked work re-queued",
         "description": format!("{queued} stage questions handed to the queue"),
@@ -169,6 +174,7 @@ async fn redecide_everything(
 ) -> Result<Json<Value>, ApiError> {
     let reopened = control::redecide_everything(&state.ident_ctx()).await?;
     state.invalidate_progress();
+    control::announce(&state.pool, &state.progress_events).await;
     Ok(Json(json!({
         "message": "Every stage question re-opened",
         "description": format!("{reopened} stage records reopened"),
@@ -182,6 +188,7 @@ async fn wipe_and_rerun(
 ) -> Result<Json<Value>, ApiError> {
     let wiped = control::wipe_and_rerun(&state.pool).await?;
     state.invalidate_progress();
+    control::announce(&state.pool, &state.progress_events).await;
     Ok(Json(json!({
         "artists": wiped.artists,
         "tracks": wiped.tracks,

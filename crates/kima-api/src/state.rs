@@ -10,6 +10,7 @@ use kima_core::identify::IdentifySwitch;
 use kima_db::PgPool;
 use kima_db::settings_kv::SettingsCache;
 use kima_ident::IdentCtx;
+use kima_ident::events::ProgressEvents;
 use kima_library::scan::LibraryRoot;
 use kima_library::transcode::Transcoder;
 use kima_library::watch::{IgnoreSet, SharedStatus, WatchStatus};
@@ -88,6 +89,10 @@ pub struct AppState {
     /// The identification machinery the process runs, for the enrichment controls. `None` in
     /// tests, where [`AppState::ident_ctx`] builds one from the other fields.
     pub ident: Option<IdentCtx>,
+    /// `enrichment:progress` on [`Self::events`] (spec §17): the control routes announce their
+    /// change here. The process's [`IdentCtx`] takes a clone, so the coordinator and the
+    /// routes share one once-a-second window.
+    pub progress_events: ProgressEvents,
     /// `GET /api/enrichment/progress`, kept for 5 s (upstream memoises it); a control that
     /// changes the counts drops it.
     pub progress_memo: Arc<Mutex<Option<(Instant, serde_json::Value)>>>,
@@ -105,13 +110,15 @@ impl AppState {
     pub fn with_shutdown(pool: PgPool, session_secret: &str, shutdown: CancellationToken) -> Self {
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
         let cipher = Arc::new(Cipher::random());
+        let events = EventBus::new(1024);
         Self {
             settings: SettingsCache::new(pool.clone(), cipher.clone()),
             identify: IdentifySwitch::new(false, true),
             net: Arc::new(Net::disabled()),
             pool,
             jwt: Arc::new(JwtKeys::new(session_secret)),
-            events: EventBus::new(1024),
+            progress_events: ProgressEvents::new(events.clone()),
+            events,
             sse: Arc::new(SseRegistry::new()),
             shutdown,
             password_work: Arc::new(Semaphore::new(cpus.max(1))),
@@ -200,6 +207,7 @@ impl AppState {
                 artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
             },
             last_cycle: Default::default(),
+            progress_events: self.progress_events.clone(),
         }
     }
 

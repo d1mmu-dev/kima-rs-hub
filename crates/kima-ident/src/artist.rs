@@ -41,8 +41,10 @@ pub const MAX_CATALOGUE_CHECKS: usize = 3;
 pub const FAILURE_CAP: i16 = RETRY_CAP;
 /// MusicBrainz genres kept per artist (spec §12.4).
 pub const MAX_GENRES: usize = 5;
-/// The most one artist's enrichment may take, every request and download included; past it the
-/// run fails with `TIMEOUT` and nothing it learned is written.
+/// The most one artist's enrichment may take, every request and download included (the
+/// production value of `IdentConfig::artist_timeout`). Past it before the artist's own write,
+/// the run fails with `TIMEOUT` and nothing it learned is written; the album covers that
+/// follow the write only get what is left.
 pub const ARTIST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// How one artist's enrichment ended.
@@ -210,6 +212,8 @@ struct Gathered {
     unresolvable: bool,
     /// The image `write.image` sets, put in place only if the write accepts it.
     image: Option<NewImage>,
+    /// The run went through every step: the album covers are filled after the write.
+    fill_covers: bool,
 }
 
 /// Normalises `bytes` and stages them as the artist's image, off the async threads.
@@ -300,8 +304,7 @@ async fn download_image(ctx: &IdentCtx, artist: Uuid, source: &str, url: &str) -
     }
 }
 
-/// Spec §12.1-§12.5 in upstream's order, then the album covers (§12.7). Writes nothing about
-/// the artist (its image is only staged); album covers are written as they are found.
+/// Spec §12.1-§12.5 in upstream's order. Writes nothing (the image is only staged).
 async fn gather(ctx: &IdentCtx, a: &ArtistForEnrichment) -> Gathered {
     let net = &ctx.net;
     let mut steps = Steps::default();
@@ -315,6 +318,7 @@ async fn gather(ctx: &IdentCtx, a: &ArtistForEnrichment) -> Gathered {
         steps,
         unresolvable,
         image: None,
+        fill_covers: false,
     };
 
     // §12.1 the guard: an id of another artist goes with everything learned through it.
@@ -466,41 +470,35 @@ async fn gather(ctx: &IdentCtx, a: &ArtistForEnrichment) -> Gathered {
         }
     }
 
-    // §12.7 the album covers. A paused source leaves the artist pending; nothing else here
-    // fails the run.
-    match album_covers::fill_for_artist(ctx, a.id).await {
-        Outcome::Answered(_) | Outcome::Absent(_) => {}
-        Outcome::RateLimited { .. } => steps.waiting = true,
-        Outcome::Transient(f) | Outcome::Permanent(f) => {
-            warn!(artist = %a.id, code = %f.code, "album covers could not be filled");
-        }
-    }
-
     Gathered {
         write,
         steps,
         unresolvable: false,
         image,
+        fill_covers: true,
     }
 }
 
 /// Enriches one claimed artist and writes the outcome (spec §12.1-§12.5, §10.5). A database
 /// error is returned; everything else ends in the [`ArtistResult`] written to the row.
 pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result<ArtistResult> {
-    let g = match tokio::time::timeout(ARTIST_TIMEOUT, gather(ctx, a)).await {
+    let cap = ctx.config.artist_timeout;
+    let deadline = tokio::time::Instant::now() + cap;
+    let g = match tokio::time::timeout_at(deadline, gather(ctx, a)).await {
         Ok(g) => g,
         Err(_) => Gathered {
             write: ArtistWrite::status(ArtistStatus::Completed, 0),
             steps: Steps {
                 failure: Some(Failure::new(
                     "TIMEOUT",
-                    format!("artist enrichment took over {ARTIST_TIMEOUT:?}"),
+                    format!("artist enrichment took over {cap:?}"),
                 )),
                 waiting: false,
             },
             unresolvable: false,
             // Whatever was staged was dropped with the run.
             image: None,
+            fill_covers: false,
         },
     };
     let Gathered {
@@ -508,6 +506,7 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
         steps,
         unresolvable,
         image,
+        fill_covers,
     } = g;
     let result = if unresolvable {
         write.status = ArtistStatus::Unresolvable;
@@ -538,6 +537,32 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
         ArtistResult::Completed
     };
     save(ctx, a.id, &write, image).await?;
+    if !fill_covers {
+        return Ok(result);
+    }
+    // §12.7 the album covers, after the artist's own outcome is written, so nothing they do can
+    // discard it or count a failure. They get what is left of the artist's time cap; a source
+    // waiting on its rate limit, or running out of time, puts a completed artist back to
+    // `pending` so the remaining albums are asked again (stored ones drop out).
+    let again =
+        match tokio::time::timeout_at(deadline, album_covers::fill_for_artist(ctx, a.id)).await {
+            Ok(Outcome::Answered(_) | Outcome::Absent(_)) => false,
+            Ok(Outcome::RateLimited { .. }) => true,
+            Ok(Outcome::Transient(f) | Outcome::Permanent(f)) => {
+                warn!(artist = %a.id, code = %f.code, "album covers could not be filled");
+                false
+            }
+            Err(_) => {
+                debug!(artist = %a.id, "album covers ran out of the artist's time; the rest waits");
+                true
+            }
+        };
+    if again
+        && result == ArtistResult::Completed
+        && identity::reopen_completed_artist(&ctx.pool, a.id).await?
+    {
+        return Ok(ArtistResult::Pending);
+    }
     Ok(result)
 }
 
@@ -546,6 +571,12 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
 /// cleared (another artist's id) is deleted before the commit, unless a user image holds the
 /// place. A user image writer that locks the row before replacing the file can therefore
 /// never have its file overwritten or deleted by a run.
+///
+/// The file steps are plain blocking calls on this task, not `spawn_blocking`: a detached
+/// closure would still run after a cancelled run's rollback released the lock. Each is one
+/// rename or unlink (and a stamp of a few bytes), so they do not hold up the runtime. If the
+/// image cannot be put in place, the transaction is rolled back and the outcome is written
+/// again without the image.
 async fn save(
     ctx: &IdentCtx,
     id: Uuid,
@@ -559,7 +590,7 @@ async fn save(
         tx.rollback().await?;
         return Ok(());
     };
-    let data_dir = ctx.library.data_dir.clone();
+    let data_dir = &ctx.library.data_dir;
     let accepted = match (&write.image, image) {
         (Change::Set((_, source)), Some(new)) if saved.image_source.as_deref() == Some(source) => {
             Some(new)
@@ -567,27 +598,27 @@ async fn save(
         _ => None,
     };
     if let Some(new) = accepted {
-        let data_dir = data_dir.clone();
-        let placed = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            new.file
-                .persist(&artwork::artist_image_path(&data_dir, id))?;
-            match &new.local {
-                Some(stamp) => artwork::write_local_stamp(&data_dir, id, stamp),
-                None => artwork::remove_local_stamp(&data_dir, id),
-            }
-        })
-        .await;
-        match placed {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => warn!(artist = %id, %error, "could not put an artist image in place"),
-            Err(error) => warn!(artist = %id, %error, "could not put an artist image in place"),
+        if let Err(error) = new.file.persist(&artwork::artist_image_path(data_dir, id)) {
+            warn!(artist = %id, %error, "could not put an artist image in place");
+            tx.rollback().await?;
+            let without_image = ArtistWrite {
+                image: Change::Keep,
+                ..write.clone()
+            };
+            identity::save_artist_outcome(&ctx.pool, id, &without_image).await?;
+            return Ok(());
+        }
+        let stamped = match &new.local {
+            Some(stamp) => artwork::write_local_stamp(data_dir, id, stamp),
+            None => artwork::remove_local_stamp(data_dir, id),
+        };
+        if let Err(error) = stamped {
+            warn!(artist = %id, %error, "could not record where the artist image came from");
         }
     }
     if write.image == Change::Clear && saved.image_source.is_none() {
         // Still under the row lock, so a user image cannot land in between.
-        let removed =
-            tokio::task::spawn_blocking(move || artwork::remove_artist_image(&data_dir, id)).await;
-        if let Ok(Err(error)) = removed {
+        if let Err(error) = artwork::remove_artist_image(data_dir, id) {
             warn!(artist = %id, %error, "could not remove an artist image no row refers to");
         }
     }

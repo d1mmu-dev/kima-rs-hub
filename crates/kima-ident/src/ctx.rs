@@ -1,7 +1,7 @@
 //! What every identification stage needs, built once per process.
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kima_core::cipher::Cipher;
 use kima_core::events::EventBus;
@@ -37,6 +37,9 @@ pub struct IdentConfig {
     pub acoustid_env_key: Option<String>,
     /// `FANART_API_KEY`: used when no enabled key is stored (spec §15.1). A secret.
     pub fanart_env_key: Option<String>,
+    /// One artist's whole enrichment, album covers included
+    /// ([`crate::artist::ARTIST_TIMEOUT`] in production; tests shorten it).
+    pub artist_timeout: Duration,
 }
 
 // Never prints the key.
@@ -54,6 +57,7 @@ impl std::fmt::Debug for IdentConfig {
                 "fanart_env_key",
                 &self.fanart_env_key.as_ref().map(|_| ".."),
             )
+            .field("artist_timeout", &self.artist_timeout)
             .finish()
     }
 }
@@ -88,6 +92,7 @@ impl Default for IdentConfig {
             acoustid_disabled: false,
             acoustid_env_key: None,
             fanart_env_key: None,
+            artist_timeout: crate::artist::ARTIST_TIMEOUT,
         }
     }
 }

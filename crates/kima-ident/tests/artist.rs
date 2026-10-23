@@ -1412,3 +1412,31 @@ async fn a_user_image_set_during_a_run_keeps_its_file(pool: PgPool) {
         .collect();
     assert_eq!(files.len(), 1, "{files:?}");
 }
+
+/// Review M2: an image that cannot be put in place is not recorded; the rest of the outcome is.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn an_image_that_cannot_be_placed_is_not_recorded(pool: PgPool) {
+    let a = seed(&pool, "Perturbator", "Dangerous Days").await;
+    set_mbid(&pool, a, M, "tag").await;
+    let w = known("Perturbator", M).get(
+        &fanart_url(M),
+        json!({"artistthumb": [{"url": "{images}/fanart/thumb.jpg"}]}),
+    );
+    let images = World::default().image("/fanart/thumb.jpg", &jpeg(300, 300, 1));
+    let f = fx(&pool, w, images).await;
+    // A non-empty folder where the image file goes: the rename fails.
+    let blocker = kima_library::artwork::artist_image_path(f.data_dir(), a);
+    std::fs::create_dir_all(blocker.join("inside")).unwrap();
+
+    assert_eq!(enrich(&f, a).await, ArtistResult::Completed);
+    let r = row(&pool, a).await;
+    assert_eq!(r.status, "completed");
+    assert_eq!((r.image_path, r.image_source), (None, None));
+    assert_eq!(r.similar, Some(json!([])));
+    assert!(blocker.join("inside").is_dir());
+    let files: Vec<_> = std::fs::read_dir(f.data_dir().join("artist-images"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+}

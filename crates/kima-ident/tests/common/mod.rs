@@ -48,6 +48,7 @@ pub fn ident_ctx_with(
             acoustid_disabled: false,
             acoustid_env_key: None,
             fanart_env_key: None,
+            artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
         },
         last_cycle: Default::default(),
     }

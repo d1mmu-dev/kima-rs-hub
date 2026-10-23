@@ -1330,6 +1330,7 @@ dependencies = [
  "kima-library",
  "kima-net",
  "kima-test-support",
+ "lofty",
  "serde",
  "serde_json",
  "sqlx",

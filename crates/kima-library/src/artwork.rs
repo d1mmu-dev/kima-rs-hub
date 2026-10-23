@@ -707,13 +707,48 @@ pub fn stored_variant(
             Err(e) => return Err(e.into()),
         }
     }
-    // Re-checked on open: swapped for a symlink or another file since is no image.
-    let Ok(bytes) = read_local_image(source) else {
-        return Ok(None);
+    // The source is stat'ed before it is read and again after the variant is written: if it
+    // was replaced in between, the variant (built from the old image, yet newer than the new
+    // one) is dropped and built again, so a stale variant is never left to pass the mtime check.
+    let mut last = None;
+    for _ in 0..STORED_VARIANT_ATTEMPTS {
+        let Some(before) = file_identity(source) else {
+            return Ok(None);
+        };
+        // Re-checked on open: swapped for a symlink or another file since is no image.
+        let Ok(bytes) = read_local_image(source) else {
+            return Ok(None);
+        };
+        let jpeg = render(&CoverSource::Embedded(bytes), size)?;
+        store(&out, &jpeg)?;
+        if file_identity(source) == Some(before) {
+            return Ok(Some(jpeg));
+        }
+        unlink(&out)?;
+        last = Some(jpeg);
+    }
+    // Still changing: served uncached.
+    Ok(last)
+}
+
+/// Builds of a stored image's variant tried while its source keeps changing.
+const STORED_VARIANT_ATTEMPTS: usize = 3;
+
+/// What identifies a regular file's content as of now: device, inode, size, mtime. `None` for
+/// anything but a regular file (a symlink is not followed).
+fn file_identity(path: &Path) -> Option<(u64, u64, u64, Option<SystemTime>)> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
     };
-    let jpeg = render(&CoverSource::Embedded(bytes), size)?;
-    store(&out, &jpeg)?;
-    Ok(Some(jpeg))
+    #[cfg(not(unix))]
+    let (dev, ino) = (0, 0);
+    Some((dev, ino, meta.len(), modified(&meta)))
 }
 
 /// Clears a library cover's cache entry (its stamp and size files) when it went stale, keeping

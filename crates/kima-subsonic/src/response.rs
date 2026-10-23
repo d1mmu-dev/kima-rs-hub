@@ -109,13 +109,16 @@ pub enum Child {
     List(&'static str, Vec<Node>),
     /// Bare values (the extensions' `versions`): `<versions>1</versions>` and `[1]`.
     Scalars(&'static str, Vec<Value>),
+    /// One text element (`artistInfo`'s `biography`): `<biography>text</biography>` and
+    /// `"biography": "text"`.
+    Text(&'static str, String),
 }
 
 impl Child {
     fn name(&self) -> &'static str {
         match self {
             Self::One(node) => node.name,
-            Self::List(name, _) | Self::Scalars(name, _) => name,
+            Self::List(name, _) | Self::Scalars(name, _) | Self::Text(name, _) => name,
         }
     }
 }
@@ -181,6 +184,20 @@ impl Node {
     pub fn scalars(mut self, name: &'static str, values: Vec<Value>) -> Self {
         self.push(Child::Scalars(name, values));
         self
+    }
+
+    /// A child element holding only text, a plain string in JSON (see [`text_names`]).
+    pub fn text_child(mut self, name: &'static str, text: impl Into<String>) -> Self {
+        self.push(Child::Text(name, text.into()));
+        self
+    }
+
+    /// [`Node::text_child`] when there is a value.
+    pub fn text_child_opt(self, name: &'static str, text: Option<impl Into<String>>) -> Self {
+        match text {
+            Some(text) => self.text_child(name, text),
+            None => self,
+        }
     }
 
     fn push(&mut self, child: Child) {
@@ -272,6 +289,7 @@ fn write_element(w: &mut Writer<Vec<u8>>, name: &str, node: &Node) {
             Child::One(_) => true,
             Child::List(_, nodes) => !nodes.is_empty(),
             Child::Scalars(_, values) => !values.is_empty(),
+            Child::Text(..) => true,
         });
     if !has_content {
         w.write_event(Event::Empty(start)).unwrap();
@@ -295,6 +313,11 @@ fn write_element(w: &mut Writer<Vec<u8>>, name: &str, node: &Node) {
                     write_text(w, &value.to_xml_string());
                     w.write_event(Event::End(BytesEnd::new(*name))).unwrap();
                 }
+            }
+            Child::Text(name, text) => {
+                w.write_event(Event::Start(BytesStart::new(*name))).unwrap();
+                write_text(w, text);
+                w.write_event(Event::End(BytesEnd::new(*name))).unwrap();
             }
         }
     }
@@ -334,6 +357,9 @@ pub fn write_json(node: &Node) -> Json {
                     (*name).to_owned(),
                     Json::Array(values.iter().map(Value::to_json).collect()),
                 );
+            }
+            Child::Text(name, text) => {
+                object.insert((*name).to_owned(), Json::String(text.clone()));
             }
         }
     }
@@ -390,7 +416,26 @@ const LIST_NAMES: &[&str] = &[
     "subsonic-response/users/user/folder",
     "subsonic-response/user/folder",
     "subsonic-response/transcodeDecision/transcodeReason",
+    "subsonic-response/artistInfo/similarArtist",
+    "subsonic-response/artistInfo2/similarArtist",
+    "subsonic-response/lyricsList/structuredLyrics",
+    "subsonic-response/lyricsList/structuredLyrics/line",
 ];
+
+/// Elements the writers emit as [`Child::Text`]: text in XML, a plain string in JSON. The
+/// structural test reads them back by this table, as it does lists by `LIST_NAMES`.
+const TEXT_NAMES: &[&str] = &[
+    "subsonic-response/artistInfo/biography",
+    "subsonic-response/artistInfo/musicBrainzId",
+    "subsonic-response/artistInfo2/biography",
+    "subsonic-response/artistInfo2/musicBrainzId",
+    "subsonic-response/albumInfo/musicBrainzId",
+];
+
+/// The paths the writers emit as plain text elements (see `TEXT_NAMES`).
+pub fn text_names() -> &'static [&'static str] {
+    TEXT_NAMES
+}
 
 /// The paths the writers always emit as lists (see `LIST_NAMES`).
 pub fn list_names() -> &'static [&'static str] {

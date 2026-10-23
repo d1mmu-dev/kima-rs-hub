@@ -1,0 +1,9 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <albumInfo>
+    <musicBrainzId>2a2c6d57-2f46-4b5e-9d0a-7e2f4a1d5c11</musicBrainzId>
+  </albumInfo>
+</subsonic-response>

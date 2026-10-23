@@ -104,6 +104,9 @@ pub struct ResolvedSimilar {
     /// The stored `match`.
     pub weight: f64,
     pub in_library: bool,
+    /// The library artist's own name (Subsonic shows it; the page shows the stored `name`).
+    #[serde(skip)]
+    pub library_name: Option<String>,
 }
 
 /// The entries of a stored `artists."similar"` value, in order. Anything that is not a list,
@@ -237,6 +240,7 @@ pub async fn resolve(
                 owned_album_count: found.map_or(0, |c| c.owned_album_count),
                 weight: e.r#match,
                 in_library: found.is_some(),
+                library_name: found.map(|c| c.name.clone()),
             }
         })
         .collect())

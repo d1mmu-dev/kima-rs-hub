@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ar.bio, ar.user_bio, ar.mbid, ar.\"similar\"\n           FROM artists ar\n           WHERE ar.id = $1\n             AND EXISTS (SELECT 1 FROM albums al\n                         JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL\n                         WHERE al.artist_id = ar.id)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bio",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_bio",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "similar",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "2b20658520ed16fb04ba52b97c3f6d2192a55a45c4ae570717db3a26a2dc9b68"
+}

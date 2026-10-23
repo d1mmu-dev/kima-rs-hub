@@ -1,0 +1,16 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "albumInfo": {
+      "musicBrainzId": "2a2c6d57-2f46-4b5e-9d0a-7e2f4a1d5c11"
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

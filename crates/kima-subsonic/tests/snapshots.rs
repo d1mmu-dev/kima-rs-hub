@@ -345,6 +345,10 @@ const STRING_ATTRS: &[&str] = &[
     "comment", "message", "email",
 ];
 
+/// List items that are objects even when they carry only text (an unsynced lyrics `line` is
+/// `{"value": ...}`), unlike the bare values of `versions`.
+const OBJECT_TEXT_LISTS: &[&str] = &["subsonic-response/lyricsList/structuredLyrics/line"];
+
 /// Parses an envelope by the JSON rules: an element is an object, an attribute a typed key
 /// (number, bool, else string), text `"value"`, and the elements `list_names()` names are arrays.
 fn xml_to_json(xml: &str) -> Value {
@@ -406,7 +410,12 @@ fn xml_to_json(xml: &str) -> Value {
     fn close(node: Open, stack: &mut [Open]) -> (String, Value) {
         let name = node.path.rsplit('/').next().unwrap().to_owned();
         let scalar = node.map.is_empty() && !node.children && !node.text.is_empty();
-        let value = if scalar && kima_subsonic::response::list_names().contains(&&*node.path) {
+        let value = if kima_subsonic::response::text_names().contains(&&*node.path) {
+            json!(node.text)
+        } else if scalar
+            && kima_subsonic::response::list_names().contains(&&*node.path)
+            && !OBJECT_TEXT_LISTS.contains(&&*node.path)
+        {
             typed(&node.text)
         } else {
             let mut map = node.map;
@@ -1431,12 +1440,8 @@ snap_mut!(missing_xml, missing_json, |s| {
 });
 
 snap!(stubs, |s| {
-    let artist1 = artist_id(1).to_string();
     let track1 = track_id(1).to_string();
     for endpoint in [
-        "getAlbumInfo",
-        "getAlbumInfo2",
-        "getLyrics",
         "getPodcasts",
         "getNewestPodcasts",
         "refreshPodcasts",
@@ -1454,16 +1459,6 @@ snap!(stubs, |s| {
     ] {
         s.case(endpoint, "stub", &alice(&[("id", &track1)])).await;
     }
-    for endpoint in ["getArtistInfo", "getArtistInfo2"] {
-        s.case(endpoint, "known_artist", &alice(&[("id", &artist1)]))
-            .await;
-        s.case(endpoint, "unknown_artist", &alice(&[("id", UNKNOWN)]))
-            .await;
-        s.case(endpoint, "missing_id", &alice(&[])).await;
-    }
-    s.case("getLyricsBySongId", "stub", &alice(&[("id", &track1)]))
-        .await;
-    s.case("getLyricsBySongId", "missing_id", &alice(&[])).await;
     s.case("getPodcastEpisode", "stub", &alice(&[("id", "1")]))
         .await;
     s.case("getVideoInfo", "stub", &alice(&[("id", "1")])).await;
@@ -1476,6 +1471,67 @@ snap!(stubs, |s| {
         .await;
     s.case("noSuchEndpoint", "not_implemented", &alice(&[]))
         .await;
+});
+
+// Artist and album info and lyrics (spec §18 rows 58-63): stored data only.
+snap!(info, |s| {
+    let artist1 = artist_id(1).to_string();
+    let artist2 = artist_id(2).to_string();
+    s.sql(&format!(
+        r#"UPDATE artists SET bio = 'Formed in Liverpool & <famous>',
+               "similar" = '[{{"name":"La Roux","mbid":null,"match":0.9}},
+                             {{"name":"Not In The Library","mbid":null,"match":0.8}}]'
+           WHERE id = '{artist1}'"#
+    ))
+    .await;
+    for endpoint in ["getArtistInfo", "getArtistInfo2"] {
+        s.case(endpoint, "known_artist", &alice(&[("id", &artist1)]))
+            .await;
+        s.case(endpoint, "no_bio_no_similar", &alice(&[("id", &artist2)]))
+            .await;
+        s.case(endpoint, "unknown_artist", &alice(&[("id", UNKNOWN)]))
+            .await;
+        s.case(endpoint, "missing_id", &alice(&[])).await;
+    }
+    let album1 = album_id(1).to_string();
+    let album2 = album_id(2).to_string();
+    for endpoint in ["getAlbumInfo", "getAlbumInfo2"] {
+        s.case(endpoint, "with_mbid", &alice(&[("id", &album1)]))
+            .await;
+        s.case(endpoint, "without_mbid", &alice(&[("id", &album2)]))
+            .await;
+        s.case(endpoint, "unknown_album", &alice(&[("id", UNKNOWN)]))
+            .await;
+        s.case(endpoint, "missing_id", &alice(&[])).await;
+    }
+    s.case(
+        "getLyrics",
+        "match",
+        &alice(&[("artist", "the beatles"), ("title", "come together")]),
+    )
+    .await;
+    s.case(
+        "getLyrics",
+        "no_match",
+        &alice(&[("title", "no such song")]),
+    )
+    .await;
+    s.case("getLyrics", "no_parameters", &alice(&[])).await;
+    let track1 = track_id(1).to_string();
+    let track2 = track_id(2).to_string();
+    s.case(
+        "getLyricsBySongId",
+        "synced_and_plain",
+        &alice(&[("id", &track1)]),
+    )
+    .await;
+    s.case(
+        "getLyricsBySongId",
+        "cached_miss",
+        &alice(&[("id", &track2)]),
+    )
+    .await;
+    s.case("getLyricsBySongId", "missing_id", &alice(&[])).await;
 });
 
 /// Every endpoint in the table has at least one snapshot.

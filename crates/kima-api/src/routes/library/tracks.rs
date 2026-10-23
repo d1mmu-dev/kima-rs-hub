@@ -4,6 +4,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use kima_db::browse::{self, Sort};
+use kima_db::genres;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -77,7 +78,8 @@ async fn shuffle(
     })))
 }
 
-/// Shaped as upstream's single-track handler: `{id, title, artist, album, duration}`.
+/// Shaped as upstream's single-track handler: `{id, title, artist, album, duration}`, plus the
+/// identification answer and the effective genres (spec §16.1).
 async fn detail(
     State(state): State<AppState>,
     _user: AuthUser,
@@ -87,6 +89,10 @@ async fn detail(
     let t = browse::track(&state.pool, parse_id(&id).ok_or_else(not_found)?)
         .await?
         .ok_or_else(not_found)?;
+    let genres = genres::effective_for_tracks(&state.pool, &[t.id])
+        .await?
+        .remove(&t.id)
+        .unwrap_or_default();
     Ok(Json(json!({
         "id": t.id,
         "title": t.title,
@@ -98,5 +104,8 @@ async fn detail(
         },
         "duration": t.duration_secs,
         "audioFeatures": null,
+        "recordingMbid": t.recording_mbid,
+        "isrc": t.isrc,
+        "genres": genres,
     })))
 }

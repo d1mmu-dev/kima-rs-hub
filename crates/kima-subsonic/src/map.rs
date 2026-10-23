@@ -218,6 +218,8 @@ mod tests {
             album_year: Some(1969),
             album_artist_id: Uuid::from_u128(1),
             album_artist_name: "The Beatles".into(),
+            recording_mbid: None,
+            isrc: None,
         }
     }
 

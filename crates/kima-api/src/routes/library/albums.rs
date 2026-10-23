@@ -4,6 +4,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use kima_db::browse::{self, Sort};
+use kima_db::genres;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -71,5 +72,11 @@ async fn detail(
         .await?
         .ok_or_else(not_found)?;
     let tracks = browse::tracks_of_albums(&state.pool, &[album.id]).await?;
-    Ok(Json(album_with_tracks(&album, &tracks)))
+    let effective = genres::effective_for_albums(&state.pool, &[album.id])
+        .await?
+        .remove(&album.id)
+        .unwrap_or_default();
+    let mut v = album_with_tracks(&album, &tracks);
+    v["genres"] = json!(genres::merged(&album.user_genres, &effective));
+    Ok(Json(v))
 }

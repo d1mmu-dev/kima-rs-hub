@@ -211,7 +211,10 @@ pub async fn recent_artists(
              JOIN artists ar ON ar.id = al.artist_id
              WHERE p.user_id = $1 GROUP BY ar.id
              ORDER BY max(p.played_at) DESC LIMIT $2)
-         SELECT ar.id, ar.name,
+         SELECT ar.id, ar.name, ar.mbid, ar.display_name,
+             (ar.image_path IS NOT NULL) AS has_image,
+             (ar.image_path IS NOT NULL AND ar.image_source = 'user') AS user_image,
+             COALESCE(ar.user_genres, '{}') AS user_genres,
              (SELECT count(DISTINCT al.id) FROM albums al JOIN tracks t ON t.album_id = al.id
                  AND t.missing_since IS NULL WHERE al.artist_id = ar.id) AS album_count,
              (SELECT count(*) FROM albums al JOIN tracks t ON t.album_id = al.id

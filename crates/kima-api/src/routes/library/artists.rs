@@ -4,6 +4,8 @@ use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use kima_db::browse::{self, ArtistRow, Sort};
+use kima_db::genres;
+use kima_ident::similar;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -30,14 +32,20 @@ struct ListParams {
     paging: Paging,
 }
 
-/// The fields the artist cards read. There are no artist images or MusicBrainz ids in M1.
+/// The value the frontend hands to `getCoverArtUrl`: the artist id when a stored image exists
+/// (the cover route serves it by that id, spec §12.6), else null.
+fn image(a: &ArtistRow) -> Option<Uuid> {
+    a.has_image.then_some(a.id)
+}
+
+/// The fields the artist cards read.
 pub(in crate::routes) fn artist_json(a: &ArtistRow) -> Value {
     json!({
         "id": a.id,
-        "mbid": null,
+        "mbid": a.mbid,
         "name": a.name,
-        "heroUrl": null,
-        "coverArt": null,
+        "heroUrl": image(a),
+        "coverArt": image(a),
         "albumCount": a.album_count,
         "trackCount": a.track_count,
     })
@@ -88,25 +96,43 @@ async fn detail(
     let ids: Vec<Uuid> = albums.iter().map(|a| a.id).collect();
     let tracks = browse::tracks_of_albums(&state.pool, &ids).await?;
 
+    let ids = [artist.id];
+    let effective = genres::effective_for_artists(&state.pool, &ids)
+        .await?
+        .remove(&artist.id)
+        .unwrap_or_default();
+    let tags = genres::musicbrainz_for_artists(&state.pool, &ids)
+        .await?
+        .remove(&artist.id)
+        .unwrap_or_default();
+    // Stored data only: no lookup happens on a page view (spec §12.8, D-113).
+    let stored = artist
+        .similar
+        .as_ref()
+        .map(similar::stored_entries)
+        .unwrap_or_default();
+    let similar_artists = similar::resolve(&state.pool, &stored, similar::PAGE_SIMILAR).await?;
+
     let mut v = artist_json(&artist);
     v["albums"] = albums
         .iter()
         .map(|a| album_with_tracks(a, &tracks))
         .collect();
-    v["image"] = Value::Null;
-    v["bio"] = Value::Null;
-    v["summary"] = Value::Null;
+    v["image"] = json!(image(&artist));
+    // Upstream `getArtistDisplaySummary`: `userSummary ?? summary`.
+    v["bio"] = json!(artist.user_bio.as_ref().or(artist.bio.as_ref()));
+    v["summary"] = json!(artist.bio);
     v["url"] = Value::Null;
     v["listeners"] = json!(0);
-    v["genres"] = json!([]);
-    v["tags"] = json!([]);
+    v["genres"] = json!(genres::merged(&artist.user_genres, &effective));
+    v["tags"] = json!(tags);
     v["topTracks"] = json!([]);
-    v["similarArtists"] = json!([]);
-    v["displayName"] = Value::Null;
-    v["userSummary"] = Value::Null;
+    v["similarArtists"] = json!(similar_artists);
+    v["displayName"] = json!(artist.display_name);
+    v["userSummary"] = json!(artist.user_bio);
     v["userHeroUrl"] = Value::Null;
-    v["userGenres"] = json!([]);
-    v["hasUserOverrides"] = json!(false);
+    v["userGenres"] = json!(artist.user_genres);
+    v["hasUserOverrides"] = json!(artist.has_user_overrides());
     Ok(Json(v))
 }
 

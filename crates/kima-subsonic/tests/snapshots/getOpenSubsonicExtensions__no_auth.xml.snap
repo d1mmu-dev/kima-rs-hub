@@ -12,4 +12,7 @@ source: crates/kima-subsonic/tests/snapshots.rs
   <openSubsonicExtensions name="indexBasedQueue">
     <versions>1</versions>
   </openSubsonicExtensions>
+  <openSubsonicExtensions name="songLyrics">
+    <versions>1</versions>
+  </openSubsonicExtensions>
 </subsonic-response>

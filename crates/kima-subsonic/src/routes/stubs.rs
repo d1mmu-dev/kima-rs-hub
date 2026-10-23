@@ -1,17 +1,13 @@
-//! Later-milestone and compat stubs (spec §4.9 #58-#71, §4.10 #72-#81, D-086). Each answers with
+//! Later-milestone and compat stubs (spec §4.9 #64-#71, §4.10 #72-#81, D-086). Each answers with
 //! the empty element or the error its row names, so clients that probe these endpoints get a
 //! well-formed answer instead of `Not implemented`.
 
 use axum::Router;
-use axum::extract::State;
-use kima_api::AppState;
-use kima_db::subsonic;
 
 use super::add;
 use crate::auth::SubsonicUser;
 use crate::ctx::SubsonicCtx;
 use crate::error::SubsonicError;
-use crate::ids::{self, Prefix};
 use crate::params::Params;
 use crate::response::{Answer, Node};
 
@@ -21,12 +17,6 @@ const NO_CHAT: &str = "Chat is not supported by this server";
 const NO_JUKEBOX: &str = "Jukebox mode is not supported by this server";
 
 pub fn add_routes(router: Router<SubsonicCtx>) -> Router<SubsonicCtx> {
-    let router = add(router, "getAlbumInfo", album_info);
-    let router = add(router, "getAlbumInfo2", album_info);
-    let router = add(router, "getArtistInfo", artist_info);
-    let router = add(router, "getArtistInfo2", artist_info2);
-    let router = add(router, "getLyrics", lyrics);
-    let router = add(router, "getLyricsBySongId", lyrics_by_song_id);
     let router = add(router, "getPodcasts", podcasts);
     let router = add(router, "getNewestPodcasts", newest_podcasts);
     let router = add(router, "getPodcastEpisode", podcast_episode);
@@ -49,53 +39,6 @@ pub fn add_routes(router: Router<SubsonicCtx>) -> Router<SubsonicCtx> {
 
 fn empty(name: &'static str) -> Result<Answer, SubsonicError> {
     Ok(Answer::node(Node::new(name)))
-}
-
-async fn album_info(_user: SubsonicUser) -> Result<Answer, SubsonicError> {
-    empty("albumInfo")
-}
-
-/// 10 without `id`, 70 for an unknown artist, else an empty element.
-async fn known_artist(
-    _user: &SubsonicUser,
-    app: &AppState,
-    params: &Params,
-) -> Result<(), SubsonicError> {
-    let raw = params.required("id")?;
-    let not_found = || SubsonicError::not_found("Artist not found");
-    let id = ids::parse(raw, &[Prefix::Ar, Prefix::ArtistColon]).ok_or_else(not_found)?;
-    if subsonic::artist_exists(&app.pool, id).await? {
-        Ok(())
-    } else {
-        Err(not_found())
-    }
-}
-
-async fn artist_info(
-    user: SubsonicUser,
-    State(app): State<AppState>,
-    params: Params,
-) -> Result<Answer, SubsonicError> {
-    known_artist(&user, &app, &params).await?;
-    empty("artistInfo")
-}
-
-async fn artist_info2(
-    user: SubsonicUser,
-    State(app): State<AppState>,
-    params: Params,
-) -> Result<Answer, SubsonicError> {
-    known_artist(&user, &app, &params).await?;
-    empty("artistInfo2")
-}
-
-async fn lyrics(_user: SubsonicUser) -> Result<Answer, SubsonicError> {
-    empty("lyrics")
-}
-
-async fn lyrics_by_song_id(_user: SubsonicUser, params: Params) -> Result<Answer, SubsonicError> {
-    params.required("id")?;
-    empty("lyricsList")
 }
 
 async fn podcasts(_user: SubsonicUser) -> Result<Answer, SubsonicError> {

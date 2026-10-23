@@ -603,3 +603,116 @@ pub async fn web_now_playing(
     .fetch_all(pool)
     .await
 }
+
+/// What `getArtistInfo(2)` shows of an artist (spec §18 rows 60-61).
+#[derive(Debug, Clone)]
+pub struct ArtistInfoRow {
+    pub bio: Option<String>,
+    pub user_bio: Option<String>,
+    pub mbid: Option<Uuid>,
+    /// `artists."similar"` as stored, `[{name, mbid, match}]`.
+    pub similar: Option<serde_json::Value>,
+}
+
+/// The artist's info, when it is visible (has a present track, as `artist_exists`).
+pub async fn artist_info(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<ArtistInfoRow>> {
+    sqlx::query_as!(
+        ArtistInfoRow,
+        r#"SELECT ar.bio, ar.user_bio, ar.mbid, ar."similar"
+           FROM artists ar
+           WHERE ar.id = $1
+             AND EXISTS (SELECT 1 FROM albums al
+                         JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL
+                         WHERE al.artist_id = ar.id)"#,
+        id
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// The album's `release_mbid` (inner `None` when it has none), when the album is visible (has a
+/// present track, as `album_with_tracks`); `None` otherwise (spec §18 rows 58-59).
+pub async fn album_info(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Option<Uuid>>> {
+    let row = sqlx::query!(
+        r#"SELECT al.release_mbid
+           FROM albums al
+           WHERE al.id = $1
+             AND EXISTS (SELECT 1 FROM tracks t
+                         WHERE t.album_id = al.id AND t.missing_since IS NULL)"#,
+        id
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.release_mbid))
+}
+
+/// Artists that may carry the name `getLyrics` was given: those whose identity key is `key`
+/// first, then those whose search vector holds every word of one of `spellings`; at most
+/// `limit`, by id. The caller confirms each by its normalised name. Index-backed
+/// (`name_key`, `artists_search_idx`); the text is only ever a bound parameter.
+pub async fn artist_name_candidates(
+    pool: &PgPool,
+    key: &str,
+    spellings: &[String],
+    limit: i64,
+) -> sqlx::Result<Vec<(Uuid, String)>> {
+    let rows = sqlx::query!(
+        r#"SELECT ar.id, ar.name
+           FROM artists ar
+           WHERE ar.name_key = $1
+              OR ar.search @@ (
+                  SELECT string_agg(
+                             '(' || plainto_tsquery('simple', unaccent(s.v))::text || ')',
+                             ' | ')::tsquery
+                  FROM unnest($2::text[]) AS s(v)
+                  WHERE length(to_tsvector('simple', unaccent(s.v))) > 0)
+           ORDER BY (ar.name_key = $1) DESC, ar.id
+           LIMIT $3"#,
+        key,
+        spellings,
+        limit
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.id, r.name)).collect())
+}
+
+/// The track `getLyrics` answers with, and its stored lyrics.
+#[derive(Debug, Clone)]
+pub struct LyricsMatch {
+    pub title: String,
+    /// The album artist's name.
+    pub artist: String,
+    pub plain: Option<String>,
+    pub synced: Option<String>,
+    /// `None` when the track has no lyrics row.
+    pub source: Option<String>,
+}
+
+/// The first present track (by id) whose title contains `title` without regard to case (when
+/// given) and whose album artist is one of `artists` (when given), with its lyrics row. The
+/// title is matched with `strpos`, so `%` and `_` are plain characters (spec §18 row 62).
+pub async fn lyrics_match(
+    pool: &PgPool,
+    title: Option<&str>,
+    artists: Option<&[Uuid]>,
+) -> sqlx::Result<Option<LyricsMatch>> {
+    sqlx::query_as!(
+        LyricsMatch,
+        r#"SELECT t.title, ar.name AS artist,
+                  l.plain_lyrics AS "plain?", l.synced_lyrics AS "synced?", l.source AS "source?"
+           FROM tracks t
+           JOIN albums al ON al.id = t.album_id
+           JOIN artists ar ON ar.id = al.artist_id
+           LEFT JOIN track_lyrics l ON l.track_id = t.id
+           WHERE t.missing_since IS NULL
+             AND ($1::text IS NULL OR strpos(lower(t.title), lower($1)) > 0)
+             AND ($2::uuid[] IS NULL OR al.artist_id = ANY($2))
+           ORDER BY t.id
+           LIMIT 1"#,
+        title,
+        artists
+    )
+    .fetch_optional(pool)
+    .await
+}

@@ -9,6 +9,7 @@ use crate::error::SubsonicError;
 
 mod bookmarks;
 mod browse;
+mod info;
 mod media;
 mod playlists;
 mod queue;
@@ -129,6 +130,7 @@ pub fn router() -> Router<SubsonicCtx> {
     let router = stars::add_routes(router);
     let router = bookmarks::add_routes(router);
     let router = users::add_routes(router);
+    let router = info::add_routes(router);
     let router = stubs::add_routes(router);
     router.fallback(not_implemented)
 }

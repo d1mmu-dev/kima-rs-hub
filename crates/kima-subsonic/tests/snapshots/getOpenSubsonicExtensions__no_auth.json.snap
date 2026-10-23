@@ -22,6 +22,12 @@ source: crates/kima-subsonic/tests/snapshots.rs
         "versions": [
           1
         ]
+      },
+      {
+        "name": "songLyrics",
+        "versions": [
+          1
+        ]
       }
     ],
     "serverVersion": "[redacted]",

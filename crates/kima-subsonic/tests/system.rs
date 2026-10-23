@@ -18,6 +18,7 @@ async fn extensions_need_no_auth(pool: PgPool) {
             {"name": "apiKeyAuthentication", "versions": [1]},
             {"name": "formPost", "versions": [1]},
             {"name": "indexBasedQueue", "versions": [1]},
+            {"name": "songLyrics", "versions": [1]},
         ])
     );
     // The suffix-less path works too.
@@ -32,6 +33,22 @@ async fn extensions_need_no_auth(pool: PgPool) {
     let xml = rest_xml(&server, "getOpenSubsonicExtensions", &[]).await;
     assert!(xml.contains(
         "<openSubsonicExtensions name=\"formPost\"><versions>1</versions></openSubsonicExtensions>"
+    ));
+}
+
+/// `songLyrics` v1 is advertised now that `getLyricsBySongId` is real (spec §18 row 4, C10).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn extensions_include_song_lyrics(pool: PgPool) {
+    let (server, _) = server(pool);
+    let res = rest(&server, "getOpenSubsonicExtensions", &[]).await;
+    let list = res["openSubsonicExtensions"].as_array().unwrap();
+    assert!(
+        list.contains(&json!({"name": "songLyrics", "versions": [1]})),
+        "{res}"
+    );
+    let xml = rest_xml(&server, "getOpenSubsonicExtensions", &[]).await;
+    assert!(xml.contains(
+        "<openSubsonicExtensions name=\"songLyrics\"><versions>1</versions></openSubsonicExtensions>"
     ));
 }
 

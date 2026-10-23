@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT al.release_mbid\n           FROM albums al\n           WHERE al.id = $1\n             AND EXISTS (SELECT 1 FROM tracks t\n                         WHERE t.album_id = al.id AND t.missing_since IS NULL)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "release_mbid",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "33ae99ebb9df7dba7b9fc1f63f912c3b6350e64a98c7c6fe270bc5e1e5d993f8"
+}

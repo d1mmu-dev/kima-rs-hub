@@ -1,0 +1,16 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <lyricsList>
+    <structuredLyrics displayArtist="The Beatles" displayTitle="Come Together" lang="und" synced="true">
+      <line start="1500">Here come old flat top</line>
+      <line start="5000">He come groovin up slowly</line>
+    </structuredLyrics>
+    <structuredLyrics displayArtist="The Beatles" displayTitle="Come Together" lang="und" synced="false">
+      <line>Here come old flat top</line>
+      <line>He come groovin up slowly</line>
+    </structuredLyrics>
+  </lyricsList>
+</subsonic-response>

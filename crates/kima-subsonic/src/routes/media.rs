@@ -245,8 +245,22 @@ async fn get_cover_art(
     let not_found = || SubsonicError::not_found(COVER_NOT_FOUND);
 
     // A bare id is tried as an album (or, being no album, an artist with a stored image,
-    // D-113), then as a track. Prefixed artist ids (`ar-`, `artist:`) find nothing here yet
-    // (D-086).
+    // D-113), then as a track. A prefixed artist id (`ar-`, `artist:`) is an artist only: its
+    // stored image (spec §18 row 32).
+    if ids::parse(raw, &[]).is_none()
+        && let Some(id) = ids::parse(raw, &[Prefix::Ar, Prefix::ArtistColon])
+    {
+        let is_artist = matches!(
+            kima_db::identity::cover_owner(&app.pool, id).await?,
+            kima_db::identity::CoverOwner::Artist { has_image: true }
+        );
+        let image = if is_artist {
+            media::cover(&app, id, size).await?
+        } else {
+            None
+        };
+        return image.map(cover_response).ok_or_else(not_found);
+    }
     let (album, track) = if let Some(id) = ids::parse(raw, &[]) {
         (Some(id), Some(id))
     } else if let Some(id) = ids::parse(raw, &[Prefix::Al, Prefix::AlbumColon]) {
@@ -267,15 +281,18 @@ async fn get_cover_art(
     {
         image = media::cover(&app, song.track.album_id, size).await?;
     }
-    let image = image.ok_or_else(not_found)?;
-    Ok((
+    image.map(cover_response).ok_or_else(not_found)
+}
+
+fn cover_response(image: media::CoverImage) -> Response {
+    (
         [
             (CONTENT_TYPE, image.content_type),
             (CACHE_CONTROL, "private, max-age=86400"),
         ],
         image.bytes,
     )
-        .into_response())
+        .into_response()
 }
 
 async fn get_avatar(

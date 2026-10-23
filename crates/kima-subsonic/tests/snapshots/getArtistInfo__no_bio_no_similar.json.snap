@@ -1,0 +1,17 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "artistInfo": {
+      "coverArt": "ar-00000000-0000-7000-8000-100000000002",
+      "similarArtist": []
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

@@ -1,0 +1,47 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "lyricsList": {
+      "structuredLyrics": [
+        {
+          "displayArtist": "The Beatles",
+          "displayTitle": "Come Together",
+          "lang": "und",
+          "line": [
+            {
+              "start": 1500,
+              "value": "Here come old flat top"
+            },
+            {
+              "start": 5000,
+              "value": "He come groovin up slowly"
+            }
+          ],
+          "synced": true
+        },
+        {
+          "displayArtist": "The Beatles",
+          "displayTitle": "Come Together",
+          "lang": "und",
+          "line": [
+            {
+              "value": "Here come old flat top"
+            },
+            {
+              "value": "He come groovin up slowly"
+            }
+          ],
+          "synced": false
+        }
+      ]
+    },
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

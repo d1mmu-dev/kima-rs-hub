@@ -109,8 +109,17 @@ fixture_test!(stub_answers, |server, pool| {
     // (endpoint, params, expected element or (code, message))
     let empty = |name: &str| Ok(name.to_owned());
     let cases: Vec<StubCase> = vec![
-        ("getAlbumInfo", vec![], empty("albumInfo")),
-        ("getAlbumInfo2", vec![], empty("albumInfo")),
+        // Real since M3 (spec §18 rows 58-63); `tests/info.rs` covers them in full.
+        (
+            "getAlbumInfo",
+            vec![],
+            Err((10, "Required parameter is missing: id")),
+        ),
+        (
+            "getAlbumInfo2",
+            vec![("id", &uuid)],
+            Err((70, "Album not found")),
+        ),
         ("getArtistInfo", vec![("id", &uuid)], empty("artistInfo")),
         ("getArtistInfo", vec![("id", &ar)], empty("artistInfo")),
         ("getArtistInfo2", vec![("id", &uuid)], empty("artistInfo2")),
@@ -309,10 +318,6 @@ const UNAFFECTED: &[(&str, Option<u64>)] = &[
     ("updateUser", Some(50)),
     ("deleteUser", Some(50)),
     ("changePassword", Some(50)),
-    ("getAlbumInfo", None),
-    ("getAlbumInfo2", None),
-    ("getLyrics", None),
-    ("getLyricsBySongId", None),
     ("getPodcasts", None),
     ("getNewestPodcasts", None),
     ("getPodcastEpisode", Some(70)),

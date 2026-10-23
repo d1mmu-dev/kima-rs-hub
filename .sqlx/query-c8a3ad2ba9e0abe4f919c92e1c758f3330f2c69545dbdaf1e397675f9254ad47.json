@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ar.id, ar.name\n           FROM artists ar\n           WHERE ar.name_key = $1\n              OR ar.search @@ (\n                  SELECT string_agg(\n                             '(' || plainto_tsquery('simple', unaccent(s.v))::text || ')',\n                             ' | ')::tsquery\n                  FROM unnest($2::text[]) AS s(v)\n                  WHERE length(to_tsvector('simple', unaccent(s.v))) > 0)\n           ORDER BY (ar.name_key = $1) DESC, ar.id\n           LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "c8a3ad2ba9e0abe4f919c92e1c758f3330f2c69545dbdaf1e397675f9254ad47"
+}

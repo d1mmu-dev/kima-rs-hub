@@ -26,6 +26,7 @@ const FLAC_REL: &str = "The Beatles/Abbey Road/01 Come Together.flac";
 struct Env {
     server: TestServer,
     root: PathBuf,
+    data: PathBuf,
     // Kept alive for the data and transcode directories.
     _dirs: Vec<tempfile::TempDir>,
 }
@@ -43,6 +44,7 @@ fn env_with(pool: PgPool, public_url: Option<&str>) -> Env {
     Env {
         server: TestServer::new(router).unwrap(),
         root,
+        data: data.path().to_path_buf(),
         _dirs: vec![data, cache],
     }
 }
@@ -689,24 +691,68 @@ async fn cover_art_size_snaps(pool: PgPool) {
     migrator = "kima_db::MIGRATOR",
     fixtures(path = "fixtures", scripts("subsonic"))
 )]
-async fn cover_art_artist_70(pool: PgPool) {
+async fn cover_art_artist_without_image_70(pool: PgPool) {
     let env = env(pool);
     abbey_road_cover(&env);
-    let artist = artist_id(1).to_string();
+    // Artist 1 has an `image_path` but no file under the data folder; artist 2 has none at all.
+    for artist in [artist_id(1).to_string(), artist_id(2).to_string()] {
+        for raw in [
+            format!("ar-{artist}"),
+            format!("artist:{artist}"),
+            artist.clone(),
+        ] {
+            env.assert_error("getCoverArt", &[("id", &raw)], 70, "Cover art not found")
+                .await;
+        }
+    }
+    // An artist prefix never serves an album's cover.
+    let album = album_id(1).to_string();
+    env.assert_error(
+        "getCoverArt",
+        &[("id", &format!("ar-{album}"))],
+        70,
+        "Cover art not found",
+    )
+    .await;
+    // An artist cover is an error in the envelope, not an HTTP failure or an image.
+    let res = env
+        .get("getCoverArt", &[("id", &format!("ar-{}", artist_id(2)))])
+        .await;
+    res.assert_status_ok();
+    assert!(res.text().contains("<error code=\"70\""));
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn cover_art_artist_prefix_and_bare_id(pool: PgPool) {
+    let env = env(pool);
+    let artist = artist_id(1);
+    let path = kima_library::artwork::artist_image_path(&env.data, artist);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let img = image::RgbImage::from_pixel(600, 300, image::Rgb([10, 200, 30]));
+    img.save_with_format(&path, image::ImageFormat::Jpeg)
+        .unwrap();
+    let artist = artist.to_string();
     for raw in [
         format!("ar-{artist}"),
         format!("artist:{artist}"),
         artist.clone(),
     ] {
-        env.assert_error("getCoverArt", &[("id", &raw)], 70, "Cover art not found")
+        let res = env.get("getCoverArt", &[("id", &raw)]).await;
+        res.assert_status_ok();
+        assert_eq!(res.header(CONTENT_TYPE), "image/jpeg", "{raw}");
+        assert_eq!(res.header("cache-control"), "private, max-age=86400");
+        assert_eq!(dims(&res), (600, 300), "{raw}");
+        // `size` snaps as for albums: the long side fits the bucket.
+        let small = env
+            .get("getCoverArt", &[("id", &raw), ("size", "100")])
             .await;
+        small.assert_status_ok();
+        let (w, h) = dims(&small);
+        assert!(w <= 150 && h <= 150 && w > h, "{raw}: {w}x{h}");
     }
-    // An artist cover is an error in the envelope, not an HTTP failure or an image.
-    let res = env
-        .get("getCoverArt", &[("id", &format!("ar-{artist}"))])
-        .await;
-    res.assert_status_ok();
-    assert!(res.text().contains("<error code=\"70\""));
 }
 
 #[sqlx::test(

@@ -533,3 +533,153 @@ mod artist_images {
         artwork::remove_artist_image(data.path(), id).unwrap();
     }
 }
+
+mod stored_images {
+    use std::path::{Path, PathBuf};
+
+    use kima_library::artwork;
+    use uuid::Uuid;
+
+    fn noisy_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            let v = x
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(y.wrapping_mul(40_503));
+            image::Rgb([(v >> 3) as u8, (v >> 11) as u8, (v >> 19) as u8])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Jpeg).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn album_image_path_is_the_id_under_album_images() {
+        let id = Uuid::parse_str("0192f0c4-1111-7000-8000-000000000001").unwrap();
+        assert_eq!(
+            artwork::album_image_path(Path::new("/data"), id),
+            PathBuf::from("/data/album-images/0192f0c4-1111-7000-8000-000000000001.jpg")
+        );
+    }
+
+    /// A staged image reaches its place only when persisted; dropped, it leaves nothing.
+    #[test]
+    fn staged_images_land_only_when_persisted() {
+        let data = tempfile::tempdir().unwrap();
+        let id = Uuid::now_v7();
+        let staged = artwork::stage_album_image(data.path(), b"first").unwrap();
+        drop(staged);
+        let dir = data.path().join("album-images");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let staged = artwork::stage_album_image(data.path(), b"second").unwrap();
+        staged
+            .persist(&artwork::album_image_path(data.path(), id))
+            .unwrap();
+        assert_eq!(
+            std::fs::read(artwork::album_image_path(data.path(), id)).unwrap(),
+            b"second"
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        artwork::remove_album_image(data.path(), id).unwrap();
+        assert!(!artwork::album_image_path(data.path(), id).exists());
+        artwork::remove_album_image(data.path(), id).unwrap();
+    }
+
+    /// The local artist image's stamp: current while the source is unchanged and the stored
+    /// image is there; stale once either changes.
+    #[test]
+    fn local_stamp_tracks_the_source() {
+        let root = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let src = root_path.join("Artist/artist.jpg");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, noisy_jpeg(64, 64)).unwrap();
+        let id = Uuid::now_v7();
+        assert!(!artwork::local_artist_image_is_current(
+            data.path(),
+            &root_path,
+            id,
+            &src
+        ));
+        let stamp = artwork::local_stamp(&root_path, &src).unwrap();
+        artwork::store_artist_image(data.path(), id, b"jpeg").unwrap();
+        artwork::write_local_stamp(data.path(), id, &stamp).unwrap();
+        assert!(artwork::local_artist_image_is_current(
+            data.path(),
+            &root_path,
+            id,
+            &src
+        ));
+
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(30);
+        std::fs::File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert!(!artwork::local_artist_image_is_current(
+            data.path(),
+            &root_path,
+            id,
+            &src
+        ));
+
+        artwork::write_local_stamp(
+            data.path(),
+            id,
+            &artwork::local_stamp(&root_path, &src).unwrap(),
+        )
+        .unwrap();
+        assert!(artwork::local_artist_image_is_current(
+            data.path(),
+            &root_path,
+            id,
+            &src
+        ));
+        artwork::remove_artist_image(data.path(), id).unwrap();
+        assert!(!artwork::local_artist_image_is_current(
+            data.path(),
+            &root_path,
+            id,
+            &src
+        ));
+    }
+
+    #[test]
+    fn stored_variant_snaps_caches_and_rebuilds() {
+        let data = tempfile::tempdir().unwrap();
+        let id = Uuid::now_v7();
+        let src = artwork::artist_image_path(data.path(), id);
+        artwork::store_artist_image(data.path(), id, &noisy_jpeg(400, 200)).unwrap();
+        let get = |size| {
+            let bytes = artwork::stored_variant(data.path(), id, &src, size)
+                .unwrap()
+                .unwrap();
+            let img = image::load_from_memory(&bytes).unwrap();
+            (img.width(), img.height())
+        };
+        assert_eq!(get(Some(128)), (128, 64));
+        assert_eq!(get(None), (400, 200));
+        let variant = data.path().join(format!("artwork/{id}/stored-128.jpg"));
+        assert!(variant.is_file());
+
+        artwork::store_artist_image(data.path(), id, &noisy_jpeg(100, 300)).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(30);
+        std::fs::File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(get(Some(128)), (43, 128));
+
+        // A missing source is no image.
+        std::fs::remove_file(&src).unwrap();
+        assert!(
+            artwork::stored_variant(data.path(), id, &src, Some(128))
+                .unwrap()
+                .is_none()
+        );
+    }
+}

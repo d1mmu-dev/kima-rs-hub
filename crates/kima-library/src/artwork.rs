@@ -518,20 +518,219 @@ pub fn store_artist_image(data_dir: &Path, artist: Uuid, jpeg: &[u8]) -> std::io
     Ok(())
 }
 
-/// Deletes the artist's stored image, and nothing else: only
-/// [`artist_image_path`]`(data_dir, artist)`, unlinked (a symlink there is removed, never
-/// followed). Gone already is fine. Blocking.
-pub fn remove_artist_image(data_dir: &Path, artist: Uuid) -> std::io::Result<()> {
-    let path = artist_image_path(data_dir, artist);
-    match std::fs::symlink_metadata(&path) {
+/// Unlinks `path` when it is a file or a symlink (never followed); a folder or nothing there
+/// is left alone.
+fn unlink(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() => Ok(()),
-        Ok(_) => match std::fs::remove_file(&path) {
+        Ok(_) => match std::fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// Deletes the artist's stored image and its local-image stamp, and nothing else: only
+/// [`artist_image_path`]`(data_dir, artist)` and its stamp, unlinked (a symlink there is
+/// removed, never followed). Gone already is fine. Blocking.
+pub fn remove_artist_image(data_dir: &Path, artist: Uuid) -> std::io::Result<()> {
+    unlink(&artist_image_path(data_dir, artist))?;
+    unlink(&local_stamp_path(data_dir, artist))
+}
+
+/// The folder under the data directory that holds downloaded album covers (spec §12.7) and
+/// user album images (§16.3). Not part of the evictable cover cache.
+pub const ALBUM_IMAGES_DIR: &str = "album-images";
+
+/// Where the album's stored image lives: `<data_dir>/album-images/<id>.jpg`, named by the id
+/// alone.
+pub fn album_image_path(data_dir: &Path, album: Uuid) -> PathBuf {
+    data_dir
+        .join(ALBUM_IMAGES_DIR)
+        .join(format!("{}.jpg", album.hyphenated()))
+}
+
+/// Deletes the album's stored image, and nothing else (unlinked, never followed). Gone
+/// already is fine. Blocking.
+pub fn remove_album_image(data_dir: &Path, album: Uuid) -> std::io::Result<()> {
+    unlink(&album_image_path(data_dir, album))
+}
+
+/// A normalised image written to a temp file next to its final place, not yet in it. Dropped,
+/// the temp file is removed; [`StagedImage::persist`] renames it into place atomically.
+pub struct StagedImage {
+    tmp: tempfile::TempPath,
+}
+
+impl std::fmt::Debug for StagedImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagedImage").finish_non_exhaustive()
+    }
+}
+
+impl StagedImage {
+    /// Renames the staged file to `dest` (which must be in the folder it was staged in).
+    /// Blocking.
+    pub fn persist(self, dest: &Path) -> std::io::Result<()> {
+        self.tmp.persist(dest).map_err(|e| e.error)
+    }
+}
+
+/// Writes `jpeg` to a synced temp file in `<data_dir>/<subdir>`, creating the folder; a
+/// symlink or a file in its place is refused. Blocking.
+fn stage_in(data_dir: &Path, subdir: &str, jpeg: &[u8]) -> std::io::Result<StagedImage> {
+    let dir = data_dir.join(subdir);
+    std::fs::create_dir_all(&dir)?;
+    if !is_real_dir(&dir) {
+        return Err(std::io::Error::other(format!(
+            "the {subdir} folder is not a directory"
+        )));
+    }
+    let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+    tmp.write_all(jpeg)?;
+    tmp.as_file().sync_all()?;
+    Ok(StagedImage {
+        tmp: tmp.into_temp_path(),
+    })
+}
+
+/// Stages an artist image in `<data_dir>/artist-images`, for [`artist_image_path`]. Blocking.
+pub fn stage_artist_image(data_dir: &Path, jpeg: &[u8]) -> std::io::Result<StagedImage> {
+    stage_in(data_dir, ARTIST_IMAGES_DIR, jpeg)
+}
+
+/// Stages an album image in `<data_dir>/album-images`, for [`album_image_path`]. Blocking.
+pub fn stage_album_image(data_dir: &Path, jpeg: &[u8]) -> std::io::Result<StagedImage> {
+    stage_in(data_dir, ALBUM_IMAGES_DIR, jpeg)
+}
+
+/// Where the stamp of a `local` artist image lives: what library file it was copied from, as
+/// it was then (`<data_dir>/artist-images/<id>.local.json`).
+fn local_stamp_path(data_dir: &Path, artist: Uuid) -> PathBuf {
+    data_dir
+        .join(ARTIST_IMAGES_DIR)
+        .join(format!("{}.local.json", artist.hyphenated()))
+}
+
+/// Stamps a local artist image found under `root` (the canonical library root). Blocking.
+pub fn local_stamp(root: &Path, source: &Path) -> std::io::Result<SourceStamp> {
+    SourceStamp::capture(root, source)
+}
+
+/// Records which library file the artist's `local` image was copied from. Blocking.
+pub fn write_local_stamp(
+    data_dir: &Path,
+    artist: Uuid,
+    stamp: &SourceStamp,
+) -> std::io::Result<()> {
+    let json = serde_json::to_vec(stamp).map_err(std::io::Error::other)?;
+    let staged = stage_in(data_dir, ARTIST_IMAGES_DIR, &json)?;
+    staged.persist(&local_stamp_path(data_dir, artist))
+}
+
+/// Removes the local-image stamp (the stored image now comes from elsewhere). Blocking.
+pub fn remove_local_stamp(data_dir: &Path, artist: Uuid) -> std::io::Result<()> {
+    unlink(&local_stamp_path(data_dir, artist))
+}
+
+/// True when the artist's stored image is a regular file copied from `source` as it is now
+/// (same path, size and mtimes as the stamp records): copying it again would change nothing.
+/// Blocking.
+pub fn local_artist_image_is_current(
+    data_dir: &Path,
+    root: &Path,
+    artist: Uuid,
+    source: &Path,
+) -> bool {
+    let stored = std::fs::symlink_metadata(artist_image_path(data_dir, artist))
+        .is_ok_and(|m| m.file_type().is_file());
+    if !stored {
+        return false;
+    }
+    let Ok(raw) = std::fs::read(local_stamp_path(data_dir, artist)) else {
+        return false;
+    };
+    let Ok(recorded) = serde_json::from_slice::<SourceStamp>(&raw) else {
+        return false;
+    };
+    local_stamp(root, source).is_ok_and(|now| now == recorded)
+}
+
+// ---- variants of stored images (spec §12.6, D-113) ----
+
+/// A variant of a stored image: `<data_dir>/artwork/<id>/stored-<size|orig>.jpg`. Named apart
+/// from the library cover's files so the two never replace each other.
+fn stored_variant_path(data_dir: &Path, id: Uuid, size: Option<u32>) -> PathBuf {
+    let name = size.map_or_else(|| "orig".to_string(), |s| s.to_string());
+    data_dir
+        .join("artwork")
+        .join(id.to_string())
+        .join(format!("stored-{name}.jpg"))
+}
+
+fn modified(meta: &std::fs::Metadata) -> Option<SystemTime> {
+    meta.modified().ok()
+}
+
+/// The stored image at `source` (an [`artist_image_path`] or [`album_image_path`] built by the
+/// caller from the id) at `size`, as JPEG q85, cached under `<data_dir>/artwork/<id>/` and
+/// rebuilt when `source` is newer than the cached variant. `None` when `source` is not a
+/// regular file (missing or a symlink, never followed). Blocking.
+pub fn stored_variant(
+    data_dir: &Path,
+    id: Uuid,
+    source: &Path,
+    size: Option<u32>,
+) -> Result<Option<Vec<u8>>, ArtworkError> {
+    let size = size.map(bucket);
+    let src_meta = match std::fs::symlink_metadata(source) {
+        Ok(m) if m.file_type().is_file() => m,
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let entry = data_dir.join("artwork").join(id.to_string());
+    if std::fs::symlink_metadata(&entry).is_ok_and(|m| !m.is_dir()) {
+        // Something other than a folder in the entry's place: unlinked, never followed.
+        remove_album(data_dir, id)?;
+    }
+    let out = stored_variant_path(data_dir, id, size);
+    if let Ok(meta) = std::fs::symlink_metadata(&out)
+        && meta.file_type().is_file()
+        && modified(&meta) >= modified(&src_meta)
+    {
+        match std::fs::read(&out) {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    // Re-checked on open: swapped for a symlink or another file since is no image.
+    let Ok(bytes) = read_local_image(source) else {
+        return Ok(None);
+    };
+    let jpeg = render(&CoverSource::Embedded(bytes), size)?;
+    store(&out, &jpeg)?;
+    Ok(Some(jpeg))
+}
+
+/// Clears a library cover's cache entry (its stamp and size files) when it went stale, keeping
+/// the variants of a stored image that share the folder. Something other than a real folder
+/// in the entry's place is unlinked, never followed. Blocking.
+pub fn clear_cover_entry(data_dir: &Path, album_id: Uuid) -> std::io::Result<()> {
+    let entry = data_dir.join("artwork").join(album_id.to_string());
+    if !is_real_dir(&entry) {
+        return remove_album(data_dir, album_id);
+    }
+    let names = std::iter::once(STAMP_FILE.to_string())
+        .chain(std::iter::once("orig.jpg".to_string()))
+        .chain(SIZE_BUCKETS.iter().map(|b| format!("{b}.jpg")));
+    for name in names {
+        unlink(&entry.join(name))?;
+    }
+    Ok(())
 }
 
 /// A relative path of plain components only: no root, no `..`, no `.`.

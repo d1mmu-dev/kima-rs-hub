@@ -1,7 +1,9 @@
-//! Album cover art, resized and cached. Shared by `/api` and `/rest`.
+//! Album cover art and stored album and artist images, resized and cached. Shared by `/api`
+//! and `/rest`.
 
 use std::path::{Component, Path, PathBuf};
 
+use kima_db::identity::CoverOwner;
 use kima_library::artwork;
 use uuid::Uuid;
 
@@ -16,17 +18,91 @@ pub struct CoverImage {
     pub content_type: &'static str,
 }
 
-/// The album's cover at `size` (snapped to a cache bucket), or `None` when it has none.
+/// The cover for `id` at `size` (snapped to a cache bucket), or `None` when there is none.
+///
+/// For an album: a user image first, then embedded and folder art (M1), then the stored
+/// fallback cover (spec §12.7). For an artist (an id that is no album): its stored image
+/// (D-113). Stored images are read only from `<data_dir>/{album,artist}-images/<id>.jpg`,
+/// the name built from the parsed id, never from stored or requested text.
 pub async fn cover(
     state: &AppState,
-    album_id: Uuid,
+    id: Uuid,
     size: Option<u32>,
 ) -> Result<Option<CoverImage>, MediaError> {
     let size = size.map(artwork::bucket);
-    let (Some(data_dir), Some(root)) = (state.data_dir.clone(), state.library_root()) else {
+    let Some(data_dir) = state.data_dir.clone() else {
         return Ok(None);
     };
+    let jpeg = |bytes: Option<Vec<u8>>| {
+        bytes.map(|bytes| CoverImage {
+            bytes,
+            content_type: "image/jpeg",
+        })
+    };
+    let image_source = match kima_db::identity::cover_owner(&state.pool, id).await? {
+        CoverOwner::None | CoverOwner::Artist { has_image: false } => return Ok(None),
+        CoverOwner::Artist { has_image: true } => {
+            let source = artwork::artist_image_path(&data_dir, id);
+            return Ok(jpeg(stored(state, data_dir, id, source, size).await?));
+        }
+        CoverOwner::Album { image_source } => image_source,
+    };
+    let album_image = artwork::album_image_path(&data_dir, id);
+    if image_source.as_deref() == Some("user")
+        && let Some(bytes) = stored(state, data_dir.clone(), id, album_image.clone(), size).await?
+    {
+        return Ok(jpeg(Some(bytes)));
+    }
+    if let Some(root) = state.library_root() {
+        let library = library_cover(state, data_dir.clone(), root, id, size).await?;
+        if library.is_some() {
+            return Ok(jpeg(library));
+        }
+    }
+    if image_source.is_some_and(|s| s != "user") {
+        return Ok(jpeg(stored(state, data_dir, id, album_image, size).await?));
+    }
+    Ok(None)
+}
 
+/// A variant of a stored image (spec §12.6), cached under `<data_dir>/artwork/<id>/`.
+async fn stored(
+    state: &AppState,
+    data_dir: PathBuf,
+    id: Uuid,
+    source: PathBuf,
+    size: Option<u32>,
+) -> Result<Option<Vec<u8>>, MediaError> {
+    let cap = state.artwork_cache_bytes;
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Option<Vec<u8>>> {
+        let build = || artwork::stored_variant(&data_dir, id, &source, size);
+        // Another request can evict this entry between our steps; build once more.
+        let bytes = match build() {
+            Err(artwork::ArtworkError::Io(io)) if io.kind() == std::io::ErrorKind::NotFound => {
+                build()?
+            }
+            other => other?,
+        };
+        if bytes.is_some()
+            && let Err(e) = artwork::evict_to(&data_dir, cap)
+        {
+            tracing::warn!(error = %e, "could not trim the cover cache");
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|e| MediaError::Internal(e.into()))?
+    .map_err(MediaError::Internal)
+}
+
+/// The album's embedded or folder art (M1), resized and cached.
+async fn library_cover(
+    state: &AppState,
+    data_dir: PathBuf,
+    root: PathBuf,
+    album_id: Uuid,
+    size: Option<u32>,
+) -> Result<Option<Vec<u8>>, MediaError> {
     let paths = kima_db::library::album_track_paths(&state.pool, album_id).await?;
     let key = album_id.to_string();
     let cap = state.artwork_cache_bytes;
@@ -48,11 +124,7 @@ pub async fn cover(
     })
     .await
     .map_err(|e| MediaError::Internal(e.into()))??;
-
-    Ok(bytes.map(|bytes| CoverImage {
-        bytes,
-        content_type: "image/jpeg",
-    }))
+    Ok(bytes)
 }
 
 struct Job {
@@ -93,8 +165,9 @@ impl Job {
                     return Ok(Some(std::fs::read(cached)?));
                 }
             } else {
-                // The source or its folder changed (or the entry predates stamps): start over.
-                artwork::remove_album(data_dir, album_id)?;
+                // The source or its folder changed (or the entry predates stamps): start over,
+                // keeping the variants of a stored image that share the folder.
+                artwork::clear_cover_entry(data_dir, album_id)?;
             }
         }
         let mut failed = 0;

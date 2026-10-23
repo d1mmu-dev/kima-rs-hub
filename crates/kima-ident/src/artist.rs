@@ -6,8 +6,11 @@
 //! "none") and, for MusicBrainz, Wikidata and the similar-artist sources, fails the run: the
 //! artist is `failed`, and `unresolvable` at the [`FAILURE_CAP`]-th failure in a row; a source
 //! that only waits on its rate limit leaves the artist `pending` without counting a failure.
-//! Image sources never fail the run. Images are decoded and re-encoded before they are stored
-//! under `<data_dir>/artist-images/<id>.jpg`, and a `user` image is never touched.
+//! Image sources never fail the run. Images are decoded and re-encoded, staged in a temp file,
+//! and put in place at `<data_dir>/artist-images/<id>.jpg` only inside the transaction that
+//! records them, after the row's precedence check accepted them: a `user` image is never
+//! touched. After the artist's own image, its albums' missing covers are filled
+//! ([`crate::album_covers`]).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,7 +31,7 @@ use uuid::Uuid;
 
 use crate::musicbrainz::{self, ArtistInc};
 use crate::stages::{BatchReport, MAX_ERROR_CHARS, RETRY_CAP};
-use crate::{IdentCtx, Mbid, deezer, fanart, listenbrainz, similar, text, wikidata};
+use crate::{IdentCtx, Mbid, album_covers, deezer, fanart, listenbrainz, similar, text, wikidata};
 
 /// Artists claimed per batch (spec §10.6).
 pub const BATCH: i64 = 10;
@@ -192,36 +195,51 @@ fn image_rank(source: Option<&str>) -> u8 {
     }
 }
 
+/// An image a run found, staged next to its place but not in it yet.
+struct NewImage {
+    file: artwork::StagedImage,
+    /// For a `local` image: the library file it was copied from, as it was.
+    local: Option<artwork::SourceStamp>,
+}
+
 /// What a run learned, before it is written.
 struct Gathered {
     write: ArtistWrite,
     steps: Steps,
     /// The run is over: MusicBrainz has no such artist.
     unresolvable: bool,
-    /// A new image file was written.
-    image_written: bool,
+    /// The image `write.image` sets, put in place only if the write accepts it.
+    image: Option<NewImage>,
 }
 
-/// Normalises `bytes` and stores them as the artist's image, off the async threads.
-///
-/// CARRIED (Task 21 review I2, to the task that writes user images, spec §16.3): the file is
-/// written to `<id>.jpg` before `save_artist_outcome` checks the row's `image_source`, so a
-/// `user` image set while this artist is enriching could be overwritten on disk (the row keeps
-/// `user`); likewise a guard-drop deletes the file after the commit. The user-image writer
-/// must lock the artist row (or use a distinct file name) to close this.
-async fn store_image(ctx: &IdentCtx, artist: Uuid, bytes: Vec<u8>) -> Result<(), String> {
+/// Normalises `bytes` and stages them as the artist's image, off the async threads.
+async fn stage_image(ctx: &IdentCtx, bytes: Vec<u8>) -> Result<artwork::StagedImage, String> {
     let data_dir = ctx.library.data_dir.clone();
     tokio::task::spawn_blocking(move || {
         let jpeg = artwork::normalize_image(&bytes).map_err(|e| e.to_string())?;
-        artwork::store_artist_image(&data_dir, artist, &jpeg).map_err(|e| e.to_string())
+        artwork::stage_artist_image(&data_dir, &jpeg).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// Spec §12.3 step 2: the artist's image in the library, copied when found.
-async fn store_local_image(ctx: &IdentCtx, a: &ArtistForEnrichment) -> bool {
+/// What the library holds for the artist (spec §12.3 step 2).
+enum Local {
+    /// No usable image.
+    None,
+    /// The image already stored was copied from this very file, unchanged since.
+    Current,
+    Found(NewImage),
+}
+
+/// Spec §12.3 step 2: the artist's image in the library, staged when found. When the stored
+/// `local` image was copied from the same file, unchanged since (its stamp), nothing is read
+/// or written again.
+async fn local_image(ctx: &IdentCtx, a: &ArtistForEnrichment) -> Local {
     let root = ctx.library.root.get();
+    let data_dir = ctx.library.data_dir.clone();
+    let stored_local = a.image_source.as_deref() == Some("local");
+    let id = a.id;
     let dirs: Vec<PathBuf> = a
         .album_dirs
         .iter()
@@ -230,26 +248,39 @@ async fn store_local_image(ctx: &IdentCtx, a: &ArtistForEnrichment) -> bool {
         .collect();
     let found = tokio::task::spawn_blocking(move || {
         let path = artwork::find_local_artist_image(&root, &dirs)?;
-        artwork::read_local_image(&path).ok()
+        // `find_local_artist_image` answers under the canonical root.
+        let root = std::fs::canonicalize(&root).ok()?;
+        if stored_local && artwork::local_artist_image_is_current(&data_dir, &root, id, &path) {
+            return Some(Err(()));
+        }
+        // Stamped before reading, so a change during the copy shows up next time.
+        let stamp = artwork::local_stamp(&root, &path).ok()?;
+        let bytes = artwork::read_local_image(&path).ok()?;
+        Some(Ok((bytes, stamp)))
     })
     .await
     .ok()
     .flatten();
-    let Some(bytes) = found else {
-        return false;
+    let (bytes, stamp) = match found {
+        None => return Local::None,
+        Some(Err(())) => return Local::Current,
+        Some(Ok(found)) => found,
     };
-    match store_image(ctx, a.id, bytes).await {
-        Ok(()) => true,
+    match stage_image(ctx, bytes).await {
+        Ok(file) => Local::Found(NewImage {
+            file,
+            local: Some(stamp),
+        }),
         Err(error) => {
             warn!(artist = %a.id, %error, "the library's artist image could not be used");
-            false
+            Local::None
         }
     }
 }
 
-/// Downloads `url` and stores it as the artist's image. A failure (a download refused or
+/// Downloads `url` and stages it as the artist's image. A failure (a download refused or
 /// failed, an image that does not decode) is logged and the next source is tried.
-async fn download_image(ctx: &IdentCtx, artist: Uuid, source: &str, url: &str) -> bool {
+async fn download_image(ctx: &IdentCtx, artist: Uuid, source: &str, url: &str) -> Option<NewImage> {
     let bytes = match ctx.net.get_bytes(url).await {
         Outcome::Answered(b) => b,
         other => {
@@ -257,19 +288,20 @@ async fn download_image(ctx: &IdentCtx, artist: Uuid, source: &str, url: &str) -
             if let Some(code) = other.code() {
                 debug!(%artist, source, code, "artist image download failed");
             }
-            return false;
+            return None;
         }
     };
-    match store_image(ctx, artist, bytes).await {
-        Ok(()) => true,
+    match stage_image(ctx, bytes).await {
+        Ok(file) => Some(NewImage { file, local: None }),
         Err(error) => {
             debug!(%artist, source, %error, "artist image did not decode");
-            false
+            None
         }
     }
 }
 
-/// Spec §12.1-§12.5 in upstream's order. Writes nothing; files are written (the image).
+/// Spec §12.1-§12.5 in upstream's order, then the album covers (§12.7). Writes nothing about
+/// the artist (its image is only staged); album covers are written as they are found.
 async fn gather(ctx: &IdentCtx, a: &ArtistForEnrichment) -> Gathered {
     let net = &ctx.net;
     let mut steps = Steps::default();
@@ -282,7 +314,7 @@ async fn gather(ctx: &IdentCtx, a: &ArtistForEnrichment) -> Gathered {
         write,
         steps,
         unresolvable,
-        image_written: false,
+        image: None,
     };
 
     // §12.1 the guard: an id of another artist goes with everything learned through it.
@@ -391,41 +423,56 @@ async fn gather(ctx: &IdentCtx, a: &ArtistForEnrichment) -> Gathered {
     }
 
     // §12.3 the image: user, local, Wikidata, fanart, Deezer; only a higher source replaces.
-    let mut image_written = false;
+    let mut image = None;
     let image_name = format!("{}.jpg", a.id.hyphenated());
     let current = image_rank(image_source.as_deref());
     if current < image_rank(Some("user")) {
-        if store_local_image(ctx, a).await {
-            image_written = true;
-            write.image = Change::Set((image_name.clone(), "local".to_owned()));
-        } else if current < image_rank(Some("local")) {
-            let mut stored = false;
-            if let Some(url) = wikidata_image.filter(|_| current < image_rank(Some("wikidata"))) {
-                stored = download_image(ctx, a.id, "wikidata", &url).await;
-                if stored {
-                    write.image = Change::Set((image_name.clone(), "wikidata".to_owned()));
+        let mut found = None;
+        match local_image(ctx, a).await {
+            Local::Found(new) => found = Some((new, "local")),
+            // Already stored: nothing lower may replace it.
+            Local::Current => {}
+            Local::None if current < image_rank(Some("local")) => {
+                if let Some(url) = wikidata_image.filter(|_| current < image_rank(Some("wikidata")))
+                {
+                    found = download_image(ctx, a.id, "wikidata", &url)
+                        .await
+                        .map(|n| (n, "wikidata"));
                 }
-            }
-            if !stored && current < image_rank(Some("fanart")) {
-                if let (Some(id), Some(key)) = (mbid, ctx.fanart_key().await) {
-                    if let Outcome::Answered(Some(url)) = fanart::artist_image(net, &key, id).await
-                    {
-                        stored = download_image(ctx, a.id, "fanart", &url).await;
-                        if stored {
-                            write.image = Change::Set((image_name.clone(), "fanart".to_owned()));
+                if found.is_none() && current < image_rank(Some("fanart")) {
+                    if let (Some(id), Some(key)) = (mbid, ctx.fanart_key().await) {
+                        if let Outcome::Answered(Some(url)) =
+                            fanart::artist_image(net, &key, id).await
+                        {
+                            found = download_image(ctx, a.id, "fanart", &url)
+                                .await
+                                .map(|n| (n, "fanart"));
                         }
                     }
                 }
-            }
-            if !stored && current < image_rank(Some("deezer")) {
-                if let Some(url) = deezer_hit.as_ref().and_then(|h| h.picture.as_deref()) {
-                    stored = download_image(ctx, a.id, "deezer", url).await;
-                    if stored {
-                        write.image = Change::Set((image_name, "deezer".to_owned()));
+                if found.is_none() && current < image_rank(Some("deezer")) {
+                    if let Some(url) = deezer_hit.as_ref().and_then(|h| h.picture.as_deref()) {
+                        found = download_image(ctx, a.id, "deezer", url)
+                            .await
+                            .map(|n| (n, "deezer"));
                     }
                 }
             }
-            image_written = stored;
+            Local::None => {}
+        }
+        if let Some((new, source)) = found {
+            write.image = Change::Set((image_name, source.to_owned()));
+            image = Some(new);
+        }
+    }
+
+    // §12.7 the album covers. A paused source leaves the artist pending; nothing else here
+    // fails the run.
+    match album_covers::fill_for_artist(ctx, a.id).await {
+        Outcome::Answered(_) | Outcome::Absent(_) => {}
+        Outcome::RateLimited { .. } => steps.waiting = true,
+        Outcome::Transient(f) | Outcome::Permanent(f) => {
+            warn!(artist = %a.id, code = %f.code, "album covers could not be filled");
         }
     }
 
@@ -433,7 +480,7 @@ async fn gather(ctx: &IdentCtx, a: &ArtistForEnrichment) -> Gathered {
         write,
         steps,
         unresolvable: false,
-        image_written,
+        image,
     }
 }
 
@@ -452,15 +499,15 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
                 waiting: false,
             },
             unresolvable: false,
-            // A download may have finished before the deadline.
-            image_written: true,
+            // Whatever was staged was dropped with the run.
+            image: None,
         },
     };
     let Gathered {
         mut write,
         steps,
         unresolvable,
-        image_written,
+        image,
     } = g;
     let result = if unresolvable {
         write.status = ArtistStatus::Unresolvable;
@@ -490,24 +537,62 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
         write.error = Change::Clear;
         ArtistResult::Completed
     };
-    let saved = identity::save_artist_outcome(&ctx.pool, a.id, &write).await?;
-    // The image was dropped with another artist's id, or the artist was pruned meanwhile: the
-    // file goes too.
-    let orphaned = if saved {
-        write.image == Change::Clear
-    } else {
-        image_written && !identity::artist_exists(&ctx.pool, a.id).await?
+    save(ctx, a.id, &write, image).await?;
+    Ok(result)
+}
+
+/// Writes the outcome and, while the artist row is still locked by that write, puts the staged
+/// image in place when the row accepted it (no `user` image in the way). An image the write
+/// cleared (another artist's id) is deleted before the commit, unless a user image holds the
+/// place. A user image writer that locks the row before replacing the file can therefore
+/// never have its file overwritten or deleted by a run.
+async fn save(
+    ctx: &IdentCtx,
+    id: Uuid,
+    write: &ArtistWrite,
+    image: Option<NewImage>,
+) -> sqlx::Result<()> {
+    let mut tx = ctx.pool.begin().await?;
+    let Some(saved) = identity::save_artist_outcome_in(&mut tx, id, write).await? else {
+        // Not `enriching` any more (a wipe, a restart, a prune): nothing is written and the
+        // staged file goes with `image`.
+        tx.rollback().await?;
+        return Ok(());
     };
-    if orphaned {
-        let data_dir = ctx.library.data_dir.clone();
-        let id = a.id;
+    let data_dir = ctx.library.data_dir.clone();
+    let accepted = match (&write.image, image) {
+        (Change::Set((_, source)), Some(new)) if saved.image_source.as_deref() == Some(source) => {
+            Some(new)
+        }
+        _ => None,
+    };
+    if let Some(new) = accepted {
+        let data_dir = data_dir.clone();
+        let placed = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            new.file
+                .persist(&artwork::artist_image_path(&data_dir, id))?;
+            match &new.local {
+                Some(stamp) => artwork::write_local_stamp(&data_dir, id, stamp),
+                None => artwork::remove_local_stamp(&data_dir, id),
+            }
+        })
+        .await;
+        match placed {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!(artist = %id, %error, "could not put an artist image in place"),
+            Err(error) => warn!(artist = %id, %error, "could not put an artist image in place"),
+        }
+    }
+    if write.image == Change::Clear && saved.image_source.is_none() {
+        // Still under the row lock, so a user image cannot land in between.
         let removed =
             tokio::task::spawn_blocking(move || artwork::remove_artist_image(&data_dir, id)).await;
         if let Ok(Err(error)) = removed {
             warn!(artist = %id, %error, "could not remove an artist image no row refers to");
         }
     }
-    Ok(result)
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Claims up to [`BATCH`] artists and enriches them, at most `enrichmentConcurrency` at once.

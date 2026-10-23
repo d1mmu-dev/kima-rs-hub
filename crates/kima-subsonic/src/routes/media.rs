@@ -244,8 +244,9 @@ async fn get_cover_art(
     };
     let not_found = || SubsonicError::not_found(COVER_NOT_FOUND);
 
-    // Artist ids (`ar-`, `artist:` or a bare artist id) find nothing here: kima-rs has no artist
-    // images until M3 (D-086). A bare id is tried as an album, then as a track.
+    // A bare id is tried as an album (or, being no album, an artist with a stored image,
+    // D-113), then as a track. Prefixed artist ids (`ar-`, `artist:`) find nothing here yet
+    // (D-086).
     let (album, track) = if let Some(id) = ids::parse(raw, &[]) {
         (Some(id), Some(id))
     } else if let Some(id) = ids::parse(raw, &[Prefix::Al, Prefix::AlbumColon]) {

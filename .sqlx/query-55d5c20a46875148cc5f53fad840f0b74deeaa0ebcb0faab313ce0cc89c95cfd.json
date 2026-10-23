@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT EXISTS (SELECT 1 FROM artists WHERE id = $1) AS \"e!\"",
+  "query": "SELECT image_path IS NOT NULL AS \"has!\" FROM artists WHERE id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "e!",
+        "name": "has!",
         "type_info": "Bool"
       }
     ],
@@ -18,5 +18,5 @@
       null
     ]
   },
-  "hash": "b15da49208843116c54e845a1ca5a8e1ec988a7b346a414c352f6d260f0982eb"
+  "hash": "55d5c20a46875148cc5f53fad840f0b74deeaa0ebcb0faab313ce0cc89c95cfd"
 }

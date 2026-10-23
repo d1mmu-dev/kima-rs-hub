@@ -1,4 +1,5 @@
-//! `GET /api/library/cover-art/:id?size=N`: an album's cover, resized and cached.
+//! `GET /api/library/cover-art/:id?size=N`: an album's cover or an artist's image (D-113),
+//! resized and cached. The id must parse as a UUID; nothing of the request text reaches a path.
 
 use axum::Router;
 use axum::extract::{Path as UrlPath, Query, State};
@@ -46,8 +47,8 @@ async fn cover_art(
         },
     };
     let not_found = || ApiError::NotFound("Cover art not found");
-    let album = id.parse().map_err(|_| not_found())?;
-    let img = media::cover(&state, album, size)
+    let id = id.parse().map_err(|_| not_found())?;
+    let img = media::cover(&state, id, size)
         .await?
         .ok_or_else(not_found)?;
     Ok((

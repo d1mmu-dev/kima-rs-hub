@@ -366,3 +366,204 @@ async fn cache_cap_evicts_after_write(pool: PgPool) {
     assert_eq!(f.orig_dims().await, (400, 200));
     assert!(!f.entry().exists());
 }
+
+// ---- M3: stored images (spec §12.6, §12.7; D-113) ----
+
+fn jpeg_file(path: &std::path::Path, w: u32, h: u32) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    image::RgbImage::from_pixel(w, h, image::Rgb([10, 120, 10]))
+        .save_with_format(path, image::ImageFormat::Jpeg)
+        .unwrap();
+}
+
+async fn artist_with_image(pool: &PgPool, data: &std::path::Path, w: u32, h: u32) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO artists (id, name, name_key, image_path, image_source) \
+         VALUES ($1, 'Painter', 'painter', $1::text || '.jpg', 'wikidata')",
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .unwrap();
+    jpeg_file(&kima_library::artwork::artist_image_path(data, id), w, h);
+    id
+}
+
+async fn set_album_image(pool: &PgPool, album: Uuid, source: &str) {
+    sqlx::query(
+        "UPDATE albums SET image_path = id::text || '.jpg', image_source = $2 WHERE id = $1",
+    )
+    .bind(album)
+    .bind(source)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn dims(
+    server: &axum_test::TestServer,
+    token: &str,
+    id: Uuid,
+    size: Option<u32>,
+) -> (u32, u32) {
+    let url = match size {
+        Some(s) => format!("/api/library/cover-art/{id}?size={s}"),
+        None => format!("/api/library/cover-art/{id}"),
+    };
+    let res = server.get(&url).authorization_bearer(token).await;
+    res.assert_status_ok();
+    assert_eq!(res.header("content-type"), "image/jpeg");
+    assert_eq!(res.header("cache-control"), "private, max-age=86400");
+    let img = image::load_from_memory(res.as_bytes()).unwrap();
+    (img.width(), img.height())
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cover_route_serves_artist_id_with_size_snapping(pool: PgPool) {
+    let music = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let artist = artist_with_image(&pool, data.path(), 800, 400).await;
+    let state = common::state(pool)
+        .with_data_dir(data.path().into())
+        .with_library_root(music.path().into());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+
+    // 100 snaps up to 128.
+    assert_eq!(dims(&server, &token, artist, Some(100)).await, (128, 64));
+    assert_eq!(dims(&server, &token, artist, Some(5000)).await, (800, 400));
+    assert_eq!(dims(&server, &token, artist, None).await, (800, 400));
+    // The variant is cached under the artist's id.
+    assert!(data.path().join(format!("artwork/{artist}")).is_dir());
+    // Without a session the image is not served, as album covers are not.
+    server
+        .get(&format!("/api/library/cover-art/{artist}"))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cover_route_unknown_id_404(pool: PgPool) {
+    let music = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    // A file named by an id with no row is never served.
+    let stray = Uuid::now_v7();
+    jpeg_file(
+        &kima_library::artwork::artist_image_path(data.path(), stray),
+        50,
+        50,
+    );
+    jpeg_file(
+        &kima_library::artwork::album_image_path(data.path(), stray),
+        50,
+        50,
+    );
+    // An artist whose row records no image is not served either, even with a file present.
+    let artist = artist_with_image(&pool, data.path(), 50, 50).await;
+    sqlx::query("UPDATE artists SET image_path = NULL, image_source = NULL WHERE id = $1")
+        .bind(artist)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = common::state(pool)
+        .with_data_dir(data.path().into())
+        .with_library_root(music.path().into());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    for id in [
+        stray.to_string(),
+        artist.to_string(),
+        "..%2F..%2Fetc%2Fpasswd".into(),
+    ] {
+        let res = server
+            .get(&format!("/api/library/cover-art/{id}"))
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(
+            res.json::<serde_json::Value>()["error"],
+            "Cover art not found"
+        );
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn fallback_served_after_embedded_and_folder(pool: PgPool) {
+    let f = cover_fixture(pool.clone(), None).await;
+    jpeg_file(
+        &kima_library::artwork::album_image_path(f.data.path(), f.album),
+        90,
+        90,
+    );
+    set_album_image(&pool, f.album, "deezer").await;
+    // The folder's cover.png (400x200) wins over the fallback.
+    assert_eq!(f.orig_dims().await, (400, 200));
+    // Without it, the fallback is served.
+    std::fs::remove_file(f.music.path().join("A/B/cover.png")).unwrap();
+    set_mtime(&f.music.path().join("A/B"), 30);
+    assert_eq!(f.orig_dims().await, (90, 90));
+    assert_eq!(dims(&f.server, &f.token, f.album, Some(64)).await, (64, 64));
+    // Served again from the cache.
+    assert_eq!(f.orig_dims().await, (90, 90));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn user_album_image_first(pool: PgPool) {
+    let f = cover_fixture(pool.clone(), None).await;
+    jpeg_file(
+        &kima_library::artwork::album_image_path(f.data.path(), f.album),
+        70,
+        30,
+    );
+    set_album_image(&pool, f.album, "user").await;
+    assert_eq!(f.orig_dims().await, (70, 30));
+    // A user image whose file is gone falls back to the folder's cover.
+    std::fs::remove_file(kima_library::artwork::album_image_path(
+        f.data.path(),
+        f.album,
+    ))
+    .unwrap();
+    assert_eq!(f.orig_dims().await, (400, 200));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn variant_rebuilt_when_image_replaced(pool: PgPool) {
+    let music = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let artist = artist_with_image(&pool, data.path(), 800, 400).await;
+    let state = common::state(pool)
+        .with_data_dir(data.path().into())
+        .with_library_root(music.path().into());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    assert_eq!(dims(&server, &token, artist, Some(256)).await, (256, 128));
+    assert_eq!(dims(&server, &token, artist, Some(256)).await, (256, 128));
+
+    let source = kima_library::artwork::artist_image_path(data.path(), artist);
+    jpeg_file(&source, 300, 600);
+    set_mtime(&source, 30);
+    assert_eq!(dims(&server, &token, artist, Some(256)).await, (128, 256));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_symlinked_stored_image_is_not_served(pool: PgPool) {
+    let music = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let artist = artist_with_image(&pool, data.path(), 80, 80).await;
+    let source = kima_library::artwork::artist_image_path(data.path(), artist);
+    let elsewhere = music.path().join("secret.jpg");
+    jpeg_file(&elsewhere, 40, 40);
+    std::fs::remove_file(&source).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &source).unwrap();
+    let state = common::state(pool)
+        .with_data_dir(data.path().into())
+        .with_library_root(music.path().into());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    server
+        .get(&format!("/api/library/cover-art/{artist}"))
+        .authorization_bearer(&token)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+}

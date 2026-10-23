@@ -337,16 +337,6 @@ pub async fn release_artists(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<u64> {
     Ok(r.rows_affected())
 }
 
-/// Whether the artist row exists.
-pub async fn artist_exists(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
-    sqlx::query_scalar!(
-        r#"SELECT EXISTS (SELECT 1 FROM artists WHERE id = $1) AS "e!""#,
-        id
-    )
-    .fetch_one(pool)
-    .await
-}
-
 /// An artist's enrichment status after a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtistStatus {
@@ -434,6 +424,32 @@ impl ArtistWrite {
 /// `last_enriched_at` is now.
 pub async fn save_artist_outcome(pool: &PgPool, id: Uuid, out: &ArtistWrite) -> sqlx::Result<bool> {
     let mut tx = pool.begin().await?;
+    let saved = save_artist_outcome_in(&mut tx, id, out).await?;
+    if saved.is_some() {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(saved.is_some())
+}
+
+/// The row's image after [`save_artist_outcome_in`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedArtist {
+    /// `image_source` as written: the run's own source when its image was accepted, `user`
+    /// when a user image kept its place, `None` when there is no image.
+    pub image_source: Option<String>,
+}
+
+/// [`save_artist_outcome`] on the caller's transaction, which it leaves open: the artist row
+/// stays locked until the caller commits, so a stored image file can be put in place between
+/// the precedence check and the commit. `None` (nothing written) when the artist is no longer
+/// `enriching`.
+pub async fn save_artist_outcome_in(
+    tx: &mut PgConnection,
+    id: Uuid,
+    out: &ArtistWrite,
+) -> sqlx::Result<Option<SavedArtist>> {
     let error = out.error.value();
     let mbid = out.mbid.value();
     let image = out.image.value();
@@ -456,7 +472,7 @@ pub async fn save_artist_outcome(pool: &PgPool, id: Uuid, out: &ArtistWrite) -> 
                "similar" = CASE $15 WHEN 'keep' THEN "similar" WHEN 'set' THEN $16
                                     ELSE NULL END
            WHERE id = $1 AND enrichment_status = 'enriching'
-           RETURNING id"#,
+           RETURNING image_source"#,
         id,
         out.status.as_str(),
         out.failures,
@@ -476,20 +492,127 @@ pub async fn save_artist_outcome(pool: &PgPool, id: Uuid, out: &ArtistWrite) -> 
     )
     .fetch_optional(&mut *tx)
     .await?;
-    if updated.is_none() {
-        tx.rollback().await?;
-        return Ok(false);
-    }
+    let Some(image_source) = updated else {
+        return Ok(None);
+    };
     let source = crate::genres::GenreSource::MusicBrainz;
     match &out.mb_genres {
         Change::Keep => {}
         Change::Set(names) => {
-            crate::genres::replace_artist_genres(&mut tx, id, source, names).await?;
+            crate::genres::replace_artist_genres(&mut *tx, id, source, names).await?;
         }
         Change::Clear => {
-            crate::genres::replace_artist_genres(&mut tx, id, source, &[]).await?;
+            crate::genres::replace_artist_genres(&mut *tx, id, source, &[]).await?;
         }
     }
-    tx.commit().await?;
-    Ok(true)
+    Ok(Some(SavedArtist { image_source }))
+}
+
+// ---- album cover fallback (spec §12.7) ----
+
+/// An album the cover fallback may fill: no stored image and a present track.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumForCover {
+    pub id: Uuid,
+    pub title: String,
+    /// The album artist's name.
+    pub artist_name: String,
+    pub release_group_mbid: Option<Uuid>,
+    /// The album's first present track (disc, number, path), relative to the library root:
+    /// the one file probed for embedded or folder art.
+    pub track_path: Option<String>,
+}
+
+/// `artist`'s albums with no stored image (`image_path IS NULL`) and a present track, by title
+/// then id, at most [`MAX_CLAIM_ALBUMS`]. Whether one has embedded or folder art is for the
+/// caller to check (on [`AlbumForCover::track_path`]).
+pub async fn albums_without_cover(pool: &PgPool, artist: Uuid) -> sqlx::Result<Vec<AlbumForCover>> {
+    let rows = sqlx::query!(
+        r#"SELECT al.id, al.title, ar.name AS artist_name, al.release_group_mbid,
+                  (SELECT t.path FROM tracks t
+                   WHERE t.album_id = al.id AND t.missing_since IS NULL
+                   ORDER BY t.disc, t.track_no, t.path LIMIT 1) AS track_path
+           FROM albums al JOIN artists ar ON ar.id = al.artist_id
+           WHERE al.artist_id = $1 AND al.image_path IS NULL
+             AND EXISTS (SELECT 1 FROM tracks t
+                         WHERE t.album_id = al.id AND t.missing_since IS NULL)
+           ORDER BY al.title, al.id
+           LIMIT $2"#,
+        artist,
+        MAX_CLAIM_ALBUMS,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| AlbumForCover {
+            id: r.id,
+            title: r.title,
+            artist_name: r.artist_name,
+            release_group_mbid: r.release_group_mbid,
+            track_path: r.track_path,
+        })
+        .collect())
+}
+
+/// Records a fallback cover (`path` relative to `<data_dir>/album-images`, `source` one of
+/// `deezer`, `coverartarchive`, `fanart`) on the caller's connection. Never over a `user`
+/// image. The update locks the album row (album only, as every writer of albums does after
+/// tracks), so a caller in a transaction holds it until it commits: the file is put in place
+/// after this answers `true` and before the commit. Returns whether it was applied (`false`:
+/// a user image, or the album is gone).
+pub async fn set_album_image(
+    conn: &mut PgConnection,
+    album: Uuid,
+    path: &str,
+    source: &str,
+) -> sqlx::Result<bool> {
+    let updated = sqlx::query_scalar!(
+        "UPDATE albums SET image_path = $2, image_source = $3
+         WHERE id = $1 AND image_source IS DISTINCT FROM 'user'
+         RETURNING id",
+        album,
+        path,
+        source,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(updated.is_some())
+}
+
+/// What `GET /library/cover-art/<id>` may serve for an id (D-113).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoverOwner {
+    /// No album and no artist has this id.
+    None,
+    /// An album; `image_source` of its stored image, when it has one.
+    Album { image_source: Option<String> },
+    /// An artist; whether it has a stored image.
+    Artist { has_image: bool },
+}
+
+/// Whose id `id` is, for the cover route: an album first, else an artist.
+pub async fn cover_owner(pool: &PgPool, id: Uuid) -> sqlx::Result<CoverOwner> {
+    let album = sqlx::query!(
+        r#"SELECT CASE WHEN image_path IS NOT NULL THEN image_source END AS image_source
+           FROM albums WHERE id = $1"#,
+        id
+    )
+    .fetch_optional(pool)
+    .await?;
+    if let Some(a) = album {
+        return Ok(CoverOwner::Album {
+            image_source: a.image_source,
+        });
+    }
+    let artist = sqlx::query_scalar!(
+        r#"SELECT image_path IS NOT NULL AS "has!" FROM artists WHERE id = $1"#,
+        id
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(match artist {
+        Some(has_image) => CoverOwner::Artist { has_image },
+        None => CoverOwner::None,
+    })
 }

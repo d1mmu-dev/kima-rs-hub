@@ -932,10 +932,17 @@ async fn prune_empty(ctx: &LibraryCtx) -> Result<(), ScanError> {
             if let Err(e) = crate::artwork::remove_album(&data_dir, id) {
                 warn!(album = %id, error = %e, "could not remove the cover cache of a deleted album");
             }
+            if let Err(e) = crate::artwork::remove_album_image(&data_dir, id) {
+                warn!(album = %id, error = %e, "could not remove the stored cover of a deleted album");
+            }
         }
         for id in pruned.artists {
             if let Err(e) = crate::artwork::remove_artist_image(&data_dir, id) {
                 warn!(artist = %id, error = %e, "could not remove the image of a deleted artist");
+            }
+            // The artist image's resized variants share the cover cache's layout.
+            if let Err(e) = crate::artwork::remove_album(&data_dir, id) {
+                warn!(artist = %id, error = %e, "could not remove the image cache of a deleted artist");
             }
         }
     })

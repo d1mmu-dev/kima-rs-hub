@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE albums SET image_path = $2, image_source = $3\n         WHERE id = $1 AND image_source IS DISTINCT FROM 'user'\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f1975086e8d61c59e70fa7ebe889b78333e62b8b1dfcead7a66ace1402eb8184"
+}

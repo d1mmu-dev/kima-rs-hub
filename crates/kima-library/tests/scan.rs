@@ -1802,3 +1802,51 @@ async fn prune_deletes_artist_image(pool: PgPool) {
     assert!(!kima_library::artwork::artist_image_path(&c.data_dir, gone).exists());
     assert!(kima_library::artwork::artist_image_path(&c.data_dir, kept).exists());
 }
+
+/// Spec §12.6: `prune_empty` deletes a pruned album's stored cover (and its variants) with its
+/// row, and only that album's.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn prune_deletes_album_image(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let p = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "C/D/01.flac",
+        tags("C", "D", "two", "2001", "1"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    let album_of = |title: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM albums WHERE title = $1")
+                .bind(title)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let (gone, kept) = (album_of("B").await, album_of("D").await);
+    for id in [gone, kept] {
+        let path = kima_library::artwork::album_image_path(&c.data_dir, id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"jpeg bytes").unwrap();
+    }
+
+    std::fs::remove_file(p).unwrap();
+    scan::reconcile(&c).await.unwrap();
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '8 days' WHERE title = 'one'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    scan::reconcile(&c).await.unwrap();
+    assert!(!kima_library::artwork::album_image_path(&c.data_dir, gone).exists());
+    assert!(kima_library::artwork::album_image_path(&c.data_dir, kept).exists());
+}

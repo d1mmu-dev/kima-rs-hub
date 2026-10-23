@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT al.id, al.title, ar.name AS artist_name, al.release_group_mbid,\n                  (SELECT t.path FROM tracks t\n                   WHERE t.album_id = al.id AND t.missing_since IS NULL\n                   ORDER BY t.disc, t.track_no, t.path LIMIT 1) AS track_path\n           FROM albums al JOIN artists ar ON ar.id = al.artist_id\n           WHERE al.artist_id = $1 AND al.image_path IS NULL\n             AND EXISTS (SELECT 1 FROM tracks t\n                         WHERE t.album_id = al.id AND t.missing_since IS NULL)\n           ORDER BY al.title, al.id\n           LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "artist_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "release_group_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "track_path",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "86d4264f1bfdf7c87d6ab67f82c360211c8ad80522114e6c5a02a6e6d3056af2"
+}

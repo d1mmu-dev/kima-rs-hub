@@ -1339,3 +1339,76 @@ async fn a_failed_artist_waits_out_the_retry_grace(pool: PgPool) {
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, a);
 }
+
+/// Task 21 carry: an unchanged local image is not read, re-encoded and rewritten on every
+/// claim; a changed one is.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn an_unchanged_local_image_is_not_rewritten(pool: PgPool) {
+    let a = seed(&pool, "Perturbator", "Dangerous Days").await;
+    set_mbid(&pool, a, M, "tag").await;
+    let f = fx(&pool, known("Perturbator", M), World::default()).await;
+    put(&f.root, "Perturbator/artist.png", &png(400, 300));
+
+    assert_eq!(enrich(&f, a).await, ArtistResult::Completed);
+    assert_eq!(row(&pool, a).await.image_source.as_deref(), Some("local"));
+    // Marked so a rewrite would show.
+    let path = kima_library::artwork::artist_image_path(f.data_dir(), a);
+    std::fs::write(&path, b"marker").unwrap();
+
+    set(&pool, a, "enrichment_status = 'pending'").await;
+    assert_eq!(enrich(&f, a).await, ArtistResult::Completed);
+    assert_eq!(std::fs::read(&path).unwrap(), b"marker");
+    let r = row(&pool, a).await;
+    assert_eq!(r.image_source.as_deref(), Some("local"));
+    assert_eq!(r.image_path, Some(format!("{a}.jpg")));
+
+    // The library's image changes: it is copied again.
+    put(&f.root, "Perturbator/artist.png", &png(200, 100));
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(30);
+    std::fs::File::options()
+        .write(true)
+        .open(f.root.join("Perturbator/artist.png"))
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    set(&pool, a, "enrichment_status = 'pending'").await;
+    assert_eq!(enrich(&f, a).await, ArtistResult::Completed);
+    let img = image::load_from_memory(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!((img.width(), img.height()), (200, 100));
+}
+
+/// Task 21 I2: a run that loses the precedence check (a user image set meanwhile) leaves the
+/// user's file alone.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_user_image_set_during_a_run_keeps_its_file(pool: PgPool) {
+    let a = seed(&pool, "Perturbator", "Dangerous Days").await;
+    set_mbid(&pool, a, M, "tag").await;
+    let w = known("Perturbator", M).get(
+        &fanart_url(M),
+        json!({"artistthumb": [{"url": "{images}/fanart/thumb.jpg"}]}),
+    );
+    let images = World::default().image("/fanart/thumb.jpg", &jpeg(300, 300, 1));
+    let f = fx(&pool, w, images).await;
+    let claimed = identity::claim_artists(&pool, 50).await.unwrap();
+    let claim = claimed.into_iter().find(|c| c.id == a).unwrap();
+    // The user's image lands after the claim, before the run's write.
+    kima_library::artwork::store_artist_image(f.data_dir(), a, b"the user's image").unwrap();
+    set(
+        &pool,
+        a,
+        "image_path = id::text || '.jpg', image_source = 'user'",
+    )
+    .await;
+
+    assert_eq!(
+        artist::enrich_one(&f.ctx, &claim).await.unwrap(),
+        ArtistResult::Completed
+    );
+    assert_eq!(row(&pool, a).await.image_source.as_deref(), Some("user"));
+    assert_eq!(stored(&f, a).unwrap(), b"the user's image");
+    let files: Vec<_> = std::fs::read_dir(f.data_dir().join("artist-images"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+}

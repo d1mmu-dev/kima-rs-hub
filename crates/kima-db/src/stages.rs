@@ -262,3 +262,24 @@ pub async fn reopen_file_missing_many(
     .await?;
     Ok(r.rows_affected())
 }
+
+/// An album's release group changed (MetadataEditor, spec §16.3): its tracks' `recording` rows
+/// that are `done` with an answer other than the file's own tag (`file_tag`) go back to
+/// `pending` with a clean slate, so the ladder asks again against the new group. Rows still
+/// open (`pending`, `working`, `failed`) are left as they are. Returns rows changed.
+pub async fn reopen_album_recordings(conn: &mut PgConnection, album: Uuid) -> sqlx::Result<u64> {
+    let r = sqlx::query!(
+        r#"UPDATE track_stages s
+           SET status = 'pending', attempts = 0, redelivered = 0, next_attempt_at = NULL,
+               last_error = NULL, error_code = NULL, error_class = NULL,
+               evidence = '{"reason":"release group changed"}'::jsonb,
+               started_at = NULL, finished_at = NULL, updated_at = now()
+           FROM tracks t
+           WHERE s.track_id = t.id AND t.album_id = $1 AND s.stage = 'recording'
+             AND s.status = 'done' AND s.source IS DISTINCT FROM 'file_tag'"#,
+        album
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(r.rows_affected())
+}

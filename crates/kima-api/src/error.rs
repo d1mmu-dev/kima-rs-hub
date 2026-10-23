@@ -27,6 +27,9 @@ pub enum ApiError {
     NotFound(&'static str),
     #[error("{0}")]
     Conflict(&'static str),
+    /// 409 with a message built at run time (the MetadataEditor's taken MBID).
+    #[error("{0}")]
+    ConflictMessage(String),
     #[error("{0}")]
     TooManyRequests(&'static str),
     /// 429 with `Retry-After`: the failed-login limiter refused the attempt.
@@ -54,7 +57,7 @@ impl IntoResponse for ApiError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Conflict(_) | Self::ConflictMessage(_) => StatusCode::CONFLICT,
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,

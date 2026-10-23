@@ -630,3 +630,337 @@ pub async fn cover_owner(pool: &PgPool, id: Uuid) -> sqlx::Result<CoverOwner> {
         None => CoverOwner::None,
     })
 }
+
+// ---- MetadataEditor overrides (spec §16.3, D-118) ----
+
+/// What an edit does to the row's user image (`image_source = 'user'`, the file at
+/// `<id>.jpg`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UserImage {
+    #[default]
+    Keep,
+    /// A user image is recorded; the caller puts the file in place before the commit.
+    Set,
+    /// A user image is removed (an image from any other source is kept); the caller deletes
+    /// the file before the commit when [`Applied::Done`] says it was cleared.
+    Clear,
+}
+
+impl UserImage {
+    /// `set`, `clear` or `keep`, given the stored `image_source`: a clear only touches a
+    /// `user` image.
+    fn mode(self, stored: Option<&str>) -> &'static str {
+        match self {
+            UserImage::Set => "set",
+            UserImage::Clear if stored == Some("user") => "clear",
+            _ => "keep",
+        }
+    }
+}
+
+/// An artist edit. `None` leaves a field as it is; `Some(None)` (or an empty list) clears it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArtistOverrides {
+    pub display_name: Option<Option<String>>,
+    pub user_bio: Option<Option<String>>,
+    pub user_genres: Option<Vec<String>>,
+    /// A MusicBrainz id typed by the user, stored with source `user`; the id already stored
+    /// changes nothing (not even its source).
+    pub mbid: Option<Uuid>,
+    pub image: UserImage,
+}
+
+/// An album edit; as [`ArtistOverrides`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AlbumOverrides {
+    pub display_title: Option<Option<String>>,
+    pub display_year: Option<Option<i32>>,
+    pub user_genres: Option<Vec<String>>,
+    pub release_group_mbid: Option<Uuid>,
+    pub image: UserImage,
+}
+
+/// What an edit did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// No such row; nothing written.
+    NotFound,
+    /// Another row of the same kind holds the MBID; nothing written (the caller rolls back).
+    MbidTaken,
+    Done {
+        /// The MBID changed (artist: set `pending`; album: recordings reopened).
+        mbid_changed: bool,
+        /// A user image was removed from the row: the caller deletes its file.
+        image_cleared: bool,
+    },
+}
+
+/// What a reset did; `None` from the reset when there is no such row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResetDone {
+    /// A `user` MBID was cleared with its source.
+    pub mbid_cleared: bool,
+    /// A user image was removed from the row: the caller deletes its file.
+    pub image_cleared: bool,
+}
+
+/// Serialises the editor's MBID writes for one value (an advisory lock held to the end of the
+/// transaction), so two edits racing for the same MBID cannot both pass the "another row has
+/// it" check. MBID columns carry no unique index (D-117).
+async fn lock_mbid(conn: &mut PgConnection, kind: &str, mbid: Uuid) -> sqlx::Result<()> {
+    let key = format!("kima.editor.{kind}.{}", mbid.hyphenated());
+    sqlx::query_scalar!(
+        r#"SELECT true AS "locked!" FROM pg_advisory_xact_lock(hashtextextended($1, 0))"#,
+        key
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Applies an artist edit on the caller's transaction (spec §16.3): the row is locked first,
+/// so a user image file can be put in place (or deleted) before the commit, under the same
+/// lock enrichment takes to write images. A changed MBID is refused when another artist
+/// holds it, else stored with source `user` and the artist set `pending` (Various Artists
+/// aside); a removed user image also sets it `pending`, so enrichment finds another. The
+/// caller kicks the coordinator after the commit.
+pub async fn apply_artist_overrides(
+    conn: &mut PgConnection,
+    id: Uuid,
+    o: &ArtistOverrides,
+) -> sqlx::Result<Applied> {
+    let Some(row) = sqlx::query!(
+        "SELECT mbid, image_source FROM artists WHERE id = $1 FOR NO KEY UPDATE",
+        id
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(Applied::NotFound);
+    };
+    let new_mbid = o.mbid.filter(|m| row.mbid != Some(*m));
+    if let Some(m) = new_mbid {
+        lock_mbid(conn, "artist", m).await?;
+        let taken = sqlx::query_scalar!(
+            r#"SELECT EXISTS (SELECT 1 FROM artists WHERE mbid = $1 AND id <> $2) AS "taken!""#,
+            m,
+            id
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        if taken {
+            return Ok(Applied::MbidTaken);
+        }
+    }
+    let image = o.image.mode(row.image_source.as_deref());
+    let image_cleared = image == "clear";
+    let path = format!("{}.jpg", id.hyphenated());
+    sqlx::query!(
+        "UPDATE artists SET
+             display_name = CASE WHEN $2 THEN $3 ELSE display_name END,
+             user_bio = CASE WHEN $4 THEN $5 ELSE user_bio END,
+             user_genres = CASE WHEN $6 THEN $7::text[] ELSE user_genres END,
+             mbid = CASE WHEN $8 THEN $9 ELSE mbid END,
+             mbid_source = CASE WHEN $8 THEN 'user' ELSE mbid_source END,
+             enrichment_status = CASE WHEN ($8 OR $12) AND name_key <> $13 THEN 'pending'
+                                      ELSE enrichment_status END,
+             image_path = CASE $10 WHEN 'set' THEN $11 WHEN 'clear' THEN NULL
+                                   ELSE image_path END,
+             image_source = CASE $10 WHEN 'set' THEN 'user' WHEN 'clear' THEN NULL
+                                     ELSE image_source END
+         WHERE id = $1",
+        id,
+        o.display_name.is_some(),
+        o.display_name.clone().flatten(),
+        o.user_bio.is_some(),
+        o.user_bio.clone().flatten(),
+        o.user_genres.is_some(),
+        o.user_genres.as_deref().unwrap_or_default(),
+        new_mbid.is_some(),
+        new_mbid,
+        image,
+        path,
+        image_cleared,
+        VARIOUS_ARTISTS_KEY,
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(Applied::Done {
+        mbid_changed: new_mbid.is_some(),
+        image_cleared,
+    })
+}
+
+/// Applies an album edit on the caller's transaction (spec §16.3), the album row locked
+/// first. A changed release group is refused when another album holds it, else stored with
+/// source `user` and the album's `recording` answers not from a file tag reopened
+/// ([`crate::stages::reopen_album_recordings`]). `display_title` and `display_year` never
+/// touch the album's identity (`title`, `year`, `sort_name`).
+pub async fn apply_album_overrides(
+    conn: &mut PgConnection,
+    id: Uuid,
+    o: &AlbumOverrides,
+) -> sqlx::Result<Applied> {
+    let Some(row) = sqlx::query!(
+        "SELECT release_group_mbid, image_source FROM albums WHERE id = $1 FOR NO KEY UPDATE",
+        id
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(Applied::NotFound);
+    };
+    let new_mbid = o
+        .release_group_mbid
+        .filter(|m| row.release_group_mbid != Some(*m));
+    if let Some(m) = new_mbid {
+        lock_mbid(conn, "album", m).await?;
+        let taken = sqlx::query_scalar!(
+            r#"SELECT EXISTS (SELECT 1 FROM albums WHERE release_group_mbid = $1 AND id <> $2)
+               AS "taken!""#,
+            m,
+            id
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        if taken {
+            return Ok(Applied::MbidTaken);
+        }
+    }
+    let image = o.image.mode(row.image_source.as_deref());
+    let path = format!("{}.jpg", id.hyphenated());
+    sqlx::query!(
+        "UPDATE albums SET
+             display_title = CASE WHEN $2 THEN $3 ELSE display_title END,
+             display_year = CASE WHEN $4 THEN $5 ELSE display_year END,
+             user_genres = CASE WHEN $6 THEN $7::text[] ELSE user_genres END,
+             release_group_mbid = CASE WHEN $8 THEN $9 ELSE release_group_mbid END,
+             release_group_mbid_source = CASE WHEN $8 THEN 'user'
+                                              ELSE release_group_mbid_source END,
+             image_path = CASE $10 WHEN 'set' THEN $11 WHEN 'clear' THEN NULL
+                                   ELSE image_path END,
+             image_source = CASE $10 WHEN 'set' THEN 'user' WHEN 'clear' THEN NULL
+                                     ELSE image_source END
+         WHERE id = $1",
+        id,
+        o.display_title.is_some(),
+        o.display_title.clone().flatten(),
+        o.display_year.is_some(),
+        o.display_year.flatten(),
+        o.user_genres.is_some(),
+        o.user_genres.as_deref().unwrap_or_default(),
+        new_mbid.is_some(),
+        new_mbid,
+        image,
+        path,
+    )
+    .execute(&mut *conn)
+    .await?;
+    if new_mbid.is_some() {
+        crate::stages::reopen_album_recordings(conn, id).await?;
+    }
+    Ok(Applied::Done {
+        mbid_changed: new_mbid.is_some(),
+        image_cleared: image == "clear",
+    })
+}
+
+/// Resets an artist on the caller's transaction (spec §16.3, R2): every override cleared
+/// (`user_genres = '{}'`), a user image removed, a `user` MBID cleared with its source; when
+/// the MBID or the image went, the artist is set `pending` (Various Artists aside) so
+/// enrichment fills them again. `name` and `sort_name` are untouched. `None` when there is no
+/// such artist.
+pub async fn reset_artist(conn: &mut PgConnection, id: Uuid) -> sqlx::Result<Option<ResetDone>> {
+    let Some(row) = sqlx::query!(
+        r#"SELECT mbid_source IS NOT DISTINCT FROM 'user' AS "user_mbid!",
+                  image_source IS NOT DISTINCT FROM 'user' AS "user_image!"
+           FROM artists WHERE id = $1 FOR NO KEY UPDATE"#,
+        id
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(None);
+    };
+    sqlx::query!(
+        "UPDATE artists SET
+             display_name = NULL, user_bio = NULL, user_genres = '{}',
+             mbid = CASE WHEN $2 THEN NULL ELSE mbid END,
+             mbid_source = CASE WHEN $2 THEN NULL ELSE mbid_source END,
+             image_path = CASE WHEN $3 THEN NULL ELSE image_path END,
+             image_source = CASE WHEN $3 THEN NULL ELSE image_source END,
+             enrichment_status = CASE WHEN ($2 OR $3) AND name_key <> $4 THEN 'pending'
+                                      ELSE enrichment_status END
+         WHERE id = $1",
+        id,
+        row.user_mbid,
+        row.user_image,
+        VARIOUS_ARTISTS_KEY,
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(Some(ResetDone {
+        mbid_cleared: row.user_mbid,
+        image_cleared: row.user_image,
+    }))
+}
+
+/// Resets an album on the caller's transaction (spec §16.3, R2): every override cleared
+/// (`user_genres = '{}'`), a user cover removed, `user` release and release-group MBIDs
+/// cleared with their sources (the album's recordings reopened when one was). `None` when
+/// there is no such album.
+pub async fn reset_album(conn: &mut PgConnection, id: Uuid) -> sqlx::Result<Option<ResetDone>> {
+    let Some(row) = sqlx::query!(
+        r#"SELECT release_mbid_source IS NOT DISTINCT FROM 'user' AS "user_release!",
+                  release_group_mbid_source IS NOT DISTINCT FROM 'user' AS "user_group!",
+                  image_source IS NOT DISTINCT FROM 'user' AS "user_image!"
+           FROM albums WHERE id = $1 FOR NO KEY UPDATE"#,
+        id
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    else {
+        return Ok(None);
+    };
+    sqlx::query!(
+        "UPDATE albums SET
+             display_title = NULL, display_year = NULL, user_genres = '{}',
+             release_mbid = CASE WHEN $2 THEN NULL ELSE release_mbid END,
+             release_mbid_source = CASE WHEN $2 THEN NULL ELSE release_mbid_source END,
+             release_group_mbid = CASE WHEN $3 THEN NULL ELSE release_group_mbid END,
+             release_group_mbid_source = CASE WHEN $3 THEN NULL
+                                              ELSE release_group_mbid_source END,
+             image_path = CASE WHEN $4 THEN NULL ELSE image_path END,
+             image_source = CASE WHEN $4 THEN NULL ELSE image_source END
+         WHERE id = $1",
+        id,
+        row.user_release,
+        row.user_group,
+        row.user_image,
+    )
+    .execute(&mut *conn)
+    .await?;
+    let mbid_cleared = row.user_release || row.user_group;
+    if mbid_cleared {
+        crate::stages::reopen_album_recordings(conn, id).await?;
+    }
+    Ok(Some(ResetDone {
+        mbid_cleared,
+        image_cleared: row.user_image,
+    }))
+}
+
+/// Sets the album's artist `pending` (Various Artists aside), so its next enrichment fills a
+/// cover that a removed user image left empty. Its own statement, after the album's
+/// transaction: writers lock an artist before its albums, never the reverse.
+pub async fn rerun_album_artist(pool: &PgPool, album: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE artists SET enrichment_status = 'pending'
+         WHERE id = (SELECT artist_id FROM albums WHERE id = $1) AND name_key <> $2",
+        album,
+        VARIOUS_ARTISTS_KEY,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}

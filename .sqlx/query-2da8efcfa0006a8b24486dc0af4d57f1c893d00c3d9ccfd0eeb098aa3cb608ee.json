@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists SET enrichment_status = 'pending'\n         WHERE id = (SELECT artist_id FROM albums WHERE id = $1) AND name_key <> $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2da8efcfa0006a8b24486dc0af4d57f1c893d00c3d9ccfd0eeb098aa3cb608ee"
+}

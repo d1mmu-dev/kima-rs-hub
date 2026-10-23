@@ -508,6 +508,20 @@ pub async fn save_artist_outcome_in(
     Ok(Some(SavedArtist { image_source }))
 }
 
+/// Puts a `completed` artist back to `pending` (its album covers wait on a source or ran out
+/// of time), so the next cycle asks again. No failure is counted. Returns whether it was
+/// `completed`.
+pub async fn reopen_completed_artist(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let r = sqlx::query!(
+        "UPDATE artists SET enrichment_status = 'pending'
+         WHERE id = $1 AND enrichment_status = 'completed'",
+        id
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
 // ---- album cover fallback (spec §12.7) ----
 
 /// An album the cover fallback may fill: no stored image and a present track.

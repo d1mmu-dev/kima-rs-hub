@@ -202,11 +202,13 @@ async fn record(
         tx.rollback().await.map_err(|e| e.to_string())?;
         return Ok(false);
     }
+    // A plain blocking rename on this task, not `spawn_blocking`: a detached closure would
+    // still run after a cancelled fill's rollback released the row lock.
     let dest = artwork::album_image_path(&ctx.library.data_dir, album);
-    tokio::task::spawn_blocking(move || staged.persist(&dest))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    if let Err(e) = staged.persist(&dest) {
+        tx.rollback().await.map_err(|e| e.to_string())?;
+        return Err(e.to_string());
+    }
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(true)
 }

@@ -567,3 +567,44 @@ async fn a_symlinked_stored_image_is_not_served(pool: PgPool) {
         .await
         .assert_status(StatusCode::NOT_FOUND);
 }
+
+/// Review M3: embedded art (a real tagged file) is served before a stored fallback.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn embedded_cover_beats_the_fallback(pool: PgPool) {
+    if !kima_test_support::require_ffmpeg() {
+        return;
+    }
+    use lofty::config::WriteOptions;
+    use lofty::file::TaggedFileExt;
+    use lofty::picture::{MimeType, Picture, PictureType};
+    use lofty::prelude::*;
+    use lofty::probe::Probe;
+
+    let music = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let track =
+        kima_test_support::make_audio(music.path(), "A/B/01.mp3", kima_test_support::Tags::full());
+    let mut tagged = Probe::open(&track).unwrap().read().unwrap();
+    let tag = tagged.primary_tag_mut().expect("the fixture has a tag");
+    tag.push_picture(
+        Picture::unchecked(png(300, 100))
+            .pic_type(PictureType::CoverFront)
+            .mime_type(MimeType::Png)
+            .build(),
+    );
+    tag.save_to_path(&track, WriteOptions::default()).unwrap();
+
+    let album = album_with_track(&pool, "A/B/01.mp3").await;
+    jpeg_file(
+        &kima_library::artwork::album_image_path(data.path(), album),
+        90,
+        90,
+    );
+    set_album_image(&pool, album, "deezer").await;
+    let state = common::state(pool)
+        .with_data_dir(data.path().into())
+        .with_library_root(music.path().into());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    assert_eq!(dims(&server, &token, album, None).await, (300, 100));
+}

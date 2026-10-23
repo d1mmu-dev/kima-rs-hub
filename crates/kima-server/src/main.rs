@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
             acoustid_disabled: config.acoustid_disabled,
             acoustid_env_key: config.acoustid_client_key.clone(),
             fanart_env_key: state.fanart_env_key.clone(),
+            artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
         },
         last_cycle: Default::default(),
     };

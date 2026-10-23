@@ -451,17 +451,17 @@ async fn albums_without_cover_lists_present_albums_without_an_image(pool: PgPool
     assert_eq!(first.track_path.as_deref(), Some("Low/Alpha/01.flac"));
 }
 
-/// `enrich_one` fills the artist's album covers after its own image.
-#[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn enrichment_fills_album_covers(pool: PgPool) {
-    let a = artist_row(&pool, "Perturbator").await;
+/// An artist known by a user MBID with `genres` on MusicBrainz and nothing anywhere else, and
+/// Deezer's cover for its album "Dangerous Days".
+async fn perturbator(pool: &PgPool, genres: Value) -> (Uuid, Uuid, World) {
+    let a = artist_row(pool, "Perturbator").await;
     sqlx::query("UPDATE artists SET mbid = $2, mbid_source = 'user' WHERE id = $1")
         .bind(a)
         .bind(Uuid::parse_str(M).unwrap())
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
-    let days = album(&pool, a, "Perturbator", "Dangerous Days", None).await;
+    let days = album(pool, a, "Perturbator", "Dangerous Days", None).await;
     let algorithm = "session_based_days_7500_session_300_contribution_3_threshold_10_limit_100_filter_True_skip_30";
     let sparql = enc(&format!(
         "SELECT ?item WHERE {{ ?item wdt:P434 \"{M}\" }} LIMIT 1"
@@ -469,7 +469,7 @@ async fn enrichment_fills_album_covers(pool: PgPool) {
     let w = World::default()
         .get(
             &format!("/artist/{M}?inc=genres&fmt=json"),
-            json!({"id": M, "name": "Perturbator", "genres": []}),
+            json!({"id": M, "name": "Perturbator", "genres": genres}),
         )
         .get(
             &format!("/sparql?query={sparql}&format=json"),
@@ -482,11 +482,22 @@ async fn enrichment_fills_album_covers(pool: PgPool) {
         .get("/search/artist?q=Perturbator&limit=1", json!({"data": []}))
         .get(&format!("/music/{M}?api_key={FANART_KEY}"), json!({}))
         .deezer_hit("Perturbator", "Dangerous Days", "{images}/days.jpg");
+    (a, days, w)
+}
+
+async fn claim(pool: &PgPool, artist: Uuid) -> identity::ArtistForEnrichment {
+    let claimed = identity::claim_artists(pool, 10).await.unwrap();
+    claimed.into_iter().find(|c| c.id == artist).unwrap()
+}
+
+/// `enrich_one` fills the artist's album covers after its own write.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enrichment_fills_album_covers(pool: PgPool) {
+    let (a, days, w) = perturbator(&pool, json!([])).await;
     let images = World::default().image("/days.jpg", &jpeg(500, 500, 4));
     let f = fx(&pool, w, images).await;
 
-    let claimed = identity::claim_artists(&pool, 10).await.unwrap();
-    let mine = claimed.into_iter().find(|c| c.id == a).unwrap();
+    let mine = claim(&pool, a).await;
     assert_eq!(
         artist::enrich_one(&f.ctx, &mine).await.unwrap(),
         ArtistResult::Completed
@@ -496,4 +507,60 @@ async fn enrichment_fills_album_covers(pool: PgPool) {
         (Some(format!("{days}.jpg")), Some("deezer".into()))
     );
     assert!(stored(&f, days).is_some());
+}
+
+/// Review I2: a cover fill that hangs past the artist's time cap discards nothing the artist's
+/// run learned and counts no failure; the artist is asked again later. Review I1: the fill,
+/// cut off while it waits on the album row's lock, leaves no file behind.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_hung_cover_fill_keeps_the_artist_outcome(pool: PgPool) {
+    let (a, days, w) = perturbator(&pool, json!([{"name": "synthwave", "count": 9}])).await;
+    let images = World::default().image("/days.jpg", &jpeg(500, 500, 4));
+    let mut f = fx(&pool, w, images).await;
+    f.ctx.config.artist_timeout = std::time::Duration::from_secs(3);
+
+    // Another writer holds the album row: the fill's write waits on it.
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM albums WHERE id = $1 FOR UPDATE")
+        .bind(days)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let mine = claim(&pool, a).await;
+    let started = std::time::Instant::now();
+    let result = artist::enrich_one(&f.ctx, &mine).await.unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert_eq!(result, ArtistResult::Pending);
+    holder.commit().await.unwrap();
+
+    let (status, failures, code, similar): (String, i16, Option<String>, Option<Value>) =
+        sqlx::query_as(
+            r#"SELECT enrichment_status, enrichment_failures, last_error_code, "similar"
+               FROM artists WHERE id = $1"#,
+        )
+        .bind(a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((status.as_str(), failures, code), ("pending", 0, None));
+    assert_eq!(similar, Some(json!([])));
+    let genres: Vec<String> = sqlx::query_scalar(
+        "SELECT g.name FROM artist_genres ag JOIN genres g ON g.id = ag.genre_id \
+         WHERE ag.artist_id = $1 AND ag.source = 'musicbrainz'",
+    )
+    .bind(a)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(genres, ["synthwave"]);
+
+    // Give a detached file step (the bug) the chance to run: nothing lands.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(image_of(&pool, days).await, (None, None));
+    assert!(
+        album_image_files(&f).is_empty(),
+        "{:?}",
+        album_image_files(&f)
+    );
 }

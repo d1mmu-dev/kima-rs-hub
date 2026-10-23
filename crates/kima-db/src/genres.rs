@@ -2,7 +2,7 @@
 //! compared by [`genre_key`]. Every input list is tag or API data: it is capped and handled
 //! in linear time.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
@@ -258,6 +258,140 @@ pub async fn recompute_file_genres(
         .await?;
     }
     Ok(())
+}
+
+/// Ids per query in the `effective_for_*` and `musicbrainz_for_*` readers.
+const ID_CHUNK: usize = 2000;
+/// Genres at least this many present tracks carry are listed by [`library_genres`].
+pub const LIBRARY_GENRES_MIN_TRACKS: i64 = 15;
+/// [`library_genres`] returns at most this many genres.
+pub const LIBRARY_GENRES_LIMIT: i64 = 20;
+
+macro_rules! genre_reader {
+    ($(#[$doc:meta])* $name:ident, $view:literal, $col:literal) => {
+        $(#[$doc])*
+        pub async fn $name(
+            pool: &PgPool,
+            ids: &[Uuid],
+        ) -> sqlx::Result<HashMap<Uuid, Vec<String>>> {
+            let mut out: HashMap<Uuid, Vec<String>> = HashMap::new();
+            for chunk in ids.chunks(ID_CHUNK) {
+                let rows: Vec<(Uuid, String)> = sqlx::query_as(concat!(
+                    "SELECT e.", $col, ", g.name FROM ", $view, " e JOIN genres g ON g.id = e.genre_id ",
+                    "WHERE e.", $col, " = ANY($1) ORDER BY e.", $col, ", e.rank, g.name, g.id"
+                ))
+                .bind(chunk)
+                .fetch_all(pool)
+                .await?;
+                for (id, name) in rows {
+                    out.entry(id).or_default().push(name);
+                }
+            }
+            Ok(out)
+        }
+    };
+}
+
+genre_reader!(
+    /// Effective genres (MusicBrainz, else file) per track, by rank. Tracks with none are absent.
+    effective_for_tracks, "track_genres_effective", "track_id"
+);
+genre_reader!(
+    /// Effective genres per album, by rank.
+    effective_for_albums, "album_genres_effective", "album_id"
+);
+genre_reader!(
+    /// Effective genres per artist, by rank.
+    effective_for_artists, "artist_genres_effective", "artist_id"
+);
+
+macro_rules! musicbrainz_reader {
+    ($(#[$doc:meta])* $name:ident, $table:literal, $col:literal) => {
+        $(#[$doc])*
+        pub async fn $name(
+            pool: &PgPool,
+            ids: &[Uuid],
+        ) -> sqlx::Result<HashMap<Uuid, Vec<String>>> {
+            let mut out: HashMap<Uuid, Vec<String>> = HashMap::new();
+            for chunk in ids.chunks(ID_CHUNK) {
+                let rows: Vec<(Uuid, String)> = sqlx::query_as(concat!(
+                    "SELECT e.", $col, ", g.name FROM ", $table, " e JOIN genres g ON g.id = e.genre_id ",
+                    "WHERE e.source = 'musicbrainz' AND e.", $col, " = ANY($1) ",
+                    "ORDER BY e.", $col, ", e.rank, g.name, g.id"
+                ))
+                .bind(chunk)
+                .fetch_all(pool)
+                .await?;
+                for (id, name) in rows {
+                    out.entry(id).or_default().push(name);
+                }
+            }
+            Ok(out)
+        }
+    };
+}
+
+musicbrainz_reader!(
+    /// MusicBrainz genres per album (the `tags` alias upstream sends), by rank.
+    musicbrainz_for_albums, "album_genres", "album_id"
+);
+musicbrainz_reader!(
+    /// MusicBrainz genres per artist (the `tags` alias), by rank.
+    musicbrainz_for_artists, "artist_genres", "artist_id"
+);
+
+/// `[...user, ...genres]`, unique by [`genre_key`] (first spelling wins), empty names dropped
+/// (upstream `getMergedGenres`).
+pub fn merged(user: &[String], genres: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    user.iter()
+        .chain(genres)
+        .filter(|g| seen.insert(genre_key(g)) && !genre_key(g).is_empty())
+        .cloned()
+        .collect()
+}
+
+/// Effective artist genres with the number of distinct present tracks of the artist's albums
+/// that sit under them, at least [`LIBRARY_GENRES_MIN_TRACKS`], most first (ties by name),
+/// at most [`LIBRARY_GENRES_LIMIT`] (spec §13.2).
+pub async fn library_genres(pool: &PgPool) -> sqlx::Result<Vec<(String, i64)>> {
+    sqlx::query_as(
+        "SELECT g.name, count(DISTINCT t.id) AS n
+         FROM artist_genres_effective ag
+         JOIN genres g ON g.id = ag.genre_id
+         JOIN albums b ON b.artist_id = ag.artist_id
+         JOIN tracks t ON t.album_id = b.id AND t.missing_since IS NULL
+         WHERE g.name NOT LIKE '\\_%'
+         GROUP BY g.id, g.name
+         HAVING count(DISTINCT t.id) >= $1
+         ORDER BY n DESC, g.name, g.id
+         LIMIT $2",
+    )
+    .bind(LIBRARY_GENRES_MIN_TRACKS)
+    .bind(LIBRARY_GENRES_LIMIT)
+    .fetch_all(pool)
+    .await
+}
+
+/// Candidates for "this genre is an artist's name": `(genre, artist name)` pairs where the two
+/// agree under lower-casing, accent folding, `&` as "and" and collapsed spaces. The caller
+/// confirms with its own normalisation. One query for all genres.
+pub async fn artist_name_candidates(
+    pool: &PgPool,
+    genres: &[String],
+) -> sqlx::Result<Vec<(String, String)>> {
+    if genres.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        r"SELECT u.genre, a.name
+          FROM UNNEST($1::text[]) AS u(genre)
+          JOIN artists a ON btrim(regexp_replace(regexp_replace(lower(unaccent(a.name)), '\s*&\s*', ' and ', 'g'), '\s+', ' ', 'g'))
+                          = btrim(regexp_replace(regexp_replace(lower(unaccent(u.genre)), '\s*&\s*', ' and ', 'g'), '\s+', ' ', 'g'))",
+    )
+    .bind(genres)
+    .fetch_all(pool)
+    .await
 }
 
 /// Advisory lock key serialising [`prune_unused`] against genre references being written

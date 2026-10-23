@@ -264,6 +264,7 @@ async fn enrich_queue_registered_with_concurrency_one(pool: PgPool) {
         net: std::sync::Arc::new(kima_net::Net::disabled()),
         cipher: std::sync::Arc::new(kima_core::cipher::Cipher::from_secret("t")),
         events: EventBus::new(4),
+        progress_events: kima_ident::events::ProgressEvents::new(EventBus::new(4)),
         library: LibraryCtx {
             pool: pool.clone(),
             root: std::path::PathBuf::from("/music").into(),

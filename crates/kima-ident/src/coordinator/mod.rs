@@ -8,7 +8,13 @@
 //! [`STATE_REREAD`]; once it is no longer `running` (paused, stopping, halted) the phases
 //! start nothing new, release what they had claimed but not started, and let the items in
 //! flight finish. The job's cancel token (shutdown, lost claim) abandons in-flight items too.
+//!
+//! Every `enrichment:progress` event of a cycle is published here (spec §17): when a batch
+//! changed counts, and when the status a cycle leaves differs from the one it found (a run
+//! starting or finishing, `stopping` becoming `idle`). A cycle with nothing to do ends where it
+//! began and is silent.
 
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 pub mod control;
@@ -25,6 +31,7 @@ use tracing::{info, warn};
 
 use crate::IdentCtx;
 use crate::artist;
+use crate::events::ProgressEvents;
 use crate::stages::{BatchReport, fingerprint, recording};
 
 /// The coordinator's job queue (concurrency 1).
@@ -137,10 +144,15 @@ pub async fn run_cycle(
     let pool = &ctx.pool;
     wait_min_interval(ctx, cancel).await?;
 
+    // The status before the cycle touches it: what the cycle's announcements compare against.
+    let found = enrichment::state(pool).await.map_err(db)?.status;
+    let ann = Announcer::new(&ctx.progress_events, found);
+
     // Steps 1-2: paused, halted or stopping end here and queue nothing.
     let st = enrichment::begin_cycle(pool).await.map_err(db)?;
     let mut report = CycleReport::default();
     if !st.may_run() {
+        ann.settle(&st);
         return Ok(report);
     }
     report.ran = true;
@@ -148,8 +160,8 @@ pub async fn run_cycle(
     let stop = CancellationToken::new();
     let phases = async {
         let (fp, net) = tokio::join!(
-            fingerprint_phase(ctx, cancel, &stop),
-            network_phases(ctx, cancel, &stop)
+            fingerprint_phase(ctx, cancel, &stop, &ann),
+            network_phases(ctx, cancel, &stop, &ann)
         );
         stop.cancel(); // ends the watcher
         (fp, net)
@@ -170,6 +182,7 @@ pub async fn run_cycle(
     let idle = !report.any_work();
     enrichment::end_cycle(pool, idle).await.map_err(db)?;
     let st = enrichment::state(pool).await.map_err(db)?;
+    ann.settle(&st);
     if st.halted || st.status == Status::Paused {
         return Ok(report);
     }
@@ -254,10 +267,53 @@ async fn batch_failed(ctx: &IdentCtx, phase: Phase, e: sqlx::Error) {
     }
 }
 
-/// Stamps the phase; `activity` when counts changed. A failure is logged only.
-async fn mark(ctx: &IdentCtx, phase: Phase, activity: bool) {
-    if let Err(error) = enrichment::set_phase(&ctx.pool, Some(phase), activity).await {
+/// What one cycle has announced (spec §17). Counts changing are always announced; the status
+/// only when it differs from the last one announced (or found, before the first).
+struct Announcer<'a> {
+    events: &'a ProgressEvents,
+    status: Mutex<Status>,
+}
+
+impl<'a> Announcer<'a> {
+    fn new(events: &'a ProgressEvents, found: Status) -> Self {
+        Self {
+            events,
+            status: Mutex::new(found),
+        }
+    }
+
+    /// Counts changed: announced whatever the status.
+    fn changed(&self, st: &State) {
+        *self.status.lock().unwrap_or_else(PoisonError::into_inner) = st.status;
+        self.events.notify(st.current_phase, st.status);
+    }
+
+    /// Announced only when the status is not the one last announced.
+    fn settle(&self, st: &State) {
+        let mut last = self.status.lock().unwrap_or_else(PoisonError::into_inner);
+        if *last != st.status {
+            *last = st.status;
+            drop(last);
+            self.events.notify(st.current_phase, st.status);
+        }
+    }
+}
+
+/// Stamps the phase after a batch (`activity` when counts changed) and announces it: counts
+/// changed, or the batch claimed work and the status moved (a run starting). A failure is
+/// logged only.
+async fn mark(ctx: &IdentCtx, ann: &Announcer<'_>, phase: Phase, b: BatchReport) {
+    let changed = b.done + b.failed > 0;
+    if let Err(error) = enrichment::set_phase(&ctx.pool, Some(phase), changed).await {
         warn!(%error, "recording the enrichment phase failed");
+    }
+    if !changed && b.claimed == 0 {
+        return;
+    }
+    match enrichment::state(&ctx.pool).await {
+        Ok(st) if changed => ann.changed(&st),
+        Ok(st) => ann.settle(&st),
+        Err(error) => warn!(%error, "reading the enrichment state failed"),
     }
 }
 
@@ -266,6 +322,7 @@ async fn fingerprint_phase(
     ctx: &IdentCtx,
     cancel: &CancellationToken,
     stop: &CancellationToken,
+    ann: &Announcer<'_>,
 ) -> PhaseOutcome {
     let mut out = PhaseOutcome::default();
     if !ctx.config.fingerprinting {
@@ -277,7 +334,7 @@ async fn fingerprint_phase(
             Ok(b) => {
                 let changed = b.done + b.failed > 0;
                 if changed || !marked {
-                    mark(ctx, Phase::Fingerprint, changed).await;
+                    mark(ctx, ann, Phase::Fingerprint, b).await;
                     marked = true;
                 }
                 out.report += b;
@@ -315,9 +372,10 @@ async fn network_phases(
     ctx: &IdentCtx,
     cancel: &CancellationToken,
     stop: &CancellationToken,
+    ann: &Announcer<'_>,
 ) -> NetworkOutcome {
-    let artists = artists_phase(ctx, cancel, stop).await;
-    let tracks = tracks_phase(ctx, cancel, stop).await;
+    let artists = artists_phase(ctx, cancel, stop, ann).await;
+    let tracks = tracks_phase(ctx, cancel, stop, ann).await;
     NetworkOutcome { artists, tracks }
 }
 
@@ -330,6 +388,7 @@ async fn artists_phase(
     ctx: &IdentCtx,
     cancel: &CancellationToken,
     stop: &CancellationToken,
+    ann: &Announcer<'_>,
 ) -> PhaseOutcome {
     let mut out = PhaseOutcome::default();
     let mut marked = false;
@@ -341,7 +400,7 @@ async fn artists_phase(
             Ok(b) => {
                 let changed = b.done + b.failed > 0;
                 if changed || !marked {
-                    mark(ctx, Phase::Artists, changed).await;
+                    mark(ctx, ann, Phase::Artists, b).await;
                     marked = true;
                 }
                 out.report += b;
@@ -363,6 +422,7 @@ async fn tracks_phase(
     ctx: &IdentCtx,
     cancel: &CancellationToken,
     stop: &CancellationToken,
+    ann: &Announcer<'_>,
 ) -> PhaseOutcome {
     let mut out = PhaseOutcome::default();
     let mut marked = false;
@@ -371,7 +431,7 @@ async fn tracks_phase(
             Ok(b) => {
                 let changed = b.done + b.failed > 0;
                 if changed || !marked {
-                    mark(ctx, Phase::Tracks, changed).await;
+                    mark(ctx, ann, Phase::Tracks, b).await;
                     marked = true;
                 }
                 out.report += b;

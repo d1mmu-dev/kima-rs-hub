@@ -10,6 +10,8 @@ use kima_db::settings_kv::SettingsCache;
 use kima_library::scan::LibraryCtx;
 use kima_net::Net;
 
+use crate::events::ProgressEvents;
+
 /// Shared handles for the stages. Cheap to clone.
 #[derive(Clone)]
 pub struct IdentCtx {
@@ -22,6 +24,9 @@ pub struct IdentCtx {
     pub config: IdentConfig,
     /// When the last enrichment cycle started (spec §10.6 `MIN_INTERVAL_MS`); shared by clones.
     pub last_cycle: Arc<Mutex<Option<Instant>>>,
+    /// `enrichment:progress` on [`Self::events`]'s bus, at most once a second (spec §17); shared
+    /// with the HTTP side's controls so both draw on one window.
+    pub progress_events: ProgressEvents,
 }
 
 /// Process configuration for identification.

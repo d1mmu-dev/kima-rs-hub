@@ -279,3 +279,42 @@ async fn revoked_users_pending_ticket_is_rejected(pool: PgPool) {
         StatusCode::UNAUTHORIZED
     );
 }
+
+/// Spec §17 (D-112): a control route announces its change to every open stream.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn pause_route_emits_event(pool: PgPool) {
+    let state = common::state(pool.clone());
+    let (ana, token) = common::user_with_token(&state, "ana").await;
+    let app = kima_api::router(state.clone());
+    sqlx::query("UPDATE enrichment_state SET status = 'running', halted = false")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = open_stream(&app, &state.sse.issue_ticket(ana.id))
+        .await
+        .into_body();
+    assert_eq!(
+        next_text(&mut body).await,
+        "data: {\"type\":\"connected\"}\n\n"
+    );
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::post("/api/enrichment/pause")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let text = next_text(&mut body).await;
+    let data: Value = serde_json::from_str(text.strip_prefix("data: ").unwrap().trim()).unwrap();
+    assert_eq!(
+        data,
+        json!({"type": "enrichment:progress", "phase": null, "status": "paused"})
+    );
+}

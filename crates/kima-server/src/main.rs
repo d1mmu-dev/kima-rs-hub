@@ -126,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
             artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
         },
         last_cycle: Default::default(),
+        progress_events: state.progress_events.clone(),
     };
     info!(config = ?ident_ctx.config, "identification");
     let mut registry = kima_server::jobs::Registry::new();

@@ -725,12 +725,15 @@ pub enum Applied {
 }
 
 /// What a reset did; `None` from the reset when there is no such row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResetDone {
     /// A `user` MBID was cleared with its source.
     pub mbid_cleared: bool,
     /// A user image was removed from the row: the caller deletes its file.
     pub image_cleared: bool,
+    /// The artist's name or the album's title, as stored (the answer when no page can be
+    /// shown: every track missing).
+    pub name: String,
 }
 
 /// Serialises the editor's MBID writes for one value (an advisory lock held to the end of the
@@ -902,7 +905,7 @@ pub async fn apply_album_overrides(
 pub async fn reset_artist(conn: &mut PgConnection, id: Uuid) -> sqlx::Result<Option<ResetDone>> {
     let Some(row) = sqlx::query!(
         r#"SELECT mbid_source IS NOT DISTINCT FROM 'user' AS "user_mbid!",
-                  image_source IS NOT DISTINCT FROM 'user' AS "user_image!"
+                  image_source IS NOT DISTINCT FROM 'user' AS "user_image!", name
            FROM artists WHERE id = $1 FOR NO KEY UPDATE"#,
         id
     )
@@ -931,6 +934,7 @@ pub async fn reset_artist(conn: &mut PgConnection, id: Uuid) -> sqlx::Result<Opt
     Ok(Some(ResetDone {
         mbid_cleared: row.user_mbid,
         image_cleared: row.user_image,
+        name: row.name,
     }))
 }
 
@@ -942,7 +946,7 @@ pub async fn reset_album(conn: &mut PgConnection, id: Uuid) -> sqlx::Result<Opti
     let Some(row) = sqlx::query!(
         r#"SELECT release_mbid_source IS NOT DISTINCT FROM 'user' AS "user_release!",
                   release_group_mbid_source IS NOT DISTINCT FROM 'user' AS "user_group!",
-                  image_source IS NOT DISTINCT FROM 'user' AS "user_image!"
+                  image_source IS NOT DISTINCT FROM 'user' AS "user_image!", title
            FROM albums WHERE id = $1 FOR NO KEY UPDATE"#,
         id
     )
@@ -976,6 +980,7 @@ pub async fn reset_album(conn: &mut PgConnection, id: Uuid) -> sqlx::Result<Opti
     Ok(Some(ResetDone {
         mbid_cleared,
         image_cleared: row.user_image,
+        name: row.title,
     }))
 }
 

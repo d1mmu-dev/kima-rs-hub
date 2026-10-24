@@ -689,6 +689,16 @@ pub struct LyricsMatch {
     pub source: Option<String>,
 }
 
+/// Whether `track` exists and is present (`missing_since IS NULL`).
+pub async fn track_is_present(pool: &PgPool, track: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (SELECT 1 FROM tracks WHERE id = $1 AND missing_since IS NULL) AS "present!""#,
+        track
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// The first present track (by id) whose title contains `title` without regard to case (when
 /// given) and whose album artist is one of `artists` (when given), with its lyrics row. The
 /// title is matched with `strpos`, so `%` and `_` are plain characters (spec §18 row 62).

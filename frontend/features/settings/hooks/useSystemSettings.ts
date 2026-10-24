@@ -42,6 +42,14 @@ const defaultSystemSettings: SystemSettings = {
     publicUrl: "",
 };
 
+/** The fields a save changes on the server side: the stored keys and their flags. */
+const SECRET_FIELDS = [
+    "fanartApiKey",
+    "acoustidApiKey",
+    "hasFanartApiKey",
+    "hasAcoustidApiKey",
+] as const satisfies readonly (keyof SystemSettings)[];
+
 export function useSystemSettings() {
     const { isAuthenticated, user } = useAuth();
     const [systemSettings, setSystemSettings] = useState<SystemSettings>(
@@ -97,6 +105,24 @@ export function useSystemSettings() {
     const saveSystemSettings = async (settingsToSave: SystemSettings) => {
         await api.updateSystemSettings(systemSettingsBody(settingsToSave));
         await api.updateSettings({ maxCacheSizeMb: settingsToSave.maxCacheSizeMb });
+        // The saved-key flags (and the keys, answered back as "") come from the server: read
+        // them again so a first-time key shows as saved, with Remove, without a reload.
+        try {
+            const fresh = await api.getSystemSettings();
+            setSystemSettings((prev) => {
+                const next = { ...prev };
+                for (const key of SECRET_FIELDS) {
+                    if (key in fresh) {
+                        const value = fresh[key];
+                        (next as Record<string, unknown>)[key] =
+                            value === null && typeof defaultSystemSettings[key] === "string" ? "" : value;
+                    }
+                }
+                return next;
+            });
+        } catch (error) {
+            console.error("Failed to reload the saved keys:", error);
+        }
     };
 
     const updateSystemSettings = (updates: Partial<SystemSettings>) => {

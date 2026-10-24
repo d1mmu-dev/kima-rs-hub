@@ -546,6 +546,25 @@ async fn lyrics_by_song_id_synced_lines_ms(pool: PgPool) {
     assert_eq!(entries(&body), Vec::<Value>::new());
 }
 
+/// Final review F2: a missing track's lyrics are not served (an empty list, as `getSong`
+/// answers it not found).
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn lyrics_by_song_id_missing_track_is_empty(pool: PgPool) {
+    let env = env(pool);
+    let t1 = s(track_id(1));
+    let body = env.ok("getLyricsBySongId", &[("id", &t1)]).await;
+    assert!(!entries(&body).is_empty(), "{body}");
+    env.sql(&format!(
+        "UPDATE tracks SET missing_since = now() WHERE id = '{t1}'"
+    ))
+    .await;
+    let body = env.ok("getLyricsBySongId", &[("id", &t1)]).await;
+    assert_eq!(entries(&body), Vec::<Value>::new());
+}
+
 #[sqlx::test(
     migrator = "kima_db::MIGRATOR",
     fixtures(path = "fixtures", scripts("subsonic"))

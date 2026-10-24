@@ -140,10 +140,11 @@ export default function SettingsPage() {
         if (hasError) {
             saveStatus.setError("Couldn't save");
         } else {
-            setSaved(snapshot(userSettings));
+            // The save re-read the saved keys; the next render takes the settings as saved.
+            setSaved(null);
             saveStatus.setSuccess("Saved");
         }
-    }, [userSettings, systemSettings, isAdmin, saveUserSettings, saveSystemSettings, saveStatus, snapshot]);
+    }, [userSettings, systemSettings, isAdmin, saveUserSettings, saveSystemSettings, saveStatus]);
 
     const handleTestService = useCallback(async (service: string) => {
         setTestingServices(prev => ({ ...prev, [service]: true }));

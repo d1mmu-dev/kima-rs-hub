@@ -269,12 +269,37 @@ async fn fetch_image(state: &AppState, url: &str, kind: Kind) -> Result<StagedIm
         }
         .map_err(|e| e.to_string())
     })
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
-    staged.map_err(|error| {
-        debug!(%error, "user image did not decode or could not be staged");
-        failed()
-    })
+    .await;
+    staged_or_failed(staged)
+}
+
+/// The decoder's result; a failure, or a decoder that panicked on a hostile image (final
+/// review F1), is the same 400.
+fn staged_or_failed<T>(
+    joined: Result<Result<T, String>, tokio::task::JoinError>,
+) -> Result<T, ApiError> {
+    joined
+        .map_err(|e| format!("the decoder stopped: {e}"))
+        .and_then(|r| r)
+        .map_err(|error| {
+            debug!(%error, "user image did not decode or could not be staged");
+            bad(COULD_NOT_FETCH)
+        })
+}
+
+/// A reset's answer: the page, or, when none can be shown (every track missing), the reset
+/// row's id and its name (artist) or title (album) under `name_key`, so a reset that committed
+/// never answers 404 (final review F1).
+fn or_reset_row(
+    page: Result<Value, ApiError>,
+    id: Uuid,
+    name_key: &str,
+    name: String,
+) -> Result<Value, ApiError> {
+    match page {
+        Err(ApiError::NotFound(_)) => Ok(json!({ "id": id, name_key: name })),
+        other => other,
+    }
 }
 
 /// Kicks the coordinator after a commit that left work for it; a failure is logged (the
@@ -535,6 +560,7 @@ pub(super) async fn reset_artist(
     let Some(ResetDone {
         mbid_cleared,
         image_cleared,
+        name,
     }) = identity::reset_artist(&mut tx, id).await?
     else {
         return Err(not_found());
@@ -550,7 +576,7 @@ pub(super) async fn reset_artist(
     }
     Ok(Json(json!({
         "message": "Artist metadata reset to original values",
-        "artist": artist_answer(&state, id).await?,
+        "artist": or_reset_row(artist_answer(&state, id).await, id, "name", name)?,
     })))
 }
 
@@ -565,6 +591,7 @@ pub(super) async fn reset_album(
     let Some(ResetDone {
         mbid_cleared,
         image_cleared,
+        name,
     }) = identity::reset_album(&mut tx, id).await?
     else {
         return Err(not_found());
@@ -578,13 +605,32 @@ pub(super) async fn reset_album(
     after_album_change(&state, id, mbid_cleared, image_cleared).await?;
     Ok(Json(json!({
         "message": "Album metadata reset to original values",
-        "album": album_answer(&state, id).await?,
+        "album": or_reset_row(album_answer(&state, id).await, id, "title", name)?,
     })))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
+
+    /// Final review F1: a decoder that panicked is the same 400 as one that failed.
+    #[tokio::test]
+    async fn a_panicking_decoder_is_could_not_fetch() {
+        let joined = tokio::task::spawn_blocking(|| -> Result<(), String> {
+            panic!("hostile image");
+        })
+        .await;
+        let res = staged_or_failed(joined).unwrap_err().into_response();
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({"error": COULD_NOT_FETCH})
+        );
+    }
 
     #[test]
     fn parse_int_reads_like_javascript() {

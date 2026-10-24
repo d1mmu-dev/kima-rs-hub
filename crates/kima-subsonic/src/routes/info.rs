@@ -240,8 +240,8 @@ pub fn parse_synced_line(line: &str) -> Option<(u32, &str)> {
 }
 
 /// `lyricsList` for one track: a synced entry when the synced text has a line that parses,
-/// then a plain entry when the plain text has a non-empty line. No track, no row or a cached
-/// miss is an empty list.
+/// then a plain entry when the plain text has a non-empty line. No track, a missing track, no
+/// row or a cached miss is an empty list.
 async fn lyrics_by_song_id(
     _user: SubsonicUser,
     State(app): State<AppState>,
@@ -256,6 +256,10 @@ async fn lyrics_by_song_id(
     let Some(id) = ids::parse(raw, &[]) else {
         return empty();
     };
+    // A missing track is not served (final review F2), as `getSong` answers it not found.
+    if !subsonic::track_is_present(&app.pool, id).await? {
+        return empty();
+    }
     let Some((title, artist, _, _)) = lyrics::lookup_fields(&app.pool, id).await? else {
         return empty();
     };

@@ -914,6 +914,56 @@ async fn reset_needs_admin_403(pool: PgPool) {
     assert_eq!(res.status_code(), StatusCode::UNAUTHORIZED);
 }
 
+/// Final review F1: a reset commits and answers 200 even when every track of the entity is
+/// missing (the page reads present tracks only), from the reset row.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reset_with_every_track_missing_answers_200(pool: PgPool) {
+    let s = one(&pool).await;
+    exec(
+        &pool,
+        "UPDATE artists SET display_name = 'Shown' WHERE id = $1",
+        s.artist,
+    )
+    .await;
+    exec(
+        &pool,
+        "UPDATE albums SET display_title = 'Shown' WHERE id = $1",
+        s.album,
+    )
+    .await;
+    exec(
+        &pool,
+        "UPDATE tracks SET missing_since = now() WHERE album_id = $1",
+        s.album,
+    )
+    .await;
+    let e = env(pool.clone()).await;
+
+    let (status, body) = post(
+        &e,
+        &e.admin,
+        &format!("/api/enrichment/artists/{}/reset", s.artist),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["message"], "Artist metadata reset to original values");
+    assert_eq!(body["artist"]["id"], s.artist.to_string());
+    assert_eq!(body["artist"]["name"], "Alpha");
+    assert_eq!(artist_col(&pool, s.artist, "display_name").await, None);
+
+    let (status, body) = post(
+        &e,
+        &e.admin,
+        &format!("/api/enrichment/albums/{}/reset", s.album),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["message"], "Album metadata reset to original values");
+    assert_eq!(body["album"]["id"], s.album.to_string());
+    assert_eq!(body["album"]["title"], "First");
+    assert_eq!(album_col(&pool, s.album, "display_title").await, None);
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn reset_unknown_404(pool: PgPool) {
     let e = env(pool.clone()).await;

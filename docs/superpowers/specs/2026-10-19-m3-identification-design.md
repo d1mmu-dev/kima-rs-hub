@@ -135,7 +135,7 @@ Anti-goals (things M3 must not do):
 | Migrations | `0015`–`0020` (§6) | `0021`–`0022` (§6.8, §6.9) |
 | New crates | `kima-net`, `kima-ident` | none (adds `kima_ident::autotag`, `kima_library::tagwrite`) |
 | Depends on | M2 | M3a's MusicBrainz client, recording MBIDs, `track_stages`, heartbeat, scanner MBID columns |
-| Divergences | D-106–D-118, D-124 | D-119–D-123 |
+| Divergences | D-106–D-118, D-124; D-122's Artwork and Cache clauses (Task 30) | D-119–D-123 (D-122 extended with the Match albums pages) |
 | Done when | §1 M3a success, CI green, rows logged | §1 M3b success, CI green, rows logged |
 
 Why this order: M3b's candidate search uses the recording MBIDs M3a computes (tracks whose recording is known pull
@@ -1906,7 +1906,8 @@ Base URLs for the other sources are not env-configurable; tests inject them thro
 ## 23. Divergences to log
 
 Each row goes into `docs/DIVERGENCES.md` in the commit that introduces it. Status `open` unless noted. M3a: D-106–D-118
-and D-124; M3b: D-119–D-123.
+and D-124; M3b: D-119–D-123. M3a already holds D-122's Artwork and Cache clauses (Task 30: saved secrets shown
+as "Saved" with Remove, the env lock); M3b extends the same row with the Match albums pages.
 
 | ID | Area | Upstream | kima-rs |
 |---|---|---|---|
@@ -2042,7 +2043,7 @@ and D-124; M3b: D-119–D-123.
 | Risk | Mitigation |
 |---|---|
 | `rusty-chromaprint` output differs from `fpcalc` (resampling, algorithm preset), so AcoustID matches less | Decode straight to 11025 Hz mono so chromaprint does not resample; the known-answer test against a committed `fpcalc` output (§9.5); preset `test2`; if the crate lacks the compressor, port `fingerprint_compressor.cpp` with its upstream test vectors |
-| MusicBrainz at 1 request per 1.1 s makes a first identification of a large library slow (one to three requests per untagged track: about 5–10 h for 20 000 tracks) | Tags first (rung 1 asks nothing); the cache makes reruns free; progress is visible and paused cleanly; `MUSICBRAINZ_BASE_URL` points at a local mirror for big libraries (README) |
+| MusicBrainz at 1 request per 1.1 s makes a first identification of a large library slow (one to three requests per untagged track: about 6–18 h for 20 000 tracks: 22 000–66 000 s) | Tags first (rung 1 asks nothing); the cache makes reruns free; progress is visible and paused cleanly; `MUSICBRAINZ_BASE_URL` points at a local mirror for big libraries (README) |
 | lofty's v2.3 writing (`use_id3v23`) converts frames (dates, multi-values) imperfectly | v2.3 round-trip tests per touched frame; the re-read verification after every write (§19.8) refuses a file whose touched keys do not read back |
 | A tag writer bug damages audio | The audio-packet MD5 check on every write (§19.8); writes go to a hidden copy and replace the original only after verification; journal and undo; round-trip tests per format |
 | A database-only match drifts from the files | Overrides are merged in the scanner's resolve, so rescans keep them; undo deletes them and re-reads |

@@ -93,8 +93,8 @@ nothing is written to your music files; identification only fills the database.
   `ACOUSTID_CLIENT_KEY`). Without one, fingerprints are still made but nothing is asked of AcoustID;
   tracks with usable tags are matched by MusicBrainz id or name. A fanart.tv key is optional and entered
   the same way (or `FANART_API_KEY`). Saved keys are never shown again; the page says "Saved".
-- **First run on a big library is slow.** MusicBrainz allows one request per second, and an
-  untagged track takes one to three requests: about 5-10 hours for 20 000 untagged tracks.
+- **First run on a big library is slow.** MusicBrainz is asked at most once every 1.1 seconds, and
+  an untagged track takes one to three requests: about 6-18 hours for 20 000 untagged tracks.
   Tagged files cost nothing, and later runs reuse a cache. Progress survives restarts. For a large library
   point `MUSICBRAINZ_BASE_URL` at a local MusicBrainz mirror.
 - Fingerprinting uses half the CPU cores by default; set `KIMA_FINGERPRINT_WORKERS` to change that.

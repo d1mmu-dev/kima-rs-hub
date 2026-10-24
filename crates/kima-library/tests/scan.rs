@@ -1850,3 +1850,49 @@ async fn prune_deletes_album_image(pool: PgPool) {
     assert!(!kima_library::artwork::album_image_path(&c.data_dir, gone).exists());
     assert!(kima_library::artwork::album_image_path(&c.data_dir, kept).exists());
 }
+
+async fn artist_status(pool: &PgPool, name_key: &str) -> String {
+    sqlx::query_scalar("SELECT enrichment_status FROM artists WHERE name_key = $1")
+        .bind(name_key)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Final review I1: a new album by a `completed` artist reopens the artist (`pending`) so its
+/// cover fallback runs for the album; a new track on a known album, or Various Artists, does
+/// not.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn new_album_reopens_a_completed_artist(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    make_audio(dir.path(), "A/B/01.flac", tags("A", "B", "t1", "1999", "1"));
+    make_audio(
+        dir.path(),
+        "VA/X/01.flac",
+        tags("Various Artists", "X", "v1", "2001", "1"),
+    );
+    rescan(&pool, dir.path()).await;
+    sqlx::query("UPDATE artists SET enrichment_status = 'completed'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Another track on the album it already has: still completed.
+    make_audio(dir.path(), "A/B/02.flac", tags("A", "B", "t2", "1999", "2"));
+    make_audio(
+        dir.path(),
+        "VA/Y/01.flac",
+        tags("Various Artists", "Y", "v2", "2002", "1"),
+    );
+    rescan(&pool, dir.path()).await;
+    assert_eq!(artist_status(&pool, "a").await, "completed");
+    assert_eq!(artist_status(&pool, "various artists").await, "completed");
+
+    // A new album: asked again.
+    make_audio(dir.path(), "A/C/01.flac", tags("A", "C", "t3", "2004", "1"));
+    rescan(&pool, dir.path()).await;
+    assert_eq!(artist_status(&pool, "a").await, "pending");
+}

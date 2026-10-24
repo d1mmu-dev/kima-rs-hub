@@ -79,6 +79,8 @@ pub struct Upserted {
     pub artist: Uuid,
     /// The row existed and its stored content fingerprint differed.
     pub content_changed: bool,
+    /// The album row was created by this upsert.
+    pub album_created: bool,
 }
 
 /// MusicBrainz's Various Artists id; never looked up.
@@ -133,12 +135,12 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
     .fetch_one(&mut *tx)
     .await?;
 
-    let album_id = sqlx::query_scalar!(
+    let album = sqlx::query!(
         r#"INSERT INTO albums (id, artist_id, title, title_key, year, is_compilation)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (artist_id, title_key, (COALESCE(year, -1))) DO UPDATE
            SET is_compilation = albums.is_compilation OR EXCLUDED.is_compilation
-           RETURNING id"#,
+           RETURNING id, (xmax = 0) AS "created!""#,
         Uuid::now_v7(),
         artist_id,
         t.album,
@@ -148,6 +150,7 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
     )
     .fetch_one(&mut *tx)
     .await?;
+    let album_id = album.id;
 
     let previous: Option<Vec<u8>> =
         sqlx::query_scalar!("SELECT fingerprint FROM tracks WHERE path = $1", t.path)
@@ -216,6 +219,7 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
         album: album_id,
         artist: artist_id,
         content_changed: previous.is_some_and(|f| f.as_slice() != t.fingerprint.as_slice()),
+        album_created: album.created,
     })
 }
 
@@ -268,6 +272,32 @@ pub async fn set_artist_mbid_if_unset(
     .execute(&mut *conn)
     .await?;
     Ok(r.rows_affected() > 0)
+}
+
+/// Puts the given `completed` artists back to `pending`, Various Artists aside, so a new album
+/// gets its cover fallback (final review I1). The rows are locked in id order. Answers how many
+/// were reopened.
+pub async fn reopen_completed_artists(
+    conn: &mut PgConnection,
+    artists: &[Uuid],
+) -> sqlx::Result<u64> {
+    if artists.is_empty() {
+        return Ok(0);
+    }
+    let r = sqlx::query!(
+        r#"WITH locked AS (
+               SELECT id FROM artists
+               WHERE id = ANY($1) AND enrichment_status = 'completed' AND name_key <> $2
+               ORDER BY id
+               FOR NO KEY UPDATE)
+           UPDATE artists a SET enrichment_status = 'pending'
+           FROM locked WHERE a.id = locked.id AND a.enrichment_status = 'completed'"#,
+        artists,
+        VARIOUS_ARTISTS_KEY
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(r.rows_affected())
 }
 
 /// The artists of the given albums.

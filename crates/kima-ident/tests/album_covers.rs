@@ -356,7 +356,9 @@ async fn failed_source_records_nothing(pool: PgPool) {
     let f = fx(&pool, w, images).await;
 
     let out = album_covers::fill_for_artist(&f.ctx, a).await;
-    assert!(matches!(out, Outcome::Answered(1)), "{out:?}");
+    // Final review I1: Alpha's and Beta's sources failed transiently, so the fill answers
+    // `Transient` (the artist is asked again later); Gamma's cover is stored all the same.
+    assert!(matches!(out, Outcome::Transient(_)), "{out:?}");
 
     assert_eq!(image_of(&pool, alpha).await, (None, None));
     assert_eq!(image_of(&pool, beta).await, (None, None));
@@ -510,7 +512,8 @@ async fn enrichment_fills_album_covers(pool: PgPool) {
 }
 
 /// Review I2: a cover fill that hangs past the artist's time cap discards nothing the artist's
-/// run learned and counts no failure; the artist stays `completed` (re-review N1). Review I1:
+/// run learned and counts no failure; the artist is left `failed` with no error, to be retried
+/// after the grace (re-review N1, final review I1). Review I1:
 /// the fill, cut off while it waits on the album row's lock, leaves no file behind.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn a_hung_cover_fill_keeps_the_artist_outcome(pool: PgPool) {
@@ -531,7 +534,7 @@ async fn a_hung_cover_fill_keeps_the_artist_outcome(pool: PgPool) {
     let started = std::time::Instant::now();
     let result = artist::enrich_one(&f.ctx, &mine).await.unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
-    assert_eq!(result, ArtistResult::Completed);
+    assert_eq!(result, ArtistResult::Pending);
     holder.commit().await.unwrap();
 
     let (status, failures, code, similar): (String, i16, Option<String>, Option<Value>) =
@@ -543,7 +546,7 @@ async fn a_hung_cover_fill_keeps_the_artist_outcome(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!((status.as_str(), failures, code), ("completed", 0, None));
+    assert_eq!((status.as_str(), failures, code), ("failed", 0, None));
     assert_eq!(similar, Some(json!([])));
     let genres: Vec<String> = sqlx::query_scalar(
         "SELECT g.name FROM artist_genres ag JOIN genres g ON g.id = ag.genre_id \
@@ -565,10 +568,12 @@ async fn a_hung_cover_fill_keeps_the_artist_outcome(pool: PgPool) {
     );
 }
 
-/// Re-review N1: a cover fill that runs out of time on a slow image host leaves the artist
-/// `completed` with no failure counted, and the next cycle does not claim it again.
+/// Re-review N1, final review I1: a cover fill that runs out of time on a slow image host
+/// counts no failure and the next cycle does not claim the artist again, but the artist is left
+/// `failed` (no error recorded) so it is claimed again after the 15 min grace and the album
+/// retried.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn a_fill_timeout_leaves_the_artist_completed(pool: PgPool) {
+async fn a_fill_timeout_leaves_the_artist_retryable(pool: PgPool) {
     // An image host that accepts connections and never answers.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let host = listener.local_addr().unwrap();
@@ -595,18 +600,82 @@ async fn a_fill_timeout_leaves_the_artist_completed(pool: PgPool) {
         took >= std::time::Duration::from_secs(2) && took < std::time::Duration::from_secs(20),
         "{took:?}"
     );
-    assert_eq!(result, ArtistResult::Completed);
-    let (status, failures, code): (String, i16, Option<String>) = sqlx::query_as(
+    assert_eq!(result, ArtistResult::Pending);
+    assert_eq!(status_of(&pool, a).await, ("failed".into(), 0, None));
+    assert_eq!(image_of(&pool, days).await, (None, None));
+    // The next cycle's claim passes it by...
+    let next = identity::claim_artists(&pool, 10).await.unwrap();
+    assert!(next.iter().all(|c| c.id != a), "{next:?}");
+    // ...and once the grace is over it is claimed again.
+    backdate(&pool, a).await;
+    let later = identity::claim_artists(&pool, 10).await.unwrap();
+    assert!(later.iter().any(|c| c.id == a), "{later:?}");
+    silent.abort();
+}
+
+async fn status_of(pool: &PgPool, a: Uuid) -> (String, i16, Option<String>) {
+    sqlx::query_as(
         "SELECT enrichment_status, enrichment_failures, last_error_code FROM artists WHERE id = $1",
     )
     .bind(a)
-    .fetch_one(&pool)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Moves the artist's last try past the 15 min retry grace.
+async fn backdate(pool: &PgPool, a: Uuid) {
+    sqlx::query(
+        "UPDATE artists SET last_enriched_at = now() - interval '16 minutes' WHERE id = $1",
+    )
+    .bind(a)
+    .execute(pool)
     .await
     .unwrap();
-    assert_eq!((status.as_str(), failures, code), ("completed", 0, None));
+}
+
+/// Final review I1: a Cover Art Archive answer that fails transiently leaves the album without
+/// a cover and the artist retryable (`failed`, no failure counted, claimed again after the
+/// grace); the later run fills the album.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_transient_cover_failure_is_retried_later(pool: PgPool) {
+    let (a, days, w) = perturbator(&pool, json!([])).await;
+    sqlx::query("UPDATE albums SET release_group_mbid = $2 WHERE id = $1")
+        .bind(days)
+        .bind(Uuid::parse_str(RG_A).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let w = w
+        .deezer_none("Perturbator", "Dangerous Days")
+        .status(&fanart_album_url(RG_A), 404);
+    let failing = w.clone().status(&caa_url(RG_A), 503);
+    let f = fx(&pool, failing, World::default()).await;
+
+    let mine = claim(&pool, a).await;
+    assert_eq!(
+        artist::enrich_one(&f.ctx, &mine).await.unwrap(),
+        ArtistResult::Pending
+    );
+    assert_eq!(status_of(&pool, a).await, ("failed".into(), 0, None));
     assert_eq!(image_of(&pool, days).await, (None, None));
-    // The next cycle's claim passes it by.
     let next = identity::claim_artists(&pool, 10).await.unwrap();
     assert!(next.iter().all(|c| c.id != a), "{next:?}");
-    silent.abort();
+
+    // A later cycle, with the archive answering again.
+    backdate(&pool, a).await;
+    let working = w.caa_front(RG_A, "{images}/days.jpg");
+    let images = World::default().image("/days.jpg", &jpeg(500, 500, 4));
+    let g = fx(&pool, working, images).await;
+    let mine = claim(&pool, a).await;
+    assert_eq!(
+        artist::enrich_one(&g.ctx, &mine).await.unwrap(),
+        ArtistResult::Completed
+    );
+    assert_eq!(status_of(&pool, a).await, ("completed".into(), 0, None));
+    assert_eq!(
+        image_of(&pool, days).await,
+        (Some(format!("{days}.jpg")), Some("coverartarchive".into()))
+    );
+    assert!(stored(&g, days).is_some());
 }

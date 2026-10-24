@@ -51,7 +51,8 @@ pub const ARTIST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtistResult {
     Completed,
-    /// Only waiting on a rate limit: asked again without counting a failure.
+    /// Only waiting on a rate limit, or album covers left to retry: asked again without
+    /// counting a failure.
     Pending,
     Failed {
         code: String,
@@ -543,29 +544,51 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
     // §12.7 the album covers, after the artist's own outcome is written, so nothing they do can
     // discard it or count a failure. They get what is left of the artist's time cap (the same
     // deadline as `gather`, so an artist never takes longer than before). A source waiting on
-    // its rate limit puts a completed artist back to `pending` (bounded by the source's pause);
-    // running out of time does not: the artist stays `completed` and the remaining albums wait
-    // for its next enrichment, so a slow image host cannot make it be claimed every cycle.
-    let again =
-        match tokio::time::timeout_at(deadline, album_covers::fill_for_artist(ctx, a.id)).await {
-            Ok(Outcome::Answered(_) | Outcome::Absent(_)) => false,
-            Ok(Outcome::RateLimited { .. }) => true,
-            Ok(Outcome::Transient(f) | Outcome::Permanent(f)) => {
-                warn!(artist = %a.id, code = %f.code, "album covers could not be filled");
-                false
-            }
-            Err(_) => {
-                debug!(artist = %a.id, "album covers ran out of the artist's time; the rest waits");
-                false
-            }
-        };
-    if again
-        && result == ArtistResult::Completed
-        && identity::reopen_completed_artist(&ctx.pool, a.id).await?
+    // its rate limit puts a completed artist back to `pending` (bounded by the source's pause).
+    // A transient source failure or running out of time puts it to `failed` without counting a
+    // failure or recording an error (final review I1): it is claimed again after the 15 min
+    // retry grace, so the remaining albums are retried while a slow image host cannot make it
+    // be claimed every cycle.
+    let again = match tokio::time::timeout_at(deadline, album_covers::fill_for_artist(ctx, a.id))
+        .await
     {
-        return Ok(ArtistResult::Pending);
+        Ok(Outcome::Answered(_) | Outcome::Absent(_)) => Again::No,
+        Ok(Outcome::RateLimited { .. }) => Again::Now,
+        Ok(Outcome::Transient(f)) => {
+            warn!(artist = %a.id, code = %f.code, "album covers could not all be filled; retried later");
+            Again::Later
+        }
+        Ok(Outcome::Permanent(f)) => {
+            warn!(artist = %a.id, code = %f.code, "album covers could not be filled");
+            Again::No
+        }
+        Err(_) => {
+            debug!(artist = %a.id, "album covers ran out of the artist's time; retried later");
+            Again::Later
+        }
+    };
+    if result != ArtistResult::Completed {
+        return Ok(result);
     }
-    Ok(result)
+    let reopened = match again {
+        Again::No => false,
+        Again::Now => identity::reopen_completed_artist(&ctx.pool, a.id).await?,
+        Again::Later => identity::defer_completed_artist(&ctx.pool, a.id).await?,
+    };
+    Ok(if reopened {
+        ArtistResult::Pending
+    } else {
+        result
+    })
+}
+
+/// Whether a completed artist's album covers want another run.
+enum Again {
+    No,
+    /// A source waits on its rate limit: `pending`.
+    Now,
+    /// A source failed transiently or the time ran out: `failed` with no failure counted.
+    Later,
 }
 
 /// Writes the outcome and, while the artist row is still locked by that write, puts the staged

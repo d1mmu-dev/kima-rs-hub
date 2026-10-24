@@ -406,6 +406,37 @@ async fn prune_deletes_expired_only(pool: PgPool) {
     assert_eq!(rows[0].ttl, Duration::from_secs(60));
 }
 
+/// Final review M3: the message is scrubbed before it is cut to 200 characters, so a key
+/// straddling the cut leaves no prefix behind.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_key_straddling_the_message_cut_leaves_no_prefix(pool: PgPool) {
+    const KEY: &str = "STRADDLINGSECRET9";
+    // `{"error":"` is 10 characters: the key starts at character 192 and runs past 200.
+    let body = format!("{}{KEY} trailing", "x".repeat(182));
+    let replay = Replay::start(Recording(vec![entry(
+        "GET",
+        &format!("/music/m?api_key={KEY}"),
+        401,
+        json!({ "error": body }),
+    )]))
+    .await;
+    let net = net(&replay, &pool);
+    let out = net
+        .get_json::<Value>(Req::get(Host::Fanart, "/music/m").query("api_key", KEY))
+        .await;
+    let Outcome::Permanent(f) = out else {
+        panic!("{out:?}")
+    };
+    for n in 4..=KEY.len() {
+        assert!(
+            !f.message.contains(&KEY[..n]),
+            "{}: {}",
+            &KEY[..n],
+            f.message
+        );
+    }
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn secrets_scrubbed_from_failure_messages(pool: PgPool) {
     // A provider that echoes the key back in its error body.

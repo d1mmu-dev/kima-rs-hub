@@ -52,6 +52,21 @@ pub async fn track_path_and_duration(
     Ok(row.map(|r| (r.path, r.duration_secs)))
 }
 
+/// A track's current path and `missing_since`, read again after its file was not found
+/// (final review M1).
+pub async fn track_path_and_missing(
+    pool: &PgPool,
+    track: Uuid,
+) -> sqlx::Result<Option<(String, Option<time::OffsetDateTime>)>> {
+    let row = sqlx::query!(
+        "SELECT path, missing_since FROM tracks WHERE id = $1",
+        track
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| (r.path, r.missing_since)))
+}
+
 /// What the recording stage's ladder reads about a track (spec §8.3): the track's own fields, its
 /// album and the album artist's name.
 #[derive(Debug, Clone, PartialEq, Eq)]

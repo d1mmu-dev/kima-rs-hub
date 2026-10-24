@@ -238,7 +238,7 @@ ALTER TABLE artists
     ADD COLUMN bio                 text,          -- Wikipedia summary (upstream Artist.summary)
     ADD COLUMN image_path          text,          -- relative to <data_dir>/artist-images
     ADD COLUMN image_source        text CHECK (image_source IN ('local', 'wikidata', 'fanart', 'deezer', 'user')),
-    ADD COLUMN similar             jsonb,         -- [{name, mbid|null, match}] (upstream similarArtistsJson)
+    ADD COLUMN "similar"           jsonb,         -- [{name, mbid|null, match}] (upstream similarArtistsJson)
     ADD COLUMN enrichment_status   text NOT NULL DEFAULT 'pending'
         CHECK (enrichment_status IN ('pending', 'enriching', 'completed', 'failed', 'unresolvable')),
     ADD COLUMN enrichment_failures smallint NOT NULL DEFAULT 0,
@@ -657,7 +657,8 @@ still use size and mtime).
   rescan writes a value (with source `tag`) only when the stored value is NULL or its source is `tag`. An autotag value
   (§19.7) or a release group typed in the MetadataEditor (§16.3, source `user`) wins over tags until the user clears
   it: the editor's Reset (`POST /enrichment/albums/{id}/reset`, §16.3) sets a `user` value and its source to NULL, and
-  the next rescan fills it from tags again. The artist MBID below follows the same rule with `mbid_source`.
+  the next rescan fills it from tags again. The artist MBID below does not follow this rule: a rescan sets it only
+  while `artists.mbid` is NULL, and never replaces any stored value (`kima_db::library`, `WHERE … mbid IS NULL`).
 - **Artist MBID** (album artist only, kima-rs has no track-artist rows): from `tag_album_artist_mbids` when the album
   artist came from the AlbumArtist tag and exactly one id is present; from `tag_artist_mbids` when the album artist
   came from the Artist tag and the count is `1 + featured.len()` (upstream `primaryArtistMbid`,
@@ -685,10 +686,11 @@ Ported function by function, each with its upstream tests (§24.2):
   database key for identification, so the PG-parity test is dropped and the ported `titlesAgree`,
   `artistIdentity` and `albumIdentity` cases decide (D-106 notes it).
 - `normalize_artist_name(s)` = trim, `fold_identity`, lowercase, `\s*&\s*` → ` and `, collapse whitespace
-  (`artistIdentity.ts:45-56`); `artist_identity_key(s)` = that with every non-letter/number removed
-  (`:63-65`, "Dead Mau5" → "deadmau5").
-- `fold_title(s)`: NFKD, drop Latin combining marks only (U+0300–U+036F), NFKC, lowercase, keep only
-  `\p{L}\p{M}\p{N}`; empty never agrees.
+  (`artistIdentity.ts:45-56`); `artist_identity_key(s)` = that with every character that is not `char::is_alphanumeric` (Unicode Alphabetic or
+  Numeric, standing in for Postgres' `[:alnum:]`) removed (`:63-65`, "Dead Mau5" → "deadmau5").
+- `fold_title(s)`: NFKD, drop the combining marks that follow a Latin letter (`(\p{Script=Latin})\p{M}+` → the letter,
+  as upstream's `foldTitle`; not the literal range U+0300–U+036F, which would turn Cyrillic й into и), NFKC,
+  lowercase, keep only `\p{L}\p{M}\p{N}`; empty never agrees. A dakuten or a Devanagari vowel sign stays.
 - `normalize_for_search(s)` (`musicbrainz.ts:555-568`): drop `(...)` and `[...]`; drop
   ` - [year] (deluxe|remastered|remaster|edition|version|expanded|bonus|explicit|clean|single|radio edit|remix|
   acoustic|live|mono|stereo) [year] [edition|version|mix]`; drop a trailing ` - YYYY`; collapse whitespace.
@@ -697,8 +699,9 @@ Ported function by function, each with its upstream tests (§24.2):
 - `version_of(title)`: the sorted set of `VERSION_WORDS` = remix, mix, dub, edit, live, acoustic, demo, instrumental,
   reprise, rework, unplugged, session, version, karaoke, cover, found among the NFKC-lowercased title split on
   non-letter/number (`recordingMatch.ts:42-51`).
-- `lengths_agree(a_secs, b_secs) -> Option<bool>`: `None` when either is unknown or ≤ 0, else `|a − b| ≤ 5`
-  (`LENGTH_TOLERANCE_SEC = 5`, `:40,54-57`).
+- `lengths_agree(a_secs, b_secs) -> Option<bool>`: lengths are whole seconds (`i32`); a MusicBrainz length in
+  milliseconds is rounded to the nearest second, half up, once (`musicbrainz::ms_to_secs`, D-125). `None` when either
+  is unknown or ≤ 0, else `|a − b| ≤ 5` (`LENGTH_TOLERANCE_SEC = 5`, `:40,54-57`).
 - `artists_agree(local_names, credits)`: true when any local name's `artist_identity_key` (or the key of its sort
   name) is in the set of the candidate's credit keys; credit names are each credit's `name`, `artist.name`,
   `artist.sort-name`, plus the joined credit line (`creditNames`, `musicbrainz.ts:24-31`; `recordingMatch.ts:59-69`).
@@ -894,8 +897,16 @@ ON CONFLICT (track_id, stage) DO UPDATE SET
   status = 'working',
   redelivered = track_stages.redelivered + (track_stages.status = 'working')::int,
   next_attempt_at = EXCLUDED.next_attempt_at, started_at = now(), updated_at = now()
+WHERE (track_stages.status = 'pending'
+       AND (track_stages.next_attempt_at IS NULL OR track_stages.next_attempt_at <= now()))
+   OR (track_stages.status IN ('failed', 'working') AND track_stages.next_attempt_at <= now())
 RETURNING track_id, redelivered, attempts;
 ```
+
+The `ON CONFLICT … WHERE` guard repeats the still-due test against the row as it is when the insert reaches it: two
+workers can both select a track with no row (`FOR UPDATE OF t SKIP LOCKED` locks the track, but the second selection
+can run after the first worker's insert committed), and without the guard the second would claim the same stage
+again. A row that is no longer due is skipped and not returned (D-108).
 
 - Order `mtime DESC` = upstream's `fileModified DESC`: newest files first.
 - A claim returned with `redelivered ≥ 3` (`STAGE_REDELIVERY_CAP`) is closed at once: `failed`, terminal,
@@ -1030,7 +1041,7 @@ status. Shape exactly upstream's (`unifiedEnrichment.ts:2827-2941`):
 ```
 
 - artists: `total` = artists with a present track (VA excluded), `completed` = completed + unresolvable, `pending` =
-  pending + enriching, `owed` = pending, `failed`; `progress = round(completed / total × 100)`.
+  pending + enriching, `owed` = pending + enriching + failed (upstream's count of artists still owing work), `failed`; `progress = round(completed / total × 100)`.
 - trackTags = the recording stage over present tracks: `enriched` = done, `waiting` = open but behind an unsettled
   fingerprint, `pending` = open and actionable (no row, pending, working, retrying), `waitingMissing` = open rows of
   missing tracks.

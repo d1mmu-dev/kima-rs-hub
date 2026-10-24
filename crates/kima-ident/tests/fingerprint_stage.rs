@@ -149,6 +149,55 @@ async fn missing_file_is_file_missing(pool: PgPool) {
     assert_file_missing(&pool, t).await;
 }
 
+/// Final review M1: a file the organizer is moving (its paths held in the watcher's ignore set,
+/// the row not yet re-pointed) is retried, not closed `FILE_MISSING`.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_file_the_organizer_is_moving_is_retried(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = root(&dir);
+    let ctx = ident_ctx(&pool, &root, dead_bases());
+    let t = track(&pool, "A/moving.flac", 100).await;
+    ctx.library.ignore.add(root.join("A/moving.flac"));
+    let report = run(&ctx).await;
+    assert_eq!((report.claimed, report.failed), (1, 1));
+    let row = stage_row(&pool, t).await;
+    assert_eq!(
+        row.get::<Option<String>, _>("error_code").as_deref(),
+        Some("MOVED")
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("error_class").as_deref(),
+        Some("INCONCLUSIVE")
+    );
+    assert!(
+        row.get::<Option<time::OffsetDateTime>, _>("next_attempt_at")
+            .is_some()
+    );
+}
+
+/// A file the scan marked missing after the claim is `FILE_MISSING`.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_file_marked_missing_after_the_claim_is_file_missing(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ident_ctx(&pool, &root(&dir), dead_bases());
+    let t = track(&pool, "A/gone.flac", 100).await;
+    let claim = stages::claim(&pool, Stage::Fingerprint, 20, true)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    sqlx::query("UPDATE tracks SET missing_since = now() WHERE id = $1")
+        .bind(t)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let res = fingerprint::run_claim(&ctx, &claim, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(res, ClaimResult::Failed);
+    assert_file_missing(&pool, t).await;
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn escaping_path_is_file_missing(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();

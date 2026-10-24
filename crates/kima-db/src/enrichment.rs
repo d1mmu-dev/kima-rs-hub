@@ -411,6 +411,15 @@ pub async fn retry_failed(pool: &PgPool, now: AcoustidNow) -> sqlx::Result<u64> 
 /// reopen. Nothing is deleted. Returns rows changed.
 pub async fn redecide(pool: &PgPool, now: AcoustidNow) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
+    // The stage rows are locked in (track, stage) order first (final review M2), so two
+    // writers over many rows queue up rather than deadlock.
+    sqlx::query!(
+        "SELECT s.track_id FROM track_stages s
+         ORDER BY s.track_id, s.stage
+         FOR NO KEY UPDATE OF s"
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     let reopened = sqlx::query!(
         "UPDATE track_stages s
          SET status = 'pending', attempts = 0, redelivered = 0, next_attempt_at = NULL,
@@ -489,7 +498,15 @@ pub async fn wipe(pool: &PgPool) -> sqlx::Result<WipeCounts> {
     )
     .execute(&mut *tx)
     .await?;
-    // Various Artists is never looked up (spec §6.3): it keeps `completed`.
+    // Various Artists is never looked up (spec §6.3): it keeps `completed`. The artists are
+    // locked in id order first (final review M2), the order the scanner uses.
+    sqlx::query!(
+        "SELECT id FROM artists WHERE name_key <> 'various artists'
+         ORDER BY id
+         FOR NO KEY UPDATE"
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     let artists = sqlx::query!(
         r#"UPDATE artists
            SET bio = NULL, "similar" = NULL, enrichment_status = 'pending',

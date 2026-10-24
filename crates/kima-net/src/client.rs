@@ -469,7 +469,7 @@ impl Net {
                 Ok(Err(outcome)) => return outcome,
                 Ok(Ok(raw)) => raw,
             };
-            match classify(req, source, raw) {
+            match classify(req, source, raw, secrets) {
                 Step::Done(outcome) => return outcome,
                 Step::Limited(limited) => {
                     if attempt < limits.rate_limit_retries {
@@ -746,7 +746,7 @@ impl Live {
 }
 
 /// Spec §7.2: what an answer means.
-fn classify(req: &Req, source: Source, raw: Raw) -> Step<Value> {
+fn classify(req: &Req, source: Source, raw: Raw, secrets: &Secrets) -> Step<Value> {
     let status = raw.status;
     let code = status.as_u16();
     if status.is_success() {
@@ -778,7 +778,9 @@ fn classify(req: &Req, source: Source, raw: Raw) -> Step<Value> {
         });
     }
     let message = || {
-        let text = String::from_utf8_lossy(&raw.body);
+        // Scrubbed before the cut (final review M3): a key straddling character 200 must not
+        // leave its prefix behind.
+        let text = secrets.scrub(&String::from_utf8_lossy(&raw.body));
         let mut text: String = text.chars().take(200).collect();
         if text.is_empty() {
             text = status.to_string();

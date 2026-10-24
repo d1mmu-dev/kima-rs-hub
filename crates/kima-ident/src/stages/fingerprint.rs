@@ -101,6 +101,20 @@ pub async fn run_claim(
     };
     let fp = match decoded {
         Ok(Ok(fp)) => fp,
+        Ok(Err(DecodeError::Missing(io))) if io.kind() == std::io::ErrorKind::NotFound => {
+            // The organizer may have moved the file meanwhile (final review M1).
+            let now = identity::track_path_and_missing(pool, claim.track_id).await?;
+            let back_or_held = ctx.library.ignore.contains(&path)
+                || tokio::fs::try_exists(&path).await.unwrap_or(false);
+            return match not_found(&rel, now, back_or_held) {
+                Some(StageFailure::FileMissing(why)) => {
+                    let f = StageFailure::FileMissing(format!("{rel}: {why}: {io}"));
+                    fail(ctx, claim, &f).await
+                }
+                Some(f) => fail(ctx, claim, &f).await,
+                None => Ok(ClaimResult::Stale),
+            };
+        }
         Ok(Err(e)) => return fail(ctx, claim, &decode_failure(&rel, e)).await,
         Err(_) => {
             let f = StageFailure::Transient(Failure::new("TIMEOUT", "timed out"));
@@ -123,8 +137,32 @@ pub async fn run_claim(
     Ok(ClaimResult::Done)
 }
 
-/// Only a missing file (`NotFound`) is `FILE_MISSING`; any other io error (permissions, a
-/// flaky mount) is transient, like a decode error.
+/// What a file not found at `read` (the path the claim decoded) means, given the row as it is
+/// now (`path`, `missing_since`; `None` when the track is gone) and whether a file is back at
+/// that path or the organizer holds it (final review M1): a row re-pointed meanwhile, or a
+/// file back or mid-move at the same path, is retried (`MOVED`); otherwise it is
+/// `FILE_MISSING`. `None`: the track is gone, nothing to report.
+fn not_found(
+    read: &str,
+    now: Option<(String, Option<OffsetDateTime>)>,
+    back_or_held: bool,
+) -> Option<StageFailure> {
+    let (path, missing_since) = now?;
+    let moved = || {
+        StageFailure::Transient(Failure::new(
+            "MOVED",
+            "the file moved while it was read; asked again",
+        ))
+    };
+    Some(if path != read || (missing_since.is_none() && back_or_held) {
+        moved()
+    } else {
+        StageFailure::FileMissing("not found".to_owned())
+    })
+}
+
+/// Only a missing file (`NotFound`) is `FILE_MISSING` (see [`not_found`]); any other io error
+/// (permissions, a flaky mount) is transient, like a decode error.
 fn decode_failure(rel: &str, e: DecodeError) -> StageFailure {
     match e {
         DecodeError::Missing(io) if io.kind() == std::io::ErrorKind::NotFound => {
@@ -158,4 +196,48 @@ fn done(accepted: bool) -> sqlx::Result<ClaimResult> {
     } else {
         ClaimResult::Stale
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn class(f: Option<StageFailure>) -> Option<&'static str> {
+        f.map(|f| match f {
+            StageFailure::FileMissing(_) => "FILE_MISSING",
+            StageFailure::Transient(f) if f.code == "MOVED" => "MOVED",
+            _ => "OTHER",
+        })
+    }
+
+    #[test]
+    fn not_found_is_file_missing_only_where_the_file_should_still_be() {
+        let now = Some(OffsetDateTime::now_utc());
+        let row = |p: &str, m| Some((p.to_owned(), m));
+        // Re-pointed meanwhile (the organizer moved it): retried at the new path.
+        assert_eq!(
+            class(not_found("A/x.flac", row("B/x.flac", None), false)),
+            Some("MOVED")
+        );
+        assert_eq!(
+            class(not_found("A/x.flac", row("B/x.flac", now), false)),
+            Some("MOVED")
+        );
+        // Same path, but the file is back or its move is in flight: retried.
+        assert_eq!(
+            class(not_found("A/x.flac", row("A/x.flac", None), true)),
+            Some("MOVED")
+        );
+        // Same path and nothing there: missing (whether or not the scan marked it yet).
+        assert_eq!(
+            class(not_found("A/x.flac", row("A/x.flac", None), false)),
+            Some("FILE_MISSING")
+        );
+        assert_eq!(
+            class(not_found("A/x.flac", row("A/x.flac", now), true)),
+            Some("FILE_MISSING")
+        );
+        // The row is gone: nothing to report.
+        assert_eq!(class(not_found("A/x.flac", None, false)), None);
+    }
 }

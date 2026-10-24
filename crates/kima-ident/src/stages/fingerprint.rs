@@ -154,11 +154,13 @@ fn not_found(
             "the file moved while it was read; asked again",
         ))
     };
-    Some(if path != read || (missing_since.is_none() && back_or_held) {
-        moved()
-    } else {
-        StageFailure::FileMissing("not found".to_owned())
-    })
+    Some(
+        if path != read || (missing_since.is_none() && back_or_held) {
+            moved()
+        } else {
+            StageFailure::FileMissing("not found".to_owned())
+        },
+    )
 }
 
 /// Only a missing file (`NotFound`) is `FILE_MISSING` (see [`not_found`]); any other io error

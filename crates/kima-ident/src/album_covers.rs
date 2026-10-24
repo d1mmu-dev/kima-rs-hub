@@ -7,7 +7,9 @@
 //! place at `<data_dir>/album-images/<id>.jpg` only while the album row is locked by the write
 //! that records it, after that write was accepted (never over a `user` image). A source that
 //! fails records nothing and the next is tried; none of them fails the artist's run. A source
-//! waiting on its rate limit makes the fill answer `RateLimited`, so the artist is asked again.
+//! waiting on its rate limit makes the fill answer `RateLimited`, so the artist is asked again;
+//! an album left without a cover because a source failed transiently makes it answer
+//! `Transient`, so the artist is asked again later (final review I1).
 
 use std::path::{Component, Path};
 
@@ -29,11 +31,14 @@ enum Filled {
     Stored,
     Nothing,
     Waiting(OffsetDateTime),
+    /// No cover, and a source failed transiently (its code): worth asking again later.
+    Retry(String),
 }
 
 /// Fills the stored covers of `artist`'s albums that have none (spec §12.7). Answers how many
-/// were stored; `RateLimited` when a source waits on its rate limit (whatever else was
-/// stored stays stored). A database error is `Transient("DB")`. Dropping the future
+/// were stored; `RateLimited` when a source waits on its rate limit, otherwise `Transient`
+/// when an album got no cover because a source failed transiently (whatever else was stored
+/// stays stored). A database error is `Transient("DB")`. Dropping the future
 /// (cancellation, the artist's time cap) leaves no temp file and no half-recorded cover.
 pub async fn fill_for_artist(ctx: &IdentCtx, artist: Uuid) -> Outcome<usize> {
     let albums = match identity::albums_without_cover(&ctx.pool, artist).await {
@@ -54,6 +59,8 @@ pub async fn fill_for_artist(ctx: &IdentCtx, artist: Uuid) -> Outcome<usize> {
         .await;
     let mut stored = 0;
     let mut waiting: Option<OffsetDateTime> = None;
+    let mut retry: Option<String> = None;
+    let mut retried = 0usize;
     for r in results {
         match r {
             Filled::Stored => stored += 1,
@@ -61,11 +68,19 @@ pub async fn fill_for_artist(ctx: &IdentCtx, artist: Uuid) -> Outcome<usize> {
             Filled::Waiting(until) => {
                 waiting = Some(waiting.map_or(until, |w| w.min(until)));
             }
+            Filled::Retry(code) => {
+                retried += 1;
+                retry.get_or_insert(code);
+            }
         }
     }
-    match waiting {
-        Some(until) => Outcome::RateLimited { until },
-        None => Outcome::Answered(stored),
+    match (waiting, retry) {
+        (Some(until), _) => Outcome::RateLimited { until },
+        (None, Some(code)) => Outcome::Transient(Failure::new(
+            code,
+            format!("{retried} album cover(s) could not be fetched; asked again later"),
+        )),
+        (None, None) => Outcome::Answered(stored),
     }
 }
 
@@ -90,6 +105,8 @@ enum Asked {
     Url(String),
     None,
     Waiting(OffsetDateTime),
+    /// Failed transiently (its code): another try may answer.
+    Failed(String),
 }
 
 fn asked(source: &str, album: Uuid, o: Outcome<Option<String>>) -> Asked {
@@ -97,7 +114,11 @@ fn asked(source: &str, album: Uuid, o: Outcome<Option<String>>) -> Asked {
         Outcome::Answered(Some(url)) => Asked::Url(url),
         Outcome::Answered(None) | Outcome::Absent(_) => Asked::None,
         Outcome::RateLimited { until } => Asked::Waiting(until),
-        Outcome::Transient(f) | Outcome::Permanent(f) => {
+        Outcome::Transient(f) => {
+            debug!(%album, source, code = %f.code, "album cover source failed");
+            Asked::Failed(f.code)
+        }
+        Outcome::Permanent(f) => {
             debug!(%album, source, code = %f.code, "album cover source failed");
             Asked::None
         }
@@ -113,6 +134,7 @@ async fn fill_one(ctx: &IdentCtx, album: &AlbumForCover, fanart_key: Option<&str
     let net = &ctx.net;
     let rg = album.release_group_mbid.map(Mbid);
     let mut waiting = None;
+    let mut failed = None;
     for source in ["deezer", "coverartarchive", "fanart"] {
         let answer = match (source, rg, fanart_key) {
             ("deezer", ..) => deezer::album_cover(net, &album.artist_name, &album.title).await,
@@ -124,22 +146,32 @@ async fn fill_one(ctx: &IdentCtx, album: &AlbumForCover, fanart_key: Option<&str
             Asked::Url(url) => match store(ctx, album.id, source, &url).await {
                 Stored::Yes => return Filled::Stored,
                 Stored::No => {}
+                Stored::Transient(code) => {
+                    failed.get_or_insert(code);
+                }
                 Stored::Refused => return Filled::Nothing,
             },
             Asked::None => {}
             Asked::Waiting(until) => waiting = Some(until),
+            Asked::Failed(code) => {
+                failed.get_or_insert(code);
+            }
         }
     }
-    match waiting {
-        Some(until) => Filled::Waiting(until),
-        None => Filled::Nothing,
+    match (waiting, failed) {
+        (Some(until), _) => Filled::Waiting(until),
+        (None, Some(code)) => Filled::Retry(code),
+        (None, None) => Filled::Nothing,
     }
 }
 
 enum Stored {
     Yes,
-    /// The download or the image failed: the next source is tried.
+    /// The image failed or the download failed for good: the next source is tried.
     No,
+    /// The download or the write failed transiently (its code): the next source is tried, and
+    /// the album is worth asking about again later.
+    Transient(String),
     /// The album row refused it (a user image, or the album is gone): nothing more to do.
     Refused,
 }
@@ -154,7 +186,10 @@ async fn store(ctx: &IdentCtx, album: Uuid, source: &str, url: &str) -> Stored {
             if let Some(code) = other.code() {
                 debug!(%album, source, code, "album cover download failed");
             }
-            return Stored::No;
+            return match other {
+                Outcome::Transient(f) => Stored::Transient(f.code),
+                _ => Stored::No,
+            };
         }
     };
     let data_dir = ctx.library.data_dir.clone();
@@ -177,7 +212,7 @@ async fn store(ctx: &IdentCtx, album: Uuid, source: &str, url: &str) -> Stored {
         Ok(false) => Stored::Refused,
         Err(error) => {
             warn!(%album, source, %error, "could not store an album cover");
-            Stored::No
+            Stored::Transient("DB".into())
         }
     }
 }

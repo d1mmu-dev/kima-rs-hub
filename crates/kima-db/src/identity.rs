@@ -522,6 +522,20 @@ pub async fn reopen_completed_artist(pool: &PgPool, id: Uuid) -> sqlx::Result<bo
     Ok(r.rows_affected() == 1)
 }
 
+/// Puts a `completed` artist to `failed` without counting a failure or recording an error, so
+/// it is claimed again after [`FAILED_RETRY_GRACE`] (its `last_enriched_at` was just written):
+/// album covers left to retry (final review I1). Answers whether the row changed.
+pub async fn defer_completed_artist(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let r = sqlx::query!(
+        "UPDATE artists SET enrichment_status = 'failed'
+         WHERE id = $1 AND enrichment_status = 'completed'",
+        id
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
 // ---- album cover fallback (spec §12.7) ----
 
 /// An album the cover fallback may fill: no stored image and a present track.

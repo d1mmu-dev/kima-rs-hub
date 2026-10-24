@@ -202,7 +202,47 @@ impl Fx {
     }
 }
 
-async fn fx(pool: &PgPool, api: World, images: World) -> Fx {
+/// Deezer's structured album search and its plain fallback (the album cover fallback).
+fn deezer_album_urls(artist: &str, title: &str) -> [String; 2] {
+    let enc = |s: &str| -> String {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
+    };
+    [
+        format!(
+            "/search/album?q={}&limit=5",
+            enc(&format!("artist:\"{artist}\" album:\"{title}\""))
+        ),
+        format!(
+            "/search/album?q={}&limit=5",
+            enc(&format!("{artist} {title}"))
+        ),
+    ]
+}
+
+async fn fx(pool: &PgPool, mut api: World, images: World) -> Fx {
+    // The album cover fallback (album_covers.rs has its own tests) finds nothing for the
+    // albums seeded so far, unless the test answers otherwise: an unrecorded request would be
+    // a transient failure that leaves the artist to be retried.
+    let albums: Vec<(String, String)> = sqlx::query_as(
+        "SELECT ar.name, al.title FROM albums al JOIN artists ar ON ar.id = al.artist_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    for (artist, title) in albums {
+        for url in deezer_album_urls(&artist, &title) {
+            if !api.0.contains_key(&url) {
+                api = api.get(&url, json!({"data": []}));
+            }
+        }
+    }
     let images = Replay::start(Recording(images.entries())).await;
     let base = images.url();
     let entries = api

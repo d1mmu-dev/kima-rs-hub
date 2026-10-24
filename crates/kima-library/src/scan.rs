@@ -518,6 +518,8 @@ struct Touched {
     artists: HashSet<Uuid>,
     /// Artist MBID candidates read per artist.
     candidates: HashMap<Uuid, Vec<Uuid>>,
+    /// Artists of the albums the folder's stores created.
+    new_album_artists: HashSet<Uuid>,
 }
 
 impl Touched {
@@ -525,6 +527,9 @@ impl Touched {
         self.albums.insert(r.upserted.album);
         self.albums.extend(r.old_album);
         self.artists.insert(r.upserted.artist);
+        if r.upserted.album_created {
+            self.new_album_artists.insert(r.upserted.artist);
+        }
         if let Some(c) = t.artist_mbid_candidate {
             self.candidates
                 .entry(r.upserted.artist)
@@ -546,11 +551,19 @@ async fn refresh_touched(pool: &PgPool, touched: Touched) -> sqlx::Result<()> {
     for &album in &albums {
         library::refresh_album_mbids(&mut tx, album).await?;
     }
-    for (artist, candidates) in &touched.candidates {
+    // Artists are locked in id order (final review M2).
+    let mut candidates: Vec<(Uuid, Vec<Uuid>)> = touched.candidates.into_iter().collect();
+    candidates.sort_unstable_by_key(|(artist, _)| *artist);
+    for (artist, candidates) in &candidates {
         if let Some(mbid) = mode_uuid(candidates) {
             library::set_artist_mbid_if_unset(&mut tx, *artist, mbid).await?;
         }
     }
+    // A new album by a `completed` artist puts the artist back to `pending`, so the album gets
+    // its cover fallback (final review I1; the cached answers make the re-run cheap).
+    let mut reopen: Vec<Uuid> = touched.new_album_artists.into_iter().collect();
+    reopen.sort_unstable();
+    library::reopen_completed_artists(&mut tx, &reopen).await?;
     // An old album's artist loses the moved track's genres too.
     let mut artists = touched.artists;
     artists.extend(library::artists_of_albums(&mut tx, &albums).await?);

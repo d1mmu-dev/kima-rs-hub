@@ -14,8 +14,8 @@ Milestones M1 (library and playback) and M2 (Subsonic) are done. On top of M0's 
 login, kima-rs now scans and watches a music folder, shows it as Artist, then Year - Album, then songs, and lets you
 browse, search, stream (with transcodes), keep playlists and resume playback. An admin can also
 preview and apply a tidy on-disk layout. Music apps that speak Subsonic/OpenSubsonic can connect
-with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Not yet built: identification (MusicBrainz),
-audio analysis, podcasts and audiobooks, integrations. See
+with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Identification (MusicBrainz, M3a) is built;
+not yet built: tag writing and the autotagger (M3b), audio analysis, podcasts and audiobooks, integrations. See
 `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` for what comes next.
 
 ## Quick start
@@ -76,6 +76,28 @@ overwritten, and every step is journaled in Postgres, so a run resumes after a c
   to can be undone (the copies are deleted).
 - **Move**: renames files inside `MUSIC_PATH`, which must be mounted writable (drop `:ro`).
   Undo restores every original path from the journal.
+
+### Identification
+
+Once a library is scanned, kima identifies it on its own, with no button to press: each track's
+MusicBrainz recording (from file tags first, then an AcoustID fingerprint match), then
+artist photos, biographies, similar artists and genres, album cover fallbacks and synced lyrics.
+Progress shows under Settings > Library Tools; new files are picked up as they arrive. In M3a
+nothing is written to your music files; identification only fills the database.
+
+- **Switch it off.** `KIMA_IDENTIFY=off` stops every outbound lookup for the whole server. An admin can
+  also turn "Auto enrich metadata" off in Settings > Artwork; the environment switch wins and
+  the toggle then says so.
+- **AcoustID key.** No AcoustID key ships with kima-rs. Register an application at
+  <https://acoustid.org/new-application> and enter the key in Settings > Artwork (or set
+  `ACOUSTID_CLIENT_KEY`). Without one, fingerprints are still made but nothing is asked of AcoustID;
+  tracks with usable tags are matched by MusicBrainz id or name. A fanart.tv key is optional and entered
+  the same way (or `FANART_API_KEY`). Saved keys are never shown again; the page says "Saved".
+- **First run on a big library is slow.** MusicBrainz allows one request per second, and an
+  untagged track takes one to three requests: about 5-10 hours for 20 000 untagged tracks.
+  Tagged files cost nothing, and later runs reuse a cache. Progress survives restarts. For a large library
+  point `MUSICBRAINZ_BASE_URL` at a local MusicBrainz mirror.
+- Fingerprinting uses half the CPU cores by default; set `KIMA_FINGERPRINT_WORKERS` to change that.
 
 ## Local development
 
@@ -139,8 +161,11 @@ New in kima-rs:
 | `KIMA_LIBRARY_SYNC_CRON` | `0 4 * * *` | Five-field cron (UTC) of the daily safety-net reconcile. `off` disables it. An invalid expression stops startup. |
 | `KIMA_PUBLIC_URL` | unset | Where clients reach this server, such as `https://music.example.com`. Must start with `http://` or `https://`; a trailing `/` is stripped. Used in the `hls` playlist and shown on the settings page. |
 | `KIMA_CONTACT` | `https://github.com/d1mmu-dev/kima-rs-hub` | Contact sent in the User-Agent of every outbound request (`kima-rs/<version> ( <contact> )`), as MusicBrainz asks. |
+| `KIMA_IDENTIFY` | `on` | `off` turns off every outbound lookup (MusicBrainz, AcoustID, Wikidata, fanart.tv, Deezer, ListenBrainz, Cover Art Archive, LRCLIB) and wins over the Settings toggle; fingerprinting still runs. Any other value stops startup. |
 | `MUSICBRAINZ_BASE_URL` | `https://musicbrainz.org/ws/2` | MusicBrainz or a mirror (upstream's name). Must start with `http://` or `https://`; a trailing `/` is stripped. |
 | `KIMA_FINGERPRINT_WORKERS` | half the cores, at least 1 | How many files are fingerprinted at once (ffmpeg decodes, chromaprint runs in-process). Must be a whole number of at least 1. |
+| `ACOUSTID_CLIENT_KEY` | unset | AcoustID client key (upstream's name), used when no key is stored in Settings. A secret: do not commit it. |
+| `FANART_API_KEY` | unset | fanart.tv key (upstream's name), used when no key is stored in Settings. A secret: do not commit it. |
 | `ACOUSTID_DISABLED` | `false` | `true` (any case) turns off fingerprinting and AcoustID lookups (upstream's name); `/api/system/features` then answers `fpcalc: false`. |
 | `KIMA_NET_DENY_REAL` | unset | `1` makes any outbound request to a host other than this machine panic. Set in CI so no test reaches the network. |
 | `KIMA_TRANSCODE_CACHE_MB` | `2048` | Size cap of the transcode cache under `KIMA_DATA_DIR`, in MB. |

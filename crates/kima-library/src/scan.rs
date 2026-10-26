@@ -12,9 +12,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use kima_core::events::{Event, EventBus};
-use kima_db::PgPool;
 use kima_db::genres::{self, GenreSource};
 use kima_db::library::{self, IndexedTrack, ResolvedTrack, TagIds};
+use kima_db::{PgPool, retry_once_on_conflict};
 use kima_db::{lyrics, stages};
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
@@ -539,33 +539,69 @@ impl Touched {
     }
 }
 
+/// One artist's share of the folder refresh, in the order the artists are locked.
+#[derive(Debug, PartialEq, Eq)]
+struct ArtistStep {
+    artist: Uuid,
+    /// The tag MBID to set while the artist has none.
+    mbid: Option<Uuid>,
+    /// The artist gets a new album: reopen it if `completed`.
+    reopen: bool,
+}
+
+/// The artists that need an MBID or a reopen, one step each, sorted by id: a single pass
+/// takes their row locks in one order (final review M2), however the two lists overlap.
+fn artist_steps(
+    candidates: &HashMap<Uuid, Vec<Uuid>>,
+    new_album_artists: &HashSet<Uuid>,
+) -> Vec<ArtistStep> {
+    let mut ids: Vec<Uuid> = candidates
+        .keys()
+        .chain(new_album_artists)
+        .copied()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    ids.sort_unstable();
+    ids.into_iter()
+        .map(|artist| ArtistStep {
+            artist,
+            mbid: candidates.get(&artist).and_then(|c| mode_uuid(c)),
+            reopen: new_album_artists.contains(&artist),
+        })
+        .collect()
+}
+
 /// After a folder: album MBIDs (mode of the tags, R2), artist MBIDs from tags where unset, and
-/// the file-derived album and artist genres, for everything the folder touched.
+/// the file-derived album and artist genres, for everything the folder touched. One
+/// transaction, run again once if the database picked it as a deadlock victim.
 async fn refresh_touched(pool: &PgPool, touched: Touched) -> sqlx::Result<()> {
     if touched.albums.is_empty() && touched.candidates.is_empty() {
         return Ok(());
     }
+    retry_once_on_conflict(|| refresh_touched_once(pool, &touched)).await
+}
+
+async fn refresh_touched_once(pool: &PgPool, touched: &Touched) -> sqlx::Result<()> {
     let mut tx = pool.begin().await?;
-    let mut albums: Vec<Uuid> = touched.albums.into_iter().collect();
+    let mut albums: Vec<Uuid> = touched.albums.iter().copied().collect();
     albums.sort_unstable();
     for &album in &albums {
         library::refresh_album_mbids(&mut tx, album).await?;
     }
-    // Artists are locked in id order (final review M2).
-    let mut candidates: Vec<(Uuid, Vec<Uuid>)> = touched.candidates.into_iter().collect();
-    candidates.sort_unstable_by_key(|(artist, _)| *artist);
-    for (artist, candidates) in &candidates {
-        if let Some(mbid) = mode_uuid(candidates) {
-            library::set_artist_mbid_if_unset(&mut tx, *artist, mbid).await?;
+    // The artists the folder gives an MBID or a new album, locked in one id-ordered pass. A
+    // new album by a `completed` artist puts the artist back to `pending`, so the album gets
+    // its cover fallback (final review I1; the cached answers make the re-run cheap).
+    for step in artist_steps(&touched.candidates, &touched.new_album_artists) {
+        if let Some(mbid) = step.mbid {
+            library::set_artist_mbid_if_unset(&mut tx, step.artist, mbid).await?;
+        }
+        if step.reopen {
+            library::reopen_completed_artists(&mut tx, &[step.artist]).await?;
         }
     }
-    // A new album by a `completed` artist puts the artist back to `pending`, so the album gets
-    // its cover fallback (final review I1; the cached answers make the re-run cheap).
-    let mut reopen: Vec<Uuid> = touched.new_album_artists.into_iter().collect();
-    reopen.sort_unstable();
-    library::reopen_completed_artists(&mut tx, &reopen).await?;
     // An old album's artist loses the moved track's genres too.
-    let mut artists = touched.artists;
+    let mut artists = touched.artists.clone();
     artists.extend(library::artists_of_albums(&mut tx, &albums).await?);
     let mut artists: Vec<Uuid> = artists.into_iter().collect();
     artists.sort_unstable();
@@ -1000,6 +1036,37 @@ mod tests {
         assert_eq!(
             mode_year([Some(2001), Some(1990), Some(2001), Some(1990)]),
             Some(1990)
+        );
+    }
+
+    #[test]
+    fn artist_steps_are_one_sorted_pass_over_the_union() {
+        let id = |n: u128| Uuid::from_u128(n);
+        let candidates = HashMap::from([
+            (id(9), vec![id(100), id(100), id(101)]),
+            (id(2), vec![id(100)]),
+        ]);
+        // 5 only reopens, 9 does both, 2 only gets an MBID; the input order is scrambled.
+        let new_album_artists = HashSet::from([id(9), id(5)]);
+        assert_eq!(
+            artist_steps(&candidates, &new_album_artists),
+            vec![
+                ArtistStep {
+                    artist: id(2),
+                    mbid: Some(id(100)),
+                    reopen: false
+                },
+                ArtistStep {
+                    artist: id(5),
+                    mbid: None,
+                    reopen: true
+                },
+                ArtistStep {
+                    artist: id(9),
+                    mbid: Some(id(100)),
+                    reopen: true
+                },
+            ]
         );
     }
 

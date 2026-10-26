@@ -242,3 +242,37 @@ async fn artist_name_candidates_fold_case_accents_and_ampersand(pool: PgPool) {
         ]
     );
 }
+
+/// The index narrowing must not lose a pair the plain comparison finds: `&` against "and" both
+/// ways, runs of spaces, and names with no words at all.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn artist_name_candidates_narrowing_loses_no_pair(pool: PgPool) {
+    artist(&pool, "Simon & Garfunkel").await;
+    artist(&pool, "Hall and Oates").await;
+    artist(&pool, "Hip Hop").await;
+    artist(&pool, "!!!").await;
+    artist(&pool, "The Band").await;
+    let mut got = genres::artist_name_candidates(
+        &pool,
+        &s(&[
+            "simon and garfunkel",
+            "hall & oates",
+            "hip   hop",
+            "!!!",
+            "and",
+            "band",
+        ]),
+    )
+    .await
+    .unwrap();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("!!!".into(), "!!!".into()),
+            ("hall & oates".into(), "Hall and Oates".into()),
+            ("hip   hop".into(), "Hip Hop".into()),
+            ("simon and garfunkel".into(), "Simon & Garfunkel".into()),
+        ]
+    );
+}

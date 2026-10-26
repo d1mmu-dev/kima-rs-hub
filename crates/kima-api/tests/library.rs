@@ -887,3 +887,30 @@ async fn similar_names_fold_ampersand_and_punctuation(pool: PgPool) {
     assert_eq!(s[3]["inLibrary"], false);
     assert_eq!(s[4]["mbid"], Value::Null);
 }
+
+/// A name that matches many artists through the search vector ("The") reads at most
+/// `MAX_CANDIDATES` rows, the exact identity-key match first even though it has the highest id.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn similar_candidates_are_capped_with_exact_matches_first(pool: PgPool) {
+    use kima_ident::similar::{Entry, MAX_CANDIDATES, candidates, resolve};
+
+    for n in 0..MAX_CANDIDATES + 50 {
+        seed(&pool, Seed::new(&format!("The Band {n}"), "A", None, "t")).await;
+    }
+    let exact = seed(&pool, Seed::new("The", "T1", None, "t1")).await;
+    seed(&pool, Seed::new("The", "T2", None, "t2")).await;
+    let entries = [Entry {
+        name: "The".into(),
+        mbid: None,
+        r#match: 0.9,
+    }];
+
+    let found = candidates(&pool, &entries).await.unwrap();
+    assert_eq!(found.len() as i64, MAX_CANDIDATES);
+    assert_eq!(found[0].id, exact.artist);
+
+    let resolved = resolve(&pool, &entries, 10).await.unwrap();
+    assert_eq!(resolved[0].id, exact.artist.to_string());
+    assert!(resolved[0].in_library);
+    assert_eq!(resolved[0].owned_album_count, 2);
+}

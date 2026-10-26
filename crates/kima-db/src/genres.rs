@@ -376,6 +376,11 @@ pub async fn library_genres(pool: &PgPool) -> sqlx::Result<Vec<(String, i64)>> {
 /// Candidates for "this genre is an artist's name": `(genre, artist name)` pairs where the two
 /// agree under lower-casing, accent folding, `&` as "and" and collapsed spaces. The caller
 /// confirms with its own normalisation. One query for all genres.
+///
+/// Each genre is first narrowed through the artists' search index (`artists_search_idx`) by
+/// its words without "and" (an artist may write it `&`, which the vector drops), so the
+/// comparison runs on those artists only, not on every artist for every genre. Equal names
+/// always share those words, so the narrowing loses no pair.
 pub async fn artist_name_candidates(
     pool: &PgPool,
     genres: &[String],
@@ -383,11 +388,31 @@ pub async fn artist_name_candidates(
     if genres.is_empty() {
         return Ok(Vec::new());
     }
+    // `tq` is the genre's words as a tsquery. The lateral (with `OFFSET 0`, so it is not
+    // flattened back into one hash join over every artist) asks the index per genre. A genre with no words at all (punctuation only)
+    // cannot be narrowed, and only compares against the artists that have none either.
     sqlx::query_as(
         r"SELECT u.genre, a.name
           FROM UNNEST($1::text[]) AS u(genre)
-          JOIN artists a ON btrim(regexp_replace(regexp_replace(lower(unaccent(a.name)), '\s*&\s*', ' and ', 'g'), '\s+', ' ', 'g'))
-                          = btrim(regexp_replace(regexp_replace(lower(unaccent(u.genre)), '\s*&\s*', ' and ', 'g'), '\s+', ' ', 'g'))",
+          CROSS JOIN LATERAL (
+              SELECT string_agg('(' || v.q || ')', ' | ')::tsquery AS q
+              FROM (VALUES (plainto_tsquery('simple', unaccent(u.genre))::text),
+                           (plainto_tsquery('simple', unaccent(replace(lower(u.genre), ' and ', ' ')))::text)
+                   ) AS v(q)
+              WHERE v.q <> '') AS tq
+          CROSS JOIN LATERAL (
+              SELECT a.name FROM artists a
+              WHERE a.search @@ tq.q
+                AND btrim(regexp_replace(regexp_replace(lower(unaccent(a.name)), '\s*&\s*', ' and ', 'g'), '\s+', ' ', 'g'))
+                  = btrim(regexp_replace(regexp_replace(lower(unaccent(u.genre)), '\s*&\s*', ' and ', 'g'), '\s+', ' ', 'g'))
+              OFFSET 0) AS a
+          UNION ALL
+          SELECT u.genre, a.name
+          FROM UNNEST($1::text[]) AS u(genre)
+          JOIN artists a ON length(a.search) = 0
+                        AND btrim(regexp_replace(regexp_replace(lower(unaccent(a.name)), '\s*&\s*', ' and ', 'g'), '\s+', ' ', 'g'))
+                          = btrim(regexp_replace(regexp_replace(lower(unaccent(u.genre)), '\s*&\s*', ' and ', 'g'), '\s+', ' ', 'g'))
+          WHERE length(to_tsvector('simple', unaccent(u.genre))) = 0",
     )
     .bind(genres)
     .fetch_all(pool)

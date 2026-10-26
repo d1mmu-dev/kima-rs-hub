@@ -140,31 +140,28 @@ pub fn stored_entries(v: &serde_json::Value) -> Vec<Entry> {
         .collect()
 }
 
+/// The most candidate rows one [`resolve`] reads. A short or common name ("The") matches far
+/// more artists through the search vector than the list has entries; exact MBID and identity-key
+/// matches come first, so the cut only drops fuzzy ones.
+pub const MAX_CANDIDATES: i64 = 200;
+
 /// A library artist that may be one of the similar artists.
-struct Candidate {
-    id: Uuid,
-    name: String,
-    mbid: Option<Uuid>,
-    has_image: bool,
-    owned_album_count: i64,
+#[derive(Debug)]
+pub struct Candidate {
+    pub id: Uuid,
+    pub name: String,
+    pub mbid: Option<Uuid>,
+    pub has_image: bool,
 }
 
-/// The first `limit` entries, each matched to a library artist (one with a present track) by
-/// MBID, else by [`normalize_artist_name`]; the rest are shown by name without an image.
+/// Library artists (with a present track) that may be the first `limit` entries, at most
+/// [`MAX_CANDIDATES`]: MBID and identity-key matches first, then the search-vector matches,
+/// each by id.
 ///
-/// One query. Candidates are found through indexes, never a scan of every artist: the MBIDs
-/// (`artists_mbid_idx`), the identity keys (`name_key`), and the unaccented search vector
-/// (`artists_search_idx`) holding every word of a name's spellings (as given, normalised, and
-/// with "and" written `&`). The normalised names are then compared in Rust.
-pub async fn resolve(
-    pool: &PgPool,
-    entries: &[Entry],
-    limit: usize,
-) -> sqlx::Result<Vec<ResolvedSimilar>> {
-    let entries = &entries[..entries.len().min(limit)];
-    if entries.is_empty() {
-        return Ok(Vec::new());
-    }
+/// Found through indexes, never a scan of every artist: the MBIDs (`artists_mbid_idx`), the
+/// identity keys (`name_key`), and the unaccented search vector (`artists_search_idx`) holding
+/// every word of a name's spellings (as given, normalised, and with "and" written `&`).
+pub async fn candidates(pool: &PgPool, entries: &[Entry]) -> sqlx::Result<Vec<Candidate>> {
     let mbids: Vec<Uuid> = entries.iter().filter_map(|e| e.mbid.map(|m| m.0)).collect();
     let keys: Vec<String> = entries
         .iter()
@@ -178,13 +175,7 @@ pub async fn resolve(
         spellings.push(normalised);
     }
     let rows = sqlx::query!(
-        r#"SELECT ar.id, ar.name, ar.mbid,
-                  (ar.image_path IS NOT NULL) AS "has_image!",
-                  (SELECT count(*) FROM albums al
-                    WHERE al.artist_id = ar.id
-                      AND EXISTS (SELECT 1 FROM tracks t
-                                   WHERE t.album_id = al.id AND t.missing_since IS NULL))
-                    AS "owned_album_count!"
+        r#"SELECT ar.id, ar.name, ar.mbid, (ar.image_path IS NOT NULL) AS "has_image!"
            FROM artists ar
            WHERE (ar.mbid = ANY($1::uuid[])
                   OR ar.name_key = ANY($2::text[])
@@ -196,25 +187,42 @@ pub async fn resolve(
                       WHERE length(to_tsvector('simple', unaccent(s.v))) > 0))
              AND EXISTS (SELECT 1 FROM albums al JOIN tracks t ON t.album_id = al.id
                           WHERE al.artist_id = ar.id AND t.missing_since IS NULL)
-           ORDER BY ar.id"#,
+           ORDER BY (COALESCE(ar.mbid = ANY($1::uuid[]), false) OR ar.name_key = ANY($2::text[])) DESC,
+                    ar.id
+           LIMIT $4"#,
         &mbids,
         &keys,
         &spellings,
+        MAX_CANDIDATES,
     )
     .fetch_all(pool)
     .await?;
-    let candidates: Vec<Candidate> = rows
+    Ok(rows
         .into_iter()
         .map(|r| Candidate {
             id: r.id,
             name: r.name,
             mbid: r.mbid,
             has_image: r.has_image,
-            owned_album_count: r.owned_album_count,
         })
-        .collect();
+        .collect())
+}
 
-    // The first (lowest id) wins when two artists share an MBID or a normalised name.
+/// The first `limit` entries, each matched to a library artist (one with a present track) by
+/// MBID, else by [`normalize_artist_name`]; the rest are shown by name without an image. The
+/// candidates are compared in Rust; only the matched artists get their album counts.
+pub async fn resolve(
+    pool: &PgPool,
+    entries: &[Entry],
+    limit: usize,
+) -> sqlx::Result<Vec<ResolvedSimilar>> {
+    let entries = &entries[..entries.len().min(limit)];
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let candidates = candidates(pool, entries).await?;
+
+    // The first wins when two artists share an MBID or a normalised name.
     let mut by_mbid: HashMap<Uuid, &Candidate> = HashMap::new();
     let mut by_name: HashMap<String, &Candidate> = HashMap::new();
     for c in &candidates {
@@ -223,25 +231,45 @@ pub async fn resolve(
         }
         by_name.entry(normalize_artist_name(&c.name)).or_insert(c);
     }
+    let found: Vec<Option<&Candidate>> = entries
+        .iter()
+        .map(|e| {
+            e.mbid
+                .and_then(|m| by_mbid.get(&m.0).copied())
+                .or_else(|| by_name.get(&normalize_artist_name(&e.name)).copied())
+        })
+        .collect();
+
+    let matched: Vec<Uuid> = found.iter().flatten().map(|c| c.id).collect();
+    let owned: HashMap<Uuid, i64> = sqlx::query!(
+        r#"SELECT ar.id,
+                  (SELECT count(*) FROM albums al
+                    WHERE al.artist_id = ar.id
+                      AND EXISTS (SELECT 1 FROM tracks t
+                                   WHERE t.album_id = al.id AND t.missing_since IS NULL))
+                    AS "owned_album_count!"
+           FROM artists ar WHERE ar.id = ANY($1)"#,
+        &matched,
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| (r.id, r.owned_album_count))
+    .collect();
 
     Ok(entries
         .iter()
-        .map(|e| {
-            let found = e
-                .mbid
-                .and_then(|m| by_mbid.get(&m.0).copied())
-                .or_else(|| by_name.get(&normalize_artist_name(&e.name)).copied());
-            ResolvedSimilar {
-                id: found.map_or_else(|| e.name.clone(), |c| c.id.to_string()),
-                name: e.name.clone(),
-                mbid: e.mbid.map(|m| m.to_string()),
-                cover_art: found.filter(|c| c.has_image).map(|c| c.id),
-                album_count: 0,
-                owned_album_count: found.map_or(0, |c| c.owned_album_count),
-                weight: e.r#match,
-                in_library: found.is_some(),
-                library_name: found.map(|c| c.name.clone()),
-            }
+        .zip(found)
+        .map(|(e, found)| ResolvedSimilar {
+            id: found.map_or_else(|| e.name.clone(), |c| c.id.to_string()),
+            name: e.name.clone(),
+            mbid: e.mbid.map(|m| m.to_string()),
+            cover_art: found.filter(|c| c.has_image).map(|c| c.id),
+            album_count: 0,
+            owned_album_count: found.map_or(0, |c| owned.get(&c.id).copied().unwrap_or(0)),
+            weight: e.r#match,
+            in_library: found.is_some(),
+            library_name: found.map(|c| c.name.clone()),
         })
         .collect())
 }

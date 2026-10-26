@@ -107,6 +107,18 @@ impl WorkerConfig {
             listen_connect: default_listen_connect(),
         }
     }
+
+    /// The heartbeat must be positive and shorter than the lease: renewed at or after the
+    /// lease's end, a running job's claim lapses and the job is reaped and run twice.
+    pub fn check(&self) -> Result<(), String> {
+        if self.heartbeat.is_zero() || self.heartbeat >= self.lease {
+            return Err(format!(
+                "worker {:?}: heartbeat {:?} must be above zero and below the lease {:?}",
+                self.queue, self.heartbeat, self.lease
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A handler that needs neither the cancel token nor permanent errors: an `Err` is retried.
@@ -129,12 +141,19 @@ where
 
 /// Runs `handler` for jobs on `config.queue`, at most `config.concurrency` at a time,
 /// until `shutdown` fires; then waits for jobs already running.
+///
+/// # Panics
+/// If [`WorkerConfig::check`] fails: a misconfigured worker is refused at start-up, not left
+/// to lose its claims.
 pub fn spawn_worker(
     pool: PgPool,
     config: WorkerConfig,
     handler: Handler,
     shutdown: CancellationToken,
 ) -> JoinHandle<()> {
+    if let Err(error) = config.check() {
+        panic!("{error}");
+    }
     tokio::spawn(async move {
         let mut listener = listen(&pool, &config).await;
         let mut last_listen_attempt = tokio::time::Instant::now();

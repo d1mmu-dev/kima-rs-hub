@@ -406,6 +406,38 @@ fn heartbeat_defaults_to_a_quarter_lease() {
     assert_eq!(config.heartbeat, config.lease / 4);
 }
 
+#[test]
+fn heartbeat_must_be_shorter_than_the_lease() {
+    let config = |lease, heartbeat| WorkerConfig {
+        lease: Duration::from_secs(lease),
+        heartbeat: Duration::from_secs(heartbeat),
+        ..WorkerConfig::new("q", 1)
+    };
+    assert!(WorkerConfig::new("q", 1).check().is_ok());
+    assert!(config(10, 9).check().is_ok());
+    for (lease, heartbeat) in [(10, 10), (10, 11), (10, 0)] {
+        let error = config(lease, heartbeat).check().unwrap_err();
+        assert!(error.contains("heartbeat"), "{error}");
+    }
+}
+
+/// A heartbeat that cannot keep the claim alive is a configuration bug: refuse to start.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+#[should_panic(expected = "heartbeat")]
+async fn spawn_worker_refuses_a_heartbeat_at_or_over_the_lease(pool: PgPool) {
+    let config = WorkerConfig {
+        lease: Duration::from_secs(5),
+        heartbeat: Duration::from_secs(5),
+        ..WorkerConfig::new("bad", 1)
+    };
+    drop(spawn_worker(
+        pool,
+        config,
+        handler(|_job| async { Ok(()) }),
+        CancellationToken::new(),
+    ));
+}
+
 /// Spec §24.3: a job running for several leases keeps its claim, so a second worker polling
 /// the same queue never reclaims it.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

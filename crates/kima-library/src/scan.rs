@@ -609,6 +609,29 @@ async fn refresh_touched_once(pool: &PgPool, touched: &Touched) -> sqlx::Result<
     tx.commit().await
 }
 
+/// Re-derives what albums take from their present tracks: the tag MBIDs (R2) and the file
+/// genres of the albums and their artists. Run after tracks go missing, come back or are purged
+/// (an album with no present track keeps none). Locks in the folder refresh's order (albums,
+/// then genres, ids sorted) and, like it, runs again once after a deadlock.
+async fn refresh_albums(pool: &PgPool, albums: HashSet<Uuid>) -> sqlx::Result<()> {
+    if albums.is_empty() {
+        return Ok(());
+    }
+    let mut albums: Vec<Uuid> = albums.into_iter().collect();
+    albums.sort_unstable();
+    retry_once_on_conflict(|| async {
+        let mut tx = pool.begin().await?;
+        for &album in &albums {
+            library::refresh_album_mbids(&mut tx, album).await?;
+        }
+        let mut artists = library::artists_of_albums(&mut tx, &albums).await?;
+        artists.sort_unstable();
+        genres::recompute_file_genres(&mut tx, &albums, &artists).await?;
+        tx.commit().await
+    })
+    .await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stored {
     Added,
@@ -815,13 +838,18 @@ pub async fn reconcile_cancellable(
             .map(|t| t.path.clone())
             .collect()
     };
+    let mut flipped: HashSet<Uuid> = HashSet::new();
     for chunk in vanished.chunks(MARK_CHUNK) {
         report.missing += library::mark_missing(&ctx.pool, chunk).await? as usize;
+        flipped.extend(library::albums_of_paths(&ctx.pool, chunk).await?);
     }
     let vanished_ids: HashSet<Uuid> = vanished.iter().map(|p| index[p].id).collect();
     for chunk in restore.chunks(MARK_CHUNK) {
         report.restored += library::clear_missing(&ctx.pool, chunk).await? as usize;
+        flipped.extend(library::albums_of_paths(&ctx.pool, chunk).await?);
     }
+    // Their albums' MBIDs and genres follow the tracks that are present now.
+    refresh_albums(&ctx.pool, flipped).await?;
     progress.advance(report.unchanged + restore.len());
 
     for (folder, files) in changed {
@@ -848,7 +876,9 @@ pub async fn reconcile_cancellable(
 
     check()?;
     if !report.root_empty_guard {
-        report.purged = library::purge_missing(&ctx.pool, MISSING_GRACE).await? as usize;
+        let albums = library::purge_missing_albums(&ctx.pool, MISSING_GRACE).await?;
+        report.purged = albums.len();
+        refresh_albums(&ctx.pool, albums.into_iter().collect()).await?;
     }
     prune_empty(ctx).await?;
     progress.finish();
@@ -906,6 +936,8 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
                 Some(_) if !root_available(&ctx.root.get()).await => PathOutcome::RootUnavailable,
                 Some(_) => {
                     library::mark_missing(&ctx.pool, std::slice::from_ref(&rel)).await?;
+                    let albums = library::albums_of_paths(&ctx.pool, std::slice::from_ref(&rel));
+                    refresh_albums(&ctx.pool, albums.await?.into_iter().collect()).await?;
                     PathOutcome::MarkedMissing
                 }
             });
@@ -928,6 +960,8 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
         if row.size == disk.size && row.mtime == disk.mtime {
             if row.missing {
                 library::clear_missing(&ctx.pool, std::slice::from_ref(&rel)).await?;
+                let albums = library::albums_of_paths(&ctx.pool, std::slice::from_ref(&rel));
+                refresh_albums(&ctx.pool, albums.await?.into_iter().collect()).await?;
                 return Ok(PathOutcome::Updated);
             }
             return Ok(PathOutcome::Unchanged);

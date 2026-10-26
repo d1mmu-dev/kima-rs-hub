@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM tracks\n         WHERE missing_since IS NOT NULL\n           AND missing_since < now() - make_interval(secs => $1::float8)\n         RETURNING album_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "album_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dcc1e48e772163001324fda7366294ebd5325efeb8242cef26ed355f97f710cd"
+}

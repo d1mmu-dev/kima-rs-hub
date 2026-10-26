@@ -257,6 +257,8 @@ pub struct ArtistForEnrichment {
     pub mbid_source: Option<String>,
     /// `local`, `wikidata`, `fanart`, `deezer` or `user`.
     pub image_source: Option<String>,
+    /// Failures in a row; below zero, the album-cover retries so far (see
+    /// [`defer_completed_artist`]).
     pub enrichment_failures: i16,
     /// Titles of the artist's albums that have a present track, at most [`MAX_CLAIM_ALBUMS`].
     pub album_titles: Vec<String>,
@@ -539,12 +541,16 @@ pub async fn reopen_completed_artist(pool: &PgPool, id: Uuid) -> sqlx::Result<bo
 
 /// Puts a `completed` artist to `failed` without counting a failure or recording an error, so
 /// it is claimed again after [`FAILED_RETRY_GRACE`] (its `last_enriched_at` was just written):
-/// album covers left to retry (final review I1). Answers whether the row changed.
-pub async fn defer_completed_artist(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+/// album covers left to retry (final review I1). `deferrals` is how many times that has now
+/// happened in a row; it is kept as `-deferrals` in `enrichment_failures`, below zero so the
+/// failure counts and lists (which read positive counts) do not show the artist. Answers
+/// whether the row changed.
+pub async fn defer_completed_artist(pool: &PgPool, id: Uuid, deferrals: i16) -> sqlx::Result<bool> {
     let r = sqlx::query!(
-        "UPDATE artists SET enrichment_status = 'failed'
+        "UPDATE artists SET enrichment_status = 'failed', enrichment_failures = $2
          WHERE id = $1 AND enrichment_status = 'completed'",
-        id
+        id,
+        -deferrals
     )
     .execute(pool)
     .await?;

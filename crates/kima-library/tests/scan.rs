@@ -1896,3 +1896,70 @@ async fn new_album_reopens_a_completed_artist(pool: PgPool) {
     rescan(&pool, dir.path()).await;
     assert_eq!(artist_status(&pool, "a").await, "pending");
 }
+
+/// Makes the next update of an album's release MBID lose a "deadlock" (40P01), once: the
+/// sequence is not transactional, so the retry does not trip it again.
+async fn fail_album_mbid_update_once(pool: &PgPool) {
+    for sql in [
+        "CREATE SEQUENCE inject_once",
+        "CREATE FUNCTION inject_conflict() RETURNS trigger AS $$
+         BEGIN
+             IF nextval('inject_once') = 1 THEN
+                 RAISE EXCEPTION 'injected' USING ERRCODE = '40P01';
+             END IF;
+             RETURN NEW;
+         END $$ LANGUAGE plpgsql",
+        "CREATE TRIGGER inject BEFORE UPDATE OF release_mbid ON albums
+         FOR EACH ROW EXECUTE FUNCTION inject_conflict()",
+    ] {
+        sqlx::query(sql).execute(pool).await.unwrap();
+    }
+}
+
+/// A deadlock victim in the folder refresh runs the whole refresh again, so the folder's album
+/// MBIDs are not left stale.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn folder_refresh_retries_once_after_a_deadlock(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let file = |rel: &'static str, rg: &'static str| Picard {
+        release: Some(rel),
+        release_group: Some(rg),
+        ..Default::default()
+    };
+    picard_audio(
+        root,
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+        &file(REL_A, RG_A),
+    );
+    rescan(&pool, root).await;
+    let album = album_of(&pool, "A/B/01.flac").await;
+    assert_eq!(album_mbids(&pool, album).await.0, Some(u(REL_A)));
+
+    fail_album_mbid_update_once(&pool).await;
+    picard_audio(
+        root,
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+        &file(REL_B, RG_B),
+    );
+    rescan(&pool, root).await;
+    assert_eq!(
+        album_mbids(&pool, album).await,
+        (
+            Some(u(REL_B)),
+            Some("tag".into()),
+            Some(u(RG_B)),
+            Some("tag".into())
+        )
+    );
+    let used: i64 = sqlx::query_scalar("SELECT last_value FROM inject_once")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(used, 2, "the first attempt failed, the second ran");
+}

@@ -386,15 +386,31 @@ pub async fn album_of_path(conn: &mut PgConnection, path: &str) -> sqlx::Result<
 
 /// Deletes tracks missing for longer than `older_than`. Returns how many.
 pub async fn purge_missing(pool: &PgPool, older_than: Duration) -> sqlx::Result<u64> {
-    let r = sqlx::query!(
+    Ok(purge_missing_albums(pool, older_than).await?.len() as u64)
+}
+
+/// [`purge_missing`], answering the album of each deleted track (one id per track), so the
+/// caller can refresh what those albums derive from their tracks.
+pub async fn purge_missing_albums(pool: &PgPool, older_than: Duration) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar!(
         "DELETE FROM tracks
          WHERE missing_since IS NOT NULL
-           AND missing_since < now() - make_interval(secs => $1::float8)",
+           AND missing_since < now() - make_interval(secs => $1::float8)
+         RETURNING album_id",
         older_than.as_secs_f64()
     )
-    .execute(pool)
-    .await?;
-    Ok(r.rows_affected())
+    .fetch_all(pool)
+    .await
+}
+
+/// The albums of the tracks at these paths.
+pub async fn albums_of_paths(pool: &PgPool, paths: &[String]) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar!(
+        "SELECT DISTINCT album_id FROM tracks WHERE path = ANY($1)",
+        paths
+    )
+    .fetch_all(pool)
+    .await
 }
 
 /// What [`prune_empty`] deleted.

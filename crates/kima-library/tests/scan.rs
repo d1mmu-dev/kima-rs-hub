@@ -1963,3 +1963,162 @@ async fn folder_refresh_retries_once_after_a_deadlock(pool: PgPool) {
         .unwrap();
     assert_eq!(used, 2, "the first attempt failed, the second ran");
 }
+
+// ---- Album values follow the present tracks (M3a cleanup C3, Task 10 m1) ----
+
+async fn album_genre_names(pool: &PgPool, album: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT g.name FROM album_genres x JOIN genres g ON g.id = x.genre_id
+         WHERE x.album_id = $1 AND x.source = 'file' ORDER BY x.rank",
+    )
+    .bind(album)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn artist_genre_names(pool: &PgPool, name_key: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT g.name FROM artist_genres x JOIN genres g ON g.id = x.genre_id
+         JOIN artists a ON a.id = x.artist_id
+         WHERE a.name_key = $1 AND x.source = 'file' ORDER BY x.rank",
+    )
+    .bind(name_key)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Album `A/B`: 01 and 02 say release A / group A / Rock, 03 says B / B / Jazz (so A and Rock
+/// win), and `K/K` keeps the library non-empty for the unmounted-disk guard.
+fn write_mbid_album(root: &Path) {
+    let file = |rel: &'static str, rg: &'static str, genre: &'static str| Picard {
+        release: Some(rel),
+        release_group: Some(rg),
+        genres: vec![genre],
+        ..Default::default()
+    };
+    for (rel, n, mbids) in [
+        ("A/B/01.flac", "1", file(REL_A, RG_A, "Rock")),
+        ("A/B/02.flac", "2", file(REL_A, RG_A, "Rock")),
+        ("A/B/03.flac", "3", file(REL_B, RG_B, "Jazz")),
+    ] {
+        picard_audio(root, rel, tags("A", "B", rel, "2000", n), &mbids);
+    }
+    make_audio(root, "K/K/01.flac", tags("K", "K", "keep", "2000", "1"));
+}
+
+/// Tracks going missing leave the album with the MBIDs and file genres of the tracks that are
+/// still there; an album with none left loses them (as `refresh_album_mbids` always did);
+/// tracks coming back restore them.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn missing_tracks_update_album_mbids_and_genres(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_mbid_album(root);
+    rescan(&pool, root).await;
+    let album = album_of(&pool, "A/B/01.flac").await;
+    let tagged = |rel, rg| {
+        (
+            Some(u(rel)),
+            Some("tag".into()),
+            Some(u(rg)),
+            Some("tag".into()),
+        )
+    };
+    assert_eq!(album_mbids(&pool, album).await, tagged(REL_A, RG_A));
+    assert_eq!(album_genre_names(&pool, album).await, vec!["Rock", "Jazz"]);
+
+    let park = tempfile::tempdir().unwrap();
+    for name in ["01.flac", "02.flac"] {
+        std::fs::rename(root.join("A/B").join(name), park.path().join(name)).unwrap();
+    }
+    rescan(&pool, root).await;
+    assert_eq!(album_mbids(&pool, album).await, tagged(REL_B, RG_B));
+    assert_eq!(album_genre_names(&pool, album).await, vec!["Jazz"]);
+    assert_eq!(artist_genre_names(&pool, "a").await, vec!["Jazz"]);
+
+    std::fs::rename(park.path().join("01.flac"), root.join("A/B/01.flac")).unwrap();
+    std::fs::rename(park.path().join("02.flac"), root.join("A/B/02.flac")).unwrap();
+    std::fs::remove_file(root.join("A/B/03.flac")).unwrap();
+    rescan(&pool, root).await;
+    assert_eq!(album_mbids(&pool, album).await, tagged(REL_A, RG_A));
+    assert_eq!(album_genre_names(&pool, album).await, vec!["Rock"]);
+
+    for name in ["01.flac", "02.flac"] {
+        std::fs::remove_file(root.join("A/B").join(name)).unwrap();
+    }
+    rescan(&pool, root).await;
+    assert_eq!(album_mbids(&pool, album).await, (None, None, None, None));
+    assert!(album_genre_names(&pool, album).await.is_empty());
+    assert!(artist_genre_names(&pool, "a").await.is_empty());
+}
+
+/// The watcher's single-file path marks a file missing and refreshes its album the same way.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn update_path_missing_updates_album_mbids_and_genres(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_mbid_album(root);
+    rescan(&pool, root).await;
+    let album = album_of(&pool, "A/B/01.flac").await;
+    let c = ctx(&pool, root);
+    for name in ["01.flac", "02.flac"] {
+        std::fs::remove_file(root.join("A/B").join(name)).unwrap();
+        let rel = format!("A/B/{name}");
+        assert_eq!(
+            scan::update_path(&c, &rel).await.unwrap(),
+            PathOutcome::MarkedMissing
+        );
+    }
+    assert_eq!(album_mbids(&pool, album).await.0, Some(u(REL_B)));
+    assert_eq!(album_genre_names(&pool, album).await, vec!["Jazz"]);
+}
+
+/// Purging tracks refreshes their albums too, whatever left the album stale.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn purge_updates_album_mbids_and_genres(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_mbid_album(root);
+    rescan(&pool, root).await;
+    let album = album_of(&pool, "A/B/01.flac").await;
+    for name in ["01.flac", "02.flac"] {
+        std::fs::remove_file(root.join("A/B").join(name)).unwrap();
+    }
+    rescan(&pool, root).await;
+    // Whatever the missing marking did, the album still shows the old values.
+    sqlx::query("UPDATE albums SET release_mbid = $2 WHERE id = $1")
+        .bind(album)
+        .bind(u(REL_A))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO album_genres (album_id, genre_id, source, rank)
+         SELECT $1, id, 'file', 5 FROM genres WHERE name = 'Rock' ON CONFLICT DO NOTHING",
+    )
+    .bind(album)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE tracks SET missing_since = now() - interval '8 days' WHERE missing_since IS NOT NULL",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let r = scan::reconcile(&ctx(&pool, root)).await.unwrap();
+    assert_eq!(r.purged, 2, "{r:?}");
+    assert_eq!(album_mbids(&pool, album).await.0, Some(u(REL_B)));
+    assert_eq!(album_genre_names(&pool, album).await, vec!["Jazz"]);
+}

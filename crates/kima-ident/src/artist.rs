@@ -39,6 +39,11 @@ pub const BATCH: i64 = 10;
 pub const MAX_CATALOGUE_CHECKS: usize = 3;
 /// Failures in a row after which an artist is `unresolvable` (`STAGE_RETRY_CAP`).
 pub const FAILURE_CAP: i16 = RETRY_CAP;
+/// Retries of a completed artist's album covers after a source failed transiently or time ran
+/// out, each after the retry grace; past it the artist stays `completed` until something
+/// reopens it. The count lives in `enrichment_failures` as a negative number (the failure
+/// counts and lists only look at positive ones).
+pub const DEFER_CAP: i16 = 6;
 /// MusicBrainz genres kept per artist (spec §12.4).
 pub const MAX_GENRES: usize = 5;
 /// The most one artist's enrichment may take, every request and download included (the
@@ -511,7 +516,7 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
     } = g;
     let result = if unresolvable {
         write.status = ArtistStatus::Unresolvable;
-        write.failures = a.enrichment_failures;
+        write.failures = a.enrichment_failures.max(0);
         ArtistResult::Unresolvable
     } else if let Some(f) = steps.failure {
         let (status, failures) = failed_status(a.enrichment_failures);
@@ -573,7 +578,17 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
     let reopened = match again {
         Again::No => false,
         Again::Now => identity::reopen_completed_artist(&ctx.pool, a.id).await?,
-        Again::Later => identity::defer_completed_artist(&ctx.pool, a.id).await?,
+        Again::Later => {
+            let so_far = a.enrichment_failures.min(0).saturating_neg();
+            if so_far >= DEFER_CAP {
+                // Out of retries: leave it `completed`, as if the covers had no more to give,
+                // until a new album, a rate limit, a wipe or a manual retry reopens it.
+                warn!(artist = %a.id, retries = so_far, "album covers still failing; not retried again");
+                false
+            } else {
+                identity::defer_completed_artist(&ctx.pool, a.id, so_far + 1).await?
+            }
+        }
     };
     Ok(if reopened {
         ArtistResult::Pending

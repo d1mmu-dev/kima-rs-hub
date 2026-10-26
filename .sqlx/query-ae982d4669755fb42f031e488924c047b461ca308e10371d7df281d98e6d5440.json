@@ -1,0 +1,43 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ar.id, ar.name, ar.mbid, (ar.image_path IS NOT NULL) AS \"has_image!\"\n           FROM artists ar\n           WHERE (ar.mbid = ANY($1::uuid[])\n                  OR ar.name_key = ANY($2::text[])\n                  OR ar.search @@ (\n                      SELECT string_agg(\n                                 '(' || plainto_tsquery('simple', unaccent(s.v))::text || ')',\n                                 ' | ')::tsquery\n                      FROM unnest($3::text[]) AS s(v)\n                      WHERE length(to_tsvector('simple', unaccent(s.v))) > 0))\n             AND EXISTS (SELECT 1 FROM albums al JOIN tracks t ON t.album_id = al.id\n                          WHERE al.artist_id = ar.id AND t.missing_since IS NULL)\n           ORDER BY (COALESCE(ar.mbid = ANY($1::uuid[]), false) OR ar.name_key = ANY($2::text[])) DESC,\n                    ar.id\n           LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "has_image!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "TextArray",
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "ae982d4669755fb42f031e488924c047b461ca308e10371d7df281d98e6d5440"
+}

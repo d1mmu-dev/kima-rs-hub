@@ -41,8 +41,11 @@ pub const MAX_CATALOGUE_CHECKS: usize = 3;
 pub const FAILURE_CAP: i16 = RETRY_CAP;
 /// Retries of a completed artist's album covers after a source failed transiently or time ran
 /// out, each after the retry grace; past it the artist stays `completed` until something
-/// reopens it. The count lives in `enrichment_failures` as a negative number (the failure
-/// counts and lists only look at positive ones).
+/// sets it `pending` again: a new album, a wipe and re-run, or the metadata editor (an MBID
+/// change, an image removal, a reset of those overrides, a removed user album cover). The
+/// stage retry and re-decide controls touch tracks only and do not reopen it. The count lives
+/// in `enrichment_failures` as a negative number (the failure counts and lists only look at
+/// positive ones); a dedicated column should replace this before anything new reads that column.
 pub const DEFER_CAP: i16 = 6;
 /// MusicBrainz genres kept per artist (spec §12.4).
 pub const MAX_GENRES: usize = 5;
@@ -582,7 +585,7 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
             let so_far = a.enrichment_failures.min(0).saturating_neg();
             if so_far >= DEFER_CAP {
                 // Out of retries: leave it `completed`, as if the covers had no more to give,
-                // until a new album, a rate limit, a wipe or a manual retry reopens it.
+                // until something sets it `pending` again (see `DEFER_CAP`).
                 warn!(artist = %a.id, retries = so_far, "album covers still failing; not retried again");
                 false
             } else {

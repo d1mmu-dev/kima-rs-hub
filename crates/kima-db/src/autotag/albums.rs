@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -94,7 +94,7 @@ pub struct NewCandidate {
 }
 
 /// A stored candidate: every `autotag_candidates` column.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone)]
 pub struct CandidateRow {
     pub id: Uuid,
     pub album_id: Uuid,
@@ -229,6 +229,7 @@ pub async fn set_state(
     Ok(())
 }
 
+/// The caller must serialize calls per album (one search job per album).
 /// Replaces the album's candidates with `ordered` (best first) in one transaction. A release
 /// already stored keeps its id and is refreshed; the others are deleted. Returns the best id.
 pub async fn store_search(
@@ -302,25 +303,27 @@ pub async fn store_search(
 
 /// The album's stored candidates, best distance first.
 pub async fn candidates(pool: &PgPool, album: Uuid) -> sqlx::Result<Vec<CandidateRow>> {
-    sqlx::query_as::<_, CandidateRow>(
+    sqlx::query_as!(
+        CandidateRow,
         "SELECT id, album_id, release_mbid, release_group_mbid, origin, distance, recommendation,
                 penalties, mapping, extra_tracks, missing_tracks, release, release_group,
                 fetched_at, created_at
          FROM autotag_candidates WHERE album_id = $1 ORDER BY distance, created_at, id",
+        album
     )
-    .bind(album)
     .fetch_all(pool)
     .await
 }
 
 pub async fn candidate(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<CandidateRow>> {
-    sqlx::query_as::<_, CandidateRow>(
+    sqlx::query_as!(
+        CandidateRow,
         "SELECT id, album_id, release_mbid, release_group_mbid, origin, distance, recommendation,
                 penalties, mapping, extra_tracks, missing_tracks, release, release_group,
                 fetched_at, created_at
          FROM autotag_candidates WHERE id = $1",
+        id
     )
-    .bind(id)
     .fetch_optional(pool)
     .await
 }

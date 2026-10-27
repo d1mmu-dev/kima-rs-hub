@@ -579,7 +579,7 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
     }
     let reopened = match again {
         Again::No => false,
-        Again::Now => identity::reopen_completed_artist(&ctx.pool, a.id).await?,
+        Again::Now => identity::requeue_completed_artist(&ctx.pool, a.id).await?,
         Again::Later => {
             let so_far = a.cover_deferrals;
             if so_far >= DEFER_CAP {

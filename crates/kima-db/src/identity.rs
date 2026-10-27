@@ -528,7 +528,21 @@ pub async fn save_artist_outcome_in(
 }
 
 /// Puts a `completed` artist back to `pending` (its album covers wait on a rate-limited
-/// source), so the next cycle asks again. No failure is counted. Returns whether it was
+/// source), so the next cycle asks again. No failure is counted and `cover_deferrals` is kept:
+/// this is the in-cycle requeue, not a fresh start. Returns whether it was `completed`.
+pub async fn requeue_completed_artist(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let r = sqlx::query!(
+        "UPDATE artists SET enrichment_status = 'pending'
+         WHERE id = $1 AND enrichment_status = 'completed'",
+        id
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
+/// Puts a `completed` artist back to `pending` with a fresh cover-retry budget
+/// (`cover_deferrals = 0`): an explicit reopen. No failure is counted. Returns whether it was
 /// `completed`.
 pub async fn reopen_completed_artist(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
     let r = sqlx::query!(

@@ -449,8 +449,8 @@ pub struct WipeCounts {
 ///   cleared, evidence `{"reason":"enrichment wiped"}`); their tracks lose `recording_mbid`,
 ///   `recording_source`, their `musicbrainz` genres, and an ISRC whose source is `musicbrainz`;
 /// - every artist but Various Artists → `bio`, `similar` and `last_enriched_at` NULL,
-///   `enrichment_status='pending'`, `enrichment_failures=0`, `cover_deferrals=0`; `musicbrainz` artist genres
-///   deleted.
+///   `enrichment_status='pending'`, `enrichment_failures=0`, `cover_deferrals=0`;
+///   `musicbrainz` artist genres deleted.
 ///
 /// Tracks whose `recording_source` is `autotag` (the user's applied answer) are left out of
 /// all of it: recording row, MBIDs, ISRC and `musicbrainz` genres stay.

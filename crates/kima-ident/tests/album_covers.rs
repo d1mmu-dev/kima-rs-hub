@@ -703,6 +703,41 @@ async fn a_cover_source_that_keeps_failing_is_retried_a_bounded_number_of_times(
     assert_eq!(deferrals_of(&pool, a).await, 1);
 }
 
+/// The in-cycle requeue after a rate-limited cover source keeps the cover-retry count (only an
+/// explicit reopen resets it), so alternating rate limits and failures cannot restart the cap.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_rate_limited_requeue_keeps_cover_deferrals(pool: PgPool) {
+    let (a, _days, w) = perturbator(&pool, json!([])).await;
+    let f = fx(&pool, w, World::default()).await;
+    sqlx::query(
+        "INSERT INTO source_pauses (source, paused_until, reason)
+         VALUES ('deezer', now() + interval '10 minutes', 'HTTP 429')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    f.ctx.net.load_pauses().await.unwrap();
+    sqlx::query("UPDATE artists SET cover_deferrals = 5 WHERE id = $1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mine = claim(&pool, a).await;
+    assert_eq!(mine.cover_deferrals, 5);
+    let result = artist::enrich_one(&f.ctx, &mine).await.unwrap();
+    assert_eq!(result, ArtistResult::Pending);
+    assert_eq!(status_of(&pool, a).await.0, "pending");
+    assert_eq!(deferrals_of(&pool, a).await, 5);
+    // An explicit reopen is what resets it.
+    sqlx::query("UPDATE artists SET enrichment_status = 'completed' WHERE id = $1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(identity::reopen_completed_artist(&pool, a).await.unwrap());
+    assert_eq!(deferrals_of(&pool, a).await, 0);
+}
+
 /// A scan that creates a new album for a completed artist reopens it with a fresh budget
 /// (`reopen_completed_artists`), and Various Artists is left alone.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

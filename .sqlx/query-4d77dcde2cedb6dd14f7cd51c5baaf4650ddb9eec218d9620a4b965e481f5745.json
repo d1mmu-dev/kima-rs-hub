@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT al.id, al.title, al.artist_id, ar.name AS artist_name, al.year, al.is_compilation,\n                al.release_mbid, al.release_mbid_source, al.release_group_mbid,\n                al.release_group_mbid_source, al.identity_source\n         FROM albums al JOIN artists ar ON ar.id = al.artist_id\n         WHERE al.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "artist_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "artist_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "year",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "is_compilation",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "release_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "release_mbid_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "release_group_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 9,
+        "name": "release_group_mbid_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "identity_source",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "4d77dcde2cedb6dd14f7cd51c5baaf4650ddb9eec218d9620a4b965e481f5745"
+}

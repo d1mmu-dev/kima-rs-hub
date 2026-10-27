@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO autotag_albums (album_id, state, error) VALUES ($1, $2, $3)\n         ON CONFLICT (album_id) DO UPDATE SET state = EXCLUDED.state, error = EXCLUDED.error,\n           updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4cc6e2569a0025269173248347d53c42811087e409102aa750e24cc48239db84"
+}

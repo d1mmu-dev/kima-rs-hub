@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH locked AS (\n               SELECT id FROM artists\n               WHERE id = ANY($1) AND enrichment_status = 'completed' AND name_key <> $2\n               ORDER BY id\n               FOR NO KEY UPDATE)\n           UPDATE artists a SET enrichment_status = 'pending', cover_deferrals = 0\n           FROM locked WHERE a.id = locked.id AND a.enrichment_status = 'completed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d8b35788cd4b55edb6dad81eea79e89fa488253519ddb2aad59b4d188e385cf0"
+}

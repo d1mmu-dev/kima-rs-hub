@@ -44,8 +44,7 @@ pub const FAILURE_CAP: i16 = RETRY_CAP;
 /// sets it `pending` again: a new album, a wipe and re-run, or the metadata editor (an MBID
 /// change, an image removal, a reset of those overrides, a removed user album cover). The
 /// stage retry and re-decide controls touch tracks only and do not reopen it. The count lives
-/// in `enrichment_failures` as a negative number (the failure counts and lists only look at
-/// positive ones); a dedicated column should replace this before anything new reads that column.
+/// in `artists.cover_deferrals`; every reopen resets it and a completed write keeps it.
 pub const DEFER_CAP: i16 = 6;
 /// MusicBrainz genres kept per artist (spec §12.4).
 pub const MAX_GENRES: usize = 5;
@@ -519,7 +518,7 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
     } = g;
     let result = if unresolvable {
         write.status = ArtistStatus::Unresolvable;
-        write.failures = a.enrichment_failures.max(0);
+        write.failures = a.enrichment_failures;
         ArtistResult::Unresolvable
     } else if let Some(f) = steps.failure {
         let (status, failures) = failed_status(a.enrichment_failures);
@@ -582,7 +581,7 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
         Again::No => false,
         Again::Now => identity::reopen_completed_artist(&ctx.pool, a.id).await?,
         Again::Later => {
-            let so_far = a.enrichment_failures.min(0).saturating_neg();
+            let so_far = a.cover_deferrals;
             if so_far >= DEFER_CAP {
                 // Out of retries: leave it `completed`, as if the covers had no more to give,
                 // until something sets it `pending` again (see `DEFER_CAP`).

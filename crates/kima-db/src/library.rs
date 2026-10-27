@@ -290,7 +290,7 @@ pub async fn reopen_completed_artists(
                WHERE id = ANY($1) AND enrichment_status = 'completed' AND name_key <> $2
                ORDER BY id
                FOR NO KEY UPDATE)
-           UPDATE artists a SET enrichment_status = 'pending'
+           UPDATE artists a SET enrichment_status = 'pending', cover_deferrals = 0
            FROM locked WHERE a.id = locked.id AND a.enrichment_status = 'completed'"#,
         artists,
         VARIOUS_ARTISTS_KEY

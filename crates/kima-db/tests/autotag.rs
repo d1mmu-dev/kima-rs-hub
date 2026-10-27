@@ -237,3 +237,25 @@ async fn unmatched_albums_skip_tagged_and_empty(pool: PgPool) {
     album(&pool).await;
     assert_eq!(unmatched_albums(&pool).await.unwrap(), vec![open]);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cover_deferrals_column_and_check(pool: PgPool) {
+    let a = artist(&pool).await;
+    let n: i16 = sqlx::query_scalar("SELECT cover_deferrals FROM artists WHERE id = $1")
+        .bind(a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    // Cover retries live in their own column; a negative failure count is refused.
+    let refused = sqlx::query("UPDATE artists SET enrichment_failures = -1 WHERE id = $1")
+        .bind(a)
+        .execute(&pool)
+        .await;
+    assert!(refused.is_err());
+    let refused = sqlx::query("UPDATE artists SET cover_deferrals = -1 WHERE id = $1")
+        .bind(a)
+        .execute(&pool)
+        .await;
+    assert!(refused.is_err());
+}

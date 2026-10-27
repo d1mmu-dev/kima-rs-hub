@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id FROM tracks t\n         JOIN track_stages s ON s.track_id = t.id\n         WHERE s.stage = 'recording' AND s.status IN ('done', 'working')\n           AND t.recording_source IS DISTINCT FROM 'autotag'\n         ORDER BY t.id\n         FOR NO KEY UPDATE OF t",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8b4bd17881672a5ec6d20a1629abbec99895fa26ca87dc7d2daf76806d75cda1"
+}

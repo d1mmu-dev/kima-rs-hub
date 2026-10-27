@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists SET enrichment_status = 'failed', cover_deferrals = $2\n         WHERE id = $1 AND enrichment_status = 'completed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6f1523abad8e3e8f5714cdc172fee27491f693169f252fe366f4e16f17cb206b"
+}

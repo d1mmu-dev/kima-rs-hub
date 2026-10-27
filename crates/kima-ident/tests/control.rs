@@ -1309,6 +1309,63 @@ async fn wipe_reopens_done_and_working_recordings_only(pool: PgPool) {
     }
 }
 
+/// Spec §10.7 and D-126: a track whose recording came from the autotagger (the user's applied
+/// answer) is left alone by the wipe: recording row, MBID and MusicBrainz genres stay.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn wipe_keeps_autotag_answers(pool: PgPool) {
+    let searched = track(&pool).await;
+    let tagged = track(&pool).await;
+    let mbid = Uuid::new_v4();
+    for (t, source) in [(searched, "search"), (tagged, "autotag")] {
+        sqlx::query("UPDATE tracks SET recording_mbid = $2, recording_source = $3 WHERE id = $1")
+            .bind(t)
+            .bind(mbid)
+            .bind(source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        put(&pool, t, "recording", "done", "NULL", None, None).await;
+        genre(
+            &pool,
+            "track_genres",
+            "track_id",
+            t,
+            "musicbrainz",
+            "mb-genre",
+        )
+        .await;
+    }
+    let before = stage_row(&pool, tagged, "recording").await;
+
+    let counts = control::wipe_and_rerun(&pool).await.unwrap();
+    assert_eq!(counts.tracks, 1);
+
+    assert_eq!(status_of(&pool, searched, "recording").await, "pending");
+    assert_eq!(
+        track_col(&pool, searched, "recording_mbid").await,
+        Value::Null
+    );
+    assert!(
+        genre_sources(&pool, "track_genres", "track_id", searched)
+            .await
+            .is_empty()
+    );
+
+    assert_eq!(stage_row(&pool, tagged, "recording").await, before);
+    assert_eq!(
+        track_col(&pool, tagged, "recording_mbid").await,
+        json!(mbid.to_string())
+    );
+    assert_eq!(
+        track_col(&pool, tagged, "recording_source").await,
+        "autotag"
+    );
+    assert_eq!(
+        genre_sources(&pool, "track_genres", "track_id", tagged).await,
+        ["musicbrainz"]
+    );
+}
+
 /// Upstream "reopens an identification claimed when the wipe came": the late report of the
 /// claim the wipe reopened is refused.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

@@ -449,8 +449,11 @@ pub struct WipeCounts {
 ///   cleared, evidence `{"reason":"enrichment wiped"}`); their tracks lose `recording_mbid`,
 ///   `recording_source`, their `musicbrainz` genres, and an ISRC whose source is `musicbrainz`;
 /// - every artist but Various Artists → `bio`, `similar` and `last_enriched_at` NULL,
-///   `enrichment_status='pending'`, `enrichment_failures=0`; `musicbrainz` artist genres
+///   `enrichment_status='pending'`, `enrichment_failures=0`, `cover_deferrals=0`; `musicbrainz` artist genres
 ///   deleted.
+///
+/// Tracks whose `recording_source` is `autotag` (the user's applied answer) are left out of
+/// all of it: recording row, MBIDs, ISRC and `musicbrainz` genres stay.
 ///
 /// Nothing else is touched: MBIDs, images, fingerprints (`track_acoustid` and the fingerprint
 /// stage), file genres, user overrides, other stages and other recording rows stay.
@@ -465,6 +468,7 @@ pub async fn wipe(pool: &PgPool) -> sqlx::Result<WipeCounts> {
         "SELECT t.id FROM tracks t
          JOIN track_stages s ON s.track_id = t.id
          WHERE s.stage = 'recording' AND s.status IN ('done', 'working')
+           AND t.recording_source IS DISTINCT FROM 'autotag'
          ORDER BY t.id
          FOR NO KEY UPDATE OF t"
     )
@@ -510,7 +514,7 @@ pub async fn wipe(pool: &PgPool) -> sqlx::Result<WipeCounts> {
     let artists = sqlx::query!(
         r#"UPDATE artists
            SET bio = NULL, "similar" = NULL, enrichment_status = 'pending',
-               enrichment_failures = 0, last_enriched_at = NULL
+               enrichment_failures = 0, cover_deferrals = 0, last_enriched_at = NULL
            WHERE name_key <> 'various artists'"#
     )
     .execute(&mut *tx)

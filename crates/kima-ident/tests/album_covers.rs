@@ -546,7 +546,8 @@ async fn a_hung_cover_fill_keeps_the_artist_outcome(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!((status.as_str(), failures, code), ("failed", -1, None));
+    assert_eq!((status.as_str(), failures, code), ("failed", 0, None));
+    assert_eq!(deferrals_of(&pool, a).await, 1);
     assert_eq!(similar, Some(json!([])));
     let genres: Vec<String> = sqlx::query_scalar(
         "SELECT g.name FROM artist_genres ag JOIN genres g ON g.id = ag.genre_id \
@@ -601,7 +602,8 @@ async fn a_fill_timeout_leaves_the_artist_retryable(pool: PgPool) {
         "{took:?}"
     );
     assert_eq!(result, ArtistResult::Pending);
-    assert_eq!(status_of(&pool, a).await, ("failed".into(), -1, None));
+    assert_eq!(status_of(&pool, a).await, ("failed".into(), 0, None));
+    assert_eq!(deferrals_of(&pool, a).await, 1);
     assert_eq!(image_of(&pool, days).await, (None, None));
     // The next cycle's claim passes it by...
     let next = identity::claim_artists(&pool, 10).await.unwrap();
@@ -621,6 +623,14 @@ async fn status_of(pool: &PgPool, a: Uuid) -> (String, i16, Option<String>) {
     .fetch_one(pool)
     .await
     .unwrap()
+}
+
+async fn deferrals_of(pool: &PgPool, a: Uuid) -> i16 {
+    sqlx::query_scalar("SELECT cover_deferrals FROM artists WHERE id = $1")
+        .bind(a)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 /// Moves the artist's last try past the 15 min retry grace.
@@ -652,20 +662,29 @@ async fn a_cover_source_that_keeps_failing_is_retried_a_bounded_number_of_times(
         .status(&caa_url(RG_A), 503);
     let f = fx(&pool, w, World::default()).await;
 
-    // The first run and each of the retries leave it deferred: `failed`, no error shown, the
-    // count of deferrals kept below zero (so the failure lists skip it).
+    // The first run and each of the retries leave it deferred: `failed`, no error shown, no
+    // failure counted, the retries in `cover_deferrals`.
     for run in 1..=artist::DEFER_CAP + 1 {
         if run > 1 {
             backdate(&pool, a).await;
         }
         let mine = claim(&pool, a).await;
         let expected = if run <= artist::DEFER_CAP {
-            (ArtistResult::Pending, ("failed".to_string(), -run, None))
+            (ArtistResult::Pending, ("failed".to_string(), 0, None), run)
         } else {
-            (ArtistResult::Completed, ("completed".to_string(), 0, None))
+            (
+                ArtistResult::Completed,
+                ("completed".to_string(), 0, None),
+                artist::DEFER_CAP,
+            )
         };
         let result = artist::enrich_one(&f.ctx, &mine).await.unwrap();
-        assert_eq!((result, status_of(&pool, a).await), expected, "run {run}");
+        let got = (
+            result,
+            status_of(&pool, a).await,
+            deferrals_of(&pool, a).await,
+        );
+        assert_eq!(got, expected, "run {run}");
     }
     // Over the cap: left `completed`, never claimed again by the grace alone.
     backdate(&pool, a).await;
@@ -673,17 +692,37 @@ async fn a_cover_source_that_keeps_failing_is_retried_a_bounded_number_of_times(
     assert!(next.iter().all(|c| c.id != a), "{next:?}");
 
     // A reopen (a new album, say) starts a fresh budget.
-    sqlx::query("UPDATE artists SET enrichment_status = 'pending' WHERE id = $1")
-        .bind(a)
-        .execute(&pool)
-        .await
-        .unwrap();
+    assert!(identity::reopen_completed_artist(&pool, a).await.unwrap());
+    assert_eq!(deferrals_of(&pool, a).await, 0);
     let mine = claim(&pool, a).await;
     assert_eq!(
         artist::enrich_one(&f.ctx, &mine).await.unwrap(),
         ArtistResult::Pending
     );
-    assert_eq!(status_of(&pool, a).await, ("failed".into(), -1, None));
+    assert_eq!(status_of(&pool, a).await, ("failed".into(), 0, None));
+    assert_eq!(deferrals_of(&pool, a).await, 1);
+}
+
+/// A scan that creates a new album for a completed artist reopens it with a fresh budget
+/// (`reopen_completed_artists`), and Various Artists is left alone.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn new_album_resets_cover_deferrals(pool: PgPool) {
+    let (a, _days, _w) = perturbator(&pool, json!([])).await;
+    sqlx::query(
+        "UPDATE artists SET enrichment_status = 'completed', cover_deferrals = 4 WHERE id = $1",
+    )
+    .bind(a)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let n = kima_db::library::reopen_completed_artists(&mut conn, &[a])
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    drop(conn);
+    assert_eq!(status_of(&pool, a).await, ("pending".into(), 0, None),);
+    assert_eq!(deferrals_of(&pool, a).await, 0);
 }
 
 /// Final review I1: a Cover Art Archive answer that fails transiently leaves the album without
@@ -709,7 +748,8 @@ async fn a_transient_cover_failure_is_retried_later(pool: PgPool) {
         artist::enrich_one(&f.ctx, &mine).await.unwrap(),
         ArtistResult::Pending
     );
-    assert_eq!(status_of(&pool, a).await, ("failed".into(), -1, None));
+    assert_eq!(status_of(&pool, a).await, ("failed".into(), 0, None));
+    assert_eq!(deferrals_of(&pool, a).await, 1);
     assert_eq!(image_of(&pool, days).await, (None, None));
     let next = identity::claim_artists(&pool, 10).await.unwrap();
     assert!(next.iter().all(|c| c.id != a), "{next:?}");

@@ -6,6 +6,7 @@ pub use sqlx::PgPool;
 
 pub mod api_keys;
 pub mod attention;
+pub mod autotag;
 pub mod bookmarks;
 pub mod browse;
 pub mod enrichment;

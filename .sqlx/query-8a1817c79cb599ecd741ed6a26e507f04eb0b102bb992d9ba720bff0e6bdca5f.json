@@ -1,0 +1,94 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, path, disc, track_no, title, artist_name, duration_secs, recording_mbid,\n                recording_source, tag_release_mbid, tag_artist_mbids, disc_total, track_total\n         FROM tracks WHERE album_id = $1 AND missing_since IS NULL\n         ORDER BY disc, track_no, path",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "disc",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "track_no",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "artist_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "duration_secs",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "recording_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "recording_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "tag_release_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 10,
+        "name": "tag_artist_mbids",
+        "type_info": "UuidArray"
+      },
+      {
+        "ordinal": 11,
+        "name": "disc_total",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "track_total",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "8a1817c79cb599ecd741ed6a26e507f04eb0b102bb992d9ba720bff0e6bdca5f"
+}

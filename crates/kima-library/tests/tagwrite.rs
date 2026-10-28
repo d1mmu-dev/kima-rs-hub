@@ -463,9 +463,21 @@ fn audio_md5_and_write_handle_odd_names() {
             "{name:?}"
         );
         assert_eq!(audio_md5(&p).unwrap(), md5, "{name:?}");
-        assert_eq!(
-            refuse_symlink(dir.path(), &format!("It's Here/{}", name.to_string_lossy())),
-            Ok(())
+        // The written file is the real one at that exact name, a regular file.
+        assert!(std::fs::symlink_metadata(&p).unwrap().is_file(), "{name:?}");
+        if let Some(utf8) = name.to_str() {
+            let rel = format!("It's Here/{utf8}");
+            assert_eq!(refuse_symlink(dir.path(), &rel), Ok(()), "{name:?}");
+        }
+    }
+    let listed: Vec<std::ffi::OsString> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    for name in &names {
+        assert!(
+            listed.contains(name),
+            "{name:?} is still there under its own name"
         );
     }
     assert!(leftovers(&folder).is_empty());
@@ -609,7 +621,147 @@ fn v23_frame_lofty_cannot_keep_refuses_the_write() {
 
     let new = native(Container::Mp3, Some(Id3Version::V3), &every_field());
     let err = write(&p, 1, &new).unwrap_err();
-    assert!(matches!(err, TagWriteError::Verify(_)), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "ID3v2.3 cannot keep TSOA with this writer; nothing written"
+    );
     assert_eq!(sha(&p), before);
     assert!(leftovers(dir.path()).is_empty());
+}
+
+/// Renames `from` to `to` (same length) in the file's bytes, at its first occurrence.
+fn patch(path: &Path, from: &[u8], to: &[u8]) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let at = bytes.windows(from.len()).position(|w| w == from).unwrap();
+    bytes[at..at + to.len()].copy_from_slice(to);
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn duplicate_frames_lofty_merges_refuse_the_write() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path(), "a.mp3");
+    let mut tag = id3(&p).unwrap();
+    tag.insert_user_text("MY TAH".into(), "second".into());
+    tag.save_to_path(&p, WriteOptions::default()).unwrap();
+    // Two TXXX frames with one description: lofty reads one of them.
+    patch(&p, b"MY TAH", b"MY TAG");
+    let before = sha(&p);
+
+    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let err = write(&p, 1, &new).unwrap_err();
+    assert!(matches!(err, TagWriteError::Verify(_)), "{err:?}");
+    assert!(err.to_string().contains("TXXX:MY TAG (2 → 1)"), "{err}");
+    assert_eq!(sha(&p), before);
+    assert!(leftovers(dir.path()).is_empty());
+}
+
+#[test]
+fn unparseable_frame_refuses_the_write() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path(), "a.mp3");
+    let mut tag = id3(&p).unwrap();
+    tag.insert(Frame::Text(lofty::id3::v2::TextInformationFrame::new(
+        FrameId::Valid(Cow::Borrowed("TPUB")),
+        lofty::TextEncoding::UTF8,
+        "Some Label".to_string(),
+    )));
+    tag.save_to_path(&p, WriteOptions::default()).unwrap();
+    // An invalid frame id: lofty skips the frame while reading.
+    patch(&p, b"TPUB", b"TP@B");
+    let before = sha(&p);
+
+    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let err = write(&p, 1, &new).unwrap_err();
+    assert!(err.to_string().contains("TP@B (1 → 0)"), "{err}");
+    assert_eq!(sha(&p), before);
+    assert!(leftovers(dir.path()).is_empty());
+}
+
+#[test]
+fn wrong_version_or_container_refused() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path(), "a.mp3");
+    make_v23(&p);
+    let before = sha(&p);
+    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let ignore = IgnoreSet::new();
+    let hooks = WriteHooks::default();
+    let err = safe_write(
+        &p,
+        1,
+        Container::Mp3,
+        Some(Id3Version::V4),
+        &new,
+        &ignore,
+        &hooks,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "the file has ID3v2 v3 but v4 was asked; nothing written"
+    );
+    let err = safe_write(&p, 1, Container::Flac, None, &new, &ignore, &hooks).unwrap_err();
+    assert!(matches!(err, TagWriteError::Verify(_)), "{err:?}");
+    // The writer's own copy name is never a file to write.
+    let own = dir.path().join(".kima-tag-9.mp3");
+    std::fs::copy(&p, &own).unwrap();
+    assert!(
+        safe_write(
+            &own,
+            9,
+            Container::Mp3,
+            Some(Id3Version::V3),
+            &new,
+            &ignore,
+            &hooks
+        )
+        .is_err()
+    );
+    assert_eq!(sha(&p), before);
+}
+
+#[test]
+fn panic_in_write_cleans_up() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture(dir.path(), "a.mp3");
+    let before = sha(&p);
+    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let ignore = IgnoreSet::new();
+    let hooks = WriteHooks {
+        panic_in_write: true,
+        ..WriteHooks::default()
+    };
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        safe_write(
+            &p,
+            6,
+            Container::Mp3,
+            Some(Id3Version::V4),
+            &new,
+            &ignore,
+            &hooks,
+        )
+    }));
+    assert!(res.is_err(), "the hook panics");
+    assert_eq!(sha(&p), before);
+    assert!(leftovers(dir.path()).is_empty(), "the copy is deleted");
+    assert!(
+        ignore.contains(&p),
+        "released with the grace, not dropped at once"
+    );
+    std::thread::sleep(IGNORE_GRACE + std::time::Duration::from_millis(500));
+    assert!(!ignore.contains(&p), "the hold is released");
 }

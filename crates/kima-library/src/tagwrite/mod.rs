@@ -78,8 +78,9 @@ pub enum TagWriteError {
     Symlink,
     #[error("the tag writer changed the audio; nothing written")]
     AudioChanged,
-    /// The written copy did not read back as expected; nothing was renamed.
-    #[error("the written tags did not read back: {0}")]
+    /// A check refused the write (the message says which, and names the keys or frames);
+    /// nothing was renamed.
+    #[error("{0}")]
     Verify(String),
     #[error("io error: {0}")]
     Io(String),
@@ -165,19 +166,76 @@ fn write_native(
     }
 }
 
-/// One digest per frame, comment or atom that is not one of `keys` (sorted), so a write that
-/// lost or changed any of them is caught before the rename.
+/// One `(label, digest)` per frame, comment or atom that is not one of `keys` (sorted), so a
+/// write that lost or changed any of them is caught before the rename and named.
 fn untouched(
     path: &Path,
     container: Container,
     id3: Option<Id3Version>,
     keys: &[String],
-) -> Result<Vec<[u8; 32]>, TagWriteError> {
+) -> Result<Vec<(String, [u8; 32])>, TagWriteError> {
     match container {
         Container::Mp3 => id3::untouched(path, id3.unwrap_or(Id3Version::V4), keys),
         // Task 13: `vorbis::untouched(path, container, keys)`, `mp4::untouched(path, keys)`.
         _ => Err(TagWriteError::Unsupported(ext_of(path))),
     }
+}
+
+/// The frames/fields as stored on disk (not as the tag library parsed them), the ones `keys`
+/// own left out, with their counts: catches what the library loses while reading (unparseable
+/// or merged duplicate frames), which [`untouched`] cannot see.
+fn raw_untouched(
+    path: &Path,
+    container: Container,
+    id3: Option<Id3Version>,
+    keys: &[String],
+) -> Result<BTreeMap<String, usize>, TagWriteError> {
+    match container {
+        Container::Mp3 => id3::raw_untouched(path, id3.unwrap_or(Id3Version::V4), keys),
+        // Task 13: `vorbis::raw_untouched(…)` (comment field names), `mp4::raw_untouched(…)`
+        // (atom paths).
+        _ => Err(TagWriteError::Unsupported(ext_of(path))),
+    }
+}
+
+/// The refusal when the written copy's raw frames differ from the original's.
+fn loss_message(
+    container: Container,
+    id3: Option<Id3Version>,
+    before: &BTreeMap<String, usize>,
+    after: &BTreeMap<String, usize>,
+) -> String {
+    let mut diffs = Vec::new();
+    let mut lost = Vec::new();
+    for key in before
+        .keys()
+        .chain(after.keys().filter(|k| !before.contains_key(*k)))
+    {
+        let (b, a) = (
+            before.get(key).copied().unwrap_or(0),
+            after.get(key).copied().unwrap_or(0),
+        );
+        if a != b {
+            diffs.push(format!("{key} ({b} → {a})"));
+            if a == 0 {
+                lost.push(key.as_str());
+            }
+        }
+    }
+    if container == Container::Mp3
+        && id3 == Some(Id3Version::V3)
+        && lost.len() == diffs.len()
+        && lost.iter().all(|k| id3::V23_DROPPED.contains(k))
+    {
+        return format!(
+            "ID3v2.3 cannot keep {} with this writer; nothing written",
+            lost.join(", ")
+        );
+    }
+    format!(
+        "these frames would be lost or changed: {}; nothing written",
+        diffs.join(", ")
+    )
 }
 
 /// Refuses a file reached through a symbolic link (D-123): the file at `rel` under `root`, or

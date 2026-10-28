@@ -396,32 +396,223 @@ fn digest(what: impl std::fmt::Debug) -> [u8; 32] {
     h.0.finalize().into()
 }
 
-/// One digest per ID3v2 frame no key of `keys` owns (as lofty reads it: id, flags, encoding,
-/// content), plus the tag flags and the whole ID3v1 and APE tags; sorted.
+/// The label of a parsed frame, in the key spelling (`TXXX:<description>`, `UFID:<owner>`, else
+/// the frame id), for messages.
+fn label(frame: &Frame<'_>) -> String {
+    match frame {
+        Frame::UserText(f) => format!("TXXX:{}", f.description),
+        Frame::UniqueFileIdentifier(f) => format!("UFID:{}", f.owner),
+        f => f.id_str().to_string(),
+    }
+}
+
+/// One `(label, digest)` per ID3v2 frame no key of `keys` owns (as lofty reads it: id, flags,
+/// encoding, content), plus the tag flags and the whole ID3v1 and APE tags; sorted.
 pub(super) fn untouched(
     path: &Path,
     version: Id3Version,
     keys: &[String],
-) -> Result<Vec<[u8; 32]>, TagWriteError> {
-    let parsed = keys
-        .iter()
-        .map(|k| parse_key(k))
-        .collect::<Result<Vec<_>, _>>()?;
+) -> Result<Vec<(String, [u8; 32])>, TagWriteError> {
+    let parsed = parse_keys(keys)?;
     let file = read_file(path)?;
     // No ID3v2 tag reads as an empty one: a write may create the tag, and removing every frame
     // strips it.
     let tag = file.id3v2().cloned().unwrap_or_default();
     let mut out = vec![
-        digest(file.id3v1()),
-        digest(file.ape()),
-        digest(tag.flags()),
+        ("ID3v1 tag".to_string(), digest(file.id3v1())),
+        ("APE tag".to_string(), digest(file.ape())),
+        ("ID3v2 tag flags".to_string(), digest(tag.flags())),
     ];
     out.extend(
         tag.iter()
             .filter(|f| !parsed.iter().any(|k| k.owns(f, version)))
-            .map(digest),
+            .map(|f| (label(f), digest(f))),
     );
     out.sort_unstable();
+    Ok(out)
+}
+
+fn parse_keys(keys: &[String]) -> Result<Vec<Key<'_>>, TagWriteError> {
+    keys.iter().map(|k| parse_key(k)).collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Raw frame check
+//
+// lofty loses some frames while *reading* (a frame it cannot parse is skipped; two frames with
+// one key, such as two `TXXX` with one description, are merged), and the digests above compare
+// lofty's view of the file, so they cannot see that. The frame headers on disk can: the safe
+// write compares the multiset of on-disk frame keys of the original and of the written copy, all
+// keys it touches left out.
+
+/// The frames lofty drops when it saves ID3v2.3 (`create_items_v3`'s list).
+pub(super) const V23_DROPPED: &[&str] = &[
+    "ASPI", "EQU2", "RVA2", "SEEK", "SIGN", "TDEN", "TDRL", "TDTG", "TMOO", "TPRO", "TSOA", "TSOP",
+    "TSOT", "TSST",
+];
+
+fn synchsafe(b: &[u8]) -> usize {
+    b.iter()
+        .fold(0usize, |acc, x| (acc << 7) | usize::from(x & 0x7F))
+}
+
+fn be(b: &[u8]) -> usize {
+    b.iter().fold(0usize, |acc, x| (acc << 8) | usize::from(*x))
+}
+
+/// Undoes unsynchronisation: `FF 00` becomes `FF`.
+fn deunsync(b: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        out.push(b[i]);
+        if b[i] == 0xFF && b.get(i + 1) == Some(&0) {
+            i += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// A text up to its terminator in an ID3 encoding (0 Latin-1, 1 UTF-16 with BOM, 2 UTF-16BE,
+/// 3 UTF-8).
+fn terminated(enc: u8, b: &[u8]) -> String {
+    match enc {
+        1 | 2 => {
+            let (mut le, mut rest) = (false, b);
+            if enc == 1 && rest.len() >= 2 {
+                le = rest[..2] == [0xFF, 0xFE];
+                rest = &rest[2..];
+            }
+            let units: Vec<u16> = rest
+                .chunks_exact(2)
+                .map(|c| {
+                    if le {
+                        u16::from_le_bytes([c[0], c[1]])
+                    } else {
+                        u16::from_be_bytes([c[0], c[1]])
+                    }
+                })
+                .take_while(|u| *u != 0)
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        3 => String::from_utf8_lossy(b.split(|x| *x == 0).next().unwrap_or(&[])).into_owned(),
+        _ => b
+            .iter()
+            .take_while(|x| **x != 0)
+            .map(|x| char::from(*x))
+            .collect(),
+    }
+}
+
+/// The key of a raw frame: `TXXX:<description>`, `UFID:<owner>`, else its id. A frame whose
+/// payload cannot be read here (compressed, encrypted) keeps a marker, so it only matches itself.
+fn raw_key(id: &str, data: &[u8], opaque: bool) -> String {
+    match id {
+        "TXXX" if opaque => "TXXX:<opaque>".to_string(),
+        "UFID" if opaque => "UFID:<opaque>".to_string(),
+        "TXXX" if !data.is_empty() => format!("TXXX:{}", terminated(data[0], &data[1..])),
+        "UFID" => format!("UFID:{}", terminated(0, data)),
+        _ => id.to_string(),
+    }
+}
+
+/// The frame keys of the ID3v2 tag at the start of the file, as stored (`TYER` stays `TYER`; a
+/// v2.2 id is upgraded as lofty does), with how often each occurs. Zero-length frames and text
+/// frames with no text are left out: lofty skips them and they hold nothing.
+pub(super) fn raw_frames(path: &Path) -> Result<Vec<String>, TagWriteError> {
+    use std::io::Read;
+    let mut f = File::open(path)?;
+    let mut h = [0u8; 10];
+    if f.read_exact(&mut h).is_err() || &h[..3] != b"ID3" {
+        return Ok(Vec::new());
+    }
+    let (major, flags) = (h[3], h[5]);
+    let mut body = Vec::new();
+    f.take(synchsafe(&h[6..10]) as u64).read_to_end(&mut body)?;
+    if flags & 0x80 != 0 && major < 4 {
+        body = deunsync(&body);
+    }
+    let mut pos = 0;
+    if flags & 0x40 != 0 && body.len() >= 4 {
+        pos = match major {
+            3 => 4 + be(&body[..4]),
+            4 => synchsafe(&body[..4]),
+            _ => 0,
+        };
+    }
+    let (id_len, hdr_len) = if major == 2 { (3, 6) } else { (4, 10) };
+    let mut out = Vec::new();
+    while pos + hdr_len <= body.len() && body[pos] != 0 {
+        let hdr = &body[pos..pos + hdr_len];
+        let size = match major {
+            2 => be(&hdr[3..6]),
+            3 => be(&hdr[4..8]),
+            _ => synchsafe(&hdr[4..8]),
+        };
+        let fflags = if major == 2 { 0 } else { be(&hdr[8..10]) };
+        let start = pos + hdr_len;
+        let data = &body[start.min(body.len())..(start + size).min(body.len())];
+        pos = start + size;
+        if size == 0 {
+            continue;
+        }
+        let raw_id = String::from_utf8_lossy(&hdr[..id_len]).into_owned();
+        let id = if major == 2 {
+            lofty::id3::v2::upgrade_v2(&raw_id).map_or(raw_id, str::to_string)
+        } else {
+            raw_id
+        };
+        // v2.3: compression 0x0080, encryption 0x0040; v2.4: compression 0x0008, encryption
+        // 0x0004, unsynchronisation 0x0002, data length indicator 0x0001.
+        let (opaque, data): (bool, Cow<'_, [u8]>) = match major {
+            3 => (fflags & 0x00C0 != 0, Cow::Borrowed(data)),
+            4 => {
+                let mut d = data;
+                if fflags & 0x0001 != 0 && d.len() >= 4 {
+                    d = &d[4..];
+                }
+                let d = if fflags & 0x0002 != 0 || flags & 0x80 != 0 {
+                    Cow::Owned(deunsync(d))
+                } else {
+                    Cow::Borrowed(d)
+                };
+                (fflags & 0x000C != 0, d)
+            }
+            _ => (false, Cow::Borrowed(data)),
+        };
+        let empty_text =
+            id.starts_with('T') && id != "TXXX" && data.iter().skip(1).all(|b| *b == 0);
+        if !opaque && empty_text {
+            continue;
+        }
+        out.push(raw_key(&id, &data, opaque));
+    }
+    Ok(out)
+}
+
+/// `raw_frames` without the frames `keys` own when saving as `version`, as counts.
+pub(super) fn raw_untouched(
+    path: &Path,
+    version: Id3Version,
+    keys: &[String],
+) -> Result<std::collections::BTreeMap<String, usize>, TagWriteError> {
+    let parsed = parse_keys(keys)?;
+    let mut out = std::collections::BTreeMap::new();
+    for k in raw_frames(path)? {
+        let id = k.split(':').next().unwrap_or_default();
+        let owned = keys.contains(&k)
+            || parsed.iter().any(|p| {
+                p.aliases(version).contains(&id)
+                    || matches!(p, Key::Timestamp(t) if *t == id)
+                    || matches!(p, Key::Text(t) if *t == id)
+                    || matches!(p, Key::Xsop if id == "XSOP")
+            });
+        if !owned {
+            *out.entry(k).or_insert(0) += 1;
+        }
+    }
     Ok(out)
 }
 

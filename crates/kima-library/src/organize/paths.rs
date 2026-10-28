@@ -242,6 +242,7 @@ pub fn plan_with(
             claimed.insert(path_key(to));
         }
     }
+    let mut matched: HashSet<String> = HashSet::new();
     items
         .into_iter()
         .map(|(base, track_id, from)| {
@@ -257,16 +258,29 @@ pub fn plan_with(
                     case_only: false,
                 };
             }
-            // Already copied there by an earlier run: nothing to plan.
-            if existing_hit.contains(&key) && same(from, &base) {
-                return PlannedMove {
-                    track_id,
-                    from: from.clone(),
-                    to: base,
-                    collision: false,
-                    unchanged: true,
-                    case_only: false,
-                };
+            // Already copied there by an earlier run (the base name or a suffixed one): nothing
+            // to plan, and each existing file answers for one track only.
+            let mut n = 2;
+            let mut cand = base.clone();
+            loop {
+                let k = path_key(&cand);
+                if existing_hit.contains(&k) && !matched.contains(&k) && same(from, &cand) {
+                    matched.insert(k.clone());
+                    claimed.insert(k);
+                    return PlannedMove {
+                        track_id,
+                        from: from.clone(),
+                        to: cand,
+                        collision: false,
+                        unchanged: true,
+                        case_only: false,
+                    };
+                }
+                if !claimed.contains(&k) || n > 10_000 {
+                    break;
+                }
+                cand = with_suffix(&base, n);
+                n += 1;
             }
             let mut to = base.clone();
             let mut n = 2;
@@ -350,6 +364,7 @@ pub fn plan_sidecars_with(
     let mut sorted: Vec<&PathBuf> = sidecars.iter().collect();
     sorted.sort();
     let mut out = Vec::new();
+    let mut matched: HashSet<String> = HashSet::new();
     for from in sorted {
         let Some(dir) = from.parent().and_then(|p| dest.get(p)) else {
             continue;
@@ -360,10 +375,26 @@ pub fn plan_sidecars_with(
             _ => (name, ""),
         };
         let base = dir.join(file_name(stem, ext));
-        if existing_keys.contains(&path_key(&base)) && same(from, &base) {
+        let (mut cand, mut n) = (base.clone(), 2);
+        let mut found = None;
+        loop {
+            let k = path_key(&cand);
+            if existing_keys.contains(&k) && !matched.contains(&k) && same(from, &cand) {
+                found = Some(cand.clone());
+                matched.insert(k);
+                break;
+            }
+            if !claimed.contains(&k) || n > 10_000 {
+                break;
+            }
+            cand = with_suffix(&base, n);
+            n += 1;
+        }
+        if let Some(to) = found {
+            claimed.insert(path_key(&to));
             out.push(SidecarMove {
                 from: from.clone(),
-                to: base,
+                to,
                 collision: false,
                 unchanged: true,
             });

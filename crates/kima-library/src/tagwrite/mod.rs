@@ -10,15 +10,17 @@
 //! - `untouched(path, keys)`: one digest per frame/field the write must not change, so the safe
 //!   write can prove every other frame survived.
 //!
-//! MP3 (ID3v2) is [`id3`]. FLAC/Ogg/Opus (Vorbis comments) and MP4 (ilst) answer
-//! [`TagWriteError::Unsupported`] until their modules are added (M3b Task 13).
+//! MP3 (ID3v2) is [`id3`], FLAC/Ogg/Opus (Vorbis comments) [`vorbis`], M4A/MP4 (`ilst`)
+//! [`mp4`]. Any other container is [`TagWriteError::Unsupported`].
 //!
 //! Everything here is blocking (file I/O, ffmpeg); call it from `spawn_blocking`.
 
 mod audio;
 mod id3;
+mod mp4;
 mod safe;
 mod values;
+mod vorbis;
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
@@ -129,13 +131,33 @@ pub fn id3_version(path: &Path) -> Result<Option<Id3Version>, TagWriteError> {
 }
 
 /// The native keys and new values of `v` for this container. Only the `Some` fields of `v`
-/// appear; a key with `[]` is removed by the write.
+/// appear; a key with `[]` is removed by the write. The keys written only when a file already
+/// has them (Vorbis `TOTALTRACKS`/`TOTALDISCS`) are added by [`native_for_file`].
 pub fn native(container: Container, id3: Option<Id3Version>, v: &TagValues) -> NativeTags {
     match container {
         Container::Mp3 => id3::native(id3.unwrap_or(Id3Version::V4), v),
-        // Task 13: `vorbis::native(v)` and `mp4::native(v)`.
-        Container::Flac | Container::Ogg | Container::Opus | Container::Mp4 => NativeTags::new(),
+        Container::Flac | Container::Ogg | Container::Opus => vorbis::native(v),
+        Container::Mp4 => mp4::native(v),
     }
+}
+
+/// [`native`] for the file at `path`: a Vorbis file that already has `TOTALTRACKS` or
+/// `TOTALDISCS` gets them too, with the values of `TRACKTOTAL`/`DISCTOTAL` (§19.8). What the
+/// apply job journals and writes. Blocking.
+pub fn native_for_file(
+    path: &Path,
+    container: Container,
+    id3: Option<Id3Version>,
+    v: &TagValues,
+) -> Result<NativeTags, TagWriteError> {
+    let mut tags = native(container, id3, v);
+    if matches!(
+        container,
+        Container::Flac | Container::Ogg | Container::Opus
+    ) {
+        vorbis::add_present_totals(path, container, &mut tags)?;
+    }
+    Ok(tags)
 }
 
 /// The current values of `keys` in the file (`[]` for an absent key).
@@ -146,8 +168,8 @@ pub fn read_native(
 ) -> Result<NativeTags, TagWriteError> {
     match container {
         Container::Mp3 => id3::read(path, keys),
-        // Task 13: `vorbis::read(path, container, keys)`, `mp4::read(path, keys)`.
-        _ => Err(TagWriteError::Unsupported(ext_of(path))),
+        Container::Flac | Container::Ogg | Container::Opus => vorbis::read(path, container, keys),
+        Container::Mp4 => mp4::read(path, keys),
     }
 }
 
@@ -161,8 +183,8 @@ fn write_native(
 ) -> Result<(), TagWriteError> {
     match container {
         Container::Mp3 => id3::write(path, id3.unwrap_or(Id3Version::V4), new),
-        // Task 13: `vorbis::write(path, container, new)`, `mp4::write(path, new)`.
-        _ => Err(TagWriteError::Unsupported(ext_of(path))),
+        Container::Flac | Container::Ogg | Container::Opus => vorbis::write(path, container, new),
+        Container::Mp4 => mp4::write(path, new),
     }
 }
 
@@ -176,8 +198,10 @@ fn untouched(
 ) -> Result<Vec<(String, [u8; 32])>, TagWriteError> {
     match container {
         Container::Mp3 => id3::untouched(path, id3.unwrap_or(Id3Version::V4), keys),
-        // Task 13: `vorbis::untouched(path, container, keys)`, `mp4::untouched(path, keys)`.
-        _ => Err(TagWriteError::Unsupported(ext_of(path))),
+        Container::Flac | Container::Ogg | Container::Opus => {
+            vorbis::untouched(path, container, keys)
+        }
+        Container::Mp4 => mp4::untouched(path, keys),
     }
 }
 
@@ -192,9 +216,10 @@ fn raw_untouched(
 ) -> Result<BTreeMap<String, usize>, TagWriteError> {
     match container {
         Container::Mp3 => id3::raw_untouched(path, id3.unwrap_or(Id3Version::V4), keys),
-        // Task 13: `vorbis::raw_untouched(…)` (comment field names), `mp4::raw_untouched(…)`
-        // (atom paths).
-        _ => Err(TagWriteError::Unsupported(ext_of(path))),
+        Container::Flac | Container::Ogg | Container::Opus => {
+            vorbis::raw_untouched(path, container, keys)
+        }
+        Container::Mp4 => mp4::raw_untouched(path, keys),
     }
 }
 
@@ -233,9 +258,19 @@ fn loss_message(
         );
     }
     format!(
-        "these frames would be lost or changed: {}; nothing written",
+        "these {} would be lost or changed: {}; nothing written",
+        noun(container),
         diffs.join(", ")
     )
+}
+
+/// What the preservation checks name: ID3v2 frames, Vorbis comment fields, MP4 atoms.
+fn noun(container: Container) -> &'static str {
+    match container {
+        Container::Mp3 => "frames",
+        Container::Flac | Container::Ogg | Container::Opus => "fields",
+        Container::Mp4 => "atoms",
+    }
 }
 
 /// Refuses a file reached through a symbolic link (D-123): the file at `rel` under `root`, or

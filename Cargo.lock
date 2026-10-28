@@ -1456,6 +1456,7 @@ name = "kima-library"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "hex",
  "image",
  "kima-core",
  "kima-db",

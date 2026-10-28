@@ -10,6 +10,7 @@ kima-core.workspace = true
 kima-db.workspace = true
 kima-jobs.workspace = true
 futures.workspace = true
+hex.workspace = true
 image.workspace = true
 lofty.workspace = true
 notify-debouncer-full.workspace = true

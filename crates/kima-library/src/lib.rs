@@ -9,5 +9,6 @@ pub mod organize;
 pub mod resolve;
 pub mod scan;
 pub mod tags;
+pub mod tagwrite;
 pub mod transcode;
 pub mod watch;

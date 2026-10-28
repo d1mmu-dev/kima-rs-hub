@@ -2003,3 +2003,166 @@ async fn resume_fsyncs_up_to_root(pool: PgPool) {
     assert!(synced.contains(&lib.root.join("Alpha")), "{synced:?}");
     assert!(synced.contains(&lib.root), "{synced:?}");
 }
+
+/// Copies the library, then plans and applies a second copy run (every row `unchanged`).
+async fn copied_twice(lib: &Lib) -> (Uuid, Uuid) {
+    let first = new_run(lib, "copy").await;
+    apply_run(lib, first).await;
+    assert_eq!(state(lib, first).await, "done");
+    let second = new_run(lib, "copy").await;
+    (first, second)
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unchanged_row_reverified_before_switch_root(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let (_, second) = copied_twice(&lib).await;
+    assert!(
+        rows(&lib, second)
+            .await
+            .iter()
+            .all(|r| r.state == "unchanged")
+    );
+    apply_run(&lib, second).await;
+    assert_eq!(state(&lib, second).await, "done");
+    // The apply journalled what the targets held.
+    assert!(rows(&lib, second).await.iter().all(|r| r.sha256.is_some()));
+
+    // A target is edited after the apply: it no longer counts as copied.
+    let edited = lib.target.join("Alpha/2001 - First/01 - One.flac");
+    let mut bytes = std::fs::read(&edited).unwrap();
+    bytes[10] ^= 1;
+    std::fs::write(&edited, bytes).unwrap();
+    let before = track_paths(&pool).await;
+    let err = apply::run_action(&lib.ctx, second, Action::SwitchRoot, &Hooks::default()).await;
+    assert!(matches!(err, Err(OrganizeError::Invalid(_))), "{err:?}");
+    assert_eq!(track_paths(&pool).await, before);
+    assert_ne!(lib.ctx.root.get(), lib.target);
+    let row = rows(&lib, second)
+        .await
+        .into_iter()
+        .find(|r| r.to_path.ends_with("01 - One.flac"))
+        .unwrap();
+    assert_eq!(row.state, "skipped");
+    assert_eq!(
+        row.note.as_deref(),
+        Some("the target changed since the apply")
+    );
+
+    // A deleted target is caught the same way.
+    std::fs::remove_file(lib.target.join("Beta/2005 - Second/01 - Three.mp3")).unwrap();
+    let err = apply::run_action(&lib.ctx, second, Action::SwitchRoot, &Hooks::default()).await;
+    assert!(matches!(err, Err(OrganizeError::Invalid(_))), "{err:?}");
+    assert_eq!(track_paths(&pool).await, before);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unchanged_row_reverified_at_apply(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let (_, second) = copied_twice(&lib).await;
+    // The target is edited between the preview and the apply.
+    let edited = lib.target.join("Alpha/2001 - First/02 - Two.flac");
+    std::fs::write(&edited, b"edited").unwrap();
+    apply_run(&lib, second).await;
+    let row = rows(&lib, second)
+        .await
+        .into_iter()
+        .find(|r| r.to_path.ends_with("02 - Two.flac"))
+        .unwrap();
+    assert_eq!(row.state, "skipped");
+    assert_eq!(std::fs::read(&edited).unwrap(), b"edited");
+    let err = apply::run_action(&lib.ctx, second, Action::SwitchRoot, &Hooks::default()).await;
+    assert!(matches!(err, Err(OrganizeError::Invalid(_))), "{err:?}");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn duplicate_tag_tracks_second_copy_run_keeps_one_to_one(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    for identical in [true, false] {
+        let files = vec![
+            (
+                "x/a.flac",
+                tags("Alpha", "First", "2001", "1", "Same"),
+                "Alpha/2001 - First/01 - Same.flac",
+            ),
+            (
+                "y/b.flac",
+                tags("Alpha", "First", "2001", "1", "Same"),
+                "Alpha/2001 - First/01 - Same (2).flac",
+            ),
+        ];
+        // Each pass in its own library and database state.
+        sqlx::query("TRUNCATE tracks, albums, artists CASCADE")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let lib = library(&pool, &files).await;
+        let a = lib.root.join("x/a.flac");
+        let b = lib.root.join("y/b.flac");
+        if identical {
+            std::fs::copy(&a, &b).unwrap();
+        } else {
+            let mut bytes = std::fs::read(&a).unwrap();
+            bytes.push(0);
+            std::fs::write(&b, bytes).unwrap();
+        }
+        let first = new_run(&lib, "copy").await;
+        apply_run(&lib, first).await;
+        let first_rows = rows(&lib, first).await;
+        assert!(first_rows.iter().all(|r| r.state == "done"));
+        assert_eq!(tree(&lib.target).len(), 2);
+
+        let second = new_run(&lib, "copy").await;
+        let second_rows = rows(&lib, second).await;
+        assert!(
+            second_rows.iter().all(|r| r.state == "unchanged"),
+            "{identical}: {second_rows:?}"
+        );
+        for r in &second_rows {
+            let was = first_rows
+                .iter()
+                .find(|f| f.track_id == r.track_id)
+                .unwrap();
+            assert_eq!(r.to_path, was.to_path, "{identical}");
+            assert!(!r.to_path.contains("(3)"));
+        }
+        apply_run(&lib, second).await;
+        assert_eq!(tree(&lib.target).len(), 2);
+        apply::run_action(&lib.ctx, second, Action::SwitchRoot, &Hooks::default())
+            .await
+            .unwrap();
+        let paths: std::collections::HashSet<_> = track_paths(&pool).await.into_values().collect();
+        assert_eq!(paths.len(), 2, "{identical}");
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_leaves_unchanged_target_alone(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let (_, second) = copied_twice(&lib).await;
+    apply_run(&lib, second).await;
+    let copied = tree(&lib.target);
+    undo_run(&lib, second).await;
+    assert_eq!(state(&lib, second).await, "undone");
+    assert_eq!(tree(&lib.target), copied);
+    assert!(
+        rows(&lib, second)
+            .await
+            .iter()
+            .all(|r| r.state == "unchanged")
+    );
+}

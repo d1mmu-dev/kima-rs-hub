@@ -954,6 +954,7 @@ async fn apply(
 
 /// Copy mode: every planned row is copied and verified into the target root.
 async fn copy_rows(r: &mut Runner<'_>) -> Result<()> {
+    verify_unchanged(r).await?;
     let rows: Vec<JournalRow> = db::all_rows(&r.ctx.pool, r.run.id)
         .await?
         .into_iter()
@@ -1034,6 +1035,44 @@ async fn copy_rows(r: &mut Runner<'_>) -> Result<()> {
             Err(e) => return Err(e.into()),
         }
         r.row_finished();
+    }
+    Ok(())
+}
+
+/// Copy mode: an `unchanged` row (a duplicate the preview found already at its target) is
+/// checked again now and its checksum journalled, so the switch can re-check it later. A target
+/// that no longer matches its source is `skipped`, and the track does not count as copied.
+async fn verify_unchanged(r: &Runner<'_>) -> Result<()> {
+    let rows: Vec<JournalRow> = db::all_rows(&r.ctx.pool, r.run.id)
+        .await?
+        .into_iter()
+        .filter(|x| x.state == "unchanged" && x.track_id.is_some() && x.sha256.is_none())
+        .collect();
+    for row in rows {
+        let (src, dst) = (
+            join_rel(&r.source, &row.from_path)?,
+            join_rel(&r.target, &row.to_path)?,
+        );
+        let sha = blocking(move || {
+            Ok(if same_file(&src, &dst) {
+                sha256_file(&dst).ok()
+            } else {
+                None
+            })
+        })
+        .await?;
+        match sha {
+            Some(sha) => db::set_sha(&r.ctx.pool, row.id, &sha).await?,
+            None => {
+                r.commit(
+                    &row,
+                    "skipped",
+                    Some("the target changed since the preview"),
+                    None,
+                )
+                .await?
+            }
+        }
     }
     Ok(())
 }
@@ -1610,6 +1649,29 @@ async fn switch_root(ctx: &LibraryCtx, run: Run) -> Result<()> {
     }
     if run.switched_at.is_some() {
         return Ok(());
+    }
+    // An `unchanged` copy was never written by this run: it counts as copied only while it
+    // still holds what the apply verified.
+    let target = PathBuf::from(&run.target_root);
+    for row in db::all_rows(&ctx.pool, run.id).await? {
+        if row.state != "unchanged" || row.track_id.is_none() {
+            continue;
+        }
+        let dst = join_rel(&target, &row.to_path)?;
+        let sha = row.sha256.clone();
+        let ok = blocking(move || {
+            Ok(
+                fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_file())
+                    && sha.as_deref().is_some_and(|s| sha_matches(&dst, s)),
+            )
+        })
+        .await?;
+        if !ok {
+            let mut tx = ctx.pool.begin().await?;
+            let note = "the target changed since the apply";
+            db::set_row_state(&mut tx, row.id, "skipped", Some(note)).await?;
+            tx.commit().await?;
+        }
     }
     let left = db::tracks_not_done(&ctx.pool, run.id).await?;
     if left > 0 {

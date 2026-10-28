@@ -1,0 +1,865 @@
+[
+ {
+  "method": "GET",
+  "url": "/release?query=release%3A%22Fixture%20Album%22%20AND%20artist%3A%22Fixture%20Band%22%20AND%20tracks%3A10&limit=5&fmt=json",
+  "status": 200,
+  "body": {
+   "created": "2026-10-27T00:00:00.000Z",
+   "count": 1,
+   "offset": 0,
+   "releases": [
+    {
+     "id": "c0000001-0000-4000-8000-000000000001",
+     "score": 100,
+     "title": "Fixture Album",
+     "status": "Official",
+     "country": "XW",
+     "date": "2001-05-01"
+    }
+   ]
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/release?query=release%3A%22Double%20Fixture%22%20AND%20artist%3A%22Fixture%20Band%22%20AND%20tracks%3A6&limit=5&fmt=json",
+  "status": 200,
+  "body": {
+   "created": "2026-10-27T00:00:00.000Z",
+   "count": 1,
+   "offset": 0,
+   "releases": [
+    {
+     "id": "c0000002-0000-4000-8000-000000000001",
+     "score": 100,
+     "title": "Double Fixture",
+     "status": "Official",
+     "country": "XW",
+     "date": "2003-09-09"
+    }
+   ]
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/release?query=release%3A%22Fixture%20Hits%22%20AND%20arid%3A89ad4ac3-39f7-470e-963a-56509c546377%20AND%20tracks%3A3&limit=5&fmt=json",
+  "status": 200,
+  "body": {
+   "created": "2026-10-27T00:00:00.000Z",
+   "count": 1,
+   "offset": 0,
+   "releases": [
+    {
+     "id": "c0000003-0000-4000-8000-000000000001",
+     "score": 100,
+     "title": "Fixture Hits",
+     "status": "Official",
+     "country": "XW",
+     "date": "2005-11-11"
+    }
+   ]
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/release/c0000001-0000-4000-8000-000000000001?inc=recordings%2Bartist-credits%2Brelease-groups%2Blabels%2Bisrcs%2Bmedia%2Bgenres&fmt=json",
+  "status": 200,
+  "body": {
+   "id": "c0000001-0000-4000-8000-000000000001",
+   "title": "Fixture Album",
+   "status": "Official",
+   "country": "XW",
+   "date": "2001-05-01",
+   "barcode": "5000000000017",
+   "disambiguation": "",
+   "release-group": {
+    "id": "d0000001-0000-4000-8000-000000000001",
+    "title": "Fixture Album",
+    "primary-type": "Album",
+    "first-release-date": "2001-05-01"
+   },
+   "artist-credit": [
+    {
+     "name": "Fixture Band",
+     "joinphrase": "",
+     "artist": {
+      "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+      "name": "Fixture Band",
+      "sort-name": "Band, Fixture"
+     }
+    }
+   ],
+   "label-info": [
+    {
+     "catalog-number": "FX-001",
+     "label": {
+      "name": "Fixture Records"
+     }
+    }
+   ],
+   "genres": [],
+   "media": [
+    {
+     "position": 1,
+     "format": "CD",
+     "title": "",
+     "track-count": 10,
+     "tracks": [
+      {
+       "id": "7a010100-0000-4000-8000-000000000001",
+       "position": 1,
+       "number": "1",
+       "title": "Fixture Song 1",
+       "length": 2000,
+       "recording": {
+        "id": "8e010100-0000-4000-8000-000000000001",
+        "title": "Fixture Song 1",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": [
+         "XXFIX0100001"
+        ]
+       }
+      },
+      {
+       "id": "7a010100-0000-4000-8000-000000000002",
+       "position": 2,
+       "number": "2",
+       "title": "Fixture Song 2",
+       "length": 2000,
+       "recording": {
+        "id": "8e010100-0000-4000-8000-000000000002",
+        "title": "Fixture Song 2",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": [
+         "XXFIX0100002"
+        ]
+       }
+      },
+      {
+       "id": "7a010100-0000-4000-8000-000000000003",
+       "position": 3,
+       "number": "3",
+       "title": "Fixture Song 3",
+       "length": 2000,
+       "recording": {
+        "id": "8e010100-0000-4000-8000-000000000003",
+        "title": "Fixture Song 3",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": [
+         "XXFIX0100003"
+        ]
+       }
+      },
+      {
+       "id": "7a010100-0000-4000-8000-000000000004",
+       "position": 4,
+       "number": "4",
+       "title": "Fixture Song 4",
+       "length": 2000,
+       "recording": {
+        "id": "8e010100-0000-4000-8000-000000000004",
+        "title": "Fixture Song 4",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": [
+         "XXFIX0100004"
+        ]
+       }
+      },
+      {
+       "id": "7a010100-0000-4000-8000-000000000005",
+       "position": 5,
+       "number": "5",
+       "title": "Fixture Song 5",
+       "length": 2000,
+       "recording": {
+        "id": "8e010100-0000-4000-8000-000000000005",
+        "title": "Fixture Song 5",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": [
+         "XXFIX0100005"
+        ]
+       }
+      },
+      {
+       "id": "7a010100-0000-4000-8000-000000000006",
+       "position": 6,
+       "number": "6",
+       "title": "Fixture Song 6",
+       "length": 2000,
+       "recording": {
+        "id": "8e010100-0000-4000-8000-000000000006",
+        "title": "Fixture Song 6",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": [
+         "XXFIX0100006"
+        ]
+       }
+      },
+      {
+       "id": "7a010100-0000-4000-8000-000000000007",
+       "position": 7,
+       "number": "7",
+       "title": "Fixture Song 7",
+       "length": 2000,
+       "recording": {
+        "id": "8e010100-0000-4000-8000-000000000007",
+        "title": "Fixture Song 7",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": [
+         "XXFIX0100007"
+        ]
+       }
+      },
+      {
+       "id": "7a010100-0000-4000-8000-000000000008",
+       "position": 8,
+       "number": "8",
+       "title": "Fixture Song 8",
+       "length": 2000,
+       "recording": {
+        "id": "8e010100-0000-4000-8000-000000000008",
+        "title": "Fixture Song 8",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": [
+         "XXFIX0100008"
+        ]
+       }
+      },
+      {
+       "id": "7a010100-0000-4000-8000-000000000009",
+       "position": 9,
+       "number": "9",
+       "title": "Fixture Song 9",
+       "length": 2000,
+       "recording": {
+        "id": "8e010100-0000-4000-8000-000000000009",
+        "title": "Fixture Song 9",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": [
+         "XXFIX0100009"
+        ]
+       }
+      },
+      {
+       "id": "7a010100-0000-4000-8000-000000000010",
+       "position": 10,
+       "number": "10",
+       "title": "Fixture Song 10",
+       "length": 2000,
+       "recording": {
+        "id": "8e010100-0000-4000-8000-000000000010",
+        "title": "Fixture Song 10",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": [
+         "XXFIX0100010"
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/release/c0000002-0000-4000-8000-000000000001?inc=recordings%2Bartist-credits%2Brelease-groups%2Blabels%2Bisrcs%2Bmedia%2Bgenres&fmt=json",
+  "status": 200,
+  "body": {
+   "id": "c0000002-0000-4000-8000-000000000001",
+   "title": "Double Fixture",
+   "status": "Official",
+   "country": "XW",
+   "date": "2003-09-09",
+   "barcode": "5000000000024",
+   "disambiguation": "",
+   "release-group": {
+    "id": "d0000002-0000-4000-8000-000000000001",
+    "title": "Double Fixture",
+    "primary-type": "Album",
+    "first-release-date": "2003"
+   },
+   "artist-credit": [
+    {
+     "name": "Fixture Band",
+     "joinphrase": "",
+     "artist": {
+      "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+      "name": "Fixture Band",
+      "sort-name": "Band, Fixture"
+     }
+    }
+   ],
+   "label-info": [
+    {
+     "catalog-number": "FX-002",
+     "label": {
+      "name": "Fixture Records"
+     }
+    }
+   ],
+   "genres": [],
+   "media": [
+    {
+     "position": 1,
+     "format": "CD",
+     "title": "Disc One",
+     "track-count": 3,
+     "tracks": [
+      {
+       "id": "7a020100-0000-4000-8000-000000000001",
+       "position": 1,
+       "number": "1",
+       "title": "Double Song 1-1",
+       "length": 2000,
+       "recording": {
+        "id": "8e020100-0000-4000-8000-000000000001",
+        "title": "Double Song 1-1",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": []
+       }
+      },
+      {
+       "id": "7a020100-0000-4000-8000-000000000002",
+       "position": 2,
+       "number": "2",
+       "title": "Double Song 1-2",
+       "length": 2000,
+       "recording": {
+        "id": "8e020100-0000-4000-8000-000000000002",
+        "title": "Double Song 1-2",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": []
+       }
+      },
+      {
+       "id": "7a020100-0000-4000-8000-000000000003",
+       "position": 3,
+       "number": "3",
+       "title": "Double Song 1-3",
+       "length": 2000,
+       "recording": {
+        "id": "8e020100-0000-4000-8000-000000000003",
+        "title": "Double Song 1-3",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": []
+       }
+      }
+     ]
+    },
+    {
+     "position": 2,
+     "format": "CD",
+     "title": "Disc Two",
+     "track-count": 3,
+     "tracks": [
+      {
+       "id": "7a020200-0000-4000-8000-000000000001",
+       "position": 1,
+       "number": "1",
+       "title": "Double Song 2-1",
+       "length": 2000,
+       "recording": {
+        "id": "8e020200-0000-4000-8000-000000000001",
+        "title": "Double Song 2-1",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": []
+       }
+      },
+      {
+       "id": "7a020200-0000-4000-8000-000000000002",
+       "position": 2,
+       "number": "2",
+       "title": "Double Song 2-2",
+       "length": 2000,
+       "recording": {
+        "id": "8e020200-0000-4000-8000-000000000002",
+        "title": "Double Song 2-2",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": []
+       }
+      },
+      {
+       "id": "7a020200-0000-4000-8000-000000000003",
+       "position": 3,
+       "number": "3",
+       "title": "Double Song 2-3",
+       "length": 2000,
+       "recording": {
+        "id": "8e020200-0000-4000-8000-000000000003",
+        "title": "Double Song 2-3",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Fixture Band",
+          "joinphrase": "",
+          "artist": {
+           "id": "b1a9c0e0-0000-4000-8000-00000000f001",
+           "name": "Fixture Band",
+           "sort-name": "Band, Fixture"
+          }
+         }
+        ],
+        "isrcs": []
+       }
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/release/c0000003-0000-4000-8000-000000000001?inc=recordings%2Bartist-credits%2Brelease-groups%2Blabels%2Bisrcs%2Bmedia%2Bgenres&fmt=json",
+  "status": 200,
+  "body": {
+   "id": "c0000003-0000-4000-8000-000000000001",
+   "title": "Fixture Hits",
+   "status": "Official",
+   "country": "XW",
+   "date": "2005-11-11",
+   "barcode": "5000000000031",
+   "disambiguation": "",
+   "release-group": {
+    "id": "d0000003-0000-4000-8000-000000000001",
+    "title": "Fixture Hits",
+    "primary-type": "Album",
+    "first-release-date": "2005-11-11"
+   },
+   "artist-credit": [
+    {
+     "name": "Various Artists",
+     "joinphrase": "",
+     "artist": {
+      "id": "89ad4ac3-39f7-470e-963a-56509c546377",
+      "name": "Various Artists",
+      "sort-name": "Various Artists"
+     }
+    }
+   ],
+   "label-info": [
+    {
+     "catalog-number": "FX-003",
+     "label": {
+      "name": "Fixture Records"
+     }
+    }
+   ],
+   "genres": [],
+   "media": [
+    {
+     "position": 1,
+     "format": "Digital Media",
+     "title": "",
+     "track-count": 3,
+     "tracks": [
+      {
+       "id": "7a030100-0000-4000-8000-000000000001",
+       "position": 1,
+       "number": "1",
+       "title": "Hits Song 1",
+       "length": 2000,
+       "recording": {
+        "id": "8e030100-0000-4000-8000-000000000001",
+        "title": "Hits Song 1",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Various Artists",
+          "joinphrase": "",
+          "artist": {
+           "id": "89ad4ac3-39f7-470e-963a-56509c546377",
+           "name": "Various Artists",
+           "sort-name": "Various Artists"
+          }
+         }
+        ],
+        "isrcs": []
+       },
+       "artist-credit": [
+        {
+         "name": "Alpha Act",
+         "joinphrase": "",
+         "artist": {
+          "id": "b1a9c0e0-0000-4000-8000-00000000f002",
+          "name": "Alpha Act",
+          "sort-name": "Act, Alpha"
+         }
+        }
+       ]
+      },
+      {
+       "id": "7a030100-0000-4000-8000-000000000002",
+       "position": 2,
+       "number": "2",
+       "title": "Hits Song 2",
+       "length": 2000,
+       "recording": {
+        "id": "8e030100-0000-4000-8000-000000000002",
+        "title": "Hits Song 2",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Various Artists",
+          "joinphrase": "",
+          "artist": {
+           "id": "89ad4ac3-39f7-470e-963a-56509c546377",
+           "name": "Various Artists",
+           "sort-name": "Various Artists"
+          }
+         }
+        ],
+        "isrcs": []
+       },
+       "artist-credit": [
+        {
+         "name": "Beta Trio",
+         "joinphrase": "",
+         "artist": {
+          "id": "b1a9c0e0-0000-4000-8000-00000000f003",
+          "name": "Beta Trio",
+          "sort-name": "Trio, Beta"
+         }
+        }
+       ]
+      },
+      {
+       "id": "7a030100-0000-4000-8000-000000000003",
+       "position": 3,
+       "number": "3",
+       "title": "Hits Song 3",
+       "length": 2000,
+       "recording": {
+        "id": "8e030100-0000-4000-8000-000000000003",
+        "title": "Hits Song 3",
+        "length": 2000,
+        "disambiguation": "",
+        "artist-credit": [
+         {
+          "name": "Various Artists",
+          "joinphrase": "",
+          "artist": {
+           "id": "89ad4ac3-39f7-470e-963a-56509c546377",
+           "name": "Various Artists",
+           "sort-name": "Various Artists"
+          }
+         }
+        ],
+        "isrcs": []
+       },
+       "artist-credit": [
+        {
+         "name": "Alpha Act",
+         "joinphrase": "",
+         "artist": {
+          "id": "b1a9c0e0-0000-4000-8000-00000000f002",
+          "name": "Alpha Act",
+          "sort-name": "Act, Alpha"
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/release-group/d0000001-0000-4000-8000-000000000001?inc=genres&fmt=json",
+  "status": 200,
+  "body": {
+   "id": "d0000001-0000-4000-8000-000000000001",
+   "title": "Fixture Album",
+   "primary-type": "Album",
+   "first-release-date": "2001-05-01",
+   "genres": [
+    {
+     "id": "e0000000-0000-4000-8000-000000000001",
+     "name": "rock",
+     "count": 5,
+     "disambiguation": ""
+    },
+    {
+     "id": "e0000000-0000-4000-8000-000000000002",
+     "name": "indie rock",
+     "count": 3,
+     "disambiguation": ""
+    },
+    {
+     "id": "e0000000-0000-4000-8000-000000000003",
+     "name": "pop",
+     "count": 1,
+     "disambiguation": ""
+    }
+   ]
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/release-group/d0000002-0000-4000-8000-000000000001?inc=genres&fmt=json",
+  "status": 200,
+  "body": {
+   "id": "d0000002-0000-4000-8000-000000000001",
+   "title": "Double Fixture",
+   "primary-type": "Album",
+   "first-release-date": "2003",
+   "genres": [
+    {
+     "id": "e0000000-0000-4000-8000-000000000001",
+     "name": "electronic",
+     "count": 4,
+     "disambiguation": ""
+    },
+    {
+     "id": "e0000000-0000-4000-8000-000000000002",
+     "name": "ambient",
+     "count": 2,
+     "disambiguation": ""
+    }
+   ]
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/release-group/d0000003-0000-4000-8000-000000000001?inc=genres&fmt=json",
+  "status": 200,
+  "body": {
+   "id": "d0000003-0000-4000-8000-000000000001",
+   "title": "Fixture Hits",
+   "primary-type": "Album",
+   "first-release-date": "2005-11-11",
+   "genres": [
+    {
+     "id": "e0000000-0000-4000-8000-000000000001",
+     "name": "pop",
+     "count": 6,
+     "disambiguation": ""
+    },
+    {
+     "id": "e0000000-0000-4000-8000-000000000002",
+     "name": "dance",
+     "count": 2,
+     "disambiguation": ""
+    }
+   ]
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/recording/8e010100-0000-4000-8000-000000000001?inc=releases&fmt=json",
+  "status": 200,
+  "body": {
+   "id": "8e010100-0000-4000-8000-000000000001",
+   "title": "Fixture Song 1",
+   "length": 2000,
+   "disambiguation": "",
+   "video": false,
+   "releases": [
+    {
+     "id": "c0000001-0000-4000-8000-000000000001",
+     "title": "Fixture Album",
+     "status": "Official",
+     "date": "2001-05-01",
+     "country": "XW"
+    },
+    {
+     "id": "c0000003-0000-4000-8000-000000000001",
+     "title": "Fixture Hits",
+     "status": "Official",
+     "date": "2005-11-11",
+     "country": "XW"
+    }
+   ]
+  }
+ },
+ {
+  "method": "GET",
+  "url": "/release/c0000099-0000-4000-8000-000000000001?inc=recordings%2Bartist-credits%2Brelease-groups%2Blabels%2Bisrcs%2Bmedia%2Bgenres&fmt=json",
+  "status": 404,
+  "body": {
+   "error": "Not Found"
+  }
+ }
+]

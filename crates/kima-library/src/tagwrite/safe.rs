@@ -210,7 +210,8 @@ fn run(
         changed.sort_unstable();
         changed.dedup();
         return Err(TagWriteError::Verify(format!(
-            "these frames would have changed: {}; nothing written",
+            "these {} would have changed: {}; nothing written",
+            super::noun(container),
             changed.join(", ")
         )));
     }

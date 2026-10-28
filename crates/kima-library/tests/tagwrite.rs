@@ -7,7 +7,7 @@ use common::{Picard, Tags, embed_cover, make_audio, png_bytes, require_ffmpeg, t
 use kima_library::organize::apply::IGNORE_GRACE;
 use kima_library::tagwrite::{
     Container, Id3Version, NativeTags, NumberPair, TagValues, TagWriteError, WriteHooks, audio_md5,
-    container_of, id3_version, native, read_native, refuse_symlink, safe_write,
+    container_of, id3_version, native, native_for_file, read_native, refuse_symlink, safe_write,
 };
 use kima_library::watch::IgnoreSet;
 use lofty::config::{ParseOptions, WriteOptions};
@@ -712,9 +712,10 @@ fn wrong_version_or_container_refused() {
     );
     let err = safe_write(&p, 1, Container::Flac, None, &new, &ignore, &hooks).unwrap_err();
     assert!(matches!(err, TagWriteError::Verify(_)), "{err:?}");
-    // The writer's own copy name is never a file to write.
+    // The writer's own copy name is never a file to write, nor deleted.
     let own = dir.path().join(".kima-tag-9.mp3");
     std::fs::copy(&p, &own).unwrap();
+    let own_before = sha(&own);
     assert!(
         safe_write(
             &own,
@@ -727,6 +728,8 @@ fn wrong_version_or_container_refused() {
         )
         .is_err()
     );
+    assert!(own.exists(), "the file named like a copy is still there");
+    assert_eq!(sha(&own), own_before);
     assert_eq!(sha(&p), before);
 }
 
@@ -764,4 +767,687 @@ fn panic_in_write_cleans_up() {
     );
     std::thread::sleep(IGNORE_GRACE + std::time::Duration::from_millis(500));
     assert!(!ignore.contains(&p), "the hold is released");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Vorbis comments (FLAC, Ogg Vorbis, Opus) and MP4
+
+use lofty::flac::FlacFile;
+use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst, Mp4File};
+use lofty::ogg::tag::VorbisComments;
+use lofty::ogg::{OggPictureStorage, OpusFile, VorbisFile};
+use lofty::picture::{MimeType, Picture, PictureType};
+
+fn container_for(ext: &str) -> Container {
+    match ext {
+        "flac" => Container::Flac,
+        "ogg" => Container::Ogg,
+        "opus" => Container::Opus,
+        "m4a" => Container::Mp4,
+        _ => Container::Mp3,
+    }
+}
+
+fn opts() -> ParseOptions {
+    ParseOptions::new()
+        .read_properties(false)
+        .implicit_conversions(false)
+}
+
+/// The file's Vorbis comments, a FLAC file's `PICTURE` blocks included.
+fn vorbis(path: &Path) -> VorbisComments {
+    let mut f = std::fs::File::open(path).unwrap();
+    match path.extension().and_then(|e| e.to_str()).unwrap() {
+        "flac" => {
+            let file = FlacFile::read_from(&mut f, opts()).unwrap();
+            let mut vc = file.vorbis_comments().cloned().unwrap_or_default();
+            for (pic, info) in file.pictures() {
+                vc.insert_picture(pic.clone(), Some(*info)).unwrap();
+            }
+            vc
+        }
+        "ogg" => VorbisFile::read_from(&mut f, opts())
+            .unwrap()
+            .vorbis_comments()
+            .clone(),
+        _ => OpusFile::read_from(&mut f, opts())
+            .unwrap()
+            .vorbis_comments()
+            .clone(),
+    }
+}
+
+fn ilst(path: &Path) -> Ilst {
+    let mut f = std::fs::File::open(path).unwrap();
+    Mp4File::read_from(&mut f, opts())
+        .unwrap()
+        .ilst()
+        .cloned()
+        .unwrap()
+}
+
+fn freeform(name: &str) -> AtomIdent<'static> {
+    AtomIdent::Freeform {
+        mean: "com.apple.iTunes".into(),
+        name: name.to_string().into(),
+    }
+}
+
+fn cover_png() -> Picture {
+    Picture::unchecked(png_bytes(16, 16, [200, 10, 10]))
+        .pic_type(PictureType::CoverFront)
+        .mime_type(MimeType::Png)
+        .build()
+}
+
+fn picard() -> Picard<'static> {
+    Picard {
+        recording: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        release: Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        artists: vec!["cccccccc-cccc-4ccc-8ccc-cccccccccccc"],
+        genres: vec!["Jazz"],
+        track: Some((5, 9)),
+        ..Default::default()
+    }
+}
+
+/// A tone with ffmpeg's tags, Picard's MBIDs, a cover, ReplayGain and a two-valued custom field.
+fn vorbis_fixture(dir: &Path, rel: &str) -> PathBuf {
+    let p = make_audio(dir, rel, Tags::full());
+    tag_picard(&p, &picard());
+    let mut vc = vorbis(&p);
+    vc.push("REPLAYGAIN_TRACK_GAIN".into(), "-6.50 dB".into());
+    vc.push("MY TAG".into(), "keep me".into());
+    vc.push("MY TAG".into(), "and me".into());
+    vc.insert_picture(cover_png(), None).unwrap();
+    vc.save_to_path(&p, WriteOptions::default()).unwrap();
+    p
+}
+
+/// The same for MP4: freeform ReplayGain and custom atoms, a cover.
+fn mp4_fixture(dir: &Path, rel: &str) -> PathBuf {
+    let p = make_audio(dir, rel, Tags::full());
+    tag_picard(&p, &picard());
+    let mut tag = ilst(&p);
+    tag.insert(Atom::new(
+        freeform("REPLAYGAIN_TRACK_GAIN"),
+        AtomData::UTF8("-6.50 dB".into()),
+    ));
+    tag.insert(
+        Atom::from_collection(
+            freeform("MY TAG"),
+            vec![
+                AtomData::UTF8("keep me".into()),
+                AtomData::UTF8("and me".into()),
+            ],
+        )
+        .unwrap(),
+    );
+    tag.insert_picture(cover_png());
+    tag.save_to_path(&p, WriteOptions::default()).unwrap();
+    p
+}
+
+fn fixture_for(dir: &Path, rel: &str) -> PathBuf {
+    if rel.ends_with(".m4a") {
+        mp4_fixture(dir, rel)
+    } else {
+        vorbis_fixture(dir, rel)
+    }
+}
+
+fn write_as(
+    path: &Path,
+    id: i64,
+    container: Container,
+    new: &NativeTags,
+) -> Result<kima_library::tagwrite::Written, TagWriteError> {
+    safe_write(
+        path,
+        id,
+        container,
+        None,
+        new,
+        &IgnoreSet::new(),
+        &WriteHooks::default(),
+    )
+}
+
+/// What every container must keep: the cover, ReplayGain and the custom field.
+fn kept_extras(path: &Path) -> (Vec<u8>, Vec<String>, Vec<String>) {
+    if path.extension().is_some_and(|e| e == "m4a") {
+        let tag = ilst(path);
+        let texts = |name: &str| {
+            tag.get(&freeform(name))
+                .map(|a| {
+                    a.data()
+                        .filter_map(|d| match d {
+                            AtomData::UTF8(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let cover = tag.pictures().unwrap().next().unwrap().data().to_vec();
+        (cover, texts("REPLAYGAIN_TRACK_GAIN"), texts("MY TAG"))
+    } else {
+        let vc = vorbis(path);
+        let all = |k: &str| vc.get_all(k).map(str::to_string).collect::<Vec<_>>();
+        let cover = vc.pictures()[0].0.data().to_vec();
+        (cover, all("REPLAYGAIN_TRACK_GAIN"), all("MY TAG"))
+    }
+}
+
+fn round_trip(ext: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let p = fixture_for(dir.path(), &format!("a.{ext}"));
+    let c = container_for(ext);
+    assert_eq!(container_of(&p).unwrap(), c);
+    assert_eq!(id3_version(&p).unwrap(), None);
+    let md5 = audio_md5(&p).unwrap();
+    let extras = kept_extras(&p);
+    assert_eq!(extras.0, png_bytes(16, 16, [200, 10, 10]));
+    assert_eq!(extras.1, vec!["-6.50 dB"]);
+    assert_eq!(extras.2, vec!["keep me", "and me"]);
+
+    let new = native_for_file(&p, c, None, &every_field()).unwrap();
+    assert_eq!(new, native(c, None, &every_field()), "no TOTALTRACKS here");
+    if c == Container::Mp4 {
+        assert_eq!(new.len(), 18);
+        assert_eq!(new["trkn"], vec!["3/12"]);
+        assert_eq!(new["disk"], vec!["1/2"]);
+        assert_eq!(new["©gen"], vec!["Rock; Pop"]);
+        assert_eq!(new["cpil"], vec!["1"]);
+        assert_eq!(
+            new["----:com.apple.iTunes:MusicBrainz Artist Id"],
+            vec![ARTIST_A, ARTIST_B]
+        );
+    } else {
+        let expected = [
+            "ALBUM",
+            "ALBUMARTIST",
+            "ALBUMARTISTSORT",
+            "ARTIST",
+            "ARTISTSORT",
+            "COMPILATION",
+            "DATE",
+            "DISCNUMBER",
+            "DISCTOTAL",
+            "GENRE",
+            "MUSICBRAINZ_ALBUMARTISTID",
+            "MUSICBRAINZ_ALBUMID",
+            "MUSICBRAINZ_ARTISTID",
+            "MUSICBRAINZ_RELEASEGROUPID",
+            "MUSICBRAINZ_RELEASETRACKID",
+            "MUSICBRAINZ_TRACKID",
+            "ORIGINALDATE",
+            "TITLE",
+            "TRACKNUMBER",
+            "TRACKTOTAL",
+        ];
+        assert_eq!(new.keys().map(String::as_str).collect::<Vec<_>>(), expected);
+        assert_eq!(new["GENRE"], vec!["Rock", "Pop"]);
+        assert_eq!(new["TRACKNUMBER"], vec!["3"]);
+        assert_eq!(new["TRACKTOTAL"], vec!["12"]);
+        assert_eq!(new["MUSICBRAINZ_ARTISTID"], vec![ARTIST_A, ARTIST_B]);
+    }
+
+    let w = write_as(&p, 1, c, &new).unwrap_or_else(|e| panic!("{ext}: {e}"));
+    assert_eq!(read_native(&p, c, &keys(&new)).unwrap(), new);
+    assert_eq!(kept_extras(&p), extras, "{ext}: cover, ReplayGain, custom");
+    assert_eq!(audio_md5(&p).unwrap(), md5);
+    assert_eq!(w.audio_md5, md5);
+    assert_eq!(w.after_sha.to_vec(), sha(&p));
+    assert!(leftovers(dir.path()).is_empty());
+
+    // The scanner reads what was written.
+    let t = kima_library::tags::read(&p).unwrap();
+    assert_eq!(t.title.as_deref(), Some("New Title"));
+    assert_eq!(t.album_artist.as_deref(), Some("New Album Artist"));
+    assert_eq!(t.recording_mbid, Some(Uuid::parse_str(REC).unwrap()));
+    assert_eq!(t.artist_mbids.len(), 2);
+    assert_eq!(t.genres, vec!["Rock".to_string(), "Pop".to_string()]);
+    assert_eq!(
+        (t.track, t.track_total, t.disc, t.disc_total),
+        (Some(3), Some(12), Some(1), Some(2))
+    );
+    assert!(t.compilation);
+
+    // Undo restores every touched key, absent ones included.
+    let old_dir = tempfile::tempdir().unwrap();
+    let orig = fixture_for(old_dir.path(), &format!("o.{ext}"));
+    let old = read_native(&orig, c, &keys(&new)).unwrap();
+    write_as(&p, 2, c, &old).unwrap();
+    assert_eq!(read_native(&p, c, &keys(&new)).unwrap(), old);
+    assert_eq!(kept_extras(&p), extras);
+    assert_eq!(audio_md5(&p).unwrap(), md5);
+}
+
+#[test]
+fn flac_round_trip() {
+    if !require_ffmpeg() {
+        return;
+    }
+    round_trip("flac");
+}
+
+#[test]
+fn ogg_round_trip() {
+    if !require_ffmpeg() {
+        return;
+    }
+    round_trip("ogg");
+}
+
+#[test]
+fn opus_round_trip() {
+    if !require_ffmpeg() {
+        return;
+    }
+    round_trip("opus");
+}
+
+#[test]
+fn m4a_round_trip() {
+    if !require_ffmpeg() {
+        return;
+    }
+    round_trip("m4a");
+}
+
+#[test]
+fn vorbis_totaltracks_only_when_present() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = vorbis_fixture(dir.path(), "a.flac");
+    let v = every_field();
+    let n = native_for_file(&p, Container::Flac, None, &v).unwrap();
+    assert!(!n.contains_key("TOTALTRACKS") && !n.contains_key("TOTALDISCS"));
+
+    let mut vc = vorbis(&p);
+    vc.push("totaltracks".into(), "9".into());
+    vc.push("TOTALDISCS".into(), "3".into());
+    vc.save_to_path(&p, WriteOptions::default()).unwrap();
+    let n = native_for_file(&p, Container::Flac, None, &v).unwrap();
+    assert_eq!(n["TOTALTRACKS"], vec!["12"]);
+    assert_eq!(n["TOTALDISCS"], vec!["2"]);
+    let old = read_native(&p, Container::Flac, &keys(&n)).unwrap();
+    assert_eq!(old["TOTALTRACKS"], vec!["9"]);
+    assert_eq!(old["TRACKTOTAL"], vec!["9"], "Picard's TRACKTOTAL");
+
+    write_as(&p, 1, Container::Flac, &n).unwrap();
+    let vc = vorbis(&p);
+    assert_eq!(vc.get_all("TOTALTRACKS").collect::<Vec<_>>(), ["12"]);
+    assert_eq!(vc.get_all("TRACKTOTAL").collect::<Vec<_>>(), ["12"]);
+    assert_eq!(vc.get_all("TOTALDISCS").collect::<Vec<_>>(), ["2"]);
+    write_as(&p, 2, Container::Flac, &old).unwrap();
+    assert_eq!(read_native(&p, Container::Flac, &keys(&n)).unwrap(), old);
+
+    // Without a total, the totals are removed with the number written.
+    let no_total = TagValues {
+        track: Some(NumberPair {
+            number: 4,
+            total: None,
+        }),
+        ..TagValues::default()
+    };
+    let n = native_for_file(&p, Container::Flac, None, &no_total).unwrap();
+    assert!(n["TRACKTOTAL"].is_empty() && n["TOTALTRACKS"].is_empty());
+    write_as(&p, 3, Container::Flac, &n).unwrap();
+    let vc = vorbis(&p);
+    assert_eq!(vc.get_all("TRACKNUMBER").collect::<Vec<_>>(), ["4"]);
+    assert_eq!(vc.get_all("TRACKTOTAL").count(), 0);
+    assert_eq!(vc.get_all("TOTALTRACKS").count(), 0);
+    assert_eq!(vc.get_all("TOTALDISCS").collect::<Vec<_>>(), ["3"]);
+}
+
+#[test]
+fn mp4_freeform_multi_value() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = mp4_fixture(dir.path(), "a.m4a");
+    let new = native(Container::Mp4, None, &every_field());
+    write_as(&p, 1, Container::Mp4, &new).unwrap();
+
+    let tag = ilst(&p);
+    let artist_ids: Vec<&AtomData> = tag
+        .get(&freeform("MusicBrainz Artist Id"))
+        .unwrap()
+        .data()
+        .collect();
+    assert_eq!(
+        artist_ids,
+        [
+            &AtomData::UTF8(ARTIST_A.into()),
+            &AtomData::UTF8(ARTIST_B.into())
+        ],
+        "one data atom per value"
+    );
+    let genre: Vec<&AtomData> = tag
+        .get(&AtomIdent::Fourcc(*b"\xa9gen"))
+        .unwrap()
+        .data()
+        .collect();
+    assert_eq!(genre, [&AtomData::UTF8("Rock; Pop".into())]);
+    assert!(tag.is_compilation());
+    let trkn: Vec<&AtomData> = tag
+        .get(&AtomIdent::Fourcc(*b"trkn"))
+        .unwrap()
+        .data()
+        .collect();
+    assert!(
+        matches!(trkn[..], [AtomData::Unknown { data, .. }] if data == &[0, 0, 0, 3, 0, 12, 0, 0])
+    );
+    let disk: Vec<&AtomData> = tag
+        .get(&AtomIdent::Fourcc(*b"disk"))
+        .unwrap()
+        .data()
+        .collect();
+    assert!(matches!(disk[..], [AtomData::Unknown { data, .. }] if data == &[0, 0, 0, 1, 0, 2]));
+
+    // A file whose atom already holds several values keeps them apart on undo.
+    let old = read_native(&p, Container::Mp4, &keys(&new)).unwrap();
+    let mut two = old.clone();
+    two.insert(
+        "©gen".to_string(),
+        vec!["Jazz".to_string(), "Blues".to_string()],
+    );
+    write_as(&p, 2, Container::Mp4, &two).unwrap();
+    assert_eq!(read_native(&p, Container::Mp4, &keys(&new)).unwrap(), two);
+    assert_eq!(
+        kima_library::tags::read(&p).unwrap().genres,
+        vec!["Jazz".to_string(), "Blues".to_string()]
+    );
+    // `cpil` false is removed; a stored `0` reads back as `0`.
+    let mut flags = NativeTags::new();
+    flags.insert("cpil".into(), vec!["0".into()]);
+    write_as(&p, 3, Container::Mp4, &flags).unwrap();
+    assert_eq!(
+        read_native(&p, Container::Mp4, &keys(&flags)).unwrap(),
+        flags
+    );
+    assert!(!ilst(&p).is_compilation());
+}
+
+#[test]
+fn m4a_moov_before_mdat_grows_with_valid_offsets() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("fast.m4a");
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i", "sine=duration=2"])
+        .args(["-c:a", "aac", "-movflags", "+faststart"])
+        .arg(&p)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let bytes = std::fs::read(&p).unwrap();
+    let at = |f: &[u8]| bytes.windows(4).position(|w| w == f).unwrap();
+    assert!(at(b"moov") < at(b"mdat"), "moov comes first");
+    let md5 = audio_md5(&p).unwrap();
+
+    let big = TagValues {
+        title: Some("Long ".repeat(2000)),
+        ..every_field()
+    };
+    let new = native(Container::Mp4, None, &big);
+    let before_len = bytes.len();
+    write_as(&p, 1, Container::Mp4, &new).unwrap();
+    assert!(std::fs::metadata(&p).unwrap().len() > before_len as u64 + 10_000);
+    let bytes = std::fs::read(&p).unwrap();
+    let at = |f: &[u8]| bytes.windows(4).position(|w| w == f).unwrap();
+    assert!(at(b"moov") < at(b"mdat"), "the audio moved");
+    assert_eq!(audio_md5(&p).unwrap(), md5, "the chunk offsets follow it");
+    assert_eq!(read_native(&p, Container::Mp4, &keys(&new)).unwrap(), new);
+}
+
+#[test]
+fn flac_keeps_other_metadata_blocks() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = vorbis_fixture(dir.path(), "a.flac");
+    // An APPLICATION block right after STREAMINFO.
+    let mut bytes = std::fs::read(&p).unwrap();
+    let after_streaminfo = 4 + 4 + 34;
+    let app = [&[0x02, 0, 0, 8][..], b"kima", b"data"].concat();
+    bytes.splice(after_streaminfo..after_streaminfo, app.iter().copied());
+    std::fs::write(&p, &bytes).unwrap();
+    let md5 = audio_md5(&p).unwrap();
+
+    write_as(
+        &p,
+        1,
+        Container::Flac,
+        &native(Container::Flac, None, &every_field()),
+    )
+    .unwrap();
+    let bytes = std::fs::read(&p).unwrap();
+    assert!(bytes.windows(8).any(|w| w == b"kimadata"));
+    assert_eq!(audio_md5(&p).unwrap(), md5);
+    assert_eq!(kept_extras(&p).0, png_bytes(16, 16, [200, 10, 10]));
+}
+
+/// Writes every field into `p` and asserts the refusal: the message contains `needle`, the file
+/// is byte-identical and no copy is left.
+fn assert_refused(p: &Path, c: Container, needle: &str) {
+    let before = sha(p);
+    let err = write_as(p, 1, c, &native(c, None, &every_field())).unwrap_err();
+    assert!(matches!(err, TagWriteError::Verify(_)), "{err:?}");
+    assert!(err.to_string().contains(needle), "{err}");
+    assert!(err.to_string().ends_with("; nothing written"), "{err}");
+    assert_eq!(sha(p), before);
+    assert!(leftovers(p.parent().unwrap()).is_empty());
+}
+
+#[test]
+fn vorbis_field_lofty_cannot_read_refuses_the_write() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    for ext in ["flac", "ogg"] {
+        let p = vorbis_fixture(dir.path(), &format!("a.{ext}"));
+        // A value that is not UTF-8: lofty drops the field while reading.
+        patch(&p, b"keep me", b"keep\xffme");
+        if ext == "ogg" {
+            fix_ogg_crcs(&p);
+        }
+        assert_refused(&p, container_for(ext), "MY TAG (2 → 1)");
+    }
+}
+
+#[test]
+fn flac_picture_field_refuses_the_write() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = vorbis_fixture(dir.path(), "a.flac");
+    // A METADATA_BLOCK_PICTURE comment in a FLAC file: lofty would turn it into a PICTURE block.
+    let pic = Picture::unchecked(png_bytes(4, 4, [1, 2, 3]))
+        .mime_type(MimeType::Png)
+        .build();
+    let info = lofty::picture::PictureInformation::from_picture(&pic).unwrap();
+    let encoded = String::from_utf8(pic.as_flac_bytes(info, true)).unwrap();
+    let mut file = {
+        let mut f = std::fs::File::open(&p).unwrap();
+        FlacFile::read_from(&mut f, opts()).unwrap()
+    };
+    let mut vc = file.vorbis_comments().cloned().unwrap();
+    vc.push("METADATA_BLOCK_PICTURE".into(), encoded);
+    file.set_vorbis_comments(vc);
+    file.save_to_path(&p, WriteOptions::default()).unwrap();
+    assert!(
+        std::fs::read(&p)
+            .unwrap()
+            .windows(23)
+            .any(|w| w == b"METADATA_BLOCK_PICTURE=")
+    );
+    assert_refused(&p, Container::Flac, "METADATA_BLOCK_PICTURE (1 → 0)");
+}
+
+#[test]
+fn flac_two_comment_blocks_refused() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = vorbis_fixture(dir.path(), "a.flac");
+    let mut bytes = std::fs::read(&p).unwrap();
+    let mut block = vec![0x04, 0, 0, 0];
+    let mut content = 0u32.to_le_bytes().to_vec();
+    content.extend(1u32.to_le_bytes());
+    content.extend(5u32.to_le_bytes());
+    content.extend(b"X=one");
+    block[3] = content.len() as u8;
+    block.extend(content);
+    bytes.splice(42..42, block);
+    std::fs::write(&p, &bytes).unwrap();
+    assert_refused(
+        &p,
+        Container::Flac,
+        "the file has 2 VORBIS_COMMENT blocks; nothing written",
+    );
+}
+
+#[test]
+fn chained_ogg_refused() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let a = make_audio(dir.path(), "a.ogg", Tags::full());
+    let b = make_audio(dir.path(), "b.ogg", Tags::default());
+    let p = dir.path().join("chained.ogg");
+    let mut bytes = std::fs::read(&a).unwrap();
+    bytes.extend(std::fs::read(&b).unwrap());
+    std::fs::write(&p, bytes).unwrap();
+    std::fs::remove_file(&a).unwrap();
+    std::fs::remove_file(&b).unwrap();
+    assert_refused(
+        &p,
+        Container::Ogg,
+        "multi-stream and chained Ogg files are not written; nothing written",
+    );
+}
+
+/// The Ogg page checksum (CRC-32, polynomial 0x04C11DB7, not reflected).
+fn ogg_crc(page: &[u8]) -> u32 {
+    let mut crc = 0u32;
+    for b in page {
+        crc ^= u32::from(*b) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04C1_1DB7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// Recomputes every page checksum after an edit that kept the page sizes.
+fn fix_ogg_crcs(path: &Path) {
+    let mut b = std::fs::read(path).unwrap();
+    let mut pos = 0;
+    while pos + 27 <= b.len() && &b[pos..pos + 4] == b"OggS" {
+        let nseg = usize::from(b[pos + 26]);
+        let size: usize = b[pos + 27..pos + 27 + nseg]
+            .iter()
+            .map(|x| usize::from(*x))
+            .sum();
+        let end = pos + 27 + nseg + size;
+        b[pos + 22..pos + 26].fill(0);
+        let crc = ogg_crc(&b[pos..end]);
+        b[pos + 22..pos + 26].copy_from_slice(&crc.to_le_bytes());
+        pos = end;
+    }
+    std::fs::write(path, b).unwrap();
+}
+
+#[test]
+fn opus_tags_binary_data_refused() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = make_audio(dir.path(), "a.opus", Tags::default());
+    // Append binary data (first bit set: RFC 7845 says keep it) to the OpusTags packet, which
+    // ends the second page.
+    let mut b = std::fs::read(&p).unwrap();
+    let page2 = 27
+        + usize::from(b[26])
+        + b[27..27 + usize::from(b[26])]
+            .iter()
+            .map(|x| usize::from(*x))
+            .sum::<usize>();
+    assert_eq!(&b[page2..page2 + 4], b"OggS");
+    let nseg = usize::from(b[page2 + 26]);
+    let last = page2 + 27 + nseg - 1;
+    assert!(b[last] < 250, "the packet ends with a short segment");
+    b[last] += 3;
+    let size: usize = b[page2 + 27..page2 + 27 + nseg]
+        .iter()
+        .map(|x| usize::from(*x))
+        .sum();
+    let end = page2 + 27 + nseg + size - 3;
+    b.splice(end..end, [0x01, 0xAB, 0xCD]);
+    std::fs::write(&p, b).unwrap();
+    fix_ogg_crcs(&p);
+    assert!(audio_md5(&p).is_ok(), "still a valid file");
+    assert_refused(&p, Container::Opus, "OpusTags binary data (1 → 0)");
+}
+
+#[test]
+fn mp4_item_lofty_cannot_read_refuses_the_write() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = mp4_fixture(dir.path(), "a.m4a");
+    // An unknown type set in the custom atom's first `data`: lofty skips that value (and, its
+    // skip miscounting the bytes, loses the items after it).
+    let mut b = std::fs::read(&p).unwrap();
+    let name = b.windows(6).position(|w| w == b"MY TAG").unwrap();
+    let data = name + b[name..].windows(4).position(|w| w == b"data").unwrap();
+    b[data + 4] = 7;
+    std::fs::write(&p, b).unwrap();
+    assert_refused(
+        &p,
+        Container::Mp4,
+        "these atoms would be lost or changed: ilst ",
+    );
+}
+
+#[test]
+fn fragmented_mp4_refused() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("frag.m4a");
+    let status = std::process::Command::new("ffmpeg")
+        .args(["-y", "-v", "error", "-f", "lavfi", "-i", "sine=duration=2"])
+        .args(["-c:a", "aac", "-metadata", "title=T"])
+        .args(["-movflags", "frag_keyframe+empty_moov"])
+        .arg(&p)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(container_of(&p).unwrap(), Container::Mp4);
+    assert_refused(
+        &p,
+        Container::Mp4,
+        "fragmented MP4 files are not written; nothing written",
+    );
 }

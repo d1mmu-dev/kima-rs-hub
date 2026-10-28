@@ -42,6 +42,7 @@ libc = "0.2"
 insta = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 lofty = "0.25"
+pathfinding = "4"
 rand = "0.8"
 regex = "1"
 reqwest = { version = "0.12", default-features = false }

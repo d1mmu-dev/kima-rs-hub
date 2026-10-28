@@ -213,7 +213,9 @@ pub fn track_distance(
     } else {
         joined(&track.artist_credit)
     };
-    if release_is_va || credit.trim() != release_credit.trim() {
+    // Beets skips the key when the local track has no artist: nothing to compare.
+    let has_artist = !local.artist_name.trim().is_empty();
+    if has_artist && (release_is_va || credit.trim() != release_credit.trim()) {
         d.add(
             "track_artist",
             W_TRACK_ARTIST,

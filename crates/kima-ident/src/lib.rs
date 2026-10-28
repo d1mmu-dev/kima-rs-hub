@@ -4,6 +4,7 @@ pub mod acoustid;
 pub mod album_covers;
 mod answer;
 pub mod artist;
+pub mod autotag;
 pub mod chromaprint;
 pub mod coordinator;
 pub mod coverartarchive;

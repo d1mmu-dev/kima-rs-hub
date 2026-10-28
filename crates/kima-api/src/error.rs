@@ -54,8 +54,32 @@ impl From<sqlx::Error> for ApiError {
     }
 }
 
+impl ApiError {
+    /// A conflict that reached the handler wrapped in another error is still a busy answer.
+    fn normalized(self) -> Self {
+        match self {
+            Self::Internal(e)
+                if e.chain().any(|c| {
+                    c.downcast_ref::<sqlx::Error>()
+                        .is_some_and(kima_db::is_retryable_conflict)
+                }) =>
+            {
+                Self::Busy
+            }
+            other => other,
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let this = self.normalized();
+        this.respond()
+    }
+}
+
+impl ApiError {
+    fn respond(self) -> Response {
         let status = match &self {
             Self::Invalid(_)
             | Self::InvalidSettings(_)
@@ -163,6 +187,28 @@ mod tests {
                 "{code}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn anyhow_wrapped_deadlock_is_503() {
+        let wrapped =
+            anyhow::Error::new(sqlx::Error::Database(Box::new(FakeDbError("40P01")))).context("x");
+        let response = ApiError::Internal(wrapped).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .unwrap(),
+            "1"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            json!({ "error": "Temporarily busy, please retry" })
+        );
     }
 
     #[tokio::test]

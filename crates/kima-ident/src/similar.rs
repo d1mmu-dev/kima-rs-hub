@@ -147,7 +147,7 @@ pub const MAX_CANDIDATES: i64 = 200;
 
 /// A library artist that may be one of the similar artists.
 #[derive(Debug)]
-pub struct Candidate {
+pub(crate) struct Candidate {
     pub id: Uuid,
     pub name: String,
     pub mbid: Option<Uuid>,
@@ -161,7 +161,7 @@ pub struct Candidate {
 /// Found through indexes, never a scan of every artist: the MBIDs (`artists_mbid_idx`), the
 /// identity keys (`name_key`), and the unaccented search vector (`artists_search_idx`) holding
 /// every word of a name's spellings (as given, normalised, and with "and" written `&`).
-pub async fn candidates(pool: &PgPool, entries: &[Entry]) -> sqlx::Result<Vec<Candidate>> {
+pub(crate) async fn candidates(pool: &PgPool, entries: &[Entry]) -> sqlx::Result<Vec<Candidate>> {
     let mbids: Vec<Uuid> = entries.iter().filter_map(|e| e.mbid.map(|m| m.0)).collect();
     let keys: Vec<String> = entries
         .iter()
@@ -272,4 +272,83 @@ pub async fn resolve(
             library_name: found.map(|c| c.name.clone()),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use kima_db::library::{self, Guessed, ResolvedTrack};
+    use time::OffsetDateTime;
+
+    use super::*;
+
+    /// One present track at `<artist>/<album>/<title>.mp3`; returns the artist id.
+    async fn seed(pool: &PgPool, artist: &str, album: &str, title: &str) -> Uuid {
+        let mut tx = pool.begin().await.unwrap();
+        let track = library::upsert_track(
+            &mut tx,
+            &ResolvedTrack {
+                album_artist: artist.into(),
+                album_artist_key: artist.to_lowercase(),
+                track_artist: artist.into(),
+                album: album.into(),
+                album_key: album.to_lowercase(),
+                album_year: None,
+                track_year: None,
+                is_compilation: false,
+                disc: 1,
+                track_no: 1,
+                title: title.into(),
+                duration_secs: 180,
+                codec: "mp3".into(),
+                bitrate: Some(320),
+                path: format!("{artist}/{album}/{title}.mp3"),
+                size: 1,
+                mtime: OffsetDateTime::now_utc(),
+                fingerprint: [1; 32],
+                guessed: Guessed::default(),
+                ids: Default::default(),
+                isrc: None,
+                disc_total: None,
+                track_total: None,
+                artist_mbid_candidate: None,
+            },
+        )
+        .await
+        .unwrap()
+        .track;
+        tx.commit().await.unwrap();
+        sqlx::query_scalar(
+            "SELECT al.artist_id FROM tracks t JOIN albums al ON al.id = t.album_id WHERE t.id = $1",
+        )
+        .bind(track)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A name that matches many artists through the search vector ("The") reads at most
+    /// `MAX_CANDIDATES` rows, the exact identity-key match first even though it has the highest
+    /// id.
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn candidates_are_capped_with_exact_matches_first(pool: PgPool) {
+        for n in 0..MAX_CANDIDATES + 50 {
+            seed(&pool, &format!("The Band {n}"), "A", "t").await;
+        }
+        let exact = seed(&pool, "The", "T1", "t1").await;
+        seed(&pool, "The", "T2", "t2").await;
+        let entries = [Entry {
+            name: "The".into(),
+            mbid: None,
+            r#match: 0.9,
+        }];
+
+        let found = candidates(&pool, &entries).await.unwrap();
+        assert_eq!(found.len() as i64, MAX_CANDIDATES);
+        assert_eq!(found[0].id, exact);
+
+        let resolved = resolve(&pool, &entries, 10).await.unwrap();
+        assert_eq!(resolved[0].id, exact.to_string());
+        assert!(resolved[0].in_library);
+        assert_eq!(resolved[0].owned_album_count, 2);
+    }
 }

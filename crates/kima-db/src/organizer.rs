@@ -22,6 +22,10 @@ pub struct Run {
     pub switched_at: Option<OffsetDateTime>,
     pub summary: Value,
     pub error: Option<String>,
+    /// The albums a scoped run plans; `None` is the whole library.
+    pub album_ids: Option<Vec<Uuid>>,
+    /// `user` or `autotag`.
+    pub origin: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -76,10 +80,21 @@ pub struct PlanTrack {
     pub track_no: i32,
     pub title: String,
     pub is_compilation: bool,
+    pub disc_total: Option<i32>,
+}
+
+/// One album's rows in a run's preview: the group a page never splits.
+#[derive(Debug, Clone)]
+pub struct AlbumRows {
+    /// `None` for the trailing group of rows that belong to no album.
+    pub album_id: Option<Uuid>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub rows: Vec<RowView>,
 }
 
 const RUN_COLUMNS: &str = "id, mode, state, source_root, target_root, created_by, created_at, \
-                           finished_at, switched_at, summary, error";
+                           finished_at, switched_at, summary, error, album_ids, origin";
 const ROW_COLUMNS: &str =
     "id, run_id, track_id, from_path, to_path, sha256, state, note, collision, applied_seq";
 
@@ -91,17 +106,78 @@ pub async fn create_run(
     target_root: &str,
     created_by: Option<Uuid>,
 ) -> sqlx::Result<Run> {
+    insert_run(
+        pool,
+        id,
+        mode,
+        source_root,
+        target_root,
+        created_by,
+        None,
+        "user",
+    )
+    .await
+}
+
+/// A run that plans only the tracks of `album_ids`.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_scoped_run(
+    pool: &PgPool,
+    id: Uuid,
+    mode: &str,
+    source_root: &str,
+    target_root: &str,
+    created_by: Option<Uuid>,
+    album_ids: &[Uuid],
+    origin: &str,
+) -> sqlx::Result<Run> {
+    insert_run(
+        pool,
+        id,
+        mode,
+        source_root,
+        target_root,
+        created_by,
+        Some(album_ids),
+        origin,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_run(
+    pool: &PgPool,
+    id: Uuid,
+    mode: &str,
+    source_root: &str,
+    target_root: &str,
+    created_by: Option<Uuid>,
+    album_ids: Option<&[Uuid]>,
+    origin: &str,
+) -> sqlx::Result<Run> {
     sqlx::query_as(&format!(
-        "INSERT INTO organizer_runs (id, mode, source_root, target_root, created_by)
-         VALUES ($1, $2, $3, $4, $5) RETURNING {RUN_COLUMNS}"
+        "INSERT INTO organizer_runs (id, mode, source_root, target_root, created_by, album_ids, origin)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {RUN_COLUMNS}"
     ))
     .bind(id)
     .bind(mode)
     .bind(source_root)
     .bind(target_root)
     .bind(created_by)
+    .bind(album_ids)
+    .bind(origin)
     .fetch_one(pool)
     .await
+}
+
+/// Every `previewed` run becomes `superseded`: its plan no longer matches the library, so it
+/// can no longer be applied. Returns how many runs changed.
+pub async fn supersede_previewed(conn: &mut PgConnection) -> sqlx::Result<u64> {
+    let res =
+        sqlx::query("UPDATE organizer_runs SET state = 'superseded' WHERE state = 'previewed'")
+            .execute(&mut *conn)
+            .await?;
+    Ok(res.rows_affected())
 }
 
 pub async fn get_run(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Run>> {
@@ -279,6 +355,102 @@ pub async fn rows(
     Ok((rows, total))
 }
 
+/// The journal's rows with the album each belongs to: a track's own album; a sidecar (or a row
+/// whose track is gone) takes the album of a track that shares its target folder. `$1` is the
+/// run id.
+const EFFECTIVE_ALBUM: &str = "WITH jr AS (
+        SELECT j.id, t.album_id AS own_album, regexp_replace(j.to_path, '[^/]*$', '') AS dir
+        FROM organizer_journal j LEFT JOIN tracks t ON t.id = j.track_id
+        WHERE j.run_id = $1
+    ), fo AS (
+        SELECT dir, (array_agg(own_album ORDER BY own_album))[1] AS album_id
+        FROM jr WHERE own_album IS NOT NULL GROUP BY dir
+    ), eff AS (
+        SELECT jr.id, COALESCE(jr.own_album, fo.album_id) AS album_id
+        FROM jr LEFT JOIN fo ON fo.dir = jr.dir
+    )";
+
+/// One page of a run's journal by album: `limit` groups from `offset`, each with every one of
+/// its rows (plan order), plus the number of groups. Albums come ordered by artist, album, id;
+/// rows that belong to no album form a trailing group.
+pub async fn rows_by_album(
+    pool: &PgPool,
+    run_id: Uuid,
+    offset: i64,
+    limit: i64,
+) -> sqlx::Result<(Vec<AlbumRows>, i64)> {
+    let groups: Vec<(Option<Uuid>, Option<String>, Option<String>)> = sqlx::query_as(&format!(
+        "{EFFECTIVE_ALBUM}
+         SELECT e.album_id, ar.name, al.title
+         FROM eff e
+         LEFT JOIN albums al ON al.id = e.album_id
+         LEFT JOIN artists ar ON ar.id = al.artist_id
+         GROUP BY e.album_id, ar.name, al.title
+         ORDER BY (e.album_id IS NULL), ar.name, al.title, e.album_id
+         OFFSET $2 LIMIT $3"
+    ))
+    .bind(run_id)
+    .bind(offset)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let total: i64 = sqlx::query_scalar(&format!(
+        "{EFFECTIVE_ALBUM} SELECT count(*) FROM (SELECT album_id FROM eff GROUP BY album_id) g"
+    ))
+    .bind(run_id)
+    .fetch_one(pool)
+    .await?;
+    let ids: Vec<Uuid> = groups.iter().filter_map(|g| g.0).collect();
+    let with_none = groups.iter().any(|g| g.0.is_none());
+    let views: Vec<(Option<Uuid>, RowView)> = if groups.is_empty() {
+        Vec::new()
+    } else {
+        let rows: Vec<RowWithGroup> = sqlx::query_as(&format!(
+            "{EFFECTIVE_ALBUM}
+             SELECT e.album_id AS group_id,
+                    j.id, j.run_id, j.track_id, j.from_path, j.to_path, j.sha256, j.state, j.note,
+                    j.collision, j.applied_seq,
+                    al.id AS album_id, al.title AS album, ar.name AS artist,
+                    al.year AS album_year, t.track_no, t.guessed
+             FROM organizer_journal j
+             JOIN eff e ON e.id = j.id
+             LEFT JOIN tracks t ON t.id = j.track_id
+             LEFT JOIN albums al ON al.id = t.album_id
+             LEFT JOIN artists ar ON ar.id = al.artist_id
+             WHERE e.album_id = ANY($2) OR ($3 AND e.album_id IS NULL)
+             ORDER BY j.id"
+        ))
+        .bind(run_id)
+        .bind(&ids)
+        .bind(with_none)
+        .fetch_all(pool)
+        .await?;
+        rows.into_iter().map(|r| (r.group_id, r.view)).collect()
+    };
+    let mut out: Vec<AlbumRows> = groups
+        .into_iter()
+        .map(|(album_id, artist, album)| AlbumRows {
+            album_id,
+            artist,
+            album,
+            rows: Vec::new(),
+        })
+        .collect();
+    for (group, view) in views {
+        if let Some(g) = out.iter_mut().find(|g| g.album_id == group) {
+            g.rows.push(view);
+        }
+    }
+    Ok((out, total))
+}
+
+#[derive(FromRow)]
+struct RowWithGroup {
+    group_id: Option<Uuid>,
+    #[sqlx(flatten)]
+    view: RowView,
+}
+
 /// Every row of a run in plan order.
 pub async fn all_rows(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Vec<JournalRow>> {
     sqlx::query_as(&format!(
@@ -386,18 +558,23 @@ pub async fn track_path(pool: &PgPool, track_id: Uuid) -> sqlx::Result<Option<St
         .await
 }
 
-/// Every present track with the fields path planning needs.
-pub async fn plan_tracks(pool: &PgPool) -> sqlx::Result<Vec<PlanTrack>> {
+/// Every present track with the fields path planning needs; with `album_ids`, only those
+/// albums' tracks.
+pub async fn plan_tracks(
+    pool: &PgPool,
+    album_ids: Option<&[Uuid]>,
+) -> sqlx::Result<Vec<PlanTrack>> {
     sqlx::query_as(
         "SELECT t.id, t.path, ar.name AS album_artist, t.artist_name AS track_artist,
                 al.title AS album, al.year AS album_year, t.disc, t.track_no, t.title,
-                al.is_compilation
+                al.is_compilation, t.disc_total
          FROM tracks t
          JOIN albums al ON al.id = t.album_id
          JOIN artists ar ON ar.id = al.artist_id
-         WHERE t.missing_since IS NULL
+         WHERE t.missing_since IS NULL AND ($1::uuid[] IS NULL OR t.album_id = ANY($1))
          ORDER BY t.path",
     )
+    .bind(album_ids)
     .fetch_all(pool)
     .await
 }

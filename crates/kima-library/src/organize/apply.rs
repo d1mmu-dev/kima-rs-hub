@@ -237,7 +237,10 @@ fn fields_of(t: &db::PlanTrack) -> Fields {
         album: t.album.clone(),
         year: t.album_year,
         disc: u32::try_from(t.disc).unwrap_or(1).max(1),
-        disc_total: 0,
+        disc_total: t
+            .disc_total
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0),
         track_no: u32::try_from(t.track_no).unwrap_or(0),
         title: t.title.clone(),
         ext: Path::new(&t.path)
@@ -260,7 +263,7 @@ async fn preview(ctx: &LibraryCtx, run: Run) -> Result<()> {
     let source = PathBuf::from(&run.source_root);
     let target = PathBuf::from(&run.target_root);
     let copy = run.mode == db::MODE_COPY;
-    let tracks = db::plan_tracks(&ctx.pool).await?;
+    let tracks = db::plan_tracks(&ctx.pool, run.album_ids.as_deref()).await?;
 
     let (src_walk, dst_walk) = {
         let (s, t) = (source.clone(), target.clone());
@@ -1527,10 +1530,16 @@ async fn uncopy_rows(r: &mut Runner<'_>) -> Result<()> {
 // ---------------------------------------------------------------------------------------------
 // Switch root
 
+/// Why a scoped run cannot become the library (shared with the API's answer).
+pub const SCOPED_SWITCH: &str = "Only a whole-library copy can become the library";
+
 /// Copy runs only, once `done`: tracks take their copied paths, the library root becomes the
 /// target (stored in system settings and switched in the running process, watcher included),
 /// and a reconcile is queued.
 async fn switch_root(ctx: &LibraryCtx, run: Run) -> Result<()> {
+    if run.album_ids.is_some() {
+        return Err(OrganizeError::Refused(SCOPED_SWITCH.into()));
+    }
     if run.mode != db::MODE_COPY || run.state != "done" {
         return Err(OrganizeError::Invalid(
             "only a finished copy run can become the library".into(),

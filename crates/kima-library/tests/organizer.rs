@@ -1555,3 +1555,279 @@ async fn undo_failed_rows_are_retried(pool: PgPool) {
     assert_eq!(tree(&lib.root), original);
     assert!(rows(&lib, run).await.iter().all(|r| r.state == "undone"));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Album scope, `disc_total`, grouping by album (M3b). Rows are seeded, so no ffmpeg is needed.
+
+struct Seeded {
+    root: PathBuf,
+    target: PathBuf,
+    ctx: LibraryCtx,
+    _dirs: (tempfile::TempDir, tempfile::TempDir),
+}
+
+fn seeded_lib(pool: &PgPool) -> Seeded {
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let target = out.path().canonicalize().unwrap().join("organized");
+    let ctx = LibraryCtx {
+        pool: pool.clone(),
+        root: root.clone().into(),
+        events: EventBus::new(256),
+        data_dir: root.join(".kima-data"),
+        ignore: IgnoreSet::new(),
+    };
+    Seeded {
+        root,
+        target,
+        ctx,
+        _dirs: (dir, out),
+    }
+}
+
+struct Row<'a> {
+    artist: &'a str,
+    album: &'a str,
+    year: i32,
+    disc: i32,
+    disc_total: Option<i32>,
+    no: i32,
+    title: &'a str,
+    path: &'a str,
+}
+
+/// Inserts a track row and a dummy file at its path; returns (track id, album id).
+async fn seed_row(pool: &PgPool, s: &Seeded, r: Row<'_>) -> (Uuid, Uuid) {
+    let mut tx = pool.begin().await.unwrap();
+    let track = kima_db::library::upsert_track(
+        &mut tx,
+        &kima_db::library::ResolvedTrack {
+            album_artist: r.artist.into(),
+            album_artist_key: r.artist.to_lowercase(),
+            track_artist: r.artist.into(),
+            album: r.album.into(),
+            album_key: r.album.to_lowercase(),
+            album_year: Some(r.year),
+            track_year: Some(r.year),
+            is_compilation: false,
+            disc: r.disc,
+            track_no: r.no,
+            title: r.title.into(),
+            duration_secs: 180,
+            codec: "mp3".into(),
+            bitrate: Some(320),
+            path: r.path.into(),
+            size: 1,
+            mtime: time::OffsetDateTime::now_utc(),
+            fingerprint: [1; 32],
+            guessed: Default::default(),
+            ids: Default::default(),
+            isrc: None,
+            disc_total: r.disc_total,
+            track_total: None,
+            artist_mbid_candidate: None,
+        },
+    )
+    .await
+    .unwrap()
+    .track;
+    tx.commit().await.unwrap();
+    let full = s.root.join(r.path);
+    std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+    std::fs::write(&full, r.path.as_bytes()).unwrap();
+    let album: Uuid = sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = $1")
+        .bind(track)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (track, album)
+}
+
+async fn scoped_preview(s: &Seeded, mode: &str, albums: Option<&[Uuid]>) -> Uuid {
+    let target = if mode == "copy" { &s.target } else { &s.root };
+    std::fs::create_dir_all(target).unwrap();
+    let (root, tgt) = (s.root.display().to_string(), target.display().to_string());
+    let id = Uuid::now_v7();
+    let run = match albums {
+        Some(a) => db::create_scoped_run(&s.ctx.pool, id, mode, &root, &tgt, None, a, "user").await,
+        None => db::create_run(&s.ctx.pool, id, mode, &root, &tgt, None).await,
+    }
+    .unwrap();
+    apply::run_action(&s.ctx, run.id, Action::Preview, &Hooks::default())
+        .await
+        .unwrap();
+    run.id
+}
+
+async fn run_rows(s: &Seeded, run: Uuid) -> Vec<db::JournalRow> {
+    db::all_rows(&s.ctx.pool, run).await.unwrap()
+}
+
+fn one<'a>(artist: &'a str, album: &'a str, title: &'a str, path: &'a str) -> Row<'a> {
+    Row {
+        artist,
+        album,
+        year: 2001,
+        disc: 1,
+        disc_total: None,
+        no: 1,
+        title,
+        path,
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn scoped_preview_plans_only_those_albums(pool: PgPool) {
+    let s = seeded_lib(&pool);
+    let (ta, album_a) = seed_row(&pool, &s, one("Alpha", "First", "One", "x/a.mp3")).await;
+    let (tb, _) = seed_row(&pool, &s, one("Beta", "Second", "Two", "x/b.mp3")).await;
+    for mode in ["move", "copy"] {
+        let run = scoped_preview(&s, mode, Some(&[album_a])).await;
+        let r = db::get_run(&pool, run).await.unwrap().unwrap();
+        assert_eq!(r.album_ids, Some(vec![album_a]));
+        assert_eq!(r.origin, "user");
+        let tracks: Vec<_> = run_rows(&s, run)
+            .await
+            .into_iter()
+            .filter_map(|r| r.track_id)
+            .collect();
+        assert_eq!(tracks, vec![ta], "{mode}");
+        assert!(!tracks.contains(&tb));
+    }
+    // An unscoped run still plans everything.
+    let run = scoped_preview(&s, "move", None).await;
+    assert_eq!(run_rows(&s, run).await.len(), 2);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn scoped_preview_never_claims_another_albums_name(pool: PgPool) {
+    let s = seeded_lib(&pool);
+    let (ta, album_a) = seed_row(&pool, &s, one("Alpha", "First", "One", "x/a.mp3")).await;
+    // Another album's file already sits at the scoped track's target.
+    seed_row(
+        &pool,
+        &s,
+        one("Gamma", "Third", "Other", "Alpha/2001 - First/01 - One.mp3"),
+    )
+    .await;
+    let run = scoped_preview(&s, "move", Some(&[album_a])).await;
+    let rows = run_rows(&s, run).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].track_id, Some(ta));
+    assert_eq!(rows[0].to_path, "Alpha/2001 - First/01 - One (2).mp3");
+    assert!(rows[0].collision);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn switch_root_refuses_scoped_run(pool: PgPool) {
+    let s = seeded_lib(&pool);
+    let (_, album) = seed_row(&pool, &s, one("Alpha", "First", "One", "x/a.mp3")).await;
+    let run = scoped_preview(&s, "copy", Some(&[album])).await;
+    assert!(
+        db::transition(&pool, run, &["previewed"], "applying")
+            .await
+            .unwrap()
+    );
+    apply::run_action(&s.ctx, run, Action::Apply, &Hooks::default())
+        .await
+        .unwrap();
+    let err = apply::run_action(&s.ctx, run, Action::SwitchRoot, &Hooks::default()).await;
+    match err {
+        Err(OrganizeError::Refused(m)) => {
+            assert_eq!(m, "Only a whole-library copy can become the library");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.ctx.root.get(), s.root);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn disc_total_used_in_names(pool: PgPool) {
+    let s = seeded_lib(&pool);
+    // A two-disc album whose only present track is on disc 1: the total alone gives the
+    // `D-NN` prefix.
+    let (_, album) = seed_row(
+        &pool,
+        &s,
+        Row {
+            disc_total: Some(2),
+            ..one("Alpha", "First", "One", "x/a.mp3")
+        },
+    )
+    .await;
+    let (_, single) = seed_row(&pool, &s, one("Beta", "Second", "Two", "x/b.mp3")).await;
+    let run = scoped_preview(&s, "move", Some(&[album, single])).await;
+    let mut to: Vec<String> = run_rows(&s, run)
+        .await
+        .into_iter()
+        .map(|r| r.to_path)
+        .collect();
+    to.sort();
+    assert_eq!(
+        to,
+        vec![
+            "Alpha/2001 - First/1-01 - One.mp3",
+            "Beta/2001 - Second/01 - Two.mp3"
+        ]
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn rows_by_album_never_splits_a_group(pool: PgPool) {
+    let s = seeded_lib(&pool);
+    for i in 0..25 {
+        let (artist, album) = (format!("Artist {i:02}"), format!("Album {i:02}"));
+        for n in 1..=2 {
+            let path = format!("in/{i:02}-{n}.mp3");
+            seed_row(
+                &pool,
+                &s,
+                Row {
+                    no: n,
+                    ..one(&artist, &album, &format!("T{n}"), &path)
+                },
+            )
+            .await;
+        }
+    }
+    // A sidecar in the shared source folder follows the smallest target folder (album 00).
+    std::fs::write(s.root.join("in/cover.jpg"), b"jpg").unwrap();
+    let run = scoped_preview(&s, "move", None).await;
+    // Album 24's tracks are deleted after the preview: its rows lose their track and album.
+    sqlx::query("DELETE FROM tracks WHERE path LIKE 'in/24-%'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (page1, total) = db::rows_by_album(&pool, run, 0, 20).await.unwrap();
+    assert_eq!(total, 25, "24 albums and the group without an album");
+    assert_eq!(page1.len(), 20);
+    let (page2, _) = db::rows_by_album(&pool, run, 20, 20).await.unwrap();
+    assert_eq!(page2.len(), 5);
+    for g in page1.iter().chain(&page2).filter(|g| g.album_id.is_some()) {
+        let tracks = g.rows.iter().filter(|r| r.row.track_id.is_some()).count();
+        assert_eq!(tracks, 2, "{:?}", g.album);
+    }
+    let names: Vec<_> = page1
+        .iter()
+        .chain(&page2)
+        .filter_map(|g| g.artist.clone())
+        .collect();
+    let mut sorted = names.clone();
+    sorted.sort();
+    assert_eq!(names, sorted);
+    // The sidecar goes with the folder it was planned into (its album's); album 24's
+    // leftovers trail in a group without an album.
+    let g0 = page1
+        .iter()
+        .find(|g| g.artist.as_deref() == Some("Artist 00"))
+        .unwrap();
+    assert!(g0.rows.iter().any(|r| r.row.to_path.ends_with("cover.jpg")));
+    let last = page2.last().unwrap();
+    assert!(last.album_id.is_none());
+    assert!(last.rows.iter().all(|r| r.row.track_id.is_none()));
+    assert_eq!(last.rows.len(), 2);
+    let all: usize = page1.iter().chain(&page2).map(|g| g.rows.len()).sum();
+    assert_eq!(all, run_rows(&s, run).await.len());
+}

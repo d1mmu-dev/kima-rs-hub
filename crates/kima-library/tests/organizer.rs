@@ -2166,3 +2166,41 @@ async fn undo_leaves_unchanged_target_alone(pool: PgPool) {
             .all(|r| r.state == "unchanged")
     );
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn mixed_disc_total_uses_the_album_maximum(pool: PgPool) {
+    let s = seeded_lib(&pool);
+    // One track carries a total of 2, the other none: both get the `D-NN` prefix.
+    let (_, album) = seed_row(
+        &pool,
+        &s,
+        Row {
+            disc_total: Some(2),
+            ..one("Alpha", "First", "One", "x/a.mp3")
+        },
+    )
+    .await;
+    seed_row(
+        &pool,
+        &s,
+        Row {
+            no: 2,
+            ..one("Alpha", "First", "Two", "x/b.mp3")
+        },
+    )
+    .await;
+    let run = scoped_preview(&s, "move", Some(&[album])).await;
+    let mut to: Vec<String> = run_rows(&s, run)
+        .await
+        .into_iter()
+        .map(|r| r.to_path)
+        .collect();
+    to.sort();
+    assert_eq!(
+        to,
+        vec![
+            "Alpha/2001 - First/1-01 - One.mp3",
+            "Alpha/2001 - First/1-02 - Two.mp3"
+        ]
+    );
+}

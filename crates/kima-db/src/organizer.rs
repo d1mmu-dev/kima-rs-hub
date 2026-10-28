@@ -170,6 +170,17 @@ async fn insert_run(
     .await
 }
 
+/// How many of `album_ids` exist as albums, and how many present (not missing) tracks they hold.
+pub async fn scope_counts(pool: &PgPool, album_ids: &[Uuid]) -> sqlx::Result<(i64, i64)> {
+    sqlx::query_as(
+        "SELECT (SELECT count(*) FROM albums WHERE id = ANY($1)),
+                (SELECT count(*) FROM tracks WHERE album_id = ANY($1) AND missing_since IS NULL)",
+    )
+    .bind(album_ids)
+    .fetch_one(pool)
+    .await
+}
+
 /// Every `previewed` run becomes `superseded`: its plan no longer matches the library, so it
 /// can no longer be applied. Returns how many runs changed.
 pub async fn supersede_previewed(conn: &mut PgConnection) -> sqlx::Result<u64> {

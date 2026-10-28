@@ -319,3 +319,375 @@ fn track_length_term() {
     l.duration_secs = 0;
     assert!(close(dist(&l, &own, "", false), 0.25));
 }
+
+// --- mapping, album distance, ordering, recommendation (Task 6) -------------------------------
+
+mod album {
+    use super::*;
+    use kima_db::autotag::{LocalAlbum, Recommendation};
+    use kima_ident::autotag::score::{Scored, order, recommend, score};
+    use kima_ident::musicbrainz::{Release, ReleaseGroup};
+    use std::path::PathBuf;
+
+    pub const THIS_YEAR: i32 = 2026;
+
+    pub fn fixture_release(id: &str) -> Release {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/musicbrainz/autotag.json");
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let e = entries
+            .iter()
+            .find(|e| {
+                e["url"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("/release/{id}?"))
+            })
+            .unwrap();
+        serde_json::from_value(e["body"].clone()).unwrap()
+    }
+
+    pub fn group(r: &Release) -> ReleaseGroup {
+        r.release_group.clone().unwrap()
+    }
+
+    pub fn local_track(disc: i32, no: i32, title: &str, artist: &str) -> LocalTrack {
+        LocalTrack {
+            id: Uuid::from_u128(u128::from(disc.unsigned_abs()) * 1000 + no.unsigned_abs() as u128),
+            disc,
+            track_no: no,
+            title: title.into(),
+            artist_name: artist.into(),
+            duration_secs: 2,
+            ..super::local(no)
+        }
+    }
+
+    pub fn local_album(title: &str, artist: &str, tracks: Vec<LocalTrack>) -> LocalAlbum {
+        LocalAlbum {
+            id: Uuid::nil(),
+            title: title.into(),
+            artist_id: Uuid::nil(),
+            artist_name: artist.into(),
+            year: None,
+            is_compilation: false,
+            release_mbid: None,
+            release_mbid_source: None,
+            release_group_mbid: None,
+            release_group_mbid_source: None,
+            identity_source: "tag".into(),
+            tracks,
+        }
+    }
+
+    /// The local twin of the 10-track fixture release.
+    pub fn twin(n: usize) -> LocalAlbum {
+        let tracks = (1..=n)
+            .map(|i| local_track(1, i as i32, &format!("Fixture Song {i}"), "Fixture Band"))
+            .collect();
+        local_album("Fixture Album", "Fixture Band", tracks)
+    }
+
+    pub const R1: &str = "c0000001-0000-4000-8000-000000000001";
+    pub const R2: &str = "c0000002-0000-4000-8000-000000000001";
+    pub const R3: &str = "c0000003-0000-4000-8000-000000000001";
+
+    pub fn run(l: &LocalAlbum, r: &Release) -> Scored {
+        score(l, r, &group(r), THIS_YEAR)
+    }
+
+    #[test]
+    fn perfect_match_strong() {
+        let r = fixture_release(R1);
+        let s = run(&twin(10), &r);
+        assert_eq!(s.distance, 0.0);
+        assert_eq!(s.recommendation, Recommendation::Strong);
+        assert_eq!(s.mapping.pairs.len(), 10);
+        assert!(s.mapping.extra.is_empty() && s.mapping.missing.is_empty());
+        assert!(close(s.penalties.values().sum::<f64>(), s.distance));
+    }
+
+    #[test]
+    fn renamed_track_breaks_pair_and_caps_medium() {
+        let r = fixture_release(R1);
+        let mut l = twin(10);
+        l.tracks[4].title = "Zzzz".into();
+        let s = run(&l, &r);
+        assert_eq!(s.mapping.pairs.len(), 9);
+        assert_eq!(s.mapping.extra, vec![l.tracks[4].id]);
+        assert_eq!(s.mapping.missing.len(), 1);
+        assert_eq!(s.mapping.missing[0].title, "Fixture Song 5");
+        assert_eq!(s.mapping.missing[0].position, 5);
+        assert!(close(s.distance, 1.5 / 25.5), "{}", s.distance);
+        assert_eq!(s.recommendation, Recommendation::Medium);
+        assert!(close(s.penalties.values().sum::<f64>(), s.distance));
+    }
+
+    #[test]
+    fn missing_track_caps_medium() {
+        let r = fixture_release(R1);
+        let s = run(&twin(9), &r);
+        assert_eq!(s.mapping.pairs.len(), 9);
+        assert_eq!(s.mapping.missing.len(), 1);
+        assert!(s.mapping.extra.is_empty());
+        assert!(s.distance < 0.04, "{}", s.distance);
+        assert_eq!(s.recommendation, Recommendation::Medium);
+    }
+
+    #[test]
+    fn extra_track_caps_medium() {
+        let r = fixture_release(R1);
+        let mut l = twin(10);
+        l.tracks
+            .push(local_track(1, 11, "Bonus Track", "Fixture Band"));
+        let s = run(&l, &r);
+        assert_eq!(s.mapping.extra.len(), 1);
+        assert_eq!(s.mapping.pairs.len(), 10);
+        assert_eq!(s.recommendation, Recommendation::Medium);
+    }
+
+    #[test]
+    fn wrong_year_penalty() {
+        let r = fixture_release(R1);
+        let mut l = twin(10);
+        l.year = Some(1990);
+        let s = run(&l, &r);
+        // Release and original year are 2001: |1990 - 2001| / (2026 - 2001) = 11/25. Σw = 27.
+        assert!(
+            close(s.penalties["year"], (11.0 / 25.0) / 27.0),
+            "{:?}",
+            s.penalties
+        );
+        // Without an original year the penalty is 1: share 1/Σw.
+        let mut g = group(&r);
+        g.first_release_date = None;
+        let s = score(&l, &r, &g, THIS_YEAR);
+        assert!(close(s.penalties["year"], 1.0 / 27.0));
+        // The right year adds the key with penalty 0.
+        l.year = Some(2001);
+        assert_eq!(run(&l, &r).distance, 0.0);
+    }
+
+    #[test]
+    fn unknown_local_artist_skips_the_artist_key() {
+        let r = fixture_release(R1);
+        let mut l = twin(10);
+        l.artist_name = "Unknown Artist".into();
+        let s = run(&l, &r);
+        assert!(!s.penalties.contains_key("artist"));
+    }
+
+    #[test]
+    fn album_id_term() {
+        let r = fixture_release(R1);
+        let mut l = twin(10);
+        l.release_mbid = Some(r.id.0);
+        assert_eq!(run(&l, &r).distance, 0.0);
+        l.release_mbid = Some(Uuid::from_u128(5));
+        // 5 / (3 + 3 + 5 + 20)
+        assert!(close(run(&l, &r).penalties["album_id"], 5.0 / 31.0));
+    }
+
+    fn va_local() -> LocalAlbum {
+        let artists = ["Alpha Act", "Beta Trio", "Alpha Act"];
+        let tracks = (1..=3)
+            .map(|i| local_track(1, i, &format!("Hits Song {i}"), artists[i as usize - 1]))
+            .collect();
+        local_album("Fixture Hits", "Various Artists", tracks)
+    }
+
+    #[test]
+    fn va_compilation_artist_zero() {
+        let r = fixture_release(R3);
+        let s = run(&va_local(), &r);
+        assert_eq!(s.penalties["artist"], 0.0);
+        assert_eq!(s.mapping.pairs.len(), 3);
+        assert_eq!(s.distance, 0.0);
+        // track_artist is added per pair: each track distance is title 3 + artist 2 + index 1 +
+        // length 2 = 8 weights; a wrong artist on one track shows in its pair.
+        let mut l = va_local();
+        l.tracks[0].artist_name = "Somebody Else".into();
+        let s = run(&l, &r);
+        assert!(s.mapping.pairs[0].distance > 0.0);
+        assert!(close(
+            s.mapping.pairs[0].distance,
+            2.0 * 1.0 / 8.0 * artist_dist()
+        ));
+    }
+
+    fn artist_dist() -> f64 {
+        string_dist("Somebody Else", "Alpha Act")
+    }
+
+    #[test]
+    fn va_release_with_empty_local_artist_skips_track_artist() {
+        let r = fixture_release(R3);
+        let mut l = va_local();
+        for t in &mut l.tracks {
+            t.artist_name.clear();
+        }
+        let s = run(&l, &r);
+        assert_eq!(s.distance, 0.0, "{:?}", s.penalties);
+    }
+
+    #[test]
+    fn two_disc_mapping() {
+        let r = fixture_release(R2);
+        let mut tracks = Vec::new();
+        for disc in 1..=2 {
+            for no in 1..=3 {
+                tracks.push(local_track(
+                    disc,
+                    no,
+                    &format!("Double Song {disc}-{no}"),
+                    "Fixture Band",
+                ));
+            }
+        }
+        let l = local_album("Double Fixture", "Fixture Band", tracks);
+        let s = run(&l, &r);
+        assert_eq!(s.mapping.pairs.len(), 6);
+        for (pair, local) in s.mapping.pairs.iter().zip(&l.tracks) {
+            assert_eq!(i32::try_from(pair.medium).unwrap(), local.disc);
+            assert_eq!(i32::try_from(pair.position).unwrap(), local.track_no);
+        }
+        assert_eq!(s.penalties["mediums"], 0.0);
+        assert_eq!(s.distance, 0.0);
+        // One disc locally against two media: penalty 1, with disc_total read as well.
+        let mut one = l.clone();
+        one.tracks.truncate(3);
+        one.tracks[0].disc_total = Some(1);
+        assert!(run(&one, &r).penalties["mediums"] > 0.0);
+    }
+
+    fn rel_with(id: u128, status: &str, format: &str, country: &str, date: &str) -> Release {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::from_u128(id).to_string(),
+            "title": "T", "status": status, "country": country, "date": date,
+            "media": [{"position": 1, "format": format, "track-count": 0, "tracks": []}],
+        }))
+        .unwrap()
+    }
+
+    fn scored(distance: f64) -> Scored {
+        Scored {
+            distance,
+            recommendation: recommend(distance, false),
+            penalties: Default::default(),
+            mapping: Default::default(),
+        }
+    }
+
+    fn ids(c: &[(Release, Scored)]) -> Vec<u128> {
+        c.iter().map(|(r, _)| r.id.0.as_u128()).collect()
+    }
+
+    #[test]
+    fn ordering_tie_breakers() {
+        let mut c = vec![
+            (rel_with(9, "Official", "CD", "GB", "2000"), scored(0.1)),
+            (
+                rel_with(8, "Bootleg", "Digital Media", "XW", "1999"),
+                scored(0.1),
+            ),
+            (
+                rel_with(7, "Official", "12\" Vinyl", "XW", "2000"),
+                scored(0.1),
+            ),
+            (
+                rel_with(6, "Official", "Digital Media", "GB", "2000"),
+                scored(0.1),
+            ),
+            (rel_with(5, "Official", "CD", "XW", "2000"), scored(0.1)),
+            (rel_with(4, "Official", "CD", "XW", "1999-05"), scored(0.1)),
+            (rel_with(3, "Official", "CD", "XW", "1999-05"), scored(0.1)),
+            (
+                rel_with(2, "Official", "Enhanced CD", "XW", "1990"),
+                scored(0.1),
+            ),
+        ];
+        order(&mut c);
+        // Official first; Digital Media; CD (XW before GB; earlier date; smaller MBID);
+        // "… CD"; Vinyl; the bootleg last.
+        assert_eq!(ids(&c), vec![6, 3, 4, 5, 9, 2, 7, 8]);
+    }
+
+    #[test]
+    fn ordering_rounds_distance_to_three_decimals() {
+        let mut c = vec![
+            (rel_with(2, "Official", "CD", "XW", "2000"), scored(0.1004)),
+            (rel_with(1, "Official", "CD", "XW", "2001"), scored(0.1001)),
+            (rel_with(3, "Official", "CD", "XW", "2000"), scored(0.0994)),
+        ];
+        order(&mut c);
+        // 0.0994 rounds to 0.099 (first); 0.1004 and 0.1001 tie at 0.100, then by date, then id.
+        assert_eq!(ids(&c), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn worst_medium_ranks_the_release() {
+        let mut mixed = rel_with(1, "Official", "Digital Media", "XW", "2000");
+        let vinyl = rel_with(2, "Official", "Vinyl", "XW", "2000");
+        mixed.media.push(vinyl.media[0].clone());
+        let cd = rel_with(3, "Official", "CD", "XW", "2000");
+        let mut c = vec![(mixed, scored(0.1)), (cd, scored(0.1))];
+        order(&mut c);
+        assert_eq!(ids(&c), vec![3, 1]);
+    }
+
+    #[test]
+    fn recommendation_thresholds() {
+        assert_eq!(recommend(0.0, false), Recommendation::Strong);
+        assert_eq!(recommend(0.039, false), Recommendation::Strong);
+        assert_eq!(recommend(0.04, false), Recommendation::Medium);
+        assert_eq!(recommend(0.039, true), Recommendation::Medium);
+        assert_eq!(recommend(0.199, true), Recommendation::Medium);
+        assert_eq!(recommend(0.2, false), Recommendation::Weak);
+    }
+
+    #[test]
+    fn hungarian_prefers_global_minimum() {
+        // Greedy from the first local track would give it R1 (1/8 against 2/8) and leave the
+        // second with R2; the optimum swaps them.
+        let release: Release = serde_json::from_value(serde_json::json!({
+            "id": Uuid::from_u128(1).to_string(), "title": "T",
+            "media": [{"position": 1, "track-count": 2, "tracks": [
+                {"id": Uuid::from_u128(11).to_string(), "position": 1, "title": "abcdefgh",
+                 "recording": {"id": Uuid::from_u128(21).to_string()}},
+                {"id": Uuid::from_u128(12).to_string(), "position": 2, "title": "abcdefyz",
+                 "recording": {"id": Uuid::from_u128(22).to_string()}},
+            ]}],
+        }))
+        .unwrap();
+        let mut a = local_track(1, 0, "abcdefgx", "");
+        a.id = Uuid::from_u128(101);
+        a.duration_secs = 0;
+        let mut b = local_track(1, 0, "abcdefgh", "");
+        b.id = Uuid::from_u128(102);
+        b.duration_secs = 0;
+        let l = local_album("T", "", vec![a, b]);
+        let m = kima_ident::autotag::score::map_tracks(&l, &release);
+        assert_eq!(m.pairs.len(), 2);
+        let by_local = |id: u128| {
+            m.pairs
+                .iter()
+                .find(|p| p.track_id.as_u128() == id)
+                .unwrap()
+                .release_track_mbid
+                .0
+                .as_u128()
+        };
+        assert_eq!(by_local(101), 12);
+        assert_eq!(by_local(102), 11);
+    }
+
+    #[test]
+    fn empty_sides_do_not_panic() {
+        let r = fixture_release(R1);
+        let none = local_album("Fixture Album", "Fixture Band", vec![]);
+        let s = run(&none, &r);
+        assert_eq!(s.mapping.missing.len(), 10);
+        assert_ne!(s.recommendation, Recommendation::Strong);
+    }
+}

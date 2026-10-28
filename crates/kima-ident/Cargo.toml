@@ -15,6 +15,7 @@ kima-jobs.workspace = true
 kima-library.workspace = true
 kima-net.workspace = true
 md-5.workspace = true
+pathfinding.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
 rusty-chromaprint.workspace = true

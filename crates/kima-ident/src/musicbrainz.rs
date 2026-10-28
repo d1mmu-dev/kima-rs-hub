@@ -372,14 +372,18 @@ pub fn top_genres(gs: &[Genre], n: usize) -> Vec<String> {
     voted.into_iter().take(n).map(|g| g.name.clone()).collect()
 }
 
+/// A release date as a sortable string: padded with `-99-99` and cut to ten characters, so a
+/// bare year or month sorts after the full dates within it; none is `9999`.
+pub(crate) fn sortable_date(d: Option<&str>) -> String {
+    let d = d.filter(|d| !d.is_empty()).unwrap_or("9999");
+    format!("{d}-99-99").chars().take(10).collect()
+}
+
 /// The release that stands for its group: official first, then the earliest date (a date of
 /// only a year or a month is padded with `-99-99`, so it sorts after the full dates within it;
 /// none is `9999`), then id ascending (`chooseRelease`, `musicbrainz.ts:40-47`).
 pub fn choose_release(rs: &[ReleaseSummary]) -> Option<&ReleaseSummary> {
-    let sortable = |d: &Option<String>| -> String {
-        let d = d.as_deref().filter(|d| !d.is_empty()).unwrap_or("9999");
-        format!("{d}-99-99").chars().take(10).collect()
-    };
+    let sortable = |d: &Option<String>| sortable_date(d.as_deref());
     rs.iter().min_by(|a, b| {
         let official = |r: &ReleaseSummary| r.status.as_deref() != Some("Official");
         official(a)

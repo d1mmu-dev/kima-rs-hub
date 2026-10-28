@@ -192,6 +192,20 @@ fn with_suffix(p: &Path, n: u32) -> PathBuf {
 /// keeps it. `existing` holds paths already occupied at the destination; the planned tracks'
 /// own current paths are treated as vacated.
 pub fn plan(tracks: &[(Uuid, Fields, PathBuf)], existing: &HashSet<PathBuf>) -> Vec<PlannedMove> {
+    plan_with(tracks, existing, &|_, _| false)
+}
+
+/// Decides whether the file at the first path (a source) is a duplicate of the file already at
+/// the second (a planned target in `existing`): same size and SHA-256.
+pub type SameFile<'a> = &'a dyn Fn(&Path, &Path) -> bool;
+
+/// [`plan`], where a target that already exists and holds a duplicate of the track's file
+/// (per `same`) is `unchanged` at that path instead of a suffixed collision.
+pub fn plan_with(
+    tracks: &[(Uuid, Fields, PathBuf)],
+    existing: &HashSet<PathBuf>,
+    same: SameFile<'_>,
+) -> Vec<PlannedMove> {
     let own: HashSet<String> = tracks.iter().map(|(_, _, from)| path_key(from)).collect();
     let mut claimed: HashSet<String> = existing
         .iter()
@@ -243,6 +257,17 @@ pub fn plan(tracks: &[(Uuid, Fields, PathBuf)], existing: &HashSet<PathBuf>) -> 
                     case_only: false,
                 };
             }
+            // Already copied there by an earlier run: nothing to plan.
+            if existing_hit.contains(&key) && same(from, &base) {
+                return PlannedMove {
+                    track_id,
+                    from: from.clone(),
+                    to: base,
+                    collision: false,
+                    unchanged: true,
+                    case_only: false,
+                };
+            }
             let mut to = base.clone();
             let mut n = 2;
             while claimed.contains(&path_key(&to)) {
@@ -266,14 +291,14 @@ pub fn plan(tracks: &[(Uuid, Fields, PathBuf)], existing: &HashSet<PathBuf>) -> 
         .collect()
 }
 
-/// Whether a non-audio file travels with its album: cover images, `.cue` and `.log`.
+/// Whether a non-audio file travels with its album: cover images, `.cue`, `.log`, `.lrc` and `.nfo`.
 pub fn is_sidecar(p: &Path) -> bool {
     matches!(
         p.extension()
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "cue" | "log")
+        Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "cue" | "log" | "lrc" | "nfo")
     )
 }
 
@@ -285,6 +310,18 @@ pub fn plan_sidecars(
     sidecars: &[PathBuf],
     existing: &HashSet<PathBuf>,
 ) -> Vec<SidecarMove> {
+    plan_sidecars_with(moves, sidecars, existing, &|_, _| false)
+}
+
+/// [`plan_sidecars`], where an existing duplicate of the sidecar (per `same`) at its target is
+/// `unchanged` at that path.
+pub fn plan_sidecars_with(
+    moves: &[PlannedMove],
+    sidecars: &[PathBuf],
+    existing: &HashSet<PathBuf>,
+    same: SameFile<'_>,
+) -> Vec<SidecarMove> {
+    let existing_keys: HashSet<String> = existing.iter().map(|p| path_key(p)).collect();
     let mut votes: HashMap<PathBuf, BTreeMap<PathBuf, usize>> = HashMap::new();
     for m in moves {
         if let (Some(src), Some(dst)) = (m.from.parent(), m.to.parent()) {
@@ -323,6 +360,15 @@ pub fn plan_sidecars(
             _ => (name, ""),
         };
         let base = dir.join(file_name(stem, ext));
+        if existing_keys.contains(&path_key(&base)) && same(from, &base) {
+            out.push(SidecarMove {
+                from: from.clone(),
+                to: base,
+                collision: false,
+                unchanged: true,
+            });
+            continue;
+        }
         let mut to = base.clone();
         let mut n = 2;
         while claimed.contains(&path_key(&to)) {
@@ -572,6 +618,48 @@ mod tests {
             assert!(!s.collision);
         }
         assert!(out.iter().any(|s| s.to.ends_with("folder.jpg")));
+    }
+
+    #[test]
+    fn lrc_and_nfo_travel_with_album() {
+        let x = f("Radiohead", "OK Computer", Some(1997), 1, "Airbag");
+        let moves = plan(
+            &[(id(1), x, PathBuf::from("messy/ok/a.flac"))],
+            &HashSet::new(),
+        );
+        let sidecars = vec![
+            PathBuf::from("messy/ok/a.LRC"),
+            PathBuf::from("messy/ok/album.nfo"),
+        ];
+        assert!(sidecars.iter().all(|p| is_sidecar(p)));
+        assert!(!is_sidecar(Path::new("a.txt")) && !is_sidecar(Path::new("lrc")));
+        let out = plan_sidecars(&moves, &sidecars, &HashSet::new());
+        assert_eq!(out.len(), 2);
+        for s in &out {
+            assert_eq!(
+                s.to.parent().unwrap(),
+                Path::new("Radiohead/1997 - OK Computer")
+            );
+        }
+    }
+
+    #[test]
+    fn a_duplicate_at_the_target_is_unchanged_not_suffixed() {
+        let x = f("Abba", "Gold", None, 1, "Same");
+        let at = PathBuf::from("Abba/Gold/01 - Same.flac");
+        let cover = PathBuf::from("Abba/Gold/c.jpg");
+        let existing: HashSet<PathBuf> = [at.clone(), cover.clone()].into();
+        let tracks = [(id(1), x, PathBuf::from("/src/a.flac"))];
+        let sidecars = [PathBuf::from("/src/c.jpg")];
+        let moves = plan_with(&tracks, &existing, &|_, _| true);
+        assert!(moves[0].unchanged && !moves[0].collision && moves[0].to == at);
+        let side = plan_sidecars_with(&moves, &sidecars, &existing, &|_, _| true);
+        assert!(side[0].unchanged && !side[0].collision && side[0].to == cover);
+
+        let moves = plan_with(&tracks, &existing, &|_, _| false);
+        assert!(moves[0].collision && !moves[0].unchanged);
+        let side = plan_sidecars_with(&moves, &sidecars, &existing, &|_, _| false);
+        assert!(side[0].collision && !side[0].unchanged);
     }
 
     #[test]

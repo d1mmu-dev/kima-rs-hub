@@ -17,7 +17,7 @@
 //!   the target folder (`.kima-stage-<row>-<name>`), journalled as `staged`, and are placed in
 //!   a second pass once every other row has moved.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, FileTimes};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -56,6 +56,8 @@ pub enum Action {
 /// Called on a finished `.kima-part` copy (tests corrupt it).
 pub type CopyHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
+type HookRef<'a> = Option<&'a (dyn Fn(&Path) + Send + Sync)>;
+
 /// Test hooks. Production passes [`Hooks::default`].
 #[derive(Default, Clone)]
 pub struct Hooks {
@@ -68,6 +70,8 @@ pub struct Hooks {
     pub after_copy: Option<CopyHook>,
     /// Treat every move as crossing filesystems (copy, verify, delete the source).
     pub force_cross_fs: bool,
+    /// Called on each folder a cross-filesystem move fsyncs (tests record them).
+    pub on_sync_dir: Option<CopyHook>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -294,13 +298,24 @@ async fn preview(ctx: &LibraryCtx, run: Run) -> Result<()> {
         .iter()
         .map(|t| (t.id, fields_of(t), src_key(Path::new(&t.path))))
         .collect();
-    let moves = paths::plan(&inputs, &existing);
     let sidecars: Vec<PathBuf> = src_walk
         .iter()
         .filter(|p| paths::is_sidecar(p))
         .map(|p| src_key(p))
         .collect();
-    let sidecar_moves = paths::plan_sidecars(&moves, &sidecars, &existing);
+    // In copy mode a file already copied to its target by an earlier run is not planned again:
+    // same size and SHA-256 (hashed only when the sizes match) makes it `unchanged` there.
+    let (moves, sidecar_moves) = {
+        let target = target.clone();
+        tokio::task::spawn_blocking(move || {
+            let same = |from: &Path, to: &Path| copy && same_file(from, &target.join(to));
+            let moves = paths::plan_with(&inputs, &existing, &same);
+            let sidecar_moves = paths::plan_sidecars_with(&moves, &sidecars, &existing, &same);
+            (moves, sidecar_moves)
+        })
+        .await
+        .map_err(|e| OrganizeError::Io(e.to_string()))?
+    };
 
     let strip = |p: &Path| -> Option<String> {
         if copy {
@@ -400,6 +415,23 @@ fn sha256_file(p: &Path) -> io::Result<Vec<u8>> {
 
 fn sha_matches(p: &Path, sha: &[u8]) -> bool {
     sha256_file(p).is_ok_and(|s| s == sha)
+}
+
+/// Two regular files of one size and one SHA-256 (hashed only when the sizes match). A
+/// symbolic link or an unreadable file is never the same.
+fn same_file(a: &Path, b: &Path) -> bool {
+    let size = |p: &Path| {
+        fs::symlink_metadata(p)
+            .ok()
+            .filter(|m| m.file_type().is_file())
+            .map(|m| m.len())
+    };
+    match (size(a), size(b)) {
+        (Some(x), Some(y)) if x == y => {
+            matches!((sha256_file(a), sha256_file(b)), (Ok(p), Ok(q)) if p == q)
+        }
+        _ => false,
+    }
 }
 
 /// (device, inode, link count).
@@ -574,18 +606,28 @@ fn copy_verified(
 
 /// Moves `src` to `dst` (never replacing it): a rename on one filesystem, else a verified copy
 /// and then deleting the source.
+///
+/// `started`: an earlier attempt journalled the row, so it may have created (and died with
+/// unsynced) folders below the deepest one that exists now; the fsync walk then goes up to
+/// `root`.
 fn move_file(
     src: &Path,
     dst: &Path,
     sha: &[u8],
     force_cross_fs: bool,
-    after_copy: Option<&(dyn Fn(&Path) + Send + Sync)>,
+    started: bool,
+    root: &Path,
+    hooks: (HookRef<'_>, HookRef<'_>),
 ) -> io::Result<Copied> {
+    let (after_copy, on_sync_dir) = hooks;
     // The deepest folder that already exists: every folder below it is created by this move.
-    let existing_top = dst
-        .parent()
-        .and_then(|p| p.ancestors().find(|a| exists(a)))
-        .map(Path::to_path_buf);
+    let existing_top = if started {
+        Some(root.to_path_buf())
+    } else {
+        dst.parent()
+            .and_then(|p| p.ancestors().find(|a| exists(a)))
+            .map(Path::to_path_buf)
+    };
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -606,6 +648,9 @@ fn move_file(
             }
             let mut cur = dst.parent();
             while let Some(d) = cur {
+                if let Some(h) = on_sync_dir {
+                    h(d);
+                }
                 sync_dir(d);
                 if Some(d) == existing_top.as_deref() {
                     break;
@@ -644,6 +689,7 @@ fn symlinked_ancestor(root: &Path, path: &Path) -> bool {
 const SYMLINK_NOTE: &str = "a folder on the target path is a symbolic link";
 /// A resumed row found its copy in place but the source no longer matches the journalled
 /// checksum: something wrote to it in between.
+const CHANGED_SINCE_MOVE: &str = "changed since the move";
 const SOURCE_CHANGED: &str = "the source changed after it was copied; both files were kept";
 
 /// Removes `dir` and its parents while they are empty, stopping at `stop` (never removed).
@@ -1069,10 +1115,11 @@ async fn move_rows(r: &mut Runner<'_>, dir: Dir) -> Result<()> {
 
     // Files still waiting at their current place. A row whose target is one of them is part of
     // a chain or cycle: it is staged and placed in the second pass.
-    let mut waiting: HashSet<(u64, u64)> = HashSet::new();
+    // Counted, because hard links give several rows one inode: it waits until all have moved.
+    let mut waiting: HashMap<(u64, u64), usize> = HashMap::new();
     for row in &first {
         if let Some((d, i, _)) = ident(&op_for(row)?.src) {
-            waiting.insert((d, i));
+            *waiting.entry((d, i)).or_default() += 1;
         }
     }
 
@@ -1082,8 +1129,13 @@ async fn move_rows(r: &mut Runner<'_>, dir: Dir) -> Result<()> {
         let op = op_for(&row)?;
         let src_id = ident(&op.src).map(|(d, i, _)| (d, i));
         let staged = move_one(r, &row, &op, dir, &waiting).await?;
-        if let Some(id) = src_id {
-            waiting.remove(&id);
+        if let Some(id) = src_id
+            && let Some(n) = waiting.get_mut(&id)
+        {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                waiting.remove(&id);
+            }
         }
         if staged {
             let mut row = row;
@@ -1126,7 +1178,7 @@ async fn move_one(
     row: &JournalRow,
     op: &Op,
     dir: Dir,
-    waiting: &HashSet<(u64, u64)>,
+    waiting: &HashMap<(u64, u64), usize>,
 ) -> Result<bool> {
     // An undo only moves a file the library still expects where the apply put it.
     if dir == Dir::Back
@@ -1140,14 +1192,20 @@ async fn move_one(
     let case_only = op.src != op.dst && lower(&op.src) == lower(&op.dst);
     let known_sha = row.sha256.clone();
     // A stat; cheap enough to do here.
-    let dst_waiting = ident(&op.dst).is_some_and(|(d, i, _)| waiting.contains(&(d, i)));
+    let dst_waiting = ident(&op.dst).is_some_and(|(d, i, _)| waiting.contains_key(&(d, i)));
     let step = {
         let (src, dst, stage) = (op.src.clone(), op.dst.clone(), op.stage.clone());
         let started = op.started;
+        let sidecar_undo = dir == Dir::Back && row.track_id.is_none();
         blocking(move || {
             let src_ok = exists(&src);
             let dst_ok = exists(&dst);
             let matches = |p: &Path| known_sha.as_deref().is_some_and(|s| sha_matches(p, s));
+            // A sidecar has no track to vouch for it: it goes back only if it still is what
+            // the apply moved.
+            if sidecar_undo && src_ok && !matches(&src) {
+                return Ok(Step::Fail(CHANGED_SINCE_MOVE));
+            }
             Ok(if !src_ok {
                 if started && dst_ok && matches(&dst) {
                     Step::Commit
@@ -1270,8 +1328,13 @@ async fn move_one(
             let (src, d) = (op.src.clone(), dest.clone());
             let force = r.hooks.force_cross_fs;
             let hook = r.hooks.after_copy.clone();
-            let moved =
-                blocking_io(move || move_file(&src, &d, &sha, force, hook.as_deref())).await?;
+            let sync_hook = r.hooks.on_sync_dir.clone();
+            let (started, root) = (op.started, r.source.clone());
+            let moved = blocking_io(move || {
+                let hooks = (hook.as_deref(), sync_hook.as_deref());
+                move_file(&src, &d, &sha, force, started, &root, hooks)
+            })
+            .await?;
             match moved {
                 Ok(Copied::Placed) => {}
                 Ok(Copied::Mismatch) => {

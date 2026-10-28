@@ -1831,3 +1831,175 @@ async fn rows_by_album_never_splits_a_group(pool: PgPool) {
     let all: usize = page1.iter().chain(&page2).map(|g| g.rows.len()).sum();
     assert_eq!(all, run_rows(&s, run).await.len());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Task 10: sidecars, duplicate copies, sidecar undo, hard-link waiting, resume fsync
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn lrc_and_nfo_travel_with_album(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    std::fs::write(lib.root.join("messy/a.LRC"), b"[00:01.00]one").unwrap();
+    std::fs::write(lib.root.join("messy/album.nfo"), b"release notes").unwrap();
+    let run = new_run(&lib, "move").await;
+    apply_run(&lib, run).await;
+    assert_eq!(state(&lib, run).await, "done");
+    let after = tree(&lib.root);
+    assert!(after.contains_key("Alpha/2001 - First/a.lrc"), "{after:?}");
+    assert!(after.contains_key("Alpha/2001 - First/album.nfo"));
+    assert!(!lib.root.join("messy/album.nfo").exists());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn second_copy_run_plans_no_duplicates(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    std::fs::write(lib.root.join("messy/cover.jpg"), b"jpeg").unwrap();
+    let run = new_run(&lib, "copy").await;
+    apply_run(&lib, run).await;
+    assert_eq!(state(&lib, run).await, "done");
+    let copied = tree(&lib.target);
+    assert_eq!(copied.len(), files.len() + 1);
+
+    let again = new_run(&lib, "copy").await;
+    let planned = rows(&lib, again).await;
+    assert_eq!(planned.len(), files.len() + 1);
+    for r in &planned {
+        assert_eq!(r.state, "unchanged", "{r:?}");
+        assert!(!r.collision && !r.to_path.contains(" (2)"), "{r:?}");
+    }
+    // Applying it changes nothing.
+    apply_run(&lib, again).await;
+    assert_eq!(tree(&lib.target), copied);
+
+    // A file changed in the target is still a collision, and is not overwritten.
+    let edited = lib.target.join("Alpha/2001 - First/01 - One.flac");
+    std::fs::write(&edited, b"edited").unwrap();
+    let third = new_run(&lib, "copy").await;
+    let planned = rows(&lib, third).await;
+    let one = planned
+        .iter()
+        .find(|r| r.from_path == "messy/a.flac")
+        .unwrap();
+    assert!(one.collision && one.to_path.contains(" (2)"), "{one:?}");
+    assert_eq!(
+        planned.iter().filter(|r| r.state == "unchanged").count(),
+        files.len()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn sidecar_undo_checks_content(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    std::fs::write(lib.root.join("messy/cover.jpg"), b"jpeg").unwrap();
+    let run = new_run(&lib, "move").await;
+    apply_run(&lib, run).await;
+    assert_eq!(state(&lib, run).await, "done");
+    let moved = lib.root.join("Alpha/2001 - First/cover.jpg");
+    std::fs::write(&moved, b"someone else's picture").unwrap();
+
+    undo_run(&lib, run).await;
+    let all = rows(&lib, run).await;
+    let cover = all.iter().find(|r| r.track_id.is_none()).unwrap();
+    assert_eq!(cover.state, "undo_failed");
+    assert_eq!(cover.note.as_deref(), Some("changed since the move"));
+    assert_eq!(std::fs::read(&moved).unwrap(), b"someone else's picture");
+    assert!(!lib.root.join("messy/cover.jpg").exists());
+    // The tracks still went home.
+    assert!(lib.root.join("messy/a.flac").exists());
+    assert!(
+        all.iter()
+            .filter(|r| r.track_id.is_some())
+            .all(|r| r.state == "undone")
+    );
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn hard_linked_duplicates_keep_waiting(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = vec![
+        (
+            "a/a.flac",
+            tags("Alpha", "First", "2001", "1", "One"),
+            "Alpha/2001 - First/01 - One.flac",
+        ),
+        (
+            "Alpha/2001 - First/01 - Three.flac",
+            tags("Alpha", "First", "2001", "2", "Two"),
+            "Alpha/2001 - First/02 - Two.flac",
+        ),
+        (
+            "c/c.flac",
+            tags("Alpha", "First", "2001", "1", "Three"),
+            "Alpha/2001 - First/01 - Three.flac",
+        ),
+    ];
+    let lib = library(&pool, &files).await;
+    // Rows one and two now name one inode; row three wants the second one's current path.
+    let b = lib.root.join(files[1].0);
+    std::fs::remove_file(&b).unwrap();
+    std::fs::hard_link(lib.root.join(files[0].0), &b).unwrap();
+    let run = new_run(&lib, "move").await;
+    apply_run(&lib, run).await;
+    let all = rows(&lib, run).await;
+    assert!(all.iter().all(|r| r.state == "done"), "{all:?}");
+    assert_eq!(state(&lib, run).await, "done");
+    let after = tree(&lib.root);
+    for (_, _, to) in &files {
+        assert!(after.contains_key(*to), "{to}");
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn resume_fsyncs_up_to_root(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let run = new_run(&lib, "move").await;
+    start(&lib, run, &["previewed"], "applying").await;
+    // The moment an earlier attempt died in: checksum journalled, target folders created (and
+    // never synced), the file not yet copied.
+    let row = rows(&lib, run)
+        .await
+        .into_iter()
+        .find(|r| r.from_path == "messy/a.flac")
+        .unwrap();
+    db::set_sha(&pool, row.id, &sha(&lib.root.join(&row.from_path)))
+        .await
+        .unwrap();
+    let folder = lib.root.join("Alpha/2001 - First");
+    std::fs::create_dir_all(&folder).unwrap();
+
+    let synced: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+    let log = synced.clone();
+    let hooks = Hooks {
+        force_cross_fs: true,
+        on_sync_dir: Some(Arc::new(move |d: &Path| {
+            log.lock().unwrap().push(d.to_path_buf())
+        })),
+        ..Default::default()
+    };
+    apply_with(&lib, run, &hooks).await.unwrap();
+    assert_eq!(state(&lib, run).await, "done");
+    let synced = synced.lock().unwrap().clone();
+    // The resumed row's walk went from its folder up through `Alpha` to the root; without
+    // `started` it would stop at the folder that already existed.
+    assert!(synced.contains(&folder), "{synced:?}");
+    assert!(synced.contains(&lib.root.join("Alpha")), "{synced:?}");
+    assert!(synced.contains(&lib.root), "{synced:?}");
+}

@@ -489,7 +489,8 @@ pub async fn tracks_not_done(pool: &PgPool, run_id: Uuid) -> sqlx::Result<i64> {
         "SELECT count(*) FROM tracks t
          WHERE t.missing_since IS NULL
            AND NOT EXISTS (SELECT 1 FROM organizer_journal j
-                           WHERE j.run_id = $1 AND j.track_id = t.id AND j.state = 'done')",
+                           WHERE j.run_id = $1 AND j.track_id = t.id
+                             AND j.state IN ('done', 'unchanged'))",
     )
     .bind(run_id)
     .fetch_one(pool)
@@ -589,7 +590,7 @@ pub async fn switch_root(pool: &PgPool, run_id: Uuid, target_root: &str) -> sqlx
     sqlx::query(
         "UPDATE tracks t SET path = 'kima-organizer-switch/' || j.id || '/' || j.to_path
          FROM organizer_journal j
-         WHERE j.run_id = $1 AND j.state = 'done' AND j.track_id = t.id",
+         WHERE j.run_id = $1 AND j.state IN ('done', 'unchanged') AND j.track_id = t.id",
     )
     .bind(run_id)
     .execute(&mut *tx)
@@ -597,7 +598,7 @@ pub async fn switch_root(pool: &PgPool, run_id: Uuid, target_root: &str) -> sqlx
     let moved = sqlx::query(
         "UPDATE tracks t SET path = j.to_path, updated_at = now()
          FROM organizer_journal j
-         WHERE j.run_id = $1 AND j.state = 'done' AND j.track_id = t.id",
+         WHERE j.run_id = $1 AND j.state IN ('done', 'unchanged') AND j.track_id = t.id",
     )
     .bind(run_id)
     .execute(&mut *tx)

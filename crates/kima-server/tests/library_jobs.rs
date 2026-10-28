@@ -257,9 +257,8 @@ async fn unchanged_reconcile_does_not_kick(pool: PgPool) {
     assert_eq!(enrich_jobs(&pool).await, 0);
 }
 
-#[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn enrich_queue_registered_with_concurrency_one(pool: PgPool) {
-    let ctx = kima_ident::IdentCtx {
+fn ident_ctx(pool: &PgPool) -> kima_ident::IdentCtx {
+    kima_ident::IdentCtx {
         pool: pool.clone(),
         net: std::sync::Arc::new(kima_net::Net::disabled()),
         cipher: std::sync::Arc::new(kima_core::cipher::Cipher::from_secret("t")),
@@ -278,13 +277,106 @@ async fn enrich_queue_registered_with_concurrency_one(pool: PgPool) {
         ),
         config: kima_ident::IdentConfig::default(),
         last_cycle: Default::default(),
-    };
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enrich_queue_registered_with_concurrency_one(pool: PgPool) {
+    let ctx = ident_ctx(&pool);
     let mut registry = Registry::new();
     registry.register_enrich(ctx);
     let config = registry.config("enrich").unwrap();
     let default = kima_jobs::worker::WorkerConfig::new("enrich", 1);
     assert_eq!(config.concurrency, 1);
     assert_eq!(config.lease, default.lease);
+}
+
+/// The server registers three queues: `autotag` and `enrich` at concurrency 1 with the
+/// default lease, and `library`.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn registered_queues_are_autotag_enrich_library(pool: PgPool) {
+    let ctx = ident_ctx(&pool);
+    let mut registry = Registry::new();
+    registry.register_library(ctx.library.clone());
+    registry.register_autotag(ctx.clone());
+    registry.register_enrich(ctx);
+    assert_eq!(registry.queues(), ["autotag", "enrich", "library"]);
+    let config = registry.config("autotag").unwrap();
+    let default = kima_jobs::worker::WorkerConfig::new("autotag", 1);
+    assert_eq!(config.concurrency, 1);
+    assert_eq!(config.lease, default.lease);
+}
+
+/// Startup requeues an autotag search a dead process left running and puts its album back
+/// to `queued`; an album `searching` with no job left is `failed`.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn prepare_autotag_queue_recovers_searches(pool: PgPool) {
+    let mut albums = Vec::new();
+    for n in 0..2 {
+        let artist = Uuid::now_v7();
+        sqlx::query("INSERT INTO artists (id, name, name_key) VALUES ($1, $2, $2)")
+            .bind(artist)
+            .bind(format!("artist {n}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let album = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO albums (id, artist_id, title, title_key) VALUES ($1, $2, 'x', 'x')",
+        )
+        .bind(album)
+        .bind(artist)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO autotag_albums (album_id, state) VALUES ($1, 'searching')")
+            .bind(album)
+            .execute(&pool)
+            .await
+            .unwrap();
+        albums.push(album);
+    }
+    let job = queue::enqueue(
+        &pool,
+        "autotag",
+        json!({"kind": "search", "albumId": albums[0]}),
+        3,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE jobs SET state = 'running', attempts = 1 WHERE id = $1")
+        .bind(job)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    kima_server::jobs::prepare_autotag_queue(&pool)
+        .await
+        .unwrap();
+
+    let job_state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = $1")
+        .bind(job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(job_state, "queued");
+    let state = |album: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT state, error FROM autotag_albums WHERE album_id = $1",
+            )
+            .bind(album)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(state(albums[0]).await, ("queued".into(), None));
+    assert_eq!(
+        state(albums[1]).await,
+        ("failed".into(), Some("The search was interrupted".into()))
+    );
 }
 
 fn config(sync: Option<&str>) -> kima_core::config::Config {

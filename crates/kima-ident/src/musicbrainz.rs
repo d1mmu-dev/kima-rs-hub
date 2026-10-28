@@ -602,28 +602,45 @@ pub async fn recording_isrcs_and_genres(net: &Net, id: Mbid) -> Outcome<Recordin
         .await
 }
 
-/// The artist clause of an album search: a name, or the Various Artists credit by id.
+/// The artist clause of an album search: a name, the Various Artists credit by id, or none (an
+/// unknown artist is no evidence, and `artist:""` would match nothing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtistClause<'a> {
     Name(&'a str),
     Various,
+    Any,
+}
+
+/// The text a search clause quotes: the value normalised for search, or the trimmed raw value
+/// when normalising empties it (a title that is only `(Live)`), so a clause is never `""` for
+/// a non-blank value.
+fn clause_text(s: &str) -> String {
+    let n = text::normalize_for_search(s);
+    let n = if n.is_empty() {
+        s.trim().to_string()
+    } else {
+        n
+    };
+    text::escape_lucene(&n)
 }
 
 /// The Various Artists artist (spec §19).
 pub const VARIOUS_ARTISTS_MBID: &str = "89ad4ac3-39f7-470e-963a-56509c546377";
 
 /// The album search query (spec §19.1): `release:"<T>" AND artist:"<A>" AND tracks:<n>`, with
-/// title and artist normalised for search and Lucene-escaped once here; [`Req`] percent-encodes
-/// it once when sending. [`ArtistClause::Various`] is `arid:<VA id>`; `None` drops the tracks
-/// clause.
+/// title and artist normalised for search (the raw text when that empties it) and
+/// Lucene-escaped once here; [`Req`] percent-encodes it once when sending.
+/// [`ArtistClause::Various`] is `arid:<VA id>`, [`ArtistClause::Any`] (or a blank name) adds no
+/// artist clause; `None` drops the tracks clause. The caller skips a blank title.
 pub fn release_query(title: &str, artist: ArtistClause<'_>, tracks: Option<usize>) -> String {
-    let t = text::escape_lucene(&text::normalize_for_search(title));
+    let t = clause_text(title);
     let mut q = format!(r#"release:"{t}""#);
     match artist {
-        ArtistClause::Name(a) => {
-            let a = text::escape_lucene(&text::normalize_for_search(a));
+        ArtistClause::Name(a) if !a.trim().is_empty() => {
+            let a = clause_text(a);
             q.push_str(&format!(r#" AND artist:"{a}""#));
         }
+        ArtistClause::Name(_) | ArtistClause::Any => {}
         ArtistClause::Various => q.push_str(&format!(" AND arid:{VARIOUS_ARTISTS_MBID}")),
     }
     if let Some(n) = tracks {
@@ -783,6 +800,24 @@ mod tests {
                 None
             ),
             r#"release:"Don't Stop \"Live\"" AND artist:"AC\/DC""#
+        );
+    }
+
+    /// A title that normalises to nothing is searched by its raw text, never as `release:""`;
+    /// a blank or absent artist adds no clause.
+    #[test]
+    fn release_query_never_quotes_empty_text() {
+        assert_eq!(
+            release_query("(Live)", ArtistClause::Name("[Remix]"), Some(2)),
+            r#"release:"\(Live\)" AND artist:"\[Remix\]" AND tracks:2"#
+        );
+        assert_eq!(
+            release_query("Album", ArtistClause::Name("  "), None),
+            r#"release:"Album""#
+        );
+        assert_eq!(
+            release_query("Album", ArtistClause::Any, Some(4)),
+            r#"release:"Album" AND tracks:4"#
         );
     }
 }

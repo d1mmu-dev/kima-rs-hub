@@ -32,3 +32,4 @@ libc.workspace = true
 
 [dev-dependencies]
 kima-test-support.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

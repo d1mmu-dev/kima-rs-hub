@@ -7,6 +7,7 @@ use kima_db::autotag::LocalTrack;
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
+use unicode_normalization::UnicodeNormalization;
 
 pub const W_ALBUM: f64 = 3.0;
 pub const W_ARTIST: f64 = 3.0;
@@ -54,10 +55,13 @@ fn levenshtein(a: &[char], b: &[char]) -> usize {
     prev[b.len()]
 }
 
-/// Letters and digits of every script only, so non-Latin text is compared, never emptied.
+/// Everything but `\p{L}` and `\p{N}` (spec §19.3), so non-Latin text is compared, never emptied.
+static NOT_LETTER_OR_NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[^\p{L}\p{N}]").expect("static regex"));
+
 fn basic(a: &str, b: &str) -> f64 {
-    let a: Vec<char> = a.chars().filter(|c| c.is_alphanumeric()).collect();
-    let b: Vec<char> = b.chars().filter(|c| c.is_alphanumeric()).collect();
+    let a: Vec<char> = NOT_LETTER_OR_NUMBER.replace_all(a, "").chars().collect();
+    let b: Vec<char> = NOT_LETTER_OR_NUMBER.replace_all(b, "").chars().collect();
     let longest = a.len().max(b.len());
     if longest == 0 {
         return 0.0;
@@ -65,8 +69,23 @@ fn basic(a: &str, b: &str) -> f64 {
     levenshtein(&a, &b) as f64 / longest as f64
 }
 
+/// `fold_identity`, except that kana keep their (semi-)voiced marks: NFKD splits `ば` into `は` and
+/// U+3099, and folding would drop the mark so that `ば` and `は` compare equal.
+fn fold_keeping_kana(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut buf = [0u8; 4];
+    for c in s.chars() {
+        if matches!(c, '\u{3040}'..='\u{30FF}') {
+            out.push(c);
+        } else {
+            out.push_str(&fold_identity(c.encode_utf8(&mut buf)));
+        }
+    }
+    out.nfc().collect()
+}
+
 fn prepare(s: &str) -> String {
-    let s = fold_identity(&s.to_lowercase());
+    let s = fold_keeping_kana(&s.to_lowercase());
     let s = s.trim();
     let s = match s.strip_suffix(", the") {
         Some(rest) => format!("the {rest}"),
@@ -160,11 +179,11 @@ pub fn length_penalty(local_secs: i32, release_ms: u32) -> f64 {
     (f64::from((diff - LENGTH_GRACE_SECS).max(0)) / f64::from(LENGTH_MAX_SECS)).min(1.0)
 }
 
-/// A release track with where it sits: its medium's position and its index across the release.
+/// A release track with its index across the release (1-based, over all media); the track's own
+/// `position` is its place on its medium.
 #[derive(Debug, Clone, Copy)]
 pub struct ReleaseTrackRef<'a> {
     pub track: &'a Track,
-    pub medium_position: u32,
     pub absolute_index: u32,
 }
 
@@ -206,10 +225,11 @@ pub fn track_distance(
         let hit = no == Some(track.position) || no == Some(rt.absolute_index);
         d.add("track_index", W_TRACK_INDEX, if hit { 0.0 } else { 1.0 });
     }
-    if let (true, Some(ms)) = (
-        local.duration_secs > 0,
-        track.length.or(track.recording.length),
-    ) {
+    let release_ms = track
+        .length
+        .filter(|&ms| ms > 0)
+        .or(track.recording.length.filter(|&ms| ms > 0));
+    if let (true, Some(ms)) = (local.duration_secs > 0, release_ms) {
         d.add(
             "track_length",
             W_TRACK_LENGTH,

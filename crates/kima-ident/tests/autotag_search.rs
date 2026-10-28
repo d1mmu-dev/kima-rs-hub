@@ -878,3 +878,36 @@ async fn blank_album_artist_is_unknown(pool: PgPool) {
         cands[0].penalties
     );
 }
+
+/// A cancel (shutdown, lost claim) on the final attempt leaves the album `searching`, never
+/// `queued` without a job; the startup reset then settles it.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cancel_on_last_attempt_leaves_no_stuck_album(pool: PgPool) {
+    let tracks = titled("Fixture Song", 10);
+    let id = album(&pool, "Fixture Album", "Fixture Band", false, None, &tracks).await;
+    let (_replay, ctx) = ctx(&pool, vec![search_entry(&fixture_query(None), &[R1])]).await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let err = search::run_search(
+        &ctx,
+        &SearchJob::plain(id),
+        SearchAttempt { last: true, cancel },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, JobError::Retry(_)), "{err:?}");
+    assert_eq!(
+        album_state(&pool, id).await,
+        Some(("searching".into(), None, None))
+    );
+    // No job is left (the queue failed the final attempt): startup marks the album failed.
+    search::prepare(&pool).await.unwrap();
+    assert_eq!(
+        album_state(&pool, id).await,
+        Some((
+            "failed".into(),
+            None,
+            Some("The search was interrupted".into())
+        ))
+    );
+}

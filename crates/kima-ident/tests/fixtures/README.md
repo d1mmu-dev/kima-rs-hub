@@ -26,3 +26,14 @@ and its 404 body. The lyrics are the public-domain first verse of "Amazing Grace
 stays so. Nothing was sent to lrclib.net. `lrclib/requests.json` lists the hit and the 404 for a
 later recording; the recorder sees production's `/api/get` path, so recorded URLs need the `/api`
 prefix dropped to match the tests' replay base.
+
+# Autotag fixtures (M3b)
+
+`musicbrainz/autotag.json` is **hand-written** from MusicBrainz's documented JSON answers; nothing was
+sent to musicbrainz.org and every id, barcode, ISRC and count is made up. It holds three releases
+("Fixture Band - Fixture Album": 10 tracks on one medium, 2001; "Double Fixture": 2 media of 3 tracks;
+"Fixture Hits": a Various Artists compilation, 3 tracks with per-track credits and the VA MBID), all
+tracks 2000 ms long so the 2 s ffmpeg test tones match; their release groups with genres and counts;
+one release search answer each (`limit=5`, with `tracks:<n>`); a `recording?inc=releases` answer; and a
+release 404. `musicbrainz/autotag-requests.json` lists the same requests in `tools/record-fixtures`
+format, for recording the real answers later.

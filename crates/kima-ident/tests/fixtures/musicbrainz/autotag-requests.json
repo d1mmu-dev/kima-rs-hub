@@ -1,0 +1,179 @@
+[
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release",
+  "query": [
+   [
+    "query",
+    "release:\"Fixture Album\" AND artist:\"Fixture Band\" AND tracks:10"
+   ],
+   [
+    "limit",
+    "5"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release",
+  "query": [
+   [
+    "query",
+    "release:\"Double Fixture\" AND artist:\"Fixture Band\" AND tracks:6"
+   ],
+   [
+    "limit",
+    "5"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release",
+  "query": [
+   [
+    "query",
+    "release:\"Fixture Hits\" AND arid:89ad4ac3-39f7-470e-963a-56509c546377 AND tracks:3"
+   ],
+   [
+    "limit",
+    "5"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release/c0000001-0000-4000-8000-000000000001",
+  "query": [
+   [
+    "inc",
+    "recordings+artist-credits+release-groups+labels+isrcs+media+genres"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release/c0000002-0000-4000-8000-000000000001",
+  "query": [
+   [
+    "inc",
+    "recordings+artist-credits+release-groups+labels+isrcs+media+genres"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release/c0000003-0000-4000-8000-000000000001",
+  "query": [
+   [
+    "inc",
+    "recordings+artist-credits+release-groups+labels+isrcs+media+genres"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release-group/d0000001-0000-4000-8000-000000000001",
+  "query": [
+   [
+    "inc",
+    "genres"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release-group/d0000002-0000-4000-8000-000000000001",
+  "query": [
+   [
+    "inc",
+    "genres"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release-group/d0000003-0000-4000-8000-000000000001",
+  "query": [
+   [
+    "inc",
+    "genres"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/recording/8e010100-0000-4000-8000-000000000001",
+  "query": [
+   [
+    "inc",
+    "releases"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ },
+ {
+  "host": "musicbrainz",
+  "method": "GET",
+  "path": "/release/c0000099-0000-4000-8000-000000000001",
+  "query": [
+   [
+    "inc",
+    "recordings+artist-credits+release-groups+labels+isrcs+media+genres"
+   ],
+   [
+    "fmt",
+    "json"
+   ]
+  ]
+ }
+]

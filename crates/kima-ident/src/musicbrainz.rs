@@ -64,6 +64,12 @@ fn lenient_u32<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
     Ok(number(&Value::deserialize(d)?).unwrap_or(0))
 }
 
+fn lenient_release_group<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Option<ReleaseGroup>, D::Error> {
+    Ok(serde_json::from_value(Value::deserialize(d)?).ok())
+}
+
 // ---- types (MusicBrainz's kebab-case field names) ----
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +232,10 @@ impl Track {
 pub struct Medium {
     #[serde(default, deserialize_with = "lenient_u32")]
     pub position: u32,
+    #[serde(default, deserialize_with = "lenient_opt_text")]
+    pub format: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt_text")]
+    pub title: Option<String>,
     #[serde(default, deserialize_with = "lenient_u32")]
     pub track_count: u32,
     #[serde(default, deserialize_with = "lenient_vec")]
@@ -240,6 +250,18 @@ pub struct Release {
     pub title: String,
     #[serde(default, deserialize_with = "lenient_opt_text")]
     pub date: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt_text")]
+    pub status: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt_text")]
+    pub country: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt_text")]
+    pub barcode: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt_text")]
+    pub disambiguation: Option<String>,
+    /// Present when the lookup included `release-groups` (its genres are not; see
+    /// [`release_group`]).
+    #[serde(default, deserialize_with = "lenient_release_group")]
+    pub release_group: Option<ReleaseGroup>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub label_info: Vec<LabelInfo>,
     #[serde(default, deserialize_with = "lenient_vec")]
@@ -295,6 +317,12 @@ pub struct Catalogue {
 struct Recordings {
     #[serde(default, deserialize_with = "lenient_vec")]
     recordings: Vec<Recording>,
+}
+
+#[derive(Deserialize)]
+struct ReleaseHits {
+    #[serde(default, deserialize_with = "lenient_vec")]
+    releases: Vec<ReleaseSummary>,
 }
 
 #[derive(Deserialize)]
@@ -570,6 +598,79 @@ pub async fn recording_isrcs_and_genres(net: &Net, id: Mbid) -> Outcome<Recordin
         .await
 }
 
+/// The artist clause of an album search: a name, or the Various Artists credit by id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtistClause<'a> {
+    Name(&'a str),
+    Various,
+}
+
+/// The Various Artists artist (spec §19).
+pub const VARIOUS_ARTISTS_MBID: &str = "89ad4ac3-39f7-470e-963a-56509c546377";
+
+/// The album search query (spec §19.1): `release:"<T>" AND artist:"<A>" AND tracks:<n>`, with
+/// title and artist normalised for search and Lucene-escaped once here; [`Req`] percent-encodes
+/// it once when sending. [`ArtistClause::Various`] is `arid:<VA id>`; `None` drops the tracks
+/// clause.
+pub fn release_query(title: &str, artist: ArtistClause<'_>, tracks: Option<usize>) -> String {
+    let t = text::escape_lucene(&text::normalize_for_search(title));
+    let mut q = format!(r#"release:"{t}""#);
+    match artist {
+        ArtistClause::Name(a) => {
+            let a = text::escape_lucene(&text::normalize_for_search(a));
+            q.push_str(&format!(r#" AND artist:"{a}""#));
+        }
+        ArtistClause::Various => q.push_str(&format!(" AND arid:{VARIOUS_ARTISTS_MBID}")),
+    }
+    if let Some(n) = tracks {
+        q.push_str(&format!(" AND tracks:{n}"));
+    }
+    q
+}
+
+/// `GET /release?query=<q>&limit=5`: release ids in answer order. A search, so a 404 is never
+/// `Absent`. `query` is the caller's [`release_query`].
+pub async fn search_releases(net: &Net, query: &str) -> Outcome<Vec<Mbid>> {
+    net.get_json::<ReleaseHits>(get("/release", &[("query", query), ("limit", "5")]))
+        .await
+        .map(|r| r.releases.into_iter().map(|r| r.id).collect())
+}
+
+/// The releases a recording appears on: `GET /recording/{id}?inc=releases`.
+pub async fn recording_releases(net: &Net, id: Mbid) -> Outcome<Vec<Mbid>> {
+    net.get_json::<ReleaseHits>(
+        get(&format!("/recording/{id}"), &[("inc", "releases")]).absent_on_404(),
+    )
+    .await
+    .map(|r| r.releases.into_iter().map(|r| r.id).collect())
+}
+
+/// The release inc string of [`release`].
+pub const RELEASE_INC: &str = "recordings+artist-credits+release-groups+labels+isrcs+media+genres";
+
+/// One release with its tracklist: `GET /release/{id}?inc=` [`RELEASE_INC`]. A release with no
+/// tracks is `Absent`.
+pub async fn release(net: &Net, id: Mbid) -> Outcome<Release> {
+    let r: Release = match net
+        .get_json(get(&format!("/release/{id}"), &[("inc", RELEASE_INC)]).absent_on_404())
+        .await
+    {
+        Outcome::Answered(r) => r,
+        other => return retype(other),
+    };
+    if r.tracks().next().is_none() {
+        return absent(json!({"releaseMbid": id, "reason": "release has no tracklist"}));
+    }
+    Outcome::Answered(r)
+}
+
+/// A release group with its genres: `GET /release-group/{id}?inc=genres` (the release lookup's
+/// `release-groups` include carries no group genres, spec §27 Q3).
+pub async fn release_group(net: &Net, id: Mbid) -> Outcome<ReleaseGroup> {
+    net.get_json(get(&format!("/release-group/{id}"), &[("inc", "genres")]).absent_on_404())
+        .await
+}
+
 /// What [`artist`] asks MusicBrainz to include.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtistInc {
@@ -655,5 +756,29 @@ mod tests {
     fn every_request_runs_inside_the_stage_budget() {
         let req = get("/recording/x", &[("inc", "isrcs")]);
         assert!(format!("{req:?}").contains(&format!("budget: Some({STAGE_TIMEOUT:?})")));
+    }
+
+    #[test]
+    fn release_query_escapes() {
+        assert_eq!(
+            release_query(
+                "AC/DC",
+                ArtistClause::Name("Guns N' Roses & Friends?"),
+                Some(3)
+            ),
+            r#"release:"AC\/DC" AND artist:"Guns N' Roses \& Friends\?" AND tracks:3"#
+        );
+        assert_eq!(
+            release_query("東京事変", ArtistClause::Various, None),
+            r#"release:"東京事変" AND arid:89ad4ac3-39f7-470e-963a-56509c546377"#
+        );
+        assert_eq!(
+            release_query(
+                r#"Don't Stop "Live" (Remix)"#,
+                ArtistClause::Name("AC/DC"),
+                None
+            ),
+            r#"release:"Don't Stop \"Live\"" AND artist:"AC\/DC""#
+        );
     }
 }

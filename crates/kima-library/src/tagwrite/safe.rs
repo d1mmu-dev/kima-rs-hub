@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use super::{Container, Id3Version, NativeTags, TagWriteError, audio_md5};
-use crate::organize::apply::{IGNORE_GRACE, sha256_file, sync_dir};
+use crate::organize::apply::{IGNORE_GRACE, sha256_file};
 use crate::watch::IgnoreSet;
 
 /// Test hooks; all off by default.
@@ -22,6 +22,8 @@ pub struct WriteHooks {
     /// Cuts the end off the copy's audio before its MD5 is taken, as a writer that damaged the
     /// audio would.
     pub corrupt_audio: bool,
+    /// Panics once the copy exists, as a bug in the tag library would.
+    pub panic_in_write: bool,
 }
 
 /// What the write left on disk.
@@ -59,20 +61,59 @@ fn stamp(path: &Path) -> Result<(u64, Option<SystemTime>), TagWriteError> {
     Ok((m.len(), m.modified().ok()))
 }
 
+/// Holds the original and the copy in the [`IgnoreSet`] and cleans up however the write ends
+/// (error, early return or panic): the copy is deleted unless it was renamed over the original,
+/// and both paths are released after [`IGNORE_GRACE`].
+struct Hold<'a> {
+    ignore: &'a IgnoreSet,
+    path: PathBuf,
+    copy: PathBuf,
+    renamed: bool,
+}
+
+impl<'a> Hold<'a> {
+    fn new(ignore: &'a IgnoreSet, path: &Path, copy: PathBuf) -> Self {
+        ignore.add(path.to_path_buf());
+        ignore.add(copy.clone());
+        Hold {
+            ignore,
+            path: path.to_path_buf(),
+            copy,
+            renamed: false,
+        }
+    }
+}
+
+impl Drop for Hold<'_> {
+    fn drop(&mut self) {
+        if !self.renamed && fs::symlink_metadata(&self.copy).is_ok() {
+            if let Err(e) = fs::remove_file(&self.copy) {
+                tracing::warn!(copy = %self.copy.display(), "cannot delete the tag writer's copy: {e}");
+            }
+        }
+        self.ignore.release(&self.path, IGNORE_GRACE);
+        self.ignore.release(&self.copy, IGNORE_GRACE);
+    }
+}
+
 /// Writes `new` (the exact native keys to replace; `[]` removes a key) into the file at `path`:
 ///
 /// 1. hold `path` in `ignore`; refuse a symbolic link (the caller checks the folders above it
-///    with [`refuse_symlink`](super::refuse_symlink));
+///    with [`refuse_symlink`](super::refuse_symlink)), a container or ID3v2 version other than
+///    the file's, and the writer's own copy name;
 /// 2. take the original's audio MD5;
 /// 3. copy it to [`copy_path`], write the tags into the copy, `fsync` it;
-/// 4. re-read the copy: every key of `new` must read back its new value, and every other frame
-///    (and the ID3v1/APE tags) must be unchanged;
+/// 4. re-read the copy: every key of `new` must read back its new value; every other frame must
+///    be on disk as often as in the original (raw frame headers) and read back unchanged (and
+///    the ID3v1/APE tags); a refusal names the frames;
 /// 5. the copy's audio MD5 must equal the original's, else [`TagWriteError::AudioChanged`];
 /// 6. the original must not have changed meanwhile; `rename` the copy over it, `fsync` the
-///    folder; release `path` from `ignore` after [`IGNORE_GRACE`].
+///    folder (a failure there is logged: the new content is already in place); release `path`
+///    from `ignore` after [`IGNORE_GRACE`].
 ///
-/// On any failure before the rename the copy is deleted and the original is untouched. A v2.3
-/// MP3 is passed `Some(V3)` and stays v2.3; `None` writes v2.4. Blocking.
+/// On any failure before the rename, a panic included, the copy is deleted and the original is
+/// untouched. A v2.3 MP3 is passed `Some(V3)` and stays v2.3; `None` (or `Some(V4)`) is v2.4.
+/// Blocking.
 pub fn safe_write(
     path: &Path,
     journal_id: i64,
@@ -83,28 +124,44 @@ pub fn safe_write(
     hooks: &WriteHooks,
 ) -> Result<Written, TagWriteError> {
     let copy = copy_path(path, journal_id)?;
-    ignore.add(path.to_path_buf());
-    ignore.add(copy.clone());
-    let result = run(path, &copy, container, id3, new, hooks);
-    if result.is_err() && fs::symlink_metadata(&copy).is_ok() {
-        let _ = fs::remove_file(&copy);
+    if path.file_name() == copy.file_name() {
+        return Err(TagWriteError::Io(
+            "refusing to write the tag writer's own copy".to_string(),
+        ));
     }
-    ignore.release(path, IGNORE_GRACE);
-    ignore.release(&copy, IGNORE_GRACE);
-    result
+    let mut hold = Hold::new(ignore, path, copy);
+    run(&mut hold, container, id3, new, hooks)
 }
 
 fn run(
-    path: &Path,
-    copy: &Path,
+    hold: &mut Hold<'_>,
     container: Container,
     id3: Option<Id3Version>,
     new: &NativeTags,
     hooks: &WriteHooks,
 ) -> Result<Written, TagWriteError> {
+    let (path, copy) = (hold.path.clone(), hold.copy.clone());
+    let (path, copy) = (path.as_path(), copy.as_path());
     let before = stamp(path)?;
+    if super::container_of(path)? != container {
+        return Err(TagWriteError::Verify(format!(
+            "the file is not a {container:?} file; nothing written"
+        )));
+    }
+    if container == Container::Mp3 {
+        let on_disk = super::id3_version(path)?.unwrap_or(Id3Version::V4);
+        let asked = id3.unwrap_or(Id3Version::V4);
+        if on_disk != asked {
+            return Err(TagWriteError::Verify(format!(
+                "the file has ID3v2 {} but {} was asked; nothing written",
+                on_disk.as_str(),
+                asked.as_str()
+            )));
+        }
+    }
     let keys: Vec<String> = new.keys().cloned().collect();
     let kept = super::untouched(path, container, id3, &keys)?;
+    let raw_kept = super::raw_untouched(path, container, id3, &keys)?;
     let md5 = audio_md5(path)?;
 
     // A leftover copy of this journal row (a crash) is ours to replace.
@@ -113,6 +170,9 @@ fn run(
     }
     copy_file(path, copy)?;
 
+    if hooks.panic_in_write {
+        panic!("forced panic in the tag write (test hook)");
+    }
     if hooks.fail_lofty {
         return Err(TagWriteError::Lofty(
             "forced failure (test hook)".to_string(),
@@ -129,14 +189,30 @@ fn run(
             .map(|(k, _)| k.as_str())
             .collect();
         return Err(TagWriteError::Verify(format!(
-            "these keys did not read back: {}",
+            "these keys did not read back: {}; nothing written",
             bad.join(", ")
         )));
     }
-    if super::untouched(copy, container, id3, &keys)? != kept {
-        return Err(TagWriteError::Verify(
-            "another tag of the file would have changed".to_string(),
-        ));
+    let raw_now = super::raw_untouched(copy, container, id3, &keys)?;
+    if raw_now != raw_kept {
+        return Err(TagWriteError::Verify(super::loss_message(
+            container, id3, &raw_kept, &raw_now,
+        )));
+    }
+    let now = super::untouched(copy, container, id3, &keys)?;
+    if now != kept {
+        let mut changed: Vec<&str> = kept
+            .iter()
+            .filter(|x| !now.contains(x))
+            .chain(now.iter().filter(|x| !kept.contains(x)))
+            .map(|(label, _)| label.as_str())
+            .collect();
+        changed.sort_unstable();
+        changed.dedup();
+        return Err(TagWriteError::Verify(format!(
+            "these frames would have changed: {}; nothing written",
+            changed.join(", ")
+        )));
     }
 
     if hooks.corrupt_audio {
@@ -159,17 +235,22 @@ fn run(
     fs::set_permissions(copy, fs::metadata(path)?.permissions())?;
     if stamp(path)? != before {
         return Err(TagWriteError::Verify(
-            "the file changed during the tag write".to_string(),
+            "the file changed during the tag write; nothing written".to_string(),
         ));
     }
     fs::rename(copy, path)?;
+    hold.renamed = true;
     if hooks.stop_after_rename {
         return Err(TagWriteError::Io(
             "stopped after the rename (test hook)".to_string(),
         ));
     }
-    if let Some(dir) = path.parent() {
-        sync_dir(dir);
+    // The new content is in place; a failed folder sync only weakens durability across a power
+    // loss, so it is logged, not reported as a failed write (the organizer ignores it outright).
+    if let Some(dir) = path.parent()
+        && let Err(e) = File::open(dir).and_then(|d| d.sync_all())
+    {
+        tracing::warn!(folder = %dir.display(), "cannot sync the folder after a tag write: {e}");
     }
     Ok(Written {
         after_sha,

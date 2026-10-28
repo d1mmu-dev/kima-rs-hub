@@ -339,3 +339,27 @@ pub async fn unmatched_albums(pool: &PgPool) -> sqlx::Result<Vec<Uuid>> {
     .fetch_all(pool)
     .await
 }
+
+/// Startup (after the `autotag` queue's `requeue_running`): an album left `searching` by a dead
+/// process goes back to `queued` while a search job for it still waits, else to `failed`
+/// (its job ran out of attempts). Returns how many albums changed.
+pub async fn reset_interrupted_searches(pool: &PgPool) -> sqlx::Result<u64> {
+    let done = sqlx::query!(
+        "UPDATE autotag_albums a
+         SET state = CASE WHEN EXISTS (
+                 SELECT 1 FROM jobs j
+                 WHERE j.queue = 'autotag' AND j.state IN ('queued', 'running')
+                   AND j.payload ->> 'albumId' = a.album_id::text)
+               THEN 'queued' ELSE 'failed' END,
+             error = CASE WHEN EXISTS (
+                 SELECT 1 FROM jobs j
+                 WHERE j.queue = 'autotag' AND j.state IN ('queued', 'running')
+                   AND j.payload ->> 'albumId' = a.album_id::text)
+               THEN NULL ELSE 'The search was interrupted' END,
+             updated_at = now()
+         WHERE a.state = 'searching'"
+    )
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected())
+}

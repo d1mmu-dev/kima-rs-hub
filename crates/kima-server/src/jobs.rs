@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use kima_db::PgPool;
 use kima_ident::IdentCtx;
+use kima_ident::autotag::search;
 use kima_ident::coordinator;
 use kima_jobs::worker::{Handler, WorkerConfig, spawn_worker};
 use kima_library::jobs as library_jobs;
@@ -38,6 +39,11 @@ impl Registry {
         self.queues.get(queue).map(|(c, _)| c)
     }
 
+    /// The registered queue names, sorted.
+    pub fn queues(&self) -> Vec<&str> {
+        self.queues.keys().map(String::as_str).collect()
+    }
+
     pub fn len(&self) -> usize {
         self.queues.len()
     }
@@ -63,6 +69,19 @@ impl Registry {
     pub fn register_enrich(&mut self, ctx: IdentCtx) {
         self.register(coordinator::QUEUE, 1, coordinator::handler(ctx));
     }
+
+    /// Registers the `autotag` queue: one candidate search per album (spec §19.2).
+    /// Concurrency 1: MusicBrainz allows one request at a time anyway, and the store of an
+    /// album's candidates assumes one search of it at a time.
+    pub fn register_autotag(&mut self, ctx: IdentCtx) {
+        self.register(search::QUEUE, 1, search::handler(ctx));
+    }
+}
+
+/// Startup step for the `autotag` queue; call before [`spawn_all`]. Requeues searches left
+/// `running` by a process that died and settles the albums they left `searching`.
+pub async fn prepare_autotag_queue(pool: &PgPool) -> sqlx::Result<()> {
+    search::prepare(pool).await
 }
 
 /// Startup step for the `library` queue; call before [`spawn_all`]. Requeues jobs left

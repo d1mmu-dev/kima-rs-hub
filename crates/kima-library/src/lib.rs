@@ -1,6 +1,7 @@
 //! Library domain logic: tags, fingerprints, scanning and friends. Never depends on axum.
 
 pub mod artwork;
+pub mod autotag;
 pub mod fingerprint;
 pub mod jobs;
 pub mod names;

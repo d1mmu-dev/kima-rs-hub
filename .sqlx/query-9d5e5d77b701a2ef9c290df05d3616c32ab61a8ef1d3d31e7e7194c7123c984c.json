@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE autotag_albums a\n         SET state = CASE WHEN EXISTS (\n                 SELECT 1 FROM jobs j\n                 WHERE j.queue = 'autotag' AND j.state IN ('queued', 'running')\n                   AND j.payload ->> 'albumId' = a.album_id::text)\n               THEN 'queued' ELSE 'failed' END,\n             error = CASE WHEN EXISTS (\n                 SELECT 1 FROM jobs j\n                 WHERE j.queue = 'autotag' AND j.state IN ('queued', 'running')\n                   AND j.payload ->> 'albumId' = a.album_id::text)\n               THEN NULL ELSE 'The search was interrupted' END,\n             updated_at = now()\n         WHERE a.state = 'searching'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9d5e5d77b701a2ef9c290df05d3616c32ab61a8ef1d3d31e7e7194c7123c984c"
+}

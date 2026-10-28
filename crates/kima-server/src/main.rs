@@ -132,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
     let mut registry = kima_server::jobs::Registry::new();
     registry.register_library(library_ctx.clone());
     let state = state.with_ident(ident_ctx.clone());
+    registry.register_autotag(ident_ctx.clone());
     registry.register_enrich(ident_ctx);
     // Before any worker starts: recover library jobs a dead process left running, then queue
     // the safety-net reconcile (spec §4.4).
@@ -142,6 +143,10 @@ async fn main() -> anyhow::Result<()> {
     kima_ident::coordinator::prepare(&pool)
         .await
         .context("preparing the enrichment queue")?;
+    // And for the autotagger: requeue its searches, settle albums left `searching`.
+    kima_server::jobs::prepare_autotag_queue(&pool)
+        .await
+        .context("preparing the autotag queue")?;
     let workers = kima_server::jobs::spawn_all(&pool, registry, shutdown.clone());
     // Stopped by the shutdown token. With `KIMA_WATCH_MODE=off` this only records the status.
     let watcher = kima_library::watch::spawn(

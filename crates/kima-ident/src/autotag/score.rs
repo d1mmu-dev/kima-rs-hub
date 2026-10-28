@@ -87,6 +87,22 @@ fn release_tracks(release: &Release) -> Vec<(u32, ReleaseTrackRef<'_>)> {
     out
 }
 
+/// A pair's integer cost. A non-finite distance would cast to 0, a perfect pair: it costs as
+/// much as no pair.
+fn pair_cost(d: f64) -> i64 {
+    if d.is_finite() {
+        (d.clamp(0.0, 1.0) * COST_SCALE).round() as i64
+    } else {
+        PAD_COST
+    }
+}
+
+/// Whether an assigned pair is broken into one extra and one missing track; a non-finite
+/// distance always is.
+fn broken(d: f64) -> bool {
+    !d.is_finite() || d >= BREAK_DISTANCE
+}
+
 /// The assignment of local tracks to release tracks with the least summed distance (Hungarian,
 /// on a square matrix padded with cost 1.0). A pair at distance `≥ 0.5` is broken.
 pub fn map_tracks(local: &LocalAlbum, release: &Release) -> Mapping {
@@ -111,7 +127,7 @@ pub fn map_tracks(local: &LocalAlbum, release: &Release) -> Mapping {
     let costs: Vec<i64> = (0..n)
         .flat_map(|i| (0..n).map(move |j| (i, j)))
         .map(|(i, j)| match dist.get(i).and_then(|row| row.get(j)) {
-            Some(d) => (d * COST_SCALE).round() as i64,
+            Some(&d) => pair_cost(d),
             None => PAD_COST,
         })
         .collect();
@@ -128,7 +144,7 @@ pub fn map_tracks(local: &LocalAlbum, release: &Release) -> Mapping {
     for (i, &j) in assignment.iter().enumerate().take(nl) {
         if j >= nr {
             mapping.extra.push(local.tracks[i].id);
-        } else if dist[i][j] >= BREAK_DISTANCE {
+        } else if broken(dist[i][j]) {
             mapping.extra.push(local.tracks[i].id);
             taken.insert(j);
             mapping.missing.push(missing(&rts[j]));
@@ -307,4 +323,21 @@ pub fn order_key(release: &Release, scored: &Scored) -> OrderKey {
 /// Best candidate first (§19.3 tie-breakers).
 pub fn order(cands: &mut [(Release, Scored)]) {
     cands.sort_by_cached_key(|(r, s)| order_key(r, s));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_finite_distance_is_never_a_perfect_pair() {
+        for d in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(pair_cost(d), PAD_COST, "{d}");
+            assert!(broken(d), "{d}");
+        }
+        assert_eq!(pair_cost(0.0), 0);
+        assert_eq!(pair_cost(0.25), 250_000);
+        assert!(!broken(0.499));
+        assert!(broken(BREAK_DISTANCE));
+    }
 }

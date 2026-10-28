@@ -32,6 +32,7 @@ pub fn routes() -> Router<AppState> {
         .route("/library/organizer/preview", post(preview))
         .route("/library/organizer/runs", get(list))
         .route("/library/organizer/runs/{id}", get(detail))
+        .route("/library/organizer/runs/{id}/albums", get(albums))
         .route("/library/organizer/runs/{id}/apply", post(apply_run))
         .route("/library/organizer/runs/{id}/undo", post(undo_run))
         .route(
@@ -59,6 +60,8 @@ fn run_json(r: &Run) -> Value {
         "switchedAt": r.switched_at.and_then(rfc3339),
         "summary": r.summary,
         "error": r.error,
+        "albumIds": r.album_ids,
+        "origin": r.origin,
     })
 }
 
@@ -166,8 +169,11 @@ async fn capabilities(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PreviewBody {
     mode: String,
+    /// Plan only these albums' tracks.
+    album_ids: Option<Vec<Uuid>>,
 }
 
 async fn busy(state: &AppState) -> Result<bool, ApiError> {
@@ -180,6 +186,9 @@ async fn preview(
     AdminUser(user): AdminUser,
     ApiJson(body): ApiJson<PreviewBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if body.album_ids.as_ref().is_some_and(Vec::is_empty) {
+        return Err(ApiError::BadRequest("albumIds must not be empty".into()));
+    }
     let root = state
         .library_root()
         .ok_or(ApiError::Conflict("Library folder is not configured"))?;
@@ -206,15 +215,33 @@ async fn preview(
     if busy(&state).await? {
         return Err(ApiError::Conflict("Another organizer run is in progress"));
     }
-    let run = db::create_run(
-        &state.pool,
-        Uuid::now_v7(),
-        &body.mode,
-        &root.display().to_string(),
-        &target.display().to_string(),
-        Some(user.id),
-    )
-    .await?;
+    let (root_s, target_s) = (root.display().to_string(), target.display().to_string());
+    let run = match &body.album_ids {
+        Some(ids) => {
+            db::create_scoped_run(
+                &state.pool,
+                Uuid::now_v7(),
+                &body.mode,
+                &root_s,
+                &target_s,
+                Some(user.id),
+                ids,
+                "user",
+            )
+            .await?
+        }
+        None => {
+            db::create_run(
+                &state.pool,
+                Uuid::now_v7(),
+                &body.mode,
+                &root_s,
+                &target_s,
+                Some(user.id),
+            )
+            .await?
+        }
+    };
     let job = apply::enqueue(&state.pool, run.id, Action::Preview).await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -260,6 +287,31 @@ async fn detail(
     Ok(Json(v))
 }
 
+/// The run's journal by album: `limit` (default 20, at most 100) albums from `offset`, each
+/// with all its rows, so a group never splits across pages.
+async fn albums(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<String>,
+    Query(paging): Query<Paging>,
+) -> Result<Json<Value>, ApiError> {
+    let run = load(&state, &id).await?;
+    let (offset, limit) = (paging.offset(), paging.limit(20).min(100));
+    let (groups, total) = db::rows_by_album(&state.pool, run.id, offset, limit).await?;
+    let albums: Vec<Value> = groups
+        .iter()
+        .map(|g| {
+            json!({
+                "albumId": g.album_id,
+                "artist": g.artist,
+                "album": g.album,
+                "rows": g.rows.iter().map(row_json).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "albums": albums, "total": total })))
+}
+
 fn accepted(run: Uuid, job: Uuid) -> (StatusCode, Json<Value>) {
     (
         StatusCode::ACCEPTED,
@@ -274,6 +326,11 @@ async fn apply_run(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let run = load(&state, &id).await?;
+    if run.state == "superseded" {
+        return Err(ApiError::Conflict(
+            "This preview is out of date; preview again",
+        ));
+    }
     if run.switched_at.is_some() {
         return Err(ApiError::Conflict("This run was already switched to"));
     }
@@ -344,6 +401,9 @@ async fn switch_root(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let run = load(&state, &id).await?;
+    if run.album_ids.is_some() {
+        return Err(ApiError::Conflict(apply::SCOPED_SWITCH));
+    }
     if run.mode != db::MODE_COPY {
         return Err(ApiError::Conflict("Only a copy run can become the library"));
     }

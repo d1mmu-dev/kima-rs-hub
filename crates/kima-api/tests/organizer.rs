@@ -511,3 +511,170 @@ async fn apply_refused_after_partial_undo(pool: PgPool) {
         "error": "This run was partly undone; undo it fully or start a new preview"
     }));
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn preview_with_album_ids(pool: PgPool) {
+    let s = setup(pool.clone(), false).await;
+    // A second album, outside the scope.
+    seed(
+        &pool,
+        Seed::new("Beta", "Second", Some(2005), "Three").at(1, 1),
+    )
+    .await;
+    std::fs::create_dir_all(s.root.join("Beta/Second")).unwrap();
+    std::fs::write(s.root.join("Beta/Second/1-1 Three.mp3"), b"audio").unwrap();
+    let first = sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM albums WHERE title = 'First'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let res = post(
+        &s,
+        "/api/library/organizer/preview",
+        json!({"mode": "move", "albumIds": []}),
+    )
+    .await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    res.assert_json(&json!({"error": "albumIds must not be empty"}));
+
+    let res = post(
+        &s,
+        "/api/library/organizer/preview",
+        json!({"mode": "move", "albumIds": [first]}),
+    )
+    .await;
+    res.assert_status(StatusCode::ACCEPTED);
+    let run = res.json::<Value>()["runId"].as_str().unwrap().to_string();
+    run_jobs(&s.ctx).await;
+    let v = get_run(&s, &run).await;
+    assert_eq!(v["state"], "previewed");
+    assert_eq!(v["albumIds"], json!([first]));
+    assert_eq!(v["origin"], "user");
+    assert_eq!(v["total"], 2);
+    assert!(
+        v["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["album"] == "First")
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn runs_albums_route_pages(pool: PgPool) {
+    let s = setup(pool.clone(), false).await;
+    for i in 0..3 {
+        let (artist, album) = (format!("Zed {i}"), format!("Album {i}"));
+        for n in 1..=2 {
+            seed(&pool, Seed::new(&artist, &album, Some(2010), "T").at(1, n)).await;
+            let rel = format!("{artist}/{album}/1-{n} T.mp3");
+            std::fs::create_dir_all(s.root.join(&rel).parent().unwrap()).unwrap();
+            std::fs::write(s.root.join(&rel), b"a").unwrap();
+        }
+    }
+    let res = post(
+        &s,
+        "/api/library/organizer/preview",
+        json!({"mode": "move"}),
+    )
+    .await;
+    let run = res.json::<Value>()["runId"].as_str().unwrap().to_string();
+    run_jobs(&s.ctx).await;
+    let url = format!("/api/library/organizer/runs/{run}/albums");
+
+    s.server
+        .get(&url)
+        .authorization_bearer(&s.user)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    let res = s
+        .server
+        .get(&format!("{url}?limit=2"))
+        .authorization_bearer(&s.admin)
+        .await;
+    res.assert_status_ok();
+    let v: Value = res.json();
+    assert_eq!(v["total"], 4);
+    let a = v["albums"].as_array().unwrap();
+    assert_eq!(a.len(), 2);
+    assert_eq!(a[0]["artist"], "Alpha");
+    assert_eq!(a[0]["album"], "First");
+    assert_eq!(a[0]["rows"].as_array().unwrap().len(), 2);
+    assert!(a[0]["albumId"].is_string());
+    assert_eq!(a[1]["artist"], "Zed 0");
+    assert_eq!(a[1]["rows"][0]["album"], "Album 0");
+
+    let res = s
+        .server
+        .get(&format!("{url}?limit=2&offset=2"))
+        .authorization_bearer(&s.admin)
+        .await;
+    let v: Value = res.json();
+    assert_eq!(v["total"], 4);
+    assert_eq!(v["albums"].as_array().unwrap().len(), 2);
+    assert_eq!(v["albums"][1]["artist"], "Zed 2");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn apply_superseded_409(pool: PgPool) {
+    let s = setup(pool.clone(), false).await;
+    let res = post(
+        &s,
+        "/api/library/organizer/preview",
+        json!({"mode": "move"}),
+    )
+    .await;
+    let run = res.json::<Value>()["runId"].as_str().unwrap().to_string();
+    run_jobs(&s.ctx).await;
+    let mut conn = pool.acquire().await.unwrap();
+    assert_eq!(
+        kima_db::organizer::supersede_previewed(&mut conn)
+            .await
+            .unwrap(),
+        1
+    );
+    drop(conn);
+    assert_eq!(get_run(&s, &run).await["state"], "superseded");
+    let res = post(
+        &s,
+        &format!("/api/library/organizer/runs/{run}/apply"),
+        json!({}),
+    )
+    .await;
+    res.assert_status(StatusCode::CONFLICT);
+    res.assert_json(&json!({"error": "This preview is out of date; preview again"}));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn switch_root_route_refuses_a_scoped_run(pool: PgPool) {
+    let s = setup(pool.clone(), true).await;
+    let album: uuid::Uuid = sqlx::query_scalar("SELECT id FROM albums LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let run = kima_db::organizer::create_scoped_run(
+        &pool,
+        uuid::Uuid::now_v7(),
+        "copy",
+        &s.root.display().to_string(),
+        &s.target.display().to_string(),
+        None,
+        &[album],
+        "autotag",
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE organizer_runs SET state = 'done' WHERE id = $1")
+        .bind(run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let res = post(
+        &s,
+        &format!("/api/library/organizer/runs/{}/switch-root", run.id),
+        json!({}),
+    )
+    .await;
+    res.assert_status(StatusCode::CONFLICT);
+    res.assert_json(&json!({"error": "Only a whole-library copy can become the library"}));
+}

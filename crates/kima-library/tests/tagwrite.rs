@@ -7,7 +7,7 @@ use common::{Picard, Tags, embed_cover, make_audio, png_bytes, require_ffmpeg, t
 use kima_library::organize::apply::IGNORE_GRACE;
 use kima_library::tagwrite::{
     Container, Id3Version, NativeTags, NumberPair, TagValues, TagWriteError, WriteHooks, audio_md5,
-    container_of, id3_version, native, native_for_file, read_native, refuse_symlink, safe_write,
+    container_of, id3_version, native_for_file, read_native, refuse_symlink, safe_write,
 };
 use kima_library::watch::IgnoreSet;
 use lofty::config::{ParseOptions, WriteOptions};
@@ -153,7 +153,7 @@ fn mp3_v24_round_trip() {
     let before = id3(&p).unwrap();
     let md5 = audio_md5(&p).unwrap();
 
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     let expected: Vec<&str> = vec![
         "TALB",
         "TCMP",
@@ -217,7 +217,7 @@ fn mp3_v23_stays_v23() {
     make_v23(&p);
     let md5 = audio_md5(&p).unwrap();
 
-    let new = native(Container::Mp3, Some(Id3Version::V3), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V3), &every_field()).unwrap();
     assert!(new.contains_key("XSOP") && !new.contains_key("TSOP"));
     assert_eq!(new["TDOR"], vec!["1999"]);
     write(&p, 7, &new).unwrap();
@@ -259,7 +259,7 @@ fn mp3_without_id3_gets_v24() {
     assert!(id3(&p).is_none());
     assert_eq!(id3_version(&p).unwrap(), None);
 
-    let new = native(Container::Mp3, None, &every_field());
+    let new = native_for_file(&p, Container::Mp3, None, &every_field()).unwrap();
     assert!(new.contains_key("TSOP"));
     let old = read_native(&p, Container::Mp3, &keys(&new)).unwrap();
     assert!(old.values().all(Vec::is_empty));
@@ -283,7 +283,7 @@ fn genre_multi_value_v24_v23() {
     write(
         &p4,
         1,
-        &native(Container::Mp3, Some(Id3Version::V4), &genres),
+        &native_for_file(&p4, Container::Mp3, Some(Id3Version::V4), &genres).unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -296,7 +296,7 @@ fn genre_multi_value_v24_v23() {
     write(
         &p3,
         2,
-        &native(Container::Mp3, Some(Id3Version::V3), &genres),
+        &native_for_file(&p3, Container::Mp3, Some(Id3Version::V3), &genres).unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -313,7 +313,7 @@ fn undo_values_restore_absent_keys() {
     let dir = tempfile::tempdir().unwrap();
     let p = make_audio(dir.path(), "a.mp3", Tags::full());
     embed_cover(&p, png_bytes(8, 8, [1, 2, 3]));
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     let old = read_native(&p, Container::Mp3, &keys(&new)).unwrap();
     assert_eq!(old["TIT2"], vec!["The Title"]);
     assert!(old["UFID:http://musicbrainz.org"].is_empty());
@@ -345,7 +345,7 @@ fn forced_lofty_failure_leaves_original_byte_identical() {
     let dir = tempfile::tempdir().unwrap();
     let p = fixture(dir.path(), "a.mp3");
     let before = sha(&p);
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     let hooks = WriteHooks {
         fail_lofty: true,
         ..WriteHooks::default()
@@ -373,7 +373,7 @@ fn audio_changed_refused() {
     let dir = tempfile::tempdir().unwrap();
     let p = fixture(dir.path(), "a.mp3");
     let before = sha(&p);
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     let hooks = WriteHooks {
         corrupt_audio: true,
         ..WriteHooks::default()
@@ -404,7 +404,7 @@ fn stop_after_rename_leaves_the_new_tags() {
     }
     let dir = tempfile::tempdir().unwrap();
     let p = fixture(dir.path(), "a.mp3");
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     let hooks = WriteHooks {
         stop_after_rename: true,
         ..WriteHooks::default()
@@ -449,7 +449,7 @@ fn audio_md5_and_write_handle_odd_names() {
     #[cfg(target_os = "linux")]
     names.push(non_utf8_name());
 
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&src, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     for (i, name) in names.iter().enumerate() {
         let p = folder.join(name);
         std::fs::copy(&src, &p).unwrap();
@@ -541,7 +541,7 @@ fn symlinked_file_refused() {
     // The writer itself never writes through a linked file.
     let before = sha(&real);
     let link = root.join("Artist/Album/link.mp3");
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&real, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     assert_eq!(write(&link, 1, &new).unwrap_err(), TagWriteError::Symlink);
     assert_eq!(sha(&real), before);
     assert!(
@@ -562,7 +562,7 @@ fn path_held_in_ignore_set_until_grace() {
     let p = fixture(dir.path(), "a.mp3");
     let failing = fixture(dir.path(), "b.mp3");
     let ignore = IgnoreSet::new();
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     assert!(!ignore.contains(&p));
     safe_write(
         &p,
@@ -619,7 +619,7 @@ fn v23_frame_lofty_cannot_keep_refuses_the_write() {
     assert_eq!(id3_version(&p).unwrap(), Some(Id3Version::V3));
     let before = sha(&p);
 
-    let new = native(Container::Mp3, Some(Id3Version::V3), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V3), &every_field()).unwrap();
     let err = write(&p, 1, &new).unwrap_err();
     assert_eq!(
         err.to_string(),
@@ -651,7 +651,7 @@ fn duplicate_frames_lofty_merges_refuse_the_write() {
     patch(&p, b"MY TAH", b"MY TAG");
     let before = sha(&p);
 
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     let err = write(&p, 1, &new).unwrap_err();
     assert!(matches!(err, TagWriteError::Verify(_)), "{err:?}");
     assert!(err.to_string().contains("TXXX:MY TAG (2 → 1)"), "{err}");
@@ -677,7 +677,7 @@ fn unparseable_frame_refuses_the_write() {
     patch(&p, b"TPUB", b"TP@B");
     let before = sha(&p);
 
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     let err = write(&p, 1, &new).unwrap_err();
     assert!(err.to_string().contains("TP@B (1 → 0)"), "{err}");
     assert_eq!(sha(&p), before);
@@ -693,7 +693,7 @@ fn wrong_version_or_container_refused() {
     let p = fixture(dir.path(), "a.mp3");
     make_v23(&p);
     let before = sha(&p);
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     let ignore = IgnoreSet::new();
     let hooks = WriteHooks::default();
     let err = safe_write(
@@ -741,7 +741,7 @@ fn panic_in_write_cleans_up() {
     let dir = tempfile::tempdir().unwrap();
     let p = fixture(dir.path(), "a.mp3");
     let before = sha(&p);
-    let new = native(Container::Mp3, Some(Id3Version::V4), &every_field());
+    let new = native_for_file(&p, Container::Mp3, Some(Id3Version::V4), &every_field()).unwrap();
     let ignore = IgnoreSet::new();
     let hooks = WriteHooks {
         panic_in_write: true,
@@ -952,7 +952,7 @@ fn round_trip(ext: &str) {
     assert_eq!(extras.2, vec!["keep me", "and me"]);
 
     let new = native_for_file(&p, c, None, &every_field()).unwrap();
-    assert_eq!(new, native(c, None, &every_field()), "no TOTALTRACKS here");
+    assert!(!new.contains_key("TOTALTRACKS") && !new.contains_key("TOTALDISCS"));
     if c == Container::Mp4 {
         assert_eq!(new.len(), 18);
         assert_eq!(new["trkn"], vec!["3/12"]);
@@ -1111,7 +1111,7 @@ fn mp4_freeform_multi_value() {
     }
     let dir = tempfile::tempdir().unwrap();
     let p = mp4_fixture(dir.path(), "a.m4a");
-    let new = native(Container::Mp4, None, &every_field());
+    let new = native_for_file(&p, Container::Mp4, None, &every_field()).unwrap();
     write_as(&p, 1, Container::Mp4, &new).unwrap();
 
     let tag = ilst(&p);
@@ -1197,7 +1197,7 @@ fn m4a_moov_before_mdat_grows_with_valid_offsets() {
         title: Some("Long ".repeat(2000)),
         ..every_field()
     };
-    let new = native(Container::Mp4, None, &big);
+    let new = native_for_file(&p, Container::Mp4, None, &big).unwrap();
     let before_len = bytes.len();
     write_as(&p, 1, Container::Mp4, &new).unwrap();
     assert!(std::fs::metadata(&p).unwrap().len() > before_len as u64 + 10_000);
@@ -1227,7 +1227,7 @@ fn flac_keeps_other_metadata_blocks() {
         &p,
         1,
         Container::Flac,
-        &native(Container::Flac, None, &every_field()),
+        &native_for_file(&p, Container::Flac, None, &every_field()).unwrap(),
     )
     .unwrap();
     let bytes = std::fs::read(&p).unwrap();
@@ -1240,7 +1240,20 @@ fn flac_keeps_other_metadata_blocks() {
 /// is byte-identical and no copy is left.
 fn assert_refused(p: &Path, c: Container, needle: &str) {
     let before = sha(p);
-    let err = write_as(p, 1, c, &native(c, None, &every_field())).unwrap_err();
+    // Building the keys reads a Vorbis file, which may already refuse it; then a title is enough.
+    let new = match native_for_file(p, c, None, &every_field()) {
+        Ok(n) => n,
+        Err(e) => {
+            assert!(e.to_string().contains(needle), "{e}");
+            let title = if c == Container::Mp4 {
+                "©nam"
+            } else {
+                "TITLE"
+            };
+            NativeTags::from([(title.to_string(), vec!["x".to_string()])])
+        }
+    };
+    let err = write_as(p, 1, c, &new).unwrap_err();
     assert!(matches!(err, TagWriteError::Verify(_)), "{err:?}");
     assert!(err.to_string().contains(needle), "{err}");
     assert!(err.to_string().ends_with("; nothing written"), "{err}");
@@ -1450,4 +1463,181 @@ fn fragmented_mp4_refused() {
         Container::Mp4,
         "fragmented MP4 files are not written; nothing written",
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// MP4 structure (fix round 1)
+
+/// The atom at `path` (fourccs from the top level down): `(start, body start, end)`. A full
+/// `meta`'s version and flags are part of its header here.
+fn find_atom(b: &[u8], path: &[&[u8; 4]]) -> (usize, usize, usize) {
+    let (mut from, mut to) = (0, b.len());
+    let mut found = (0, 0, 0);
+    for want in path {
+        let mut pos = from;
+        loop {
+            assert!(pos + 8 <= to, "no {:?}", String::from_utf8_lossy(*want));
+            let len = u32::from_be_bytes(b[pos..pos + 4].try_into().unwrap()) as usize;
+            if &b[pos + 4..pos + 8] == *want {
+                let mut body = pos + 8;
+                if *want == b"meta" && b[body..body + 4] == [0, 0, 0, 0] {
+                    body += 4;
+                }
+                found = (pos, body, pos + len);
+                break;
+            }
+            pos += len;
+        }
+        (from, to) = (found.1, found.2);
+    }
+    found
+}
+
+/// Inserts `payload` at the start of the body of the atom at `path`, growing every atom on the
+/// way (the file's `mdat` is before `moov`, so no chunk offset moves).
+fn insert_into(p: &Path, path: &[&[u8; 4]], payload: &[u8]) {
+    let mut b = std::fs::read(p).unwrap();
+    let body = find_atom(&b, path).1;
+    for depth in 1..=path.len() {
+        let start = find_atom(&b, &path[..depth]).0;
+        let len = u32::from_be_bytes(b[start..start + 4].try_into().unwrap());
+        b[start..start + 4].copy_from_slice(&(len + payload.len() as u32).to_be_bytes());
+    }
+    b.splice(body..body, payload.iter().copied());
+    std::fs::write(p, b).unwrap();
+}
+
+fn atom(fourcc: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut a = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+    a.extend(fourcc);
+    a.extend(body);
+    a
+}
+
+/// `levels` `edts` atoms, each inside the one before.
+fn nested(levels: usize) -> Vec<u8> {
+    let mut a = Vec::new();
+    for _ in 0..levels {
+        a = atom(b"edts", &a);
+    }
+    a
+}
+
+fn plain_m4a(dir: &Path) -> PathBuf {
+    let p = make_audio(dir, "a.m4a", Tags::full());
+    let b = std::fs::read(&p).unwrap();
+    assert!(find_atom(&b, &[b"mdat"]).0 < find_atom(&b, &[b"moov"]).0);
+    p
+}
+
+#[test]
+fn mp4_nesting_depth_is_capped() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let keys = vec!["©nam".to_string()];
+    let damaged = "the MP4 atom structure is damaged; nothing written";
+    // `moov` is level 1, so 15 nested atoms reach level 16, the cap.
+    for (levels, ok) in [(15, true), (16, false)] {
+        let p = plain_m4a(dir.path());
+        insert_into(&p, &[b"moov"], &nested(levels));
+        let got = read_native(&p, Container::Mp4, &keys);
+        assert_eq!(got.is_ok(), ok, "{levels}: {got:?}");
+        if !ok {
+            assert_eq!(got.unwrap_err().to_string(), damaged);
+        }
+        std::fs::remove_file(&p).unwrap();
+    }
+    // 10 000 levels (80 kB): refused, not a stack overflow, in the read and in the write.
+    let p = plain_m4a(dir.path());
+    insert_into(&p, &[b"moov"], &nested(10_000));
+    assert_eq!(
+        read_native(&p, Container::Mp4, &keys)
+            .unwrap_err()
+            .to_string(),
+        damaged
+    );
+    assert_refused(&p, Container::Mp4, damaged);
+}
+
+#[test]
+fn mp4_with_absolute_offset_atoms_refused() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = plain_m4a(dir.path());
+    insert_into(&p, &[b"moov"], &atom(b"saio", &[0; 8]));
+    assert_refused(
+        &p,
+        Container::Mp4,
+        "MP4 files with a saio atom are not written; nothing written",
+    );
+
+    // `iloc` in a top-level `meta`, after `moov`.
+    std::fs::remove_file(&p).unwrap();
+    let p = plain_m4a(dir.path());
+    let meta = atom(b"meta", &[&[0u8; 4][..], &atom(b"iloc", &[0; 8])].concat());
+    let mut b = std::fs::read(&p).unwrap();
+    b.extend(meta);
+    std::fs::write(&p, b).unwrap();
+    assert_refused(
+        &p,
+        Container::Mp4,
+        "MP4 files with a iloc atom are not written; nothing written",
+    );
+}
+
+#[test]
+fn mp4_track_ilst_is_not_the_tag() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = plain_m4a(dir.path());
+    // A track's own udta.meta.ilst with a title: lofty neither reads nor writes it.
+    let data = atom(
+        b"data",
+        &[&[0, 0, 0, 1, 0, 0, 0, 0][..], b"Track Level"].concat(),
+    );
+    let ilst = atom(b"ilst", &atom(b"\xa9nam", &data));
+    let meta = atom(b"meta", &[&[0u8; 4][..], &ilst].concat());
+    insert_into(&p, &[b"moov", b"trak"], &atom(b"udta", &meta));
+    let md5 = audio_md5(&p).unwrap();
+
+    let new = native_for_file(&p, Container::Mp4, None, &every_field()).unwrap();
+    write_as(&p, 1, Container::Mp4, &new).unwrap();
+    assert_eq!(read_native(&p, Container::Mp4, &keys(&new)).unwrap(), new);
+    let b = std::fs::read(&p).unwrap();
+    assert!(b.windows(11).any(|w| w == b"Track Level"), "kept as it was");
+    assert_eq!(audio_md5(&p).unwrap(), md5);
+}
+
+#[test]
+fn mp4_without_udta_gets_one() {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let p = plain_m4a(dir.path());
+    // ffmpeg's moov.udta becomes padding: the file has no tag at all.
+    let mut b = std::fs::read(&p).unwrap();
+    let udta = find_atom(&b, &[b"moov", b"udta"]).0;
+    b[udta + 4..udta + 8].copy_from_slice(b"free");
+    std::fs::write(&p, &b).unwrap();
+    let new = native_for_file(&p, Container::Mp4, None, &every_field()).unwrap();
+    assert!(
+        read_native(&p, Container::Mp4, &keys(&new))
+            .unwrap()
+            .values()
+            .all(Vec::is_empty)
+    );
+    let md5 = audio_md5(&p).unwrap();
+
+    write_as(&p, 1, Container::Mp4, &new).unwrap();
+    let b = std::fs::read(&p).unwrap();
+    find_atom(&b, &[b"moov", b"udta", b"meta", b"hdlr"]);
+    assert_eq!(read_native(&p, Container::Mp4, &keys(&new)).unwrap(), new);
+    assert_eq!(audio_md5(&p).unwrap(), md5);
 }

@@ -133,7 +133,7 @@ pub fn id3_version(path: &Path) -> Result<Option<Id3Version>, TagWriteError> {
 /// The native keys and new values of `v` for this container. Only the `Some` fields of `v`
 /// appear; a key with `[]` is removed by the write. The keys written only when a file already
 /// has them (Vorbis `TOTALTRACKS`/`TOTALDISCS`) are added by [`native_for_file`].
-pub fn native(container: Container, id3: Option<Id3Version>, v: &TagValues) -> NativeTags {
+pub(crate) fn native(container: Container, id3: Option<Id3Version>, v: &TagValues) -> NativeTags {
     match container {
         Container::Mp3 => id3::native(id3.unwrap_or(Id3Version::V4), v),
         Container::Flac | Container::Ogg | Container::Opus => vorbis::native(v),
@@ -185,6 +185,15 @@ fn write_native(
         Container::Mp3 => id3::write(path, id3.unwrap_or(Id3Version::V4), new),
         Container::Flac | Container::Ogg | Container::Opus => vorbis::write(path, container, new),
         Container::Mp4 => mp4::write(path, new),
+    }
+}
+
+/// The container's own check of the written copy, beyond the preservation checks: an Ogg file's
+/// pages (numbering and checksums, which lofty rewrites).
+fn check_written(path: &Path, container: Container) -> Result<(), TagWriteError> {
+    match container {
+        Container::Ogg | Container::Opus => vorbis::check_pages(&std::fs::read(path)?),
+        Container::Mp3 | Container::Flac | Container::Mp4 => Ok(()),
     }
 }
 

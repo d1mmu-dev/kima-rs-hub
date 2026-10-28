@@ -427,6 +427,66 @@ fn parse_ogg(b: &[u8], container: Container) -> Result<Raw, TagWriteError> {
     })
 }
 
+/// The Ogg page checksum: CRC-32, polynomial 0x04C11DB7, not reflected, initial value 0.
+fn ogg_crc(page: &[u8]) -> u32 {
+    let mut crc = 0u32;
+    for b in page {
+        crc ^= u32::from(*b) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04C1_1DB7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// kima-rs's own check of a written Ogg file (lofty re-pages and renumbers it): the whole file
+/// is pages, each logical stream's page numbers run 0, 1, 2, … without a gap, and every page
+/// checksum is right.
+pub(super) fn check_pages(b: &[u8]) -> Result<(), TagWriteError> {
+    let bad = |what: String| damaged(&format!("the written Ogg file is damaged: {what}"));
+    let mut next: BTreeMap<[u8; 4], u32> = BTreeMap::new();
+    let (mut pos, mut n) = (0usize, 0usize);
+    while pos < b.len() {
+        let hdr = b
+            .get(pos..pos + 27)
+            .filter(|h| &h[..4] == b"OggS")
+            .ok_or_else(|| bad(format!("no page at byte {pos}")))?;
+        let nseg = usize::from(hdr[26]);
+        let lacing = b
+            .get(pos + 27..pos + 27 + nseg)
+            .ok_or_else(|| bad(format!("page {n} is cut off")))?;
+        let end = pos + 27 + nseg + lacing.iter().map(|x| usize::from(*x)).sum::<usize>();
+        let page = b
+            .get(pos..end)
+            .ok_or_else(|| bad(format!("page {n} is cut off")))?;
+        let serial = [hdr[14], hdr[15], hdr[16], hdr[17]];
+        let seq = u32::from_le_bytes([hdr[18], hdr[19], hdr[20], hdr[21]]);
+        let expected = next.entry(serial).or_insert(0);
+        if seq != *expected {
+            return Err(bad(format!(
+                "page {n} is numbered {seq}, expected {expected}"
+            )));
+        }
+        *expected = expected.wrapping_add(1);
+        let stored = u32::from_le_bytes([hdr[22], hdr[23], hdr[24], hdr[25]]);
+        let mut zeroed = page.to_vec();
+        zeroed[22..26].fill(0);
+        if ogg_crc(&zeroed) != stored {
+            return Err(bad(format!("page {n} has a wrong checksum")));
+        }
+        pos = end;
+        n += 1;
+    }
+    if n == 0 {
+        return Err(bad("no page".to_string()));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------------
 // Reading
 
@@ -599,6 +659,45 @@ mod tests {
         assert!(check_key("title").is_err());
         assert!(check_key("REPLAYGAIN_TRACK_GAIN").is_err());
         assert!(check_key("METADATA_BLOCK_PICTURE").is_err());
+    }
+
+    /// One page with a right checksum.
+    fn page(serial: u32, seq: u32, payload: &[u8]) -> Vec<u8> {
+        let mut p = b"OggS\0\0".to_vec();
+        p.extend([0u8; 8]);
+        p.extend(serial.to_le_bytes());
+        p.extend(seq.to_le_bytes());
+        p.extend([0u8; 4]);
+        p.push(1);
+        p.push(payload.len() as u8);
+        p.extend(payload);
+        let crc = ogg_crc(&p);
+        p[22..26].copy_from_slice(&crc.to_le_bytes());
+        p
+    }
+
+    #[test]
+    fn written_ogg_pages_are_checked() {
+        let good = [page(7, 0, b"a"), page(7, 1, b"b"), page(9, 0, b"c")].concat();
+        assert!(check_pages(&good).is_ok());
+
+        let gap = [page(7, 0, b"a"), page(7, 2, b"b")].concat();
+        let err = check_pages(&gap).unwrap_err().to_string();
+        assert!(err.contains("page 1 is numbered 2, expected 1"), "{err}");
+        let late_start = page(7, 1, b"a");
+        assert!(check_pages(&late_start).is_err());
+
+        let mut crc = good.clone();
+        crc[28] ^= 1; // the first payload byte
+        let err = check_pages(&crc).unwrap_err().to_string();
+        assert!(err.contains("page 0 has a wrong checksum"), "{err}");
+        assert!(err.ends_with("; nothing written"));
+
+        let mut tail = good.clone();
+        tail.extend(b"junk");
+        assert!(check_pages(&tail).is_err());
+        assert!(check_pages(&good[..good.len() - 1]).is_err());
+        assert!(check_pages(&[]).is_err());
     }
 
     #[test]

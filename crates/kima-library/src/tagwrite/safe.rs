@@ -180,6 +180,7 @@ fn run(
     }
     super::write_native(copy, container, id3, new)?;
     File::open(copy)?.sync_all()?;
+    super::check_written(copy, container)?;
 
     let got = super::read_native(copy, container, &keys)?;
     if &got != new {

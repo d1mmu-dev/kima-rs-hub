@@ -11,9 +11,11 @@
 //! (an unknown type set, a `covr` of an unknown image type, a value that is not valid text) is
 //! dropped while reading. When `moov` grows, lofty moves what follows it and corrects the
 //! `stco`/`co64` chunk offsets, but only the first `moof`'s `tfhd`, so a fragmented file is
-//! refused. The checks parse the file as stored: every top-level atom (the `mdat` byte for byte),
-//! every leaf atom in `moov` with the chunk offsets taken relative to the atom they point into,
-//! and every `ilst` item byte for byte.
+//! refused, and so is a file with `saio` or `iloc` (absolute offsets lofty does not correct) or
+//! container atoms nested deeper than [`MAX_DEPTH`]. The checks parse the file as stored: every
+//! top-level atom (the `mdat` byte for byte), every leaf atom in `moov` (and a top-level `meta`)
+//! with the chunk offsets taken relative to the atom they point into, and every item of the
+//! `moov.udta.meta.ilst` byte for byte (an `ilst` anywhere else is an ordinary leaf).
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -310,14 +312,26 @@ fn offsets(b: &[u8], bx: &Box_, top: &[Box_], wide: bool) -> Vec<u8> {
     out
 }
 
+/// How deep container atoms may nest (`moov` is 1; real files reach about 8). A deeper file is
+/// refused rather than walked: the walk recurses, and a crafted file would exhaust the stack.
+pub(super) const MAX_DEPTH: usize = 16;
+
+/// Where lofty reads and writes the tag: the only `ilst` whose items are keys.
+const TAG_META: &str = "moov.udta.meta";
+
+#[allow(clippy::too_many_arguments)]
 fn walk(
     b: &[u8],
     parent: &Box_,
     path: &str,
+    depth: usize,
     top: &[Box_],
     raw: &mut Vec<(String, [u8; 32])>,
     items: &mut Vec<Item>,
 ) -> Result<(), TagWriteError> {
+    if depth > MAX_DEPTH {
+        return Err(refuse("the MP4 atom structure is damaged"));
+    }
     let mut from = parent.body;
     // A full `meta` (ISO) has version and flags before its children; a QuickTime one does not.
     if &parent.fourcc == b"meta" && b.get(from..from + 4) == Some(&[0, 0, 0, 0]) {
@@ -326,8 +340,16 @@ fn walk(
     for c in boxes(b, from, parent.end)? {
         let label = format!("{path}.{}", fourcc_str(&c.fourcc));
         match &c.fourcc {
+            // Absolute file offsets lofty does not correct when `moov` grows.
+            b"saio" | b"iloc" => {
+                return Err(refuse(&format!(
+                    "MP4 files with a {} atom are not written",
+                    fourcc_str(&c.fourcc)
+                )));
+            }
             b"free" | b"skip" => {}
-            b"ilst" => {
+            // Elsewhere (a track's own `udta.meta`) an `ilst` is compared as one leaf below.
+            b"ilst" if path == TAG_META => {
                 for it in boxes(b, c.body, c.end)? {
                     if !matches!(&it.fourcc, b"free" | b"skip") {
                         items.push(parse_item(b, &it)?);
@@ -336,8 +358,8 @@ fn walk(
             }
             b"stco" => raw.push((label, sha(&offsets(b, &c, top, false)))),
             b"co64" => raw.push((label, sha(&offsets(b, &c, top, true)))),
-            b"hdlr" if path.ends_with("udta.meta") && b[c.body..c.end] == LOFTY_HDLR => {}
-            f if CONTAINERS.contains(&f) => walk(b, &c, &label, top, raw, items)?,
+            b"hdlr" if path == TAG_META && b[c.body..c.end] == LOFTY_HDLR => {}
+            f if CONTAINERS.contains(&f) => walk(b, &c, &label, depth + 1, top, raw, items)?,
             _ => raw.push((label, sha(&b[c.body..c.end]))),
         }
     }
@@ -345,7 +367,10 @@ fn walk(
 }
 
 fn parse(path: &Path) -> Result<Raw, TagWriteError> {
-    let bytes = std::fs::read(path)?;
+    parse_bytes(std::fs::read(path)?)
+}
+
+fn parse_bytes(bytes: Vec<u8>) -> Result<Raw, TagWriteError> {
     let all = boxes(&bytes, 0, bytes.len())?;
     if all.iter().any(|t| &t.fourcc == b"moof") {
         return Err(refuse("fragmented MP4 files are not written"));
@@ -361,10 +386,12 @@ fn parse(path: &Path) -> Result<Raw, TagWriteError> {
     let mut parts = Vec::new();
     let mut items = Vec::new();
     for t in &top {
-        if &t.fourcc == b"moov" {
-            walk(&bytes, t, "moov", &top, &mut parts, &mut items)?;
+        let name = fourcc_str(&t.fourcc);
+        // `moov`, and a top-level `meta` (where `iloc` lives), are walked.
+        if matches!(&t.fourcc, b"moov" | b"meta") {
+            walk(&bytes, t, &name, 1, &top, &mut parts, &mut items)?;
         } else {
-            parts.push((fourcc_str(&t.fourcc), sha(&bytes[t.body..t.end])));
+            parts.push((name, sha(&bytes[t.body..t.end])));
         }
     }
     Ok(Raw {

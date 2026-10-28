@@ -298,17 +298,30 @@ async fn preview(ctx: &LibraryCtx, run: Run) -> Result<()> {
         .iter()
         .map(|t| (t.id, fields_of(t), src_key(Path::new(&t.path))))
         .collect();
+    // A scoped move leaves the sidecars of a folder that also holds a track of another album
+    // (a cover shared with an album out of scope stays with it). A copy takes nothing away.
+    let shared: HashSet<PathBuf> = match run.album_ids.as_deref() {
+        Some(ids) if !copy => db::paths_outside(&ctx.pool, ids)
+            .await?
+            .iter()
+            .filter_map(|p| Path::new(p).parent().map(Path::to_path_buf))
+            .collect(),
+        _ => HashSet::new(),
+    };
     let sidecars: Vec<PathBuf> = src_walk
         .iter()
         .filter(|p| paths::is_sidecar(p))
+        .filter(|p| p.parent().is_none_or(|d| !shared.contains(d)))
         .map(|p| src_key(p))
         .collect();
     // In copy mode a file already copied to its target by an earlier run is not planned again:
     // same size and SHA-256 (hashed only when the sizes match) makes it `unchanged` there.
     let (moves, sidecar_moves) = {
-        let target = target.clone();
+        let (source, target) = (source.clone(), target.clone());
         tokio::task::spawn_blocking(move || {
-            let same = |from: &Path, to: &Path| copy && same_file(from, &target.join(to));
+            let same = |from: &Path, to: &Path| {
+                copy && copied_already(&source, from, &target, &target.join(to))
+            };
             let moves = paths::plan_with(&inputs, &existing, &same);
             let sidecar_moves = paths::plan_sidecars_with(&moves, &sidecars, &existing, &same);
             (moves, sidecar_moves)
@@ -686,7 +699,21 @@ fn symlinked_ancestor(root: &Path, path: &Path) -> bool {
     false
 }
 
+/// `path` is a symbolic link itself, or [`symlinked_ancestor`] holds.
+fn through_symlink(root: &Path, path: &Path) -> bool {
+    symlinked_ancestor(root, path)
+        || fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Copy mode: `dst` (under `target`) already is a copy of `src` (under `source`). Neither may
+/// be reached through a symbolic link: a linked target folder is not part of the copy, and a
+/// linked source is a track the organizer refuses (D-123).
+fn copied_already(source: &Path, src: &Path, target: &Path, dst: &Path) -> bool {
+    !through_symlink(source, src) && !through_symlink(target, dst) && same_file(src, dst)
+}
+
 const SYMLINK_NOTE: &str = "a folder on the target path is a symbolic link";
+const SOURCE_SYMLINK_NOTE: &str = "the source is reached through a symbolic link";
 /// A resumed row found its copy in place but the source no longer matches the journalled
 /// checksum: something wrote to it in between.
 const CHANGED_SINCE_MOVE: &str = "changed since the move";
@@ -1009,6 +1036,13 @@ async fn copy_rows(r: &mut Runner<'_>) -> Result<()> {
             r.row_finished();
             continue;
         }
+        let (root, s) = (r.source.clone(), src.clone());
+        if blocking(move || Ok(through_symlink(&root, &s))).await? {
+            r.commit(&row, "skipped", Some(SOURCE_SYMLINK_NOTE), None)
+                .await?;
+            r.row_finished();
+            continue;
+        }
         let (root, d) = (r.target.clone(), dst.clone());
         if blocking(move || Ok(symlinked_ancestor(&root, &d))).await? {
             r.commit(&row, "skipped", Some(SYMLINK_NOTE), None).await?;
@@ -1053,8 +1087,9 @@ async fn verify_unchanged(r: &Runner<'_>) -> Result<()> {
             join_rel(&r.source, &row.from_path)?,
             join_rel(&r.target, &row.to_path)?,
         );
+        let (source, target) = (r.source.clone(), r.target.clone());
         let sha = blocking(move || {
-            Ok(if same_file(&src, &dst) {
+            Ok(if copied_already(&source, &src, &target, &dst) {
                 sha256_file(&dst).ok()
             } else {
                 None
@@ -1355,6 +1390,11 @@ async fn move_one(
             };
             if !stage && r.track_conflict(row, &op.dst_rel).await? {
                 refuse(r, row, dir, "another track is recorded at the target").await?;
+                return Ok(false);
+            }
+            let (root, s) = (r.source.clone(), op.src.clone());
+            if dir == Dir::Forward && blocking(move || Ok(through_symlink(&root, &s))).await? {
+                refuse(r, row, dir, SOURCE_SYMLINK_NOTE).await?;
                 return Ok(false);
             }
             let (root, d) = (r.source.clone(), op.dst.clone());
@@ -1659,11 +1699,11 @@ async fn switch_root(ctx: &LibraryCtx, run: Run) -> Result<()> {
         }
         let dst = join_rel(&target, &row.to_path)?;
         let sha = row.sha256.clone();
+        let root = target.clone();
         let ok = blocking(move || {
-            Ok(
-                fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_file())
-                    && sha.as_deref().is_some_and(|s| sha_matches(&dst, s)),
-            )
+            Ok(!symlinked_ancestor(&root, &dst)
+                && fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_file())
+                && sha.as_deref().is_some_and(|s| sha_matches(&dst, s)))
         })
         .await?;
         if !ok {

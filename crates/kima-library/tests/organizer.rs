@@ -2204,3 +2204,167 @@ async fn mixed_disc_total_uses_the_album_maximum(pool: PgPool) {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Task 11: symlinks (D-123) and scoped sidecars
+
+/// Moves the target's `Alpha/2001 - First` out of the target root and puts a symlink to it
+/// in its place: the same files, reached through a link.
+#[cfg(unix)]
+fn link_target_folder(lib: &Lib, outside: &Path) {
+    let folder = lib.target.join("Alpha/2001 - First");
+    let moved = outside.join("First");
+    std::fs::rename(&folder, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &folder).unwrap();
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn symlinked_target_is_not_an_unchanged_copy_at_apply(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let (_, second) = copied_twice(&lib).await;
+    let outside = tempfile::tempdir().unwrap();
+    link_target_folder(&lib, outside.path());
+    apply_run(&lib, second).await;
+    for r in rows(&lib, second).await {
+        if r.to_path.starts_with("Alpha/2001 - First/") {
+            assert_eq!(r.state, "skipped", "{r:?}");
+            assert_eq!(
+                r.note.as_deref(),
+                Some("the target changed since the preview")
+            );
+        } else {
+            assert_eq!(r.state, "unchanged", "{r:?}");
+        }
+    }
+    let err = apply::run_action(&lib.ctx, second, Action::SwitchRoot, &Hooks::default()).await;
+    assert!(matches!(err, Err(OrganizeError::Invalid(_))), "{err:?}");
+    assert_ne!(lib.ctx.root.get(), lib.target);
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn symlinked_target_is_not_copied_at_switch(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let files = messy();
+    let lib = library(&pool, &files).await;
+    let (_, second) = copied_twice(&lib).await;
+    apply_run(&lib, second).await;
+    assert_eq!(state(&lib, second).await, "done");
+    // Same bytes, so the journalled checksums still match; only the link differs.
+    let outside = tempfile::tempdir().unwrap();
+    link_target_folder(&lib, outside.path());
+    let before = track_paths(&pool).await;
+    let err = apply::run_action(&lib.ctx, second, Action::SwitchRoot, &Hooks::default()).await;
+    assert!(matches!(err, Err(OrganizeError::Invalid(_))), "{err:?}");
+    assert_eq!(track_paths(&pool).await, before);
+    assert_ne!(lib.ctx.root.get(), lib.target);
+    let linked: Vec<_> = rows(&lib, second)
+        .await
+        .into_iter()
+        .filter(|r| r.to_path.starts_with("Alpha/2001 - First/") && r.track_id.is_some())
+        .collect();
+    assert!(!linked.is_empty());
+    for r in linked {
+        assert_eq!(r.state, "skipped", "{r:?}");
+        assert_eq!(
+            r.note.as_deref(),
+            Some("the target changed since the apply")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn symlinked_source_track_is_refused(pool: PgPool) {
+    let s = seeded_lib(&pool);
+    let (linked, _) = seed_row(&pool, &s, one("Alpha", "First", "One", "x/a.mp3")).await;
+    let (plain, _) = seed_row(&pool, &s, one("Beta", "Second", "Two", "y/b.mp3")).await;
+    // The first track's file becomes a link to a copy outside the library.
+    let outside = tempfile::tempdir().unwrap();
+    let real = outside.path().join("a.mp3");
+    std::fs::rename(s.root.join("x/a.mp3"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, s.root.join("x/a.mp3")).unwrap();
+    for mode in ["copy", "move"] {
+        let run = scoped_preview(&s, mode, None).await;
+        assert!(
+            db::transition(&pool, run, &["previewed"], "applying")
+                .await
+                .unwrap()
+        );
+        apply::run_action(&s.ctx, run, Action::Apply, &Hooks::default())
+            .await
+            .unwrap();
+        for r in run_rows(&s, run).await {
+            if r.track_id == Some(linked) {
+                assert_eq!(r.state, "skipped", "{mode}: {r:?}");
+                assert_eq!(
+                    r.note.as_deref(),
+                    Some("the source is reached through a symbolic link")
+                );
+            } else {
+                assert_eq!(r.track_id, Some(plain));
+                assert_eq!(r.state, "done", "{mode}: {r:?}");
+            }
+        }
+        // The link is where it was, still a link.
+        let meta = std::fs::symlink_metadata(s.root.join("x/a.mp3")).unwrap();
+        assert!(meta.file_type().is_symlink(), "{mode}");
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn scoped_move_leaves_shared_folder_sidecars(pool: PgPool) {
+    let s = seeded_lib(&pool);
+    // `x` holds a track of each album; `y` only one of the scoped album.
+    let (_, album_a) = seed_row(&pool, &s, one("Alpha", "First", "One", "x/a.mp3")).await;
+    seed_row(&pool, &s, one("Beta", "Second", "Two", "x/b.mp3")).await;
+    seed_row(
+        &pool,
+        &s,
+        Row {
+            no: 2,
+            ..one("Alpha", "First", "Three", "y/c.mp3")
+        },
+    )
+    .await;
+    std::fs::write(s.root.join("x/cover.jpg"), b"shared").unwrap();
+    std::fs::write(s.root.join("y/folder.jpg"), b"own").unwrap();
+
+    let run = scoped_preview(&s, "move", Some(&[album_a])).await;
+    let sidecars: Vec<String> = run_rows(&s, run)
+        .await
+        .into_iter()
+        .filter(|r| r.track_id.is_none())
+        .map(|r| r.from_path)
+        .collect();
+    assert_eq!(sidecars, vec!["y/folder.jpg"]);
+
+    // A copy takes nothing away, so it still brings the shared cover along.
+    let run = scoped_preview(&s, "copy", Some(&[album_a])).await;
+    let mut sidecars: Vec<String> = run_rows(&s, run)
+        .await
+        .into_iter()
+        .filter(|r| r.track_id.is_none())
+        .map(|r| r.from_path)
+        .collect();
+    sidecars.sort();
+    assert_eq!(sidecars, vec!["x/cover.jpg", "y/folder.jpg"]);
+
+    // Unscoped, the shared folder's sidecars move as before.
+    let run = scoped_preview(&s, "move", None).await;
+    let mut sidecars: Vec<String> = run_rows(&s, run)
+        .await
+        .into_iter()
+        .filter(|r| r.track_id.is_none())
+        .map(|r| r.from_path)
+        .collect();
+    sidecars.sort();
+    assert_eq!(sidecars, vec!["x/cover.jpg", "y/folder.jpg"]);
+}

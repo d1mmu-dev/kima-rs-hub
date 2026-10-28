@@ -591,6 +591,17 @@ pub async fn plan_tracks(
     .await
 }
 
+/// Paths of the present tracks outside these albums: a scoped run must leave their folders'
+/// sidecars where they are.
+pub async fn paths_outside(pool: &PgPool, album_ids: &[Uuid]) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar!(
+        "SELECT path FROM tracks WHERE missing_since IS NULL AND NOT (album_id = ANY($1))",
+        album_ids
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Switches the library to a copy run's target: every done track row's track takes its
 /// `to_path`, the run is stamped `switched_at`, and `system_settings.library_root` becomes the
 /// target root. One transaction. Returns how many tracks were re-pointed.

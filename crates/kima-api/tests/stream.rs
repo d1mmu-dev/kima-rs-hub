@@ -449,3 +449,31 @@ async fn stream_without_quality_follows_user_setting(pool: PgPool) {
     }
     panic!("transcode never became cached");
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stream_serves_symlinked_track(pool: PgPool) {
+    let root = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let data = bytes(5_000);
+    let s = seed(&pool, Seed::new("Artist", "Album", Some(2001), "Song")).await;
+    std::fs::write(elsewhere.path().join("song.mp3"), &data).unwrap();
+    let link = root.path().join("Artist/Album/1-1 Song.mp3");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path().join("song.mp3"), &link).unwrap();
+    sqlx::query(
+        "UPDATE tracks SET guessed = jsonb_set(guessed, '{viaSymlink}', 'true') WHERE id = $1",
+    )
+    .bind(s.track)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let state = setup(pool, root.path());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    let res = server
+        .get(&format!("/api/library/tracks/{}/stream", s.track))
+        .authorization_bearer(&token)
+        .await;
+    res.assert_status_ok();
+    assert_eq!(res.as_bytes().as_ref(), &data[..]);
+}

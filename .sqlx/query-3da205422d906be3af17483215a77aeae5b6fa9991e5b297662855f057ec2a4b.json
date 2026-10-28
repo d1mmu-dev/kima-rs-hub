@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tracks SET guessed = jsonb_set(guessed, '{viaSymlink}', to_jsonb($2::boolean))\n         WHERE path = ANY($1)\n           AND COALESCE((guessed ->> 'viaSymlink')::boolean, false) <> $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3da205422d906be3af17483215a77aeae5b6fa9991e5b297662855f057ec2a4b"
+}

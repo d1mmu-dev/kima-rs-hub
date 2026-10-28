@@ -275,6 +275,32 @@ fn is_hidden(name: &str) -> bool {
     name.starts_with('.')
 }
 
+/// The file at `rel`, or any folder above it under `root`, is a symlink (never followed). The
+/// root itself may be a link; only the parts below it count. Blocking.
+pub(crate) fn symlinked(root: &Path, rel: &str) -> bool {
+    let mut cur = root.to_path_buf();
+    for c in Path::new(rel).components() {
+        if let Component::Normal(part) = c {
+            cur.push(part);
+            if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Of `paths`, those reached through a symlink whose target resolves to a regular file. A loop
+/// or a dangling link does not resolve, so it is not among them. Blocking.
+fn live_links(root: &Path, paths: &[String]) -> HashSet<String> {
+    paths
+        .iter()
+        .filter(|p| symlinked(root, p))
+        .filter(|p| std::fs::metadata(root.join(p)).is_ok_and(|m| m.is_file()))
+        .cloned()
+        .collect()
+}
+
 fn walk(root: &Path) -> Result<Walk, ScanError> {
     std::fs::read_dir(root).map_err(|source| ScanError::Root {
         path: root.to_path_buf(),
@@ -742,6 +768,12 @@ async fn process_folder(
             continue;
         }
         let full = ctx.root.get().join(&s.path);
+        // The scanner's own flag, not a tag. The changed files share this folder and are not
+        // under a symlinked one, so only the sibling itself can be a link (an indexed one,
+        // `update_path`), and a re-read for the album year must keep that.
+        let linked = tokio::fs::symlink_metadata(&full)
+            .await
+            .is_ok_and(|m| m.file_type().is_symlink());
         let meta = match tokio::fs::metadata(&full).await {
             Ok(m) => m,
             Err(e) => {
@@ -759,7 +791,8 @@ async fn process_folder(
         };
         // Re-read tags may have moved it to another group; use that group's year if known.
         let year = years.get(&group_key(&p.resolved)).copied().unwrap_or(year);
-        let track = to_track(&p, year);
+        let mut track = to_track(&p, year);
+        track.guessed.via_symlink = linked;
         match retry_once_on_conflict(|| store(&ctx.pool, &track, &p.raw, false)).await {
             Ok(r) => {
                 touched.add(&r, &track);
@@ -855,15 +888,49 @@ pub async fn reconcile_cancellable(
         .into_iter()
         .filter(|p| root.join(p).is_file())
         .collect();
+    let candidates: Vec<String> = index
+        .values()
+        .filter(|t| !on_disk.contains(t.path.as_str()))
+        .filter(|t| !parked.contains(&t.path))
+        .filter(|t| !under_any(&t.path, &walked.unreadable))
+        .map(|t| t.path.clone())
+        .collect();
+    // The walk does not follow symlinks, so a track indexed through one never shows up on disk.
+    // While its target exists it is present: flagged, counted unchanged, and brought back if a
+    // dangling link had marked it missing. A loop or a dangling link is gone like any file.
+    let links = {
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || {
+            let live = live_links(&root, &candidates);
+            (candidates, live)
+        })
+        .await?
+    };
+    let (candidates, live) = links;
+    let mut link_flag = Vec::new();
+    for path in &live {
+        let row = &index[path];
+        if row.missing {
+            restore.push(path.clone());
+        } else {
+            report.unchanged += 1;
+        }
+        if !row.via_symlink {
+            link_flag.push(path.clone());
+        }
+    }
+    // Real files now where a link was: the flag goes with the link.
+    let link_clear: Vec<String> = index
+        .values()
+        .filter(|t| t.via_symlink && on_disk.contains(t.path.as_str()))
+        .map(|t| t.path.clone())
+        .collect();
     let vanished: Vec<String> = if report.root_empty_guard {
         Vec::new()
     } else {
-        index
-            .values()
-            .filter(|t| !t.missing && !on_disk.contains(t.path.as_str()))
-            .filter(|t| !parked.contains(&t.path))
-            .filter(|t| !under_any(&t.path, &walked.unreadable))
-            .map(|t| t.path.clone())
+        candidates
+            .into_iter()
+            .filter(|p| !index[p].missing && !live.contains(p))
             .collect()
     };
     // Each chunk's flag change commits with its albums' refresh (MBIDs and genres follow the
@@ -871,6 +938,8 @@ pub async fn reconcile_cancellable(
     for chunk in vanished.chunks(MARK_CHUNK) {
         report.missing += flip_and_refresh(&ctx.pool, chunk, false).await? as usize;
     }
+    library::set_via_symlink(&ctx.pool, &link_flag, true).await?;
+    library::set_via_symlink(&ctx.pool, &link_clear, false).await?;
     let vanished_ids: HashSet<Uuid> = vanished.iter().map(|p| index[p].id).collect();
     for chunk in restore.chunks(MARK_CHUNK) {
         report.restored += flip_and_refresh(&ctx.pool, chunk, true).await? as usize;
@@ -943,6 +1012,41 @@ fn clean_rel(rel: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 
+/// The file at `rel` is not there: marks its row missing (unless the root is unavailable).
+async fn gone(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, ScanError> {
+    Ok(match library::find_by_path(&ctx.pool, rel).await? {
+        None => PathOutcome::Ignored,
+        Some(row) if row.missing_since.is_some() => PathOutcome::Unchanged,
+        Some(_) if !root_available(&ctx.root.get()).await => PathOutcome::RootUnavailable,
+        Some(_) => {
+            flip_and_refresh(&ctx.pool, &[rel.to_string()], false).await?;
+            PathOutcome::MarkedMissing
+        }
+    })
+}
+
+/// `rel` is a symlink or lies under one. Nothing new is indexed through a link. A row that
+/// exists stays present while the target does (flagged, brought back if it was missing); with
+/// a dangling or looping link it goes missing like any vanished file.
+async fn update_linked(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, ScanError> {
+    let Some(row) = library::find_by_path(&ctx.pool, rel).await? else {
+        return Ok(PathOutcome::Ignored);
+    };
+    let live = tokio::fs::metadata(ctx.root.get().join(rel))
+        .await
+        .is_ok_and(|m| m.is_file());
+    if !live {
+        return gone(ctx, rel).await;
+    }
+    let paths = [rel.to_string()];
+    library::set_via_symlink(&ctx.pool, &paths, true).await?;
+    if row.missing_since.is_some() {
+        flip_and_refresh(&ctx.pool, &paths, true).await?;
+        return Ok(PathOutcome::Updated);
+    }
+    Ok(PathOutcome::Unchanged)
+}
+
 /// Brings one file's row up to date: adds, re-reads, re-points or marks it missing. Used for
 /// watcher events. Directories are not expanded here.
 pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, ScanError> {
@@ -952,19 +1056,17 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
     if !tags::is_audio(Path::new(&rel)) {
         return Ok(PathOutcome::Ignored);
     }
-    let meta = match tokio::fs::metadata(ctx.root.get().join(&rel)).await {
+    let root = ctx.root.get();
+    let linked = {
+        let (root, rel) = (root.clone(), rel.clone());
+        tokio::task::spawn_blocking(move || symlinked(&root, &rel)).await?
+    };
+    if linked {
+        return update_linked(ctx, &rel).await;
+    }
+    let meta = match tokio::fs::symlink_metadata(root.join(&rel)).await {
         Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(match library::find_by_path(&ctx.pool, &rel).await? {
-                None => PathOutcome::Ignored,
-                Some(row) if row.missing_since.is_some() => PathOutcome::Unchanged,
-                Some(_) if !root_available(&ctx.root.get()).await => PathOutcome::RootUnavailable,
-                Some(_) => {
-                    flip_and_refresh(&ctx.pool, std::slice::from_ref(&rel), false).await?;
-                    PathOutcome::MarkedMissing
-                }
-            });
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return gone(ctx, &rel).await,
         Err(e) => return Ok(PathOutcome::Failed(e.to_string())),
     };
     if !meta.is_file() {
@@ -981,6 +1083,9 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
     let mut known = HashMap::new();
     if let Some(row) = folder.get(&rel) {
         if row.size == disk.size && row.mtime == disk.mtime {
+            if row.via_symlink {
+                library::set_via_symlink(&ctx.pool, std::slice::from_ref(&rel), false).await?;
+            }
             if row.missing {
                 flip_and_refresh(&ctx.pool, std::slice::from_ref(&rel), true).await?;
                 return Ok(PathOutcome::Updated);

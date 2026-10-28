@@ -1905,16 +1905,22 @@ async fn fail_album_mbid_update_once(pool: &PgPool) {
 
 /// [`fail_album_mbid_update_once`] for any table and column.
 async fn fail_update_once(pool: &PgPool, table: &str, column: &str) {
+    fail_update_times(pool, table, column, 1).await;
+}
+
+/// The first `times` updates of the column lose a "deadlock"; later ones pass.
+async fn fail_update_times(pool: &PgPool, table: &str, column: &str, times: u32) {
     for sql in [
         "CREATE SEQUENCE inject_once".to_string(),
-        "CREATE FUNCTION inject_conflict() RETURNS trigger AS $$
-         BEGIN
-             IF nextval('inject_once') = 1 THEN
-                 RAISE EXCEPTION 'injected' USING ERRCODE = '40P01';
-             END IF;
-             RETURN NEW;
-         END $$ LANGUAGE plpgsql"
-            .to_string(),
+        format!(
+            "CREATE FUNCTION inject_conflict() RETURNS trigger AS $$
+             BEGIN
+                 IF nextval('inject_once') <= {times} THEN
+                     RAISE EXCEPTION 'injected' USING ERRCODE = '40P01';
+                 END IF;
+                 RETURN NEW;
+             END $$ LANGUAGE plpgsql"
+        ),
         format!(
             "CREATE TRIGGER inject BEFORE UPDATE OF {column} ON {table}
              FOR EACH ROW EXECUTE FUNCTION inject_conflict()"
@@ -1982,7 +1988,7 @@ async fn folder_refresh_retries_once_after_a_deadlock(pool: PgPool) {
 /// A deadlock in the album refresh rolls the missing marks back with it, and the retry commits
 /// both: the track is missing and the album's MBIDs follow the track that remains.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn mark_missing_and_album_refresh_commit_together(pool: PgPool) {
+async fn mark_missing_and_album_refresh_retry_together(pool: PgPool) {
     if !require_ffmpeg() {
         return;
     }
@@ -2024,6 +2030,58 @@ async fn mark_missing_and_album_refresh_commit_together(pool: PgPool) {
         2,
         "the first attempt failed, the second ran"
     );
+}
+
+/// When the album refresh fails on the retry too, the missing marks are rolled back with it:
+/// nothing is left half done. The next scan marks and refreshes both.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn mark_missing_and_album_refresh_commit_together(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let file = |rel: &'static str, rg: &'static str| Picard {
+        release: Some(rel),
+        release_group: Some(rg),
+        ..Default::default()
+    };
+    for (rel, n, mbids) in [
+        ("A/B/01.flac", "1", file(REL_A, RG_A)),
+        ("A/B/02.flac", "2", file(REL_A, RG_A)),
+        ("A/B/03.flac", "3", file(REL_B, RG_B)),
+    ] {
+        picard_audio(root, rel, tags("A", "B", rel, "2000", n), &mbids);
+    }
+    make_audio(root, "K/K/01.flac", tags("K", "K", "keep", "2000", "1"));
+    rescan(&pool, root).await;
+    let album = album_of(&pool, "A/B/01.flac").await;
+    let missing = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM tracks WHERE missing_since IS NOT NULL AND album_id = $1",
+        )
+        .bind(album)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+
+    fail_update_times(&pool, "albums", "release_mbid", 2).await;
+    for name in ["01.flac", "02.flac"] {
+        std::fs::remove_file(root.join("A/B").join(name)).unwrap();
+    }
+    assert!(scan::reconcile(&ctx(&pool, root)).await.is_err());
+    assert_eq!(
+        inject_calls(&pool).await,
+        2,
+        "the attempt and its retry both failed"
+    );
+    assert_eq!(missing().await, 0, "the marks rolled back with the refresh");
+    assert_eq!(album_mbids(&pool, album).await.0, Some(u(REL_A)));
+
+    rescan(&pool, root).await;
+    assert_eq!(missing().await, 2);
+    assert_eq!(album_mbids(&pool, album).await.0, Some(u(REL_B)));
 }
 
 /// A deadlock in a file's own store runs the store once more: the file is stored, not reported

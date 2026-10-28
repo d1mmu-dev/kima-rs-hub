@@ -329,12 +329,18 @@ pub async fn find_by_path(pool: &PgPool, path: &str) -> sqlx::Result<Option<Trac
 /// Marks the given paths missing (keeping the original time for those already missing).
 /// Returns how many rows changed.
 pub async fn mark_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> {
+    let mut conn = pool.acquire().await?;
+    mark_missing_in(&mut conn, paths).await
+}
+
+/// [`mark_missing`] on a connection, so it can share a transaction.
+pub async fn mark_missing_in(conn: &mut PgConnection, paths: &[String]) -> sqlx::Result<u64> {
     let r = sqlx::query!(
         "UPDATE tracks SET missing_since = now()
          WHERE path = ANY($1) AND missing_since IS NULL",
         paths
     )
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(r.rows_affected())
 }
@@ -405,11 +411,20 @@ pub async fn purge_missing_albums(pool: &PgPool, older_than: Duration) -> sqlx::
 
 /// The albums of the tracks at these paths.
 pub async fn albums_of_paths(pool: &PgPool, paths: &[String]) -> sqlx::Result<Vec<Uuid>> {
+    let mut conn = pool.acquire().await?;
+    albums_of_paths_in(&mut conn, paths).await
+}
+
+/// [`albums_of_paths`] on a connection, so it can share a transaction.
+pub async fn albums_of_paths_in(
+    conn: &mut PgConnection,
+    paths: &[String],
+) -> sqlx::Result<Vec<Uuid>> {
     sqlx::query_scalar!(
         "SELECT DISTINCT album_id FROM tracks WHERE path = ANY($1)",
         paths
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
 }
 
@@ -511,15 +526,21 @@ pub async fn paths_under(pool: &PgPool, dir_prefix: &str) -> sqlx::Result<Vec<St
 /// reopens their `FILE_MISSING` stage rows. Returns how many tracks changed.
 pub async fn clear_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
+    let n = clear_missing_in(&mut tx, paths).await?;
+    tx.commit().await?;
+    Ok(n)
+}
+
+/// [`clear_missing`] on a connection (the caller's transaction commits it).
+pub async fn clear_missing_in(conn: &mut PgConnection, paths: &[String]) -> sqlx::Result<u64> {
     let ids = sqlx::query_scalar!(
         "UPDATE tracks SET missing_since = NULL, updated_at = now()
          WHERE path = ANY($1) AND missing_since IS NOT NULL
          RETURNING id",
         paths
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
-    crate::stages::reopen_file_missing_many(&mut tx, &ids).await?;
-    tx.commit().await?;
+    crate::stages::reopen_file_missing_many(conn, &ids).await?;
     Ok(ids.len() as u64)
 }

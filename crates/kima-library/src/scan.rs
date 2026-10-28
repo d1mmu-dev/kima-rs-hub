@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use kima_core::events::{Event, EventBus};
 use kima_db::genres::{self, GenreSource};
 use kima_db::library::{self, IndexedTrack, ResolvedTrack, TagIds};
-use kima_db::{PgPool, retry_once_on_conflict};
+use kima_db::{PgConnection, PgPool, retry_once_on_conflict};
 use kima_db::{lyrics, stages};
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
@@ -621,13 +621,39 @@ async fn refresh_albums(pool: &PgPool, albums: HashSet<Uuid>) -> sqlx::Result<()
     albums.sort_unstable();
     retry_once_on_conflict(|| async {
         let mut tx = pool.begin().await?;
-        for &album in &albums {
-            library::refresh_album_mbids(&mut tx, album).await?;
-        }
-        let mut artists = library::artists_of_albums(&mut tx, &albums).await?;
-        artists.sort_unstable();
-        genres::recompute_file_genres(&mut tx, &albums, &artists).await?;
+        refresh_albums_in(&mut tx, &albums).await?;
         tx.commit().await
+    })
+    .await
+}
+
+/// The body of [`refresh_albums`] on the caller's transaction; `albums` sorted.
+async fn refresh_albums_in(conn: &mut PgConnection, albums: &[Uuid]) -> sqlx::Result<()> {
+    for &album in albums {
+        library::refresh_album_mbids(conn, album).await?;
+    }
+    let mut artists = library::artists_of_albums(conn, albums).await?;
+    artists.sort_unstable();
+    genres::recompute_file_genres(conn, albums, &artists).await
+}
+
+/// Marks these paths missing (`restore` false) or brings them back (`restore` true) and
+/// refreshes their albums, in one transaction, run again once after a deadlock: a victim never
+/// leaves the flag changed and the album's MBIDs and genres stale. Returns the rows changed.
+async fn flip_and_refresh(pool: &PgPool, paths: &[String], restore: bool) -> sqlx::Result<u64> {
+    retry_once_on_conflict(|| async {
+        let mut tx = pool.begin().await?;
+        let changed = if restore {
+            library::clear_missing_in(&mut tx, paths).await?
+        } else {
+            library::mark_missing_in(&mut tx, paths).await?
+        };
+        let mut albums = library::albums_of_paths_in(&mut tx, paths).await?;
+        albums.sort_unstable();
+        albums.dedup();
+        refresh_albums_in(&mut tx, &albums).await?;
+        tx.commit().await?;
+        Ok(changed)
     })
     .await
 }
@@ -693,7 +719,9 @@ async fn process_folder(
         let year = years.get(&group_key(&p.resolved)).copied().flatten();
         let track = to_track(p, year);
         let rel = p.disk.rel.clone();
-        match store(&ctx.pool, &track, &p.raw, !known.contains_key(&rel)).await {
+        match retry_once_on_conflict(|| store(&ctx.pool, &track, &p.raw, !known.contains_key(&rel)))
+            .await
+        {
             Ok(r) => {
                 touched.add(&r, &track);
                 out.album_moved |= r.album_moved;
@@ -732,7 +760,7 @@ async fn process_folder(
         // Re-read tags may have moved it to another group; use that group's year if known.
         let year = years.get(&group_key(&p.resolved)).copied().unwrap_or(year);
         let track = to_track(&p, year);
-        match store(&ctx.pool, &track, &p.raw, false).await {
+        match retry_once_on_conflict(|| store(&ctx.pool, &track, &p.raw, false)).await {
             Ok(r) => {
                 touched.add(&r, &track);
                 out.album_moved |= r.album_moved;
@@ -838,18 +866,15 @@ pub async fn reconcile_cancellable(
             .map(|t| t.path.clone())
             .collect()
     };
-    let mut flipped: HashSet<Uuid> = HashSet::new();
+    // Each chunk's flag change commits with its albums' refresh (MBIDs and genres follow the
+    // tracks that are present now).
     for chunk in vanished.chunks(MARK_CHUNK) {
-        report.missing += library::mark_missing(&ctx.pool, chunk).await? as usize;
-        flipped.extend(library::albums_of_paths(&ctx.pool, chunk).await?);
+        report.missing += flip_and_refresh(&ctx.pool, chunk, false).await? as usize;
     }
     let vanished_ids: HashSet<Uuid> = vanished.iter().map(|p| index[p].id).collect();
     for chunk in restore.chunks(MARK_CHUNK) {
-        report.restored += library::clear_missing(&ctx.pool, chunk).await? as usize;
-        flipped.extend(library::albums_of_paths(&ctx.pool, chunk).await?);
+        report.restored += flip_and_refresh(&ctx.pool, chunk, true).await? as usize;
     }
-    // Their albums' MBIDs and genres follow the tracks that are present now.
-    refresh_albums(&ctx.pool, flipped).await?;
     progress.advance(report.unchanged + restore.len());
 
     for (folder, files) in changed {
@@ -935,9 +960,7 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
                 Some(row) if row.missing_since.is_some() => PathOutcome::Unchanged,
                 Some(_) if !root_available(&ctx.root.get()).await => PathOutcome::RootUnavailable,
                 Some(_) => {
-                    library::mark_missing(&ctx.pool, std::slice::from_ref(&rel)).await?;
-                    let albums = library::albums_of_paths(&ctx.pool, std::slice::from_ref(&rel));
-                    refresh_albums(&ctx.pool, albums.await?.into_iter().collect()).await?;
+                    flip_and_refresh(&ctx.pool, std::slice::from_ref(&rel), false).await?;
                     PathOutcome::MarkedMissing
                 }
             });
@@ -959,9 +982,7 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
     if let Some(row) = folder.get(&rel) {
         if row.size == disk.size && row.mtime == disk.mtime {
             if row.missing {
-                library::clear_missing(&ctx.pool, std::slice::from_ref(&rel)).await?;
-                let albums = library::albums_of_paths(&ctx.pool, std::slice::from_ref(&rel));
-                refresh_albums(&ctx.pool, albums.await?.into_iter().collect()).await?;
+                flip_and_refresh(&ctx.pool, std::slice::from_ref(&rel), true).await?;
                 return Ok(PathOutcome::Updated);
             }
             return Ok(PathOutcome::Unchanged);

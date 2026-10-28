@@ -1900,20 +1900,35 @@ async fn new_album_reopens_a_completed_artist(pool: PgPool) {
 /// Makes the next update of an album's release MBID lose a "deadlock" (40P01), once: the
 /// sequence is not transactional, so the retry does not trip it again.
 async fn fail_album_mbid_update_once(pool: &PgPool) {
+    fail_update_once(pool, "albums", "release_mbid").await;
+}
+
+/// [`fail_album_mbid_update_once`] for any table and column.
+async fn fail_update_once(pool: &PgPool, table: &str, column: &str) {
     for sql in [
-        "CREATE SEQUENCE inject_once",
+        "CREATE SEQUENCE inject_once".to_string(),
         "CREATE FUNCTION inject_conflict() RETURNS trigger AS $$
          BEGIN
              IF nextval('inject_once') = 1 THEN
                  RAISE EXCEPTION 'injected' USING ERRCODE = '40P01';
              END IF;
              RETURN NEW;
-         END $$ LANGUAGE plpgsql",
-        "CREATE TRIGGER inject BEFORE UPDATE OF release_mbid ON albums
-         FOR EACH ROW EXECUTE FUNCTION inject_conflict()",
+         END $$ LANGUAGE plpgsql"
+            .to_string(),
+        format!(
+            "CREATE TRIGGER inject BEFORE UPDATE OF {column} ON {table}
+             FOR EACH ROW EXECUTE FUNCTION inject_conflict()"
+        ),
     ] {
-        sqlx::query(sql).execute(pool).await.unwrap();
+        sqlx::query(&sql).execute(pool).await.unwrap();
     }
+}
+
+async fn inject_calls(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT last_value FROM inject_once")
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 /// A deadlock victim in the folder refresh runs the whole refresh again, so the folder's album
@@ -1957,11 +1972,83 @@ async fn folder_refresh_retries_once_after_a_deadlock(pool: PgPool) {
             Some("tag".into())
         )
     );
-    let used: i64 = sqlx::query_scalar("SELECT last_value FROM inject_once")
+    assert_eq!(
+        inject_calls(&pool).await,
+        2,
+        "the first attempt failed, the second ran"
+    );
+}
+
+/// A deadlock in the album refresh rolls the missing marks back with it, and the retry commits
+/// both: the track is missing and the album's MBIDs follow the track that remains.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn mark_missing_and_album_refresh_commit_together(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let file = |rel: &'static str, rg: &'static str| Picard {
+        release: Some(rel),
+        release_group: Some(rg),
+        ..Default::default()
+    };
+    for (rel, n, mbids) in [
+        ("A/B/01.flac", "1", file(REL_A, RG_A)),
+        ("A/B/02.flac", "2", file(REL_A, RG_A)),
+        ("A/B/03.flac", "3", file(REL_B, RG_B)),
+    ] {
+        picard_audio(root, rel, tags("A", "B", rel, "2000", n), &mbids);
+    }
+    make_audio(root, "K/K/01.flac", tags("K", "K", "keep", "2000", "1"));
+    rescan(&pool, root).await;
+    let album = album_of(&pool, "A/B/01.flac").await;
+    assert_eq!(album_mbids(&pool, album).await.0, Some(u(REL_A)));
+
+    fail_album_mbid_update_once(&pool).await;
+    for name in ["01.flac", "02.flac"] {
+        std::fs::remove_file(root.join("A/B").join(name)).unwrap();
+    }
+    rescan(&pool, root).await;
+    let missing: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM tracks WHERE missing_since IS NOT NULL AND album_id = $1",
+    )
+    .bind(album)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(missing, 2);
+    assert_eq!(album_mbids(&pool, album).await.0, Some(u(REL_B)));
+    assert_eq!(
+        inject_calls(&pool).await,
+        2,
+        "the first attempt failed, the second ran"
+    );
+}
+
+/// A deadlock in a file's own store runs the store once more: the file is stored, not reported
+/// failed.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn store_retries_once_after_a_deadlock(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_audio(root, "A/B/01.flac", tags("A", "B", "old", "2000", "1"));
+    rescan(&pool, root).await;
+
+    fail_update_once(&pool, "tracks", "title").await;
+    make_audio(root, "A/B/01.flac", tags("A", "B", "new", "2000", "1"));
+    let r = scan::reconcile(&ctx(&pool, root)).await.unwrap();
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+    assert_eq!(r.updated, 1);
+    let title: String = sqlx::query_scalar("SELECT title FROM tracks WHERE path = 'A/B/01.flac'")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(used, 2, "the first attempt failed, the second ran");
+    assert_eq!(title, "new");
+    assert_eq!(inject_calls(&pool).await, 2);
 }
 
 // ---- Album values follow the present tracks (M3a cleanup C3, Task 10 m1) ----

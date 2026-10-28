@@ -2,7 +2,7 @@
 
 use sqlx::postgres::PgPoolOptions;
 
-pub use sqlx::PgPool;
+pub use sqlx::{PgConnection, PgPool};
 
 pub mod api_keys;
 pub mod attention;

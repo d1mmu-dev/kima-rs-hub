@@ -164,6 +164,38 @@ async fn reports_each_issue_code(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn attention_lists_symlink_issue(pool: PgPool) {
+    let linked = seed(&pool, Seed::new("Linky", "Linked", Some(2000), "t")).await;
+    let plain = seed(&pool, Seed::new("Plain", "Plain", Some(2000), "t")).await;
+    let paths = ["Linky/Linked/1-1 t.mp3".to_string()];
+    assert_eq!(
+        kima_db::library::set_via_symlink(&pool, &paths, true)
+            .await
+            .unwrap(),
+        1
+    );
+    let (srv, admin, _) = server(pool.clone()).await;
+    let v: Value = srv
+        .get("/api/library/attention")
+        .authorization_bearer(&admin)
+        .await
+        .json();
+    assert_eq!(issues_of(&v, linked.album), ["symlink"]);
+    assert!(issues_of(&v, plain.album).is_empty());
+
+    // Cleared again, the issue goes.
+    kima_db::library::set_via_symlink(&pool, &paths, false)
+        .await
+        .unwrap();
+    let v: Value = srv
+        .get("/api/library/attention")
+        .authorization_bearer(&admin)
+        .await
+        .json();
+    assert!(issues_of(&v, linked.album).is_empty());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn requires_admin(pool: PgPool) {
     let (srv, _, user) = server(pool).await;
     let res = srv

@@ -2267,3 +2267,298 @@ async fn purge_updates_album_mbids_and_genres(pool: PgPool) {
     assert_eq!(album_mbids(&pool, album).await.0, Some(u(REL_B)));
     assert_eq!(album_genre_names(&pool, album).await, vec!["Jazz"]);
 }
+
+async fn via_symlink(pool: &PgPool, path: &str) -> bool {
+    guessed(pool, path).await.via_symlink
+}
+
+async fn missing_of(pool: &PgPool, path: &str) -> bool {
+    sqlx::query_scalar("SELECT missing_since IS NOT NULL FROM tracks WHERE path = $1")
+        .bind(path)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn update_path_refuses_new_symlink(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    make_audio(
+        outside.path(),
+        "real.flac",
+        tags("Link", "Linked", "one", "2000", "1"),
+    );
+    make_audio(
+        outside.path(),
+        "folder/two.flac",
+        tags("Link", "Linked", "two", "2000", "2"),
+    );
+    std::os::unix::fs::symlink(
+        outside.path().join("real.flac"),
+        dir.path().join("file.flac"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(outside.path().join("folder"), dir.path().join("dir")).unwrap();
+
+    for rel in ["file.flac", "dir/two.flac"] {
+        let outcome = scan::update_path(&c, rel).await.unwrap();
+        assert_eq!(outcome, PathOutcome::Ignored, "{rel}");
+    }
+    assert_eq!(count(&pool, "tracks").await, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn indexed_symlink_never_marked_missing(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let real = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "A/B/02.flac",
+        tags("A", "B", "two", "2000", "2"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    assert!(!via_symlink(&pool, "A/B/01.flac").await);
+    let indexed_mtime = std::fs::metadata(&real).unwrap().modified().unwrap();
+
+    // The file becomes a link to a copy elsewhere.
+    let copy = outside.path().join("01.flac");
+    std::fs::copy(&real, &copy).unwrap();
+    std::fs::remove_file(&real).unwrap();
+    std::os::unix::fs::symlink(&copy, &real).unwrap();
+
+    for _ in 0..2 {
+        let report = scan::reconcile(&c).await.unwrap();
+        assert_eq!((report.missing, report.purged), (0, 0), "{report:?}");
+        assert_eq!(report.unchanged, 2, "{report:?}");
+        assert!(!missing_of(&pool, "A/B/01.flac").await);
+        assert!(via_symlink(&pool, "A/B/01.flac").await);
+    }
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::Unchanged
+    );
+    assert!(!missing_of(&pool, "A/B/01.flac").await);
+
+    // Flagged missing past the grace (as a build that followed links would have left it), a
+    // live link is brought back, never purged.
+    sqlx::query(
+        "UPDATE tracks SET missing_since = now() - interval '30 days' WHERE path = 'A/B/01.flac'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(
+        (report.purged, report.missing, report.restored),
+        (0, 0, 1),
+        "{report:?}"
+    );
+    assert_eq!(count(&pool, "tracks").await, 2);
+    assert!(!missing_of(&pool, "A/B/01.flac").await);
+    // The same through `update_path`.
+    sqlx::query(
+        "UPDATE tracks SET missing_since = now() - interval '30 days' WHERE path = 'A/B/01.flac'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::Updated
+    );
+    assert!(!missing_of(&pool, "A/B/01.flac").await);
+
+    // A real file in the link's place clears the flag (same size and mtime, so unchanged).
+    std::fs::remove_file(&real).unwrap();
+    std::fs::copy(&copy, &real).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&real)
+        .unwrap()
+        .set_modified(indexed_mtime)
+        .unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!((report.unchanged, report.updated), (2, 0), "{report:?}");
+    assert!(!via_symlink(&pool, "A/B/01.flac").await);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn indexed_symlinked_folder_stays_present(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    std::fs::rename(dir.path().join("A/B"), outside.path().join("B")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("B"), dir.path().join("A/B")).unwrap();
+
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!((report.missing, report.unchanged), (0, 1), "{report:?}");
+    assert!(via_symlink(&pool, "A/B/01.flac").await);
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::Unchanged
+    );
+    assert!(!missing_of(&pool, "A/B/01.flac").await);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn dangling_symlink_is_missing(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let real = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "A/B/02.flac",
+        tags("A", "B", "two", "2000", "2"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    let copy = outside.path().join("01.flac");
+    std::fs::copy(&real, &copy).unwrap();
+    std::fs::remove_file(&real).unwrap();
+    std::os::unix::fs::symlink(&copy, &real).unwrap();
+    scan::reconcile(&c).await.unwrap();
+    assert!(!missing_of(&pool, "A/B/01.flac").await);
+
+    // The target goes away: the link dangles and the row is missing, by either path.
+    std::fs::remove_file(&copy).unwrap();
+    assert_eq!(
+        scan::update_path(&c, "A/B/01.flac").await.unwrap(),
+        PathOutcome::MarkedMissing
+    );
+    assert!(missing_of(&pool, "A/B/01.flac").await);
+
+    // The target returns: the next reconcile brings the row back.
+    std::fs::copy(real.with_file_name("02.flac"), &copy).unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.restored, 1, "{report:?}");
+    assert!(!missing_of(&pool, "A/B/01.flac").await);
+
+    // Dangling again, found by the reconcile this time.
+    std::fs::remove_file(&copy).unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.missing, 1, "{report:?}");
+    assert!(missing_of(&pool, "A/B/01.flac").await);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn symlink_loops_do_not_hang_a_scan(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "A/B/02.flac",
+        tags("A", "B", "two", "2000", "2"),
+    );
+    // A folder linking to its own parent, and two file links pointing at each other.
+    std::os::unix::fs::symlink(dir.path(), dir.path().join("A/B/up")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("x.flac"), dir.path().join("y.flac")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("y.flac"), dir.path().join("x.flac")).unwrap();
+
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.added, 2, "{report:?}");
+    assert!(report.failed.is_empty(), "{report:?}");
+    for rel in ["x.flac", "A/B/up/A/B/01.flac"] {
+        assert_eq!(
+            scan::update_path(&c, rel).await.unwrap(),
+            PathOutcome::Ignored,
+            "{rel}"
+        );
+    }
+    // An indexed track whose link became a loop is gone like any dangling one.
+    let real = dir.path().join("A/B/01.flac");
+    std::fs::remove_file(&real).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("x.flac"), &real).unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.missing, 1, "{report:?}");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn real_file_back_in_a_links_place_stays_unflagged_on_reread(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let real = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "A/B/02.flac",
+        tags("A", "B", "two", "2000", "2"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    let indexed_mtime = std::fs::metadata(&real).unwrap().modified().unwrap();
+    let copy = outside.path().join("01.flac");
+    std::fs::copy(&real, &copy).unwrap();
+    std::fs::remove_file(&real).unwrap();
+    std::os::unix::fs::symlink(&copy, &real).unwrap();
+    scan::reconcile(&c).await.unwrap();
+    assert!(via_symlink(&pool, "A/B/01.flac").await);
+
+    // The real file returns (same size and mtime, so unchanged) while its siblings move the
+    // album year: it is re-read as a sibling, and must not take the old flag back with it.
+    std::fs::remove_file(&real).unwrap();
+    std::fs::copy(&copy, &real).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&real)
+        .unwrap()
+        .set_modified(indexed_mtime)
+        .unwrap();
+    make_audio(
+        dir.path(),
+        "A/B/02.flac",
+        tags("A", "B", "two", "2001", "2"),
+    );
+    make_audio(
+        dir.path(),
+        "A/B/03.flac",
+        tags("A", "B", "three", "2001", "3"),
+    );
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.updated, 2, "{report:?}");
+    assert!(guessed(&pool, "A/B/01.flac").await.year_conflict);
+    assert!(!via_symlink(&pool, "A/B/01.flac").await);
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT t.id, t.path, t.size, t.mtime,\n                  t.missing_since IS NOT NULL AS \"missing!\",\n                  t.year AS track_year, b.year AS album_year,\n                  b.title_key AS album_key, a.name_key AS artist_key,\n                  COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS \"year_conflict!\"\n           FROM tracks t\n           JOIN albums b ON b.id = t.album_id\n           JOIN artists a ON a.id = b.artist_id\n           WHERE $1::text IS NULL\n              OR (starts_with(t.path, $1) AND strpos(substr(t.path, length($1) + 1), '/') = 0)",
+  "query": "SELECT t.id, t.path, t.size, t.mtime,\n                  t.missing_since IS NOT NULL AS \"missing!\",\n                  t.year AS track_year, b.year AS album_year,\n                  b.title_key AS album_key, a.name_key AS artist_key,\n                  COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS \"year_conflict!\",\n                  COALESCE((t.guessed ->> 'viaSymlink')::boolean, false) AS \"via_symlink!\"\n           FROM tracks t\n           JOIN albums b ON b.id = t.album_id\n           JOIN artists a ON a.id = b.artist_id\n           WHERE $1::text IS NULL\n              OR (starts_with(t.path, $1) AND strpos(substr(t.path, length($1) + 1), '/') = 0)",
   "describe": {
     "columns": [
       {
@@ -52,6 +52,11 @@
         "ordinal": 9,
         "name": "year_conflict!",
         "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "via_symlink!",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
@@ -69,8 +74,9 @@
       true,
       false,
       false,
+      null,
       null
     ]
   },
-  "hash": "e11262442f09166a7bb2fd2f7f2f8dc8e619c6e0b6bd88f28c03e55941124fea"
+  "hash": "d39546cf1be69e84766e506fd6ceea5cae88af7d364f13c4f1af4d7d554090ff"
 }

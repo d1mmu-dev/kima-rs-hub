@@ -22,6 +22,10 @@ pub struct Guessed {
     pub unknown_album: bool,
     /// This track's own year differs from its album's chosen year.
     pub year_conflict: bool,
+    /// The file was indexed through a symlink (itself or a folder above it): the owner should
+    /// replace the link with the real file (needs-attention `symlink`). Set by the scanner,
+    /// never by tags, so a re-read of the real file clears it.
+    pub via_symlink: bool,
 }
 
 /// A track with every field resolved, ready to store. The `*_key` fields are the
@@ -485,6 +489,8 @@ pub struct IndexedTrack {
     pub album_key: String,
     pub artist_key: String,
     pub year_conflict: bool,
+    /// `guessed.viaSymlink`: the row stands for a file reached through a symlink.
+    pub via_symlink: bool,
 }
 
 /// Every track (`dir_prefix = None`), or only the tracks directly inside one folder:
@@ -499,7 +505,8 @@ pub async fn scan_index(
                   t.missing_since IS NOT NULL AS "missing!",
                   t.year AS track_year, b.year AS album_year,
                   b.title_key AS album_key, a.name_key AS artist_key,
-                  COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS "year_conflict!"
+                  COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS "year_conflict!",
+                  COALESCE((t.guessed ->> 'viaSymlink')::boolean, false) AS "via_symlink!"
            FROM tracks t
            JOIN albums b ON b.id = t.album_id
            JOIN artists a ON a.id = b.artist_id
@@ -509,6 +516,21 @@ pub async fn scan_index(
     )
     .fetch_all(pool)
     .await
+}
+
+/// Sets (`on`) or clears `guessed.viaSymlink` on the tracks at these paths; rows already in
+/// that state are left alone. Returns the rows changed.
+pub async fn set_via_symlink(pool: &PgPool, paths: &[String], on: bool) -> sqlx::Result<u64> {
+    let r = sqlx::query!(
+        "UPDATE tracks SET guessed = jsonb_set(guessed, '{viaSymlink}', to_jsonb($2::boolean))
+         WHERE path = ANY($1)
+           AND COALESCE((guessed ->> 'viaSymlink')::boolean, false) <> $2",
+        paths,
+        on
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
 }
 
 /// Paths of the present (not missing) tracks anywhere under the folder `dir_prefix`

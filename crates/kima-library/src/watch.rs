@@ -542,7 +542,19 @@ fn identity(root: &Path) -> Option<(u64, u64)> {
 /// The audio files one event stands for: the file itself, every audio file under a folder
 /// that appeared, or every indexed track under a folder that vanished.
 async fn expand(ctx: &LibraryCtx, path: &Path, rel: String, expand_dirs: bool) -> Vec<String> {
-    match std::fs::metadata(path) {
+    // A symlink is neither descended into nor emitted: nothing new is indexed through one
+    // (spec §20.6). The watcher follows symlinked folders, so an event may come from under
+    // one: every folder between the root and the path counts. A link that replaced an indexed
+    // file is left to the next reconcile. Something gone is still emitted: `update_path` knows
+    // what a vanished link means for its row.
+    let linked = {
+        let (root, r) = (ctx.root.get(), rel.clone());
+        tokio::task::spawn_blocking(move || crate::scan::symlinked(&root, &r))
+            .await
+            .unwrap_or(true)
+    };
+    match std::fs::symlink_metadata(path) {
+        Ok(_) if linked => Vec::new(),
         Ok(meta) if meta.is_dir() && !expand_dirs => Vec::new(),
         Ok(meta) if meta.is_dir() => {
             let root = ctx.root.get();

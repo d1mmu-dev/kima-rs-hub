@@ -17,6 +17,7 @@ pub const CONFLICTING_YEARS: &str = "conflictingYears";
 pub const MISSING_TRACK_NUMBERS: &str = "missingTrackNumbers";
 pub const DUPLICATE_TRACK_NUMBERS: &str = "duplicateTrackNumbers";
 pub const FOLDER_SPLIT: &str = "folderSplit";
+pub const SYMLINK: &str = "symlink";
 
 /// The issue codes one track raises by itself (the album-wide ones, duplicate track numbers
 /// and folder splits, need its siblings). Same order as the album report.
@@ -29,6 +30,7 @@ pub fn track_codes(guessed: &Guessed, album_year: Option<i32>, track_no: i32) ->
         (MISSING_YEAR, album_year.is_none()),
         (CONFLICTING_YEARS, guessed.year_conflict),
         (MISSING_TRACK_NUMBERS, track_no <= 0),
+        (SYMLINK, guessed.via_symlink),
     ]
     .into_iter()
     .filter_map(|(code, hit)| hit.then_some(code))
@@ -123,6 +125,7 @@ fn analyse(rows: Vec<Row>) -> Vec<AlbumAttention> {
             ),
             (DUPLICATE_TRACK_NUMBERS, duplicate),
             (FOLDER_SPLIT, split.contains(&album_id)),
+            (SYMLINK, any(|g| g.via_symlink)),
         ];
         let issues: Vec<&'static str> = checks
             .into_iter()
@@ -142,4 +145,19 @@ fn analyse(rows: Vec<Row>) -> Vec<AlbumAttention> {
         (&a.artist, &a.album, a.year, a.album_id).cmp(&(&b.artist, &b.album, b.year, b.album_id))
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn track_codes_list_a_symlinked_track() {
+        let g = Guessed {
+            via_symlink: true,
+            ..Guessed::default()
+        };
+        assert_eq!(track_codes(&g, Some(2000), 1), [SYMLINK]);
+        assert!(track_codes(&Guessed::default(), Some(2000), 1).is_empty());
+    }
 }

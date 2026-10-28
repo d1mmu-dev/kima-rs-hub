@@ -582,3 +582,31 @@ async fn watcher_reconcile_queued_behind_a_running_one(pool: PgPool) {
     .unwrap();
     assert_eq!(queued, 1);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn expand_skips_symlinked_dirs(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    make_audio(outside.path(), "linked/01.flac", tags("Linked"));
+    let h = start_on(&pool, dir, WatchMode::Auto, Duration::from_secs(60));
+    // A symlinked folder (and a symlinked file) appears, then a real file after it.
+    std::os::unix::fs::symlink(outside.path().join("linked"), h.root().join("dir")).unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("linked/01.flac"),
+        h.root().join("file.flac"),
+    )
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    make_audio(&h.root(), "Real/01.flac", tags("Real"));
+    wait_path_job(&pool, "Real/01.flac").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let jobs = path_jobs(&pool).await;
+    assert!(
+        jobs.iter().all(|p| p.starts_with("Real/")),
+        "a symlink was expanded: {jobs:?}"
+    );
+    stop(&h);
+}

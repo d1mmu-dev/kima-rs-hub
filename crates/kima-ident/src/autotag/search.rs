@@ -220,9 +220,12 @@ impl Collected {
 }
 
 /// One release search; no hits, an absence and a refused query (400) are no releases.
-async fn search_once(net: &Net, query: &str) -> Result<Vec<Mbid>, Stop> {
+async fn search_once(net: &Net, album: Uuid, query: &str) -> Result<Vec<Mbid>, Stop> {
     match musicbrainz::search_releases(net, query).await {
-        Outcome::Permanent(f) if f.code == "HTTP_400" => Ok(Vec::new()),
+        Outcome::Permanent(f) if f.code == "HTTP_400" => {
+            warn!(%album, "MusicBrainz refused the release search (400); counted as no hits");
+            Ok(Vec::new())
+        }
         o => Ok(settle(o)?.unwrap_or_default()),
     }
 }
@@ -239,9 +242,20 @@ async fn search_step(net: &Net, album: &LocalAlbum, job: &SearchJob) -> Result<V
         return Ok(Vec::new());
     }
     let n = album.tracks.len();
-    let mut ids = search_once(net, &musicbrainz::release_query(title, clause, Some(n))).await?;
+    let mut ids = search_once(
+        net,
+        album.id,
+        &musicbrainz::release_query(title, clause, Some(n)),
+    )
+    .await?;
     if ids.len() < RETRY_BELOW {
-        for id in search_once(net, &musicbrainz::release_query(title, clause, None)).await? {
+        for id in search_once(
+            net,
+            album.id,
+            &musicbrainz::release_query(title, clause, None),
+        )
+        .await?
+        {
             if !ids.contains(&id) {
                 ids.push(id);
             }
@@ -530,6 +544,8 @@ pub async fn run_search(
             Ok(())
         }
         Err(Stop::RateLimited(until)) => {
+            // By design neither deduplicated nor capped: the job comes back once per pause,
+            // which costs one request each time (the paused source answers at once until then).
             set_state(pool, album_id, AlbumState::Queued, None)
                 .await
                 .map_err(db)?;
@@ -547,15 +563,23 @@ pub async fn run_search(
             finish(&mut events, 0, AlbumState::Failed);
             Err(JobError::Permanent(text))
         }
+        Err(Stop::Cancelled) => {
+            // Shutdown or a lost claim. The state is left `searching`, on every attempt: after
+            // a shutdown the startup reset settles it by the job's fate (`queued` when the
+            // attempt was given back, `failed` when the job is gone), and after a lost claim
+            // the run that took the job over owns the state. Writing `queued` here could leave
+            // an album queued with no job (a final attempt failed by the queue).
+            finish(&mut events, 0, AlbumState::Searching);
+            Err(JobError::Retry("autotag search cancelled".into()))
+        }
         Err(stop) => {
             let text = match &stop {
                 Stop::Transient(f) => failure_text(f),
                 Stop::Db(e) => format!("autotag state: {e}"),
-                _ => "autotag search cancelled".to_string(),
+                _ => unreachable!("handled above"),
             };
             // Only the last attempt's failure is the album's; before it the queue retries.
-            let failed = attempt.last && !matches!(stop, Stop::Cancelled);
-            let (state, error) = if failed {
+            let (state, error) = if attempt.last {
                 (AlbumState::Failed, Some(text.as_str()))
             } else {
                 (AlbumState::Queued, None)

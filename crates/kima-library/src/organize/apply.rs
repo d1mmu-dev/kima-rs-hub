@@ -412,7 +412,7 @@ fn exists(p: &Path) -> bool {
     fs::symlink_metadata(p).is_ok()
 }
 
-fn sha256_file(p: &Path) -> io::Result<Vec<u8>> {
+pub(crate) fn sha256_file(p: &Path) -> io::Result<Vec<u8>> {
     let mut f = File::open(p)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
@@ -476,7 +476,7 @@ fn lower(p: &Path) -> String {
     p.to_string_lossy().to_lowercase()
 }
 
-fn sync_dir(dir: &Path) {
+pub(crate) fn sync_dir(dir: &Path) {
     #[cfg(unix)]
     if let Ok(d) = File::open(dir) {
         let _ = d.sync_all();
@@ -712,7 +712,7 @@ fn copied_already(source: &Path, src: &Path, target: &Path, dst: &Path) -> bool 
     !through_symlink(source, src) && !through_symlink(target, dst) && same_file(src, dst)
 }
 
-const SYMLINK_NOTE: &str = "a folder on the target path is a symbolic link";
+pub(crate) const SYMLINK_NOTE: &str = "a folder on the target path is a symbolic link";
 const SOURCE_SYMLINK_NOTE: &str = "the source is reached through a symbolic link";
 /// A resumed row found its copy in place but the source no longer matches the journalled
 /// checksum: something wrote to it in between.

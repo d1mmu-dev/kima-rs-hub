@@ -168,6 +168,9 @@ async fn capabilities(
     })))
 }
 
+/// Most albums one scoped preview may name.
+const MAX_SCOPE_ALBUMS: usize = 500;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PreviewBody {
@@ -186,8 +189,31 @@ async fn preview(
     AdminUser(user): AdminUser,
     ApiJson(body): ApiJson<PreviewBody>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    if body.album_ids.as_ref().is_some_and(Vec::is_empty) {
-        return Err(ApiError::BadRequest("albumIds must not be empty".into()));
+    // De-duplicated, first occurrence kept.
+    let album_ids: Option<Vec<Uuid>> = body.album_ids.as_ref().map(|ids| {
+        let mut seen = std::collections::HashSet::new();
+        ids.iter().copied().filter(|i| seen.insert(*i)).collect()
+    });
+    if let Some(ids) = &album_ids {
+        if ids.is_empty() {
+            return Err(ApiError::BadRequest("albumIds must not be empty".into()));
+        }
+        if ids.len() > MAX_SCOPE_ALBUMS {
+            return Err(ApiError::BadRequest(
+                "albumIds must not be more than 500".into(),
+            ));
+        }
+        let (found, tracks) = db::scope_counts(&state.pool, ids).await?;
+        if usize::try_from(found).ok() != Some(ids.len()) {
+            return Err(ApiError::BadRequest(
+                "albumIds holds an unknown album".into(),
+            ));
+        }
+        if tracks == 0 {
+            return Err(ApiError::BadRequest(
+                "The chosen albums have no tracks to organize".into(),
+            ));
+        }
     }
     let root = state
         .library_root()
@@ -216,7 +242,7 @@ async fn preview(
         return Err(ApiError::Conflict("Another organizer run is in progress"));
     }
     let (root_s, target_s) = (root.display().to_string(), target.display().to_string());
-    let run = match &body.album_ids {
+    let run = match &album_ids {
         Some(ids) => {
             db::create_scoped_run(
                 &state.pool,

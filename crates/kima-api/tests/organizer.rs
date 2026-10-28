@@ -678,3 +678,99 @@ async fn switch_root_route_refuses_a_scoped_run(pool: PgPool) {
     res.assert_status(StatusCode::CONFLICT);
     res.assert_json(&json!({"error": "Only a whole-library copy can become the library"}));
 }
+
+async fn preview_albums(s: &Setup, ids: Value) -> axum_test::TestResponse {
+    post(
+        s,
+        "/api/library/organizer/preview",
+        json!({"mode": "move", "albumIds": ids}),
+    )
+    .await
+}
+
+async fn first_album(pool: &PgPool) -> uuid::Uuid {
+    sqlx::query_scalar("SELECT id FROM albums WHERE title = 'First'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn preview_album_ids_are_deduplicated(pool: PgPool) {
+    let s = setup(pool.clone(), false).await;
+    let a = first_album(&pool).await;
+    let res = preview_albums(&s, json!([a, a, a])).await;
+    res.assert_status(StatusCode::ACCEPTED);
+    let run = res.json::<Value>()["runId"].as_str().unwrap().to_string();
+    assert_eq!(get_run(&s, &run).await["albumIds"], json!([a]));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn preview_rejects_unknown_capped_and_empty_scopes(pool: PgPool) {
+    let s = setup(pool.clone(), false).await;
+    let a = first_album(&pool).await;
+    let res = preview_albums(&s, json!([a, uuid::Uuid::now_v7()])).await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    res.assert_json(&json!({"error": "albumIds holds an unknown album"}));
+
+    let many: Vec<_> = (0..501).map(|_| uuid::Uuid::now_v7()).collect();
+    let res = preview_albums(&s, json!(many)).await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    res.assert_json(&json!({"error": "albumIds must not be more than 500"}));
+
+    // An album whose tracks are all missing plans nothing.
+    sqlx::query("UPDATE tracks SET missing_since = now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let res = preview_albums(&s, json!([a])).await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    res.assert_json(&json!({"error": "The chosen albums have no tracks to organize"}));
+    let runs: i64 = sqlx::query_scalar("SELECT count(*) FROM organizer_runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn albums_route_paging_edges(pool: PgPool) {
+    let s = setup(pool.clone(), false).await;
+    for i in 0..105 {
+        seed(
+            &pool,
+            Seed::new(
+                &format!("Zed {i:03}"),
+                &format!("Album {i:03}"),
+                Some(2010),
+                "T",
+            )
+            .at(1, 1),
+        )
+        .await;
+    }
+    let res = post(
+        &s,
+        "/api/library/organizer/preview",
+        json!({"mode": "move"}),
+    )
+    .await;
+    let run = res.json::<Value>()["runId"].as_str().unwrap().to_string();
+    run_jobs(&s.ctx).await;
+    let url = format!("/api/library/organizer/runs/{run}/albums");
+    let get = |q: &str| {
+        s.server
+            .get(&format!("{url}{q}"))
+            .authorization_bearer(&s.admin)
+    };
+    // Beyond the end: no albums, the total is right.
+    let v: Value = get("?offset=500").await.json();
+    assert_eq!(v["albums"], json!([]));
+    assert_eq!(v["total"], 106);
+    // limit=0 falls back to the default 20; a huge limit is capped at 100.
+    let v: Value = get("?limit=0").await.json();
+    assert_eq!(v["albums"].as_array().unwrap().len(), 20);
+    let v: Value = get("?limit=1000").await.json();
+    assert_eq!(v["albums"].as_array().unwrap().len(), 100);
+    assert_eq!(v["total"], 106);
+}

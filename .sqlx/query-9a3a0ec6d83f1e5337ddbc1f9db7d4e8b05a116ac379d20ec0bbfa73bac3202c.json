@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT t.id, t.path, t.size, t.mtime,\n                  t.missing_since IS NOT NULL AS \"missing!\",\n                  t.year AS track_year, b.year AS album_year,\n                  b.title_key AS album_key, a.name_key AS artist_key,\n                  COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS \"year_conflict!\",\n                  COALESCE((t.guessed ->> 'viaSymlink')::boolean, false) AS \"via_symlink!\",\n                  b.identity_source = 'autotag' AS \"album_autotag!\"\n           FROM tracks t\n           JOIN albums b ON b.id = t.album_id\n           JOIN artists a ON a.id = b.artist_id\n           WHERE $1::text IS NULL\n              OR (starts_with(t.path, $1) AND strpos(substr(t.path, length($1) + 1), '/') = 0)",
+  "query": "SELECT t.id, t.path, t.size, t.mtime,\n                  t.missing_since IS NOT NULL AS \"missing!\",\n                  t.year AS track_year, b.year AS album_year,\n                  b.title_key AS album_key, a.name_key AS artist_key,\n                  COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS \"year_conflict!\",\n                  COALESCE((t.guessed ->> 'viaSymlink')::boolean, false) AS \"via_symlink!\",\n                  COALESCE(b.identity_source = 'autotag'\n                           AND b.applied_identity ->> 'artistKey' = a.name_key\n                           AND b.applied_identity ->> 'titleKey' = b.title_key\n                           AND COALESCE(b.applied_identity -> 'year', 'null'::jsonb)\n                               = COALESCE(to_jsonb(b.year), 'null'::jsonb),\n                           false) AS \"album_autotag!\"\n           FROM tracks t\n           JOIN albums b ON b.id = t.album_id\n           JOIN artists a ON a.id = b.artist_id\n           WHERE $1::text IS NULL\n              OR (starts_with(t.path, $1) AND strpos(substr(t.path, length($1) + 1), '/') = 0)",
   "describe": {
     "columns": [
       {
@@ -84,5 +84,5 @@
       null
     ]
   },
-  "hash": "c88b17ca7fca0cc2cf6b2732b46d94fb1335d9c2a06f9d1bd22666293ea1f269"
+  "hash": "9a3a0ec6d83f1e5337ddbc1f9db7d4e8b05a116ac379d20ec0bbfa73bac3202c"
 }

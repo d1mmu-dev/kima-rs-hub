@@ -2562,3 +2562,414 @@ async fn real_file_back_in_a_links_place_stays_unflagged_on_reread(pool: PgPool)
     assert!(guessed(&pool, "A/B/01.flac").await.year_conflict);
     assert!(!via_symlink(&pool, "A/B/01.flac").await);
 }
+
+// ---- Task 14: tag overrides, reread_paths, autotag album pinning (spec §19.7) ----
+
+use kima_library::scan::ReadCause;
+
+/// What an autotag apply does to the album row (Task 15 will do it for real): the new title,
+/// year and `applied_identity`, the row id unchanged.
+async fn set_applied(pool: &PgPool, album: Uuid, title: &str, artist_key: &str, year: i32) {
+    let title_key = title.to_lowercase();
+    sqlx::query(
+        "UPDATE albums SET title = $2, title_key = $3, year = $4, identity_source = 'autotag',
+                applied_identity = jsonb_build_object('artistKey', $5::text, 'titleKey', $3::text,
+                                                      'year', $4::int)
+         WHERE id = $1",
+    )
+    .bind(album)
+    .bind(title)
+    .bind(&title_key)
+    .bind(year)
+    .bind(artist_key)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// (identity_source, applied_identity) of the album.
+async fn identity(pool: &PgPool, album: Uuid) -> (String, Option<serde_json::Value>) {
+    sqlx::query_as("SELECT identity_source, applied_identity FROM albums WHERE id = $1")
+        .bind(album)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn album_year(pool: &PgPool, album: Uuid) -> Option<i32> {
+    sqlx::query_scalar("SELECT year FROM albums WHERE id = $1")
+        .bind(album)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn title_of(pool: &PgPool, path: &str) -> String {
+    sqlx::query_scalar("SELECT title FROM tracks WHERE path = $1")
+        .bind(path)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Rewrites tags in place (the audio is untouched, as the tag writer does) and moves the
+/// mtime forward. `None` leaves a field alone; `Some("")` removes it.
+fn retag(path: &Path, album: Option<&str>, title: Option<&str>, date: Option<&str>) {
+    use lofty::config::WriteOptions;
+    use lofty::file::TaggedFileExt;
+    use lofty::prelude::*;
+    use lofty::probe::Probe;
+    use lofty::tag::ItemKey;
+    let mut tagged = Probe::open(path).unwrap().read().unwrap();
+    let tag = tagged.primary_tag_mut().expect("fixture has a tag");
+    if let Some(a) = album {
+        tag.set_album(a.to_string());
+    }
+    if let Some(t) = title {
+        tag.set_title(t.to_string());
+    }
+    match date {
+        Some("") => {
+            tag.remove_key(ItemKey::RecordingDate);
+            tag.remove_key(ItemKey::Year);
+        }
+        Some(d) => {
+            tag.insert_text(ItemKey::RecordingDate, d.to_string());
+        }
+        None => {}
+    }
+    tag.save_to_path(path, WriteOptions::default()).unwrap();
+    bump_mtime(path);
+}
+
+/// `fingerprint` and `recording` both `done`, and a stored AcoustID fingerprint.
+async fn seed_done_stages(pool: &PgPool, track: Uuid) {
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status, attempts, evidence)
+         VALUES ($1, 'fingerprint', 'done', 1, '{}'), ($1, 'recording', 'done', 1, '{}')",
+    )
+    .bind(track)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO track_acoustid (track_id, fingerprint, duration_secs) VALUES ($1, 'AQAA', 2)",
+    )
+    .bind(track)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn stage_statuses(pool: &PgPool, track: Uuid) -> Vec<String> {
+    stages(pool, track).await.into_iter().map(|s| s.0).collect()
+}
+
+/// A database-only match's override for the track (Task 15 writes these).
+async fn put_override(pool: &PgPool, track: Uuid, fields: serde_json::Value) {
+    let album: Uuid = sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = $1")
+        .bind(track)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let run = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO autotag_runs (id, album_id, target, state) VALUES ($1, $2, 'db', 'done')",
+    )
+    .bind(run)
+    .bind(album)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO track_tag_overrides (track_id, run_id, fields) VALUES ($1, $2, $3)")
+        .bind(track)
+        .bind(run)
+        .bind(fields)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn reread(pool: &PgPool, root: &Path, paths: &[&str], cause: ReadCause) -> scan::ScanReport {
+    let paths: Vec<String> = paths.iter().map(|p| p.to_string()).collect();
+    let r = scan::reread_paths(&ctx(pool, root), &paths, cause)
+        .await
+        .unwrap();
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+    r
+}
+
+async fn set_title(pool: &PgPool, path: &str, title: &str) {
+    sqlx::query("UPDATE tracks SET title = $2 WHERE path = $1")
+        .bind(path)
+        .bind(title)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn override_merged_on_every_read(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let rel = "A/B/01.flac";
+    let file = make_audio(root, rel, tags("A", "B", "one", "2000", "1"));
+    rescan(&pool, root).await;
+    put_override(
+        &pool,
+        track_id(&pool, rel).await,
+        serde_json::json!({"title": "Overridden"}),
+    )
+    .await;
+
+    set_title(&pool, rel, "stale").await;
+    bump_mtime(&file);
+    rescan(&pool, root).await;
+    assert_eq!(title_of(&pool, rel).await, "Overridden", "reconcile");
+
+    set_title(&pool, rel, "stale").await;
+    bump_mtime(&file);
+    let out = scan::update_path(&ctx(&pool, root), rel).await.unwrap();
+    assert_eq!(out, PathOutcome::Updated);
+    assert_eq!(title_of(&pool, rel).await, "Overridden", "update_path");
+
+    set_title(&pool, rel, "stale").await;
+    let r = reread(&pool, root, &[rel], ReadCause::Scan).await;
+    assert_eq!((r.updated, r.tags_read), (1, 1), "{r:?}");
+    assert_eq!(title_of(&pool, rel).await, "Overridden", "reread_paths");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn rescan_after_tag_write_keeps_album_and_stages(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (a, b) = ("Artist/Old/01.flac", "Artist/Old/02.flac");
+    make_audio(root, a, tags("Artist", "Old", "one", "1999", "1"));
+    make_audio(root, b, tags("Artist", "Old", "two", "1999", "2"));
+    rescan(&pool, root).await;
+    let album = album_of(&pool, a).await;
+    let id = track_id(&pool, a).await;
+    seed_done_stages(&pool, id).await;
+
+    // The apply: the row in place, then the files rewritten to the applied identity.
+    set_applied(&pool, album, "New Title", "artist", 2001).await;
+    for p in [a, b] {
+        retag(&root.join(p), Some("New Title"), None, Some("2001"));
+    }
+    let r = reread(&pool, root, &[a, b], ReadCause::TagWrite).await;
+    assert_eq!((r.updated, r.tags_read), (2, 2), "{r:?}");
+
+    // A full reconcile, then a watcher event for a touched file.
+    let r = scan::reconcile(&ctx(&pool, root)).await.unwrap();
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+    assert_eq!((r.tags_read, r.unchanged), (0, 2), "{r:?}");
+    bump_mtime(&root.join(a));
+    let out = scan::update_path(&ctx(&pool, root), a).await.unwrap();
+    assert_eq!(out, PathOutcome::Updated);
+
+    assert_eq!(album_of(&pool, a).await, album);
+    assert_eq!(album_of(&pool, b).await, album);
+    assert_eq!(album_year(&pool, album).await, Some(2001));
+    assert_eq!(stage_statuses(&pool, id).await, vec!["done", "done"]);
+    assert_eq!(acoustid_rows(&pool, id).await, 1);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM albums WHERE title = 'New Title'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+    assert_eq!(count(&pool, "albums").await, 1);
+    assert_eq!(identity(&pool, album).await.0, "autotag");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn pinned_year_not_recomputed(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let a = "Artist/Album/01.flac";
+    make_audio(root, a, tags("Artist", "Album", "one", "2001", "1"));
+    rescan(&pool, root).await;
+    let album = album_of(&pool, a).await;
+    set_applied(&pool, album, "Album", "artist", 2001).await;
+
+    // Two more files of the same album, saying 1999: the folder mode is now 1999.
+    make_audio(
+        root,
+        "Artist/Album/02.flac",
+        tags("Artist", "Album", "two", "1999", "2"),
+    );
+    make_audio(
+        root,
+        "Artist/Album/03.flac",
+        tags("Artist", "Album", "three", "1999", "3"),
+    );
+    bump_mtime(&root.join(a));
+    rescan(&pool, root).await;
+
+    assert_eq!(album_of(&pool, a).await, album);
+    assert_eq!(album_year(&pool, album).await, Some(2001));
+    assert!(!guessed(&pool, a).await.year_conflict);
+    assert_eq!(identity(&pool, album).await.0, "autotag");
+    let other = album_of(&pool, "Artist/Album/02.flac").await;
+    assert_ne!(other, album);
+    assert_eq!(album_year(&pool, other).await, Some(1999));
+
+    // Nothing changed: the pinned track is not re-read for the folder's year.
+    let r = scan::reconcile(&ctx(&pool, root)).await.unwrap();
+    assert_eq!(r.tags_read, 0, "{r:?}");
+    // A sibling change: the folder mode is still 1999, the pinned track stays put unread.
+    bump_mtime(&root.join("Artist/Album/02.flac"));
+    let r = scan::reconcile(&ctx(&pool, root)).await.unwrap();
+    assert_eq!(r.tags_read, 1, "{r:?}");
+    assert_eq!(album_of(&pool, a).await, album);
+    assert_eq!(album_year(&pool, album).await, Some(2001));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn disagreeing_track_leaves_row(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (a, b, c) = (
+        "Artist/Album/01.flac",
+        "Artist/Album/02.flac",
+        "Artist/Album/03.flac",
+    );
+    make_audio(root, a, tags("Artist", "Album", "one", "2001", "1"));
+    make_audio(root, b, tags("Artist", "Album", "two", "2001", "2"));
+    make_audio(root, c, tags("Artist", "Album", "three", "2001", "3"));
+    rescan(&pool, root).await;
+    let album = album_of(&pool, a).await;
+    set_applied(&pool, album, "Album", "artist", 2001).await;
+
+    // Re-tagged outside kima-rs: a gets another album title, c another year.
+    retag(&root.join(a), Some("Other"), None, None);
+    retag(&root.join(c), None, None, Some("1998"));
+    rescan(&pool, root).await;
+
+    assert_ne!(album_of(&pool, a).await, album, "title disagrees");
+    assert_ne!(album_of(&pool, c).await, album, "year disagrees");
+    assert_eq!(album_of(&pool, b).await, album);
+    assert_eq!(album_year(&pool, album).await, Some(2001));
+    assert_eq!(identity(&pool, album).await.0, "autotag");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn album_returns_to_scan_when_no_track_agrees(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // X: the last agreeing track goes missing (the missing-marking refresh).
+    let (xa, xb) = ("Artist/X/01.flac", "Artist/X/02.flac");
+    make_audio(root, xa, tags("Artist", "X", "one", "2001", "1"));
+    make_audio(root, xb, tags("Artist", "X", "two", "2001", "2"));
+    // Y: the last present track disagrees (the folder refresh).
+    let (ya, yb) = ("Artist/Y/01.flac", "Artist/Y/02.flac");
+    make_audio(root, ya, tags("Artist", "Y", "one", "2001", "1"));
+    make_audio(root, yb, tags("Artist", "Y", "two", "2001", "2"));
+    rescan(&pool, root).await;
+    let (x, y) = (album_of(&pool, xa).await, album_of(&pool, ya).await);
+    set_applied(&pool, x, "X", "artist", 2001).await;
+    set_applied(&pool, y, "Y", "artist", 2001).await;
+
+    retag(&root.join(xa), Some("Elsewhere"), None, None);
+    std::fs::remove_file(root.join(yb)).unwrap();
+    rescan(&pool, root).await;
+    assert_eq!(identity(&pool, x).await.0, "autotag", "xb still agrees");
+    assert_eq!(identity(&pool, y).await.0, "autotag", "ya still agrees");
+
+    std::fs::remove_file(root.join(xb)).unwrap();
+    retag(&root.join(ya), Some("Elsewhere Too"), None, None);
+    rescan(&pool, root).await;
+    // Both rows remain (a missing track holds each), back to normal resolution.
+    assert_eq!(identity(&pool, x).await, ("scan".to_string(), None));
+    assert_eq!(identity(&pool, y).await, ("scan".to_string(), None));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn new_file_with_applied_identity_joins_row(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let a = "Artist/Old/01.flac";
+    make_audio(root, a, tags("Artist", "Old", "one", "1999", "1"));
+    rescan(&pool, root).await;
+    let album = album_of(&pool, a).await;
+    set_applied(&pool, album, "New", "artist", 2001).await;
+    retag(&root.join(a), Some("New"), None, Some("2001"));
+    reread(&pool, root, &[a], ReadCause::TagWrite).await;
+    assert_eq!(album_of(&pool, a).await, album);
+
+    // A new file with the applied identity but no year of its own: the folder's year.
+    let c = "Artist/Old/03.flac";
+    let file = make_audio(root, c, tags("Artist", "New", "three", "2001", "3"));
+    retag(&file, None, None, Some(""));
+    // And one in another folder with the full identity.
+    make_audio(
+        root,
+        "Elsewhere/04.flac",
+        tags("Artist", "New", "four", "2001", "4"),
+    );
+    rescan(&pool, root).await;
+    assert_eq!(album_of(&pool, c).await, album);
+    assert_eq!(album_of(&pool, "Elsewhere/04.flac").await, album);
+    assert_eq!(count(&pool, "albums").await, 1);
+    assert_eq!(album_year(&pool, album).await, Some(2001));
+    assert_eq!(identity(&pool, album).await.0, "autotag");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn tag_write_cause_does_not_reopen(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let rel = "A/B/01.flac";
+    let file = make_audio(root, rel, tags("A", "B", "one", "2000", "1"));
+    rescan(&pool, root).await;
+    let id = track_id(&pool, rel).await;
+    seed_done_stages(&pool, id).await;
+    retag(&file, None, Some("one, retitled"), None);
+    let r = reread(&pool, root, &[rel], ReadCause::TagWrite).await;
+    assert_eq!(r.updated, 1, "{r:?}");
+    assert_eq!(title_of(&pool, rel).await, "one, retitled");
+    assert_eq!(stage_statuses(&pool, id).await, vec!["done", "done"]);
+    assert_eq!(acoustid_rows(&pool, id).await, 1);
+    // Size and mtime are stored: the next reconcile reads nothing.
+    let r = scan::reconcile(&ctx(&pool, root)).await.unwrap();
+    assert_eq!((r.tags_read, r.unchanged), (0, 1), "{r:?}");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn scan_cause_reopens_changed_file(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let rel = "A/B/01.flac";
+    let file = make_audio(root, rel, tags("A", "B", "one", "2000", "1"));
+    rescan(&pool, root).await;
+    let id = track_id(&pool, rel).await;
+    seed_done_stages(&pool, id).await;
+    retag(&file, None, Some("one, retitled"), None);
+    let r = reread(&pool, root, &[rel], ReadCause::Scan).await;
+    assert_eq!(r.updated, 1, "{r:?}");
+    assert_eq!(stage_statuses(&pool, id).await, vec!["pending", "pending"]);
+    assert_eq!(acoustid_rows(&pool, id).await, 0);
+}

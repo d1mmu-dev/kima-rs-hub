@@ -24,7 +24,7 @@
 //!
 //! Callers prune artists left with no album with `library::prune_empty` after the commit.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -125,9 +125,10 @@ struct AlbumBefore {
     artist_mbid_source: Option<String>,
     mb_genres: Vec<String>,
     tracks: Vec<TrackBefore>,
-    /// The MBID of the existing artist a re-parent moved the album to, before the apply set it.
+    /// The one artist row whose MBID the apply changed, with its value before and the value the
+    /// apply left on it: undo restores it only while the row still holds that value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    new_artist: Option<ArtistMbid>,
+    artist_mbid_write: Option<ArtistMbidWrite>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,10 +154,13 @@ struct StageBefore {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ArtistMbid {
+struct ArtistMbidWrite {
     id: Uuid,
     mbid: Option<Uuid>,
     mbid_source: Option<String>,
+    /// What the apply wrote: an MBID with source `autotag`, or none (a renamed row losing the
+    /// Various Artists MBID).
+    written: Option<Uuid>,
 }
 
 fn decode(e: serde_json::Error) -> sqlx::Error {
@@ -283,7 +287,7 @@ async fn capture(conn: &mut PgConnection, album: Uuid) -> sqlx::Result<AlbumBefo
         artist_mbid_source: a.mbid_source,
         mb_genres,
         tracks,
-        new_artist: None,
+        artist_mbid_write: None,
     })
 }
 
@@ -409,7 +413,8 @@ enum ArtistPlan {
 
 /// Spec §19.7's three rules for the name `key` on an album now on `current`: a row with the
 /// key exists → re-parent (or keep, when it is `current`); else `current` left with no album →
-/// rename in place (never into Various Artists); else create.
+/// rename in place; else create. The Various Artists row is never renamed, and no row is renamed
+/// into it: both create instead.
 async fn plan_for_name(
     conn: &mut PgConnection,
     album: Uuid,
@@ -419,10 +424,22 @@ async fn plan_for_name(
     Ok(match artist_by_key(conn, key).await? {
         Some(id) if id == current => ArtistPlan::Keep,
         Some(id) => ArtistPlan::Reparent(id),
-        None if key == VARIOUS_ARTISTS_KEY => ArtistPlan::Create,
+        None if key == VARIOUS_ARTISTS_KEY || is_various(conn, current).await? => {
+            ArtistPlan::Create
+        }
         None if !has_other_album(conn, current, album).await? => ArtistPlan::Rename,
         None => ArtistPlan::Create,
     })
+}
+
+async fn is_various(conn: &mut PgConnection, artist: Uuid) -> sqlx::Result<bool> {
+    Ok(
+        sqlx::query_scalar!("SELECT name_key FROM artists WHERE id = $1", artist)
+            .fetch_optional(&mut *conn)
+            .await?
+            .as_deref()
+            == Some(VARIOUS_ARTISTS_KEY),
+    )
 }
 
 /// Creates an artist row (enrichment `pending`; Various Artists with its MBID, `completed`);
@@ -484,8 +501,12 @@ async fn rename_artist(
 /// (closing its `recording` stage), and supersedes previewed organizer runs.
 ///
 /// With `applied.mbids_only` the identity fields and the artist step are skipped
-/// (`artist_action='none'`). A run that already has `album_before` was applied: the recorded
-/// step is answered and nothing is written again, so the first capture is never overwritten.
+/// (`artist_action='none'`) and the album's artist row is left alone (no artist MBID either).
+///
+/// Re-applying a run is a no-op: a run that already has `album_before` answers its recorded
+/// step and writes nothing, so the first capture is never overwritten. This only makes a crash
+/// between this commit and the run's end safe; callers (Task 16) must never re-apply a run on
+/// purpose (a new apply is a new run).
 pub async fn apply_identity(
     conn: &mut PgConnection,
     run: &RunRow,
@@ -535,19 +556,24 @@ pub async fn apply_identity(
             },
             current,
         ),
-        ArtistPlan::Reparent(id) => {
-            let a = sqlx::query!("SELECT mbid, mbid_source FROM artists WHERE id = $1", id)
-                .fetch_one(&mut *conn)
-                .await?;
-            before.new_artist = Some(ArtistMbid {
-                id,
-                mbid: a.mbid,
-                mbid_source: a.mbid_source,
-            });
-            (reparented(current, id), id)
-        }
+        ArtistPlan::Reparent(id) => (reparented(current, id), id),
         ArtistPlan::Rename => {
             rename_artist(conn, current, &applied.album.artist, &keys.artist_key).await?;
+            if before.artist_mbid == Some(VARIOUS_ARTISTS_MBID) {
+                // The Various Artists MBID never stays on a renamed row.
+                sqlx::query!(
+                    "UPDATE artists SET mbid = NULL, mbid_source = NULL WHERE id = $1",
+                    current
+                )
+                .execute(&mut *conn)
+                .await?;
+                before.artist_mbid_write = Some(ArtistMbidWrite {
+                    id: current,
+                    mbid: before.artist_mbid,
+                    mbid_source: before.artist_mbid_source.clone(),
+                    written: None,
+                });
+            }
             (
                 ArtistStep {
                     action: "renamed",
@@ -572,14 +598,6 @@ pub async fn apply_identity(
                     id,
                 )
             } else {
-                let a = sqlx::query!("SELECT mbid, mbid_source FROM artists WHERE id = $1", id)
-                    .fetch_one(&mut *conn)
-                    .await?;
-                before.new_artist = Some(ArtistMbid {
-                    id,
-                    mbid: a.mbid,
-                    mbid_source: a.mbid_source,
-                });
                 (reparented(current, id), id)
             }
         }
@@ -628,15 +646,38 @@ pub async fn apply_identity(
         genres::replace_album_genres(conn, album, GenreSource::MusicBrainz, &applied.album.genres)
             .await?;
     }
-    if let [mbid] = applied.album.artist_mbids.as_slice() {
-        sqlx::query!(
+    // mbids_only leaves the album's artist row alone (C3 ruling).
+    if let ([mbid], false) = (applied.album.artist_mbids.as_slice(), applied.mbids_only) {
+        let prior = sqlx::query!(
+            "SELECT mbid, mbid_source FROM artists WHERE id = $1",
+            artist
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        let wrote = sqlx::query!(
             "UPDATE artists SET mbid = $2, mbid_source = 'autotag'
              WHERE id = $1 AND mbid_source IS DISTINCT FROM 'user'",
             artist,
             mbid
         )
         .execute(&mut *conn)
-        .await?;
+        .await?
+        .rows_affected()
+            > 0;
+        // A row this apply created has nothing to give back.
+        if wrote && step.action != "created" {
+            match &mut before.artist_mbid_write {
+                Some(w) if w.id == artist => w.written = Some(*mbid),
+                _ => {
+                    before.artist_mbid_write = Some(ArtistMbidWrite {
+                        id: artist,
+                        mbid: prior.mbid,
+                        mbid_source: prior.mbid_source,
+                        written: Some(*mbid),
+                    })
+                }
+            }
+        }
     }
     for t in &applied.tracks {
         let Some(rec) = t.recording_mbid else {
@@ -776,8 +817,9 @@ pub async fn undo_collision(
 /// Undoes [`apply_identity`] on the caller's transaction (same lock order): restores the album
 /// row (title, `title_key`, year, compilation flag, `identity_source`, `applied_identity`),
 /// reverses the artist step, puts back the album MBIDs and sources, the MusicBrainz album
-/// genres, the album artist's MBID and each track's recording MBID and source, each only while
-/// it still holds what the apply wrote (source `autotag`; a later `user` value stays). A track
+/// genres, the artist MBID the apply changed and each track's recording MBID and source, each
+/// only while it still holds the very value this run wrote (source `autotag` and the same id):
+/// a later `user` edit, another run's write or a new identification answer stays. A track
 /// whose answer comes back gets its `done` stage row back; one that had none gets its
 /// `recording` stage back to `pending`. Deletes the run's overrides, supersedes previewed
 /// organizer runs and sets the album `proposed`. A collision of the old identity refuses the
@@ -802,8 +844,8 @@ pub async fn undo_identity(conn: &mut PgConnection, run: &RunRow) -> Result<(), 
         let mut ids = BTreeSet::from([current]);
         ids.extend(recorded.old_artist_id);
         ids.extend(artist_by_key(conn, &before.artist_key).await?);
-        if let Some(n) = &before.new_artist {
-            ids.insert(n.id);
+        if let Some(w) = &before.artist_mbid_write {
+            ids.insert(w.id);
         }
         lock_artists(conn, &ids).await?;
         let plan = undo_plan(
@@ -878,19 +920,24 @@ async fn restore(
     }
     sqlx::query!(
         "UPDATE albums SET
-           release_mbid = CASE WHEN release_mbid_source = 'autotag' THEN $2 ELSE release_mbid END,
-           release_mbid_source = CASE WHEN release_mbid_source = 'autotag' THEN $3
-                                      ELSE release_mbid_source END,
-           release_group_mbid = CASE WHEN release_group_mbid_source = 'autotag' THEN $4
-                                     ELSE release_group_mbid END,
-           release_group_mbid_source = CASE WHEN release_group_mbid_source = 'autotag' THEN $5
-                                            ELSE release_group_mbid_source END
+           release_mbid = CASE WHEN release_mbid_source = 'autotag' AND release_mbid = $6
+                               THEN $2 ELSE release_mbid END,
+           release_mbid_source = CASE WHEN release_mbid_source = 'autotag' AND release_mbid = $6
+                                      THEN $3 ELSE release_mbid_source END,
+           release_group_mbid = CASE WHEN release_group_mbid_source = 'autotag'
+                                          AND release_group_mbid = $7
+                                     THEN $4 ELSE release_group_mbid END,
+           release_group_mbid_source = CASE WHEN release_group_mbid_source = 'autotag'
+                                                 AND release_group_mbid = $7
+                                            THEN $5 ELSE release_group_mbid_source END
          WHERE id = $1",
         album,
         before.release_mbid,
         before.release_mbid_source,
         before.release_group_mbid,
-        before.release_group_mbid_source
+        before.release_group_mbid_source,
+        applied.album.release_mbid,
+        applied.album.release_group_mbid
     )
     .execute(&mut *conn)
     .await?;
@@ -898,44 +945,39 @@ async fn restore(
         genres::replace_album_genres(conn, album, GenreSource::MusicBrainz, &before.mb_genres)
             .await?;
     }
-    if applied.album.artist_mbids.len() == 1 {
-        // The row whose MBID the apply set: the re-parent target, else the album's own artist
-        // (kept or renamed). A created row needs nothing back.
-        let (id, mbid, source) = match &before.new_artist {
-            Some(n) => (n.id, n.mbid, n.mbid_source.clone()),
-            None => (
-                before.artist_id,
-                before.artist_mbid,
-                before.artist_mbid_source.clone(),
-            ),
-        };
+    // Only the row the apply wrote, and only while it still holds the apply's value: a later
+    // run or a user edit on the same artist is left alone.
+    if let Some(w) = &before.artist_mbid_write {
         sqlx::query!(
             "UPDATE artists SET mbid = $2, mbid_source = $3
-             WHERE id = $1 AND mbid_source = 'autotag'",
-            id,
-            mbid,
-            source
+             WHERE id = $1 AND mbid IS NOT DISTINCT FROM $4
+               AND mbid_source IS NOT DISTINCT FROM
+                   (CASE WHEN $4::uuid IS NULL THEN NULL ELSE 'autotag' END)",
+            w.id,
+            w.mbid,
+            w.mbid_source,
+            w.written
         )
         .execute(&mut *conn)
         .await?;
     }
-    let touched: BTreeSet<Uuid> = applied
+    let written: HashMap<Uuid, Uuid> = applied
         .tracks
         .iter()
-        .filter(|t| t.recording_mbid.is_some())
-        .map(|t| t.track_id)
+        .filter_map(|t| t.recording_mbid.map(|r| (t.track_id, r)))
         .collect();
-    for t in before
-        .tracks
-        .iter()
-        .filter(|t| touched.contains(&t.track_id))
-    {
+    for t in &before.tracks {
+        let Some(rec) = written.get(&t.track_id) else {
+            continue;
+        };
         let hit = sqlx::query_scalar!(
             "UPDATE tracks SET recording_mbid = $2, recording_source = $3, updated_at = now()
-             WHERE id = $1 AND recording_source = 'autotag' RETURNING id",
+             WHERE id = $1 AND recording_source = 'autotag' AND recording_mbid = $4
+             RETURNING id",
             t.track_id,
             t.recording_mbid,
-            t.recording_source
+            t.recording_source,
+            rec
         )
         .fetch_optional(&mut *conn)
         .await?;

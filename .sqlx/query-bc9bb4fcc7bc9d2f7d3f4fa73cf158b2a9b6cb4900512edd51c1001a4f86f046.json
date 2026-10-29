@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists SET mbid = NULL, mbid_source = NULL WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bc9bb4fcc7bc9d2f7d3f4fa73cf158b2a9b6cb4900512edd51c1001a4f86f046"
+}

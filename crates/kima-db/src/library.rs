@@ -472,8 +472,8 @@ pub async fn repoint_by_fingerprint_in(
 
 /// Moves exactly this missing track to `new_path`, clearing its missing flag; waits for the
 /// row's lock (no `SKIP LOCKED`), so the scanner never stores a file under another track than
-/// the one whose override it merged. `None` when the track is gone, no longer missing, or
-/// `new_path` already has a row.
+/// the one it picked (and whose override, if any, it merged). `None` when the track is gone,
+/// no longer missing, or `new_path` already has a row.
 pub async fn repoint_exact_in(
     conn: &mut PgConnection,
     track: Uuid,

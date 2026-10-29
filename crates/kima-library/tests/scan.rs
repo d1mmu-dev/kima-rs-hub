@@ -3151,14 +3151,14 @@ async fn db_matched_file_renamed_or_moved_keeps_override(pool: PgPool) {
 
 // ---- Task 14 fix round 2: a moved file is stored only under the track whose override it took ----
 
-/// Two byte-identical tracks (`Dup/x1.flac`, `Dup/x2.flac`) with the given overrides (by id
-/// order: `first` goes to the smaller id, which the re-point rule takes first), then both files
-/// deleted and marked missing in one run. Answers (smaller id, larger id) and the content.
+/// Two byte-identical tracks (`Dup/x1.flac`, `Dup/x2.flac`) with the given overrides, if any
+/// (by id order: `first` goes to the smaller id, which the re-point rule takes first), then both
+/// files deleted and marked missing in one run. Answers (smaller id, larger id) and the content.
 async fn duplicate_missing(
     pool: &PgPool,
     root: &Path,
-    first: serde_json::Value,
-    second: serde_json::Value,
+    first: Option<serde_json::Value>,
+    second: Option<serde_json::Value>,
 ) -> (Uuid, Uuid, Vec<u8>) {
     // Another file keeps the root non-empty (the unmounted-disk guard).
     make_audio(root, "Keep/k.flac", tags("Keep", "Keep", "k", "1999", "1"));
@@ -3175,8 +3175,12 @@ async fn duplicate_missing(
         track_id(pool, "Dup/x2.flac").await,
     ];
     ids.sort();
-    put_override(pool, ids[0], first).await;
-    put_override(pool, ids[1], second).await;
+    if let Some(o) = first {
+        put_override(pool, ids[0], o).await;
+    }
+    if let Some(o) = second {
+        put_override(pool, ids[1], o).await;
+    }
     std::fs::remove_file(root.join("Dup/x1.flac")).unwrap();
     std::fs::remove_file(root.join("Dup/x2.flac")).unwrap();
     rescan(pool, root).await;
@@ -3184,8 +3188,49 @@ async fn duplicate_missing(
     (ids[0], ids[1], bytes)
 }
 
-fn album_override(album: &str) -> serde_json::Value {
-    serde_json::json!({"album": album, "albumArtist": "Artist", "year": 2001})
+fn album_override(album: &str) -> Option<serde_json::Value> {
+    Some(serde_json::json!({"album": album, "albumArtist": "Artist", "year": 2001}))
+}
+
+/// Takes `track`'s row lock `FOR UPDATE` in a new transaction (as another job would) and
+/// answers it with that backend's pid.
+async fn hold_row(pool: &PgPool, track: Uuid) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM tracks WHERE id = $1 FOR UPDATE")
+        .bind(track)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    (tx, pid)
+}
+
+/// Waits until some backend waits on a lock held by `holder` (`pg_blocking_pids`), or until
+/// `job` has finished without ever waiting (the assertions after it then tell what happened).
+/// Panics after 30 s instead of hanging the suite.
+async fn wait_until_blocked_on<T>(pool: &PgPool, holder: i32, job: &tokio::task::JoinHandle<T>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                            WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))",
+        )
+        .bind(holder)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if blocked || job.is_finished() {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out after 30 s: the job never waited on the row lock held by backend {holder}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// The album title of the track now at `path`.
@@ -3242,7 +3287,7 @@ async fn unreadable_override_claims_nothing(pool: PgPool) {
     }
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    let bad = serde_json::json!({"year": "not a year"});
+    let bad = Some(serde_json::json!({"year": "not a year"}));
     let (x, y, bytes) = duplicate_missing(&pool, root, bad, album_override("AY")).await;
     let (f1, f2) = ("New/f1.flac", "New/f2.flac");
     std::fs::create_dir_all(root.join("New")).unwrap();
@@ -3271,17 +3316,12 @@ async fn locked_track_is_waited_for_not_skipped(pool: PgPool) {
     std::fs::write(root.join(f1), &bytes).unwrap();
 
     // Another job holds x's row (as `identity::lock_track` or `stages::wipe` would).
-    let mut lock = pool.begin().await.unwrap();
-    sqlx::query("SELECT 1 FROM tracks WHERE id = $1 FOR UPDATE")
-        .bind(x)
-        .execute(&mut *lock)
-        .await
-        .unwrap();
+    let (lock, holder) = hold_row(&pool, x).await;
     let job = {
         let (pool, root) = (pool.clone(), root.to_path_buf());
         tokio::spawn(async move { reread_raw(&pool, &root, &[f1]).await })
     };
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    wait_until_blocked_on(&pool, holder, &job).await;
     lock.commit().await.unwrap();
     let r = job.await.unwrap();
     assert!(r.failed.is_empty(), "{r:?}");
@@ -3336,19 +3376,20 @@ async fn exact_repoint_miss_fails_the_file(pool: PgPool) {
     std::fs::create_dir_all(root.join("New")).unwrap();
     std::fs::write(root.join(f1), &bytes).unwrap();
 
-    // The file is merged with x's override, but x is deleted meanwhile (a held delete that
-    // commits while the store waits for the row).
-    let mut del = pool.begin().await.unwrap();
+    // The file is merged with x's override, but x is deleted meanwhile: another transaction
+    // holds x's row, so the merge (a plain read) has picked x once the store waits on it; only
+    // then is x deleted and the delete committed.
+    let (mut del, holder) = hold_row(&pool, x).await;
+    let job = {
+        let (pool, root) = (pool.clone(), root.to_path_buf());
+        tokio::spawn(async move { reread_raw(&pool, &root, &[f1]).await })
+    };
+    wait_until_blocked_on(&pool, holder, &job).await;
     sqlx::query("DELETE FROM tracks WHERE id = $1")
         .bind(x)
         .execute(&mut *del)
         .await
         .unwrap();
-    let job = {
-        let (pool, root) = (pool.clone(), root.to_path_buf());
-        tokio::spawn(async move { reread_raw(&pool, &root, &[f1]).await })
-    };
-    tokio::time::sleep(Duration::from_millis(800)).await;
     del.commit().await.unwrap();
     let r = job.await.unwrap();
     assert_eq!(r.failed.len(), 1, "{r:?}");
@@ -3367,4 +3408,70 @@ async fn exact_repoint_miss_fails_the_file(pool: PgPool) {
     assert_eq!(r.repointed, 1, "{r:?}");
     assert_eq!(track_id(&pool, f1).await, y);
     assert_eq!(album_title_at(&pool, f1).await, "AY");
+}
+
+// ---- Task 14 fix round 3: a merge pick without an override is stored on exactly that track ----
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn failed_store_leaves_next_file_off_the_overridden_track(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Only x (taken first) carries an override; y has none.
+    let (x, y, bytes) = duplicate_missing(&pool, root, album_override("AX"), None).await;
+    let (f1, f2) = ("New/f1.flac", "New/f2.flac");
+    std::fs::create_dir_all(root.join("New")).unwrap();
+    std::fs::write(root.join(f1), &bytes).unwrap();
+    std::fs::write(root.join(f2), &bytes).unwrap();
+    // The first file's store fails (and rolls back): x stays missing.
+    for sql in [
+        "CREATE FUNCTION fail_f1() RETURNS trigger AS $$
+         BEGIN
+             IF NEW.path = 'New/f1.flac' THEN RAISE EXCEPTION 'injected store failure'; END IF;
+             RETURN NEW;
+         END $$ LANGUAGE plpgsql",
+        "CREATE TRIGGER fail_f1 BEFORE INSERT OR UPDATE ON tracks
+         FOR EACH ROW EXECUTE FUNCTION fail_f1()",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    let r = reread_raw(&pool, root, &[f1, f2]).await;
+    assert_eq!(r.failed.len(), 1, "{r:?}");
+    assert_eq!(r.failed[0].0, f1);
+    // f2 was given y: it never takes x from its plain tags (dropping x's matched identity).
+    assert_eq!(track_id(&pool, f2).await, y);
+    assert_eq!(album_title_at(&pool, f2).await, "Dup");
+    assert_eq!(path_of(&pool, x).await.as_deref(), Some("Dup/x1.flac"));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn locked_plain_track_is_waited_for_not_skipped(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // x (taken first) has no override; y carries AY.
+    let (x, y, bytes) = duplicate_missing(&pool, root, None, album_override("AY")).await;
+    let (f1, f2) = ("New/f1.flac", "New/f2.flac");
+    std::fs::create_dir_all(root.join("New")).unwrap();
+    std::fs::write(root.join(f1), &bytes).unwrap();
+    std::fs::write(root.join(f2), &bytes).unwrap();
+
+    // Another job holds x's row: f1 waits for it instead of skipping onto y without AY.
+    let (lock, holder) = hold_row(&pool, x).await;
+    let job = {
+        let (pool, root) = (pool.clone(), root.to_path_buf());
+        tokio::spawn(async move { reread_raw(&pool, &root, &[f1, f2]).await })
+    };
+    wait_until_blocked_on(&pool, holder, &job).await;
+    lock.commit().await.unwrap();
+    let r = job.await.unwrap();
+    assert!(r.failed.is_empty(), "{r:?}");
+    assert_eq!(track_id(&pool, f1).await, x);
+    assert_eq!(album_title_at(&pool, f1).await, "Dup");
+    assert_eq!(track_id(&pool, f2).await, y);
+    assert_eq!(album_title_at(&pool, f2).await, "AY");
 }

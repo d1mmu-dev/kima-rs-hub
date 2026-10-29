@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tracks SET path = $2, missing_since = NULL, updated_at = now()\n           WHERE id = $1 AND missing_since IS NOT NULL\n             AND NOT EXISTS (SELECT 1 FROM tracks WHERE path = $2)\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4fc543f2ccfc19fdf3ee3ec81d490869c94d9273bfff2eca3d72e2fca1994104"
+}

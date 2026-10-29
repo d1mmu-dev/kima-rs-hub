@@ -167,6 +167,21 @@ struct Prepared {
     raw: RawTags,
     resolved: Resolved,
     fingerprint: [u8; 32],
+    /// The missing track whose stored override was merged into `raw` (a moved or renamed
+    /// database-only match): the file may only take over exactly that track.
+    target: Option<Uuid>,
+}
+
+/// How [`store`] may take over a missing track for a path with no row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repoint {
+    /// The path has a row; nothing is re-pointed.
+    No,
+    /// Any missing track with the same fingerprint (earliest missing first, locked rows skipped).
+    Any,
+    /// Exactly this track, whose override was merged into the file's tags; waits for its row
+    /// lock. If it is no longer missing (or gone), nothing is stored.
+    Exact(Uuid),
 }
 
 type GroupKey = (String, String);
@@ -412,6 +427,7 @@ async fn prepare(
         raw,
         resolved,
         fingerprint,
+        target: None,
     })
 }
 
@@ -511,14 +527,20 @@ async fn store(
     pool: &PgPool,
     t: &ResolvedTrack,
     raw: &RawTags,
-    repoint: bool,
+    repoint: Repoint,
     cause: ReadCause,
-) -> sqlx::Result<StoreResult> {
+) -> sqlx::Result<Option<StoreResult>> {
     let mut tx = pool.begin().await?;
-    let repointed = if repoint {
-        library::repoint_by_fingerprint_in(&mut tx, &t.fingerprint, &t.path).await?
-    } else {
-        None
+    let repointed = match repoint {
+        Repoint::No => None,
+        Repoint::Any => {
+            library::repoint_by_fingerprint_in(&mut tx, &t.fingerprint, &t.path).await?
+        }
+        Repoint::Exact(id) => match library::repoint_exact_in(&mut tx, id, &t.path).await? {
+            Some(id) => Some(id),
+            // The file carries this track's override; under no other track may it be stored.
+            None => return Ok(None),
+        },
     };
     // Locks the track row (if any) before the album upsert locks the album: the recording
     // stage locks track then album, and the same order keeps the two from deadlocking.
@@ -561,12 +583,12 @@ async fn store(
         (None, Some(_)) => Stored::Updated,
         (None, None) => Stored::Added,
     };
-    Ok(StoreResult {
+    Ok(Some(StoreResult {
         stored,
         album_moved: old_album.is_some() && old_album != Some(up.album),
         old_album,
         upserted: up,
-    })
+    }))
 }
 
 /// The most common value, ties to the smallest.
@@ -785,8 +807,10 @@ async fn prepare_with(
 /// A file with no row at its path will take over a missing track with the same content
 /// (`store`'s re-point). If that track has a stored override (a database-only match), the file
 /// is resolved with it, so a renamed or moved file keeps the matched identity (spec §19.7). The
-/// track is picked by the re-point's own rule, in the order the files are stored, so the
-/// override is the one of the track the file will become.
+/// track is picked by the re-point's own order (earliest missing, then id), skipping tracks
+/// earlier kept files of the folder were given; a file whose override was merged is then stored
+/// only onto exactly that track ([`Repoint::Exact`]), never another. A file dropped here (an
+/// unreadable override) claims nothing.
 async fn merge_moved_overrides(
     pool: &PgPool,
     prepared: Vec<Prepared>,
@@ -808,12 +832,12 @@ async fn merge_moved_overrides(
             kept.push(p);
             continue;
         };
-        claimed.push(track);
         if let Some(v) = fields {
             match serde_json::from_value::<TagOverrides>(v) {
                 Ok(o) => {
                     p.raw.apply_overrides(&o);
                     p.resolved = resolve(&p.raw, Path::new(&p.disk.rel));
+                    p.target = Some(track);
                 }
                 Err(e) => {
                     out.failed.push((
@@ -824,6 +848,7 @@ async fn merge_moved_overrides(
                 }
             }
         }
+        claimed.push(track);
         kept.push(p);
     }
     Ok(kept)
@@ -885,12 +910,19 @@ async fn process_folder(
         let year = years.get(&group_key(&p.resolved)).copied().flatten();
         let track = to_track(p, year);
         let rel = p.disk.rel.clone();
-        match retry_once_on_conflict(|| {
-            store(&ctx.pool, &track, &p.raw, !known.contains_key(&rel), cause)
-        })
-        .await
-        {
-            Ok(r) => {
+        let repoint = match p.target {
+            Some(id) => Repoint::Exact(id),
+            None if known.contains_key(&rel) => Repoint::No,
+            None => Repoint::Any,
+        };
+        match retry_once_on_conflict(|| store(&ctx.pool, &track, &p.raw, repoint, cause)).await {
+            Ok(None) => out.failed.push((
+                rel,
+                "the moved track this file carries the override of is no longer missing; \
+                 it is read again on the next scan"
+                    .to_string(),
+            )),
+            Ok(Some(r)) => {
                 touched.add(&r, &track);
                 out.album_moved |= r.album_moved;
                 out.stored.push((rel, r.stored));
@@ -947,10 +979,13 @@ async fn process_folder(
         let year = years.get(&group_key(&p.resolved)).copied().unwrap_or(year);
         let mut track = to_track(&p, year);
         track.guessed.via_symlink = linked;
-        match retry_once_on_conflict(|| store(&ctx.pool, &track, &p.raw, false, ReadCause::Scan))
-            .await
+        match retry_once_on_conflict(|| {
+            store(&ctx.pool, &track, &p.raw, Repoint::No, ReadCause::Scan)
+        })
+        .await
         {
-            Ok(r) => {
+            Ok(None) => unreachable!("a store without a re-point always stores"),
+            Ok(Some(r)) => {
                 touched.add(&r, &track);
                 out.album_moved |= r.album_moved;
                 out.stored.push((s.path.clone(), Stored::Updated));

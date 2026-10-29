@@ -1,0 +1,43 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT al.id, ar.name, al.title, al.year\n         FROM albums al JOIN artists ar ON ar.id = al.artist_id\n         WHERE al.artist_id = $2 AND al.title_key = $3 AND al.id <> $1\n           AND COALESCE(al.year, -1) = COALESCE($4, -1)\n         ORDER BY al.id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "year",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "6f2e72bcf79660e1ec68fb1052810ed40bb26e0334a95292f8abf6ce8152bd65"
+}

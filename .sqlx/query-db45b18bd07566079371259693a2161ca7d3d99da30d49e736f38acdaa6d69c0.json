@@ -1,0 +1,130 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, album_id, candidate_id, applied, album_before, artist_action, old_artist_id,\n                new_artist_id, old_artist_name, target, reorganize, state, organizer_run_id,\n                copy_run_id, created_by, created_at, finished_at, summary, error\n         FROM autotag_runs WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "album_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "candidate_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "applied",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "album_before",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "artist_action",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "old_artist_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "new_artist_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "old_artist_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "reorganize",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "state",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "organizer_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 13,
+        "name": "copy_run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 14,
+        "name": "created_by",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 15,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "finished_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "summary",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 18,
+        "name": "error",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "db45b18bd07566079371259693a2161ca7d3d99da30d49e736f38acdaa6d69c0"
+}

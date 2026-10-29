@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE track_stages\n                     SET status = 'done', source = $2, evidence = $3,\n                         finished_at = $4::text::timestamptz, next_attempt_at = NULL,\n                         last_error = NULL, error_code = NULL, error_class = NULL,\n                         updated_at = now()\n                     WHERE track_id = $1 AND stage = 'recording'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f15b3882ed5bf2bf3e1c308ab2d52c599f696ee869ebaa6504cb93572133297c"
+}

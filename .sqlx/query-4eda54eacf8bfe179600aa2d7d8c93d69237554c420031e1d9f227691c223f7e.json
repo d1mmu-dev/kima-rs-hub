@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE autotag_runs SET album_before = $2, artist_action = $3, old_artist_id = $4,\n                new_artist_id = $5, old_artist_name = $6\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4eda54eacf8bfe179600aa2d7d8c93d69237554c420031e1d9f227691c223f7e"
+}

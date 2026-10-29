@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT album_before, artist_action, old_artist_id, new_artist_id, old_artist_name\n         FROM autotag_runs WHERE id = $1 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "album_before",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 1,
+        "name": "artist_action",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "old_artist_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "new_artist_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "old_artist_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "63eddcf39302ecb263edca198a929ec68bfe2bfae7941b90b23b28fb6d7eac6a"
+}

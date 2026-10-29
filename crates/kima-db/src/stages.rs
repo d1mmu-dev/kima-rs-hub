@@ -283,3 +283,23 @@ pub async fn reopen_album_recordings(conn: &mut PgConnection, album: Uuid) -> sq
     .await?;
     Ok(r.rows_affected())
 }
+
+/// An autotag apply set the track's recording MBID (spec §19.6): its `recording` row becomes
+/// `done` with `source = 'autotag'`, `evidence = {"reason":"autotag"}`, errors and
+/// `next_attempt_at` cleared, `finished_at = now()`; created when the track had none. A claim
+/// still out on the row is no longer current, so its report writes nothing.
+pub async fn close_recording_autotag(conn: &mut PgConnection, track: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        r#"INSERT INTO track_stages (track_id, stage, status, source, evidence, finished_at,
+                                     updated_at)
+           VALUES ($1, 'recording', 'done', 'autotag', '{"reason":"autotag"}'::jsonb, now(), now())
+           ON CONFLICT (track_id, stage) DO UPDATE SET
+             status = 'done', source = 'autotag', evidence = EXCLUDED.evidence,
+             next_attempt_at = NULL, last_error = NULL, error_code = NULL, error_class = NULL,
+             finished_at = now(), updated_at = now()"#,
+        track
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}

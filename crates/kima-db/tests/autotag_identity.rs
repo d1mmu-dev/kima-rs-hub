@@ -1322,6 +1322,7 @@ async fn undo_creates_the_old_name_when_the_renamed_row_gained_albums(pool: PgPo
     track(&pool, b, "x/1.flac", false).await;
     let r = run(&pool, b, applied("Record", "Zed", None, vec![])).await;
     assert_eq!(apply(&pool, &r).await.unwrap().action, "renamed");
+    assert_eq!(artist_mbid(&pool, x).await.0, Some(ART_MBID));
     // A scan put another Zed album on the renamed row.
     let z2 = album(&pool, x, "Zed Live", None).await;
     track(&pool, z2, "z/1.flac", false).await;
@@ -1331,6 +1332,13 @@ async fn undo_creates_the_old_name_when_the_renamed_row_gained_albums(pool: PgPo
     assert_ne!(after["artistId"], json!(x));
     assert_eq!(artist_row(&pool, x).await.unwrap()["name"], "Zed");
     assert_eq!(row(&pool, z2).await["artistId"], json!(x));
+    // The renamed row keeps the MBID the apply gave its new identity; the old name had none.
+    assert_eq!(
+        artist_mbid(&pool, x).await,
+        (Some(ART_MBID), Some("autotag".into()))
+    );
+    let created: Uuid = serde_json::from_value(after["artistId"].clone()).unwrap();
+    assert_eq!(artist_mbid(&pool, created).await, (None, None));
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -1345,4 +1353,127 @@ async fn mbids_only_leaves_the_artist_row(pool: PgPool) {
     apply(&pool, &r).await.unwrap();
     assert_eq!(artist_row(&pool, x).await, x_before);
     assert_eq!(row(&pool, b).await["relSrc"], "autotag");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_gives_the_old_mbid_to_the_recreated_old_name(pool: PgPool) {
+    let old = Uuid::now_v7();
+    let x = artist(&pool, "Xavier").await;
+    sqlx::query("UPDATE artists SET mbid = $2, mbid_source = 'tag' WHERE id = $1")
+        .bind(x)
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let b = album(&pool, x, "Record", None).await;
+    track(&pool, b, "x/1.flac", false).await;
+    let r = run(&pool, b, applied("Record", "Zed", None, vec![])).await;
+    assert_eq!(apply(&pool, &r).await.unwrap().action, "renamed");
+    let z2 = album(&pool, x, "Zed Live", None).await;
+    track(&pool, z2, "z/1.flac", false).await;
+
+    undo(&pool, r.id).await.unwrap();
+    let after = row(&pool, b).await;
+    let created: Uuid = serde_json::from_value(after["artistId"].clone()).unwrap();
+    assert_ne!(created, x);
+    assert_eq!(after["artist"], "Xavier");
+    assert_eq!(
+        artist_mbid(&pool, created).await,
+        (Some(old), Some("tag".into()))
+    );
+    assert_eq!(artist_row(&pool, x).await.unwrap()["name"], "Zed");
+    assert_eq!(
+        artist_mbid(&pool, x).await,
+        (Some(ART_MBID), Some("autotag".into()))
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_never_moves_the_various_artists_mbid_to_the_renamed_row(pool: PgPool) {
+    let m = Uuid::now_v7();
+    let x = artist(&pool, "Comp Series").await;
+    sqlx::query("UPDATE artists SET mbid = $2, mbid_source = 'tag' WHERE id = $1")
+        .bind(x)
+        .bind(library::VARIOUS_ARTISTS_MBID)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let b = album(&pool, x, "Hits", None).await;
+    track(&pool, b, "c/1.flac", false).await;
+    let mut a = applied("Hits", "Someone", None, vec![]);
+    a.album.artist_mbids = vec![m];
+    let r = run(&pool, b, a).await;
+    assert_eq!(apply(&pool, &r).await.unwrap().action, "renamed");
+    assert_eq!(
+        artist_mbid(&pool, x).await,
+        (Some(m), Some("autotag".into()))
+    );
+    let s2 = album(&pool, x, "Someone Else", None).await;
+    track(&pool, s2, "s/1.flac", false).await;
+
+    undo(&pool, r.id).await.unwrap();
+    assert_eq!(artist_row(&pool, x).await.unwrap()["name"], "Someone");
+    assert_eq!(
+        artist_mbid(&pool, x).await,
+        (Some(m), Some("autotag".into()))
+    );
+    let after = row(&pool, b).await;
+    assert_eq!(after["artist"], "Comp Series");
+    let created: Uuid = serde_json::from_value(after["artistId"].clone()).unwrap();
+    assert_ne!(created, x);
+    // Not a Various Artists name: the VA MBID is not put on it.
+    assert_eq!(artist_mbid(&pool, created).await, (None, None));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_out_of_various_artists_after_the_old_row_was_pruned(pool: PgPool) {
+    let x = artist(&pool, "Xavier").await;
+    let b = album(&pool, x, "Hits", None).await;
+    track(&pool, b, "x/1.flac", false).await;
+    let mut a = applied("Hits", "Various Artists", None, vec![]);
+    a.album.compilation = true;
+    a.album.artist_mbids = vec![library::VARIOUS_ARTISTS_MBID];
+    let r = run(&pool, b, a).await;
+    let step = apply(&pool, &r).await.unwrap();
+    assert_eq!(step.action, "created");
+    let va = step.new_artist_id.unwrap();
+    assert_eq!(library::prune_empty(&pool).await.unwrap().artists, vec![x]);
+
+    // The VA row now holds only this album, yet it is never renamed: a row is created.
+    undo(&pool, r.id).await.unwrap();
+    let after = row(&pool, b).await;
+    assert_eq!(after["artist"], "Xavier");
+    assert_ne!(after["artistId"], json!(va));
+    let vr = artist_row(&pool, va).await.unwrap();
+    assert_eq!(vr["key"], "various artists");
+    assert_eq!(vr["mbid"], json!(library::VARIOUS_ARTISTS_MBID));
+    assert_eq!(after["comp"], false);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn various_artists_with_several_albums_keeps_them(pool: PgPool) {
+    let va = artist(&pool, "Various Artists").await;
+    sqlx::query("UPDATE artists SET mbid = $2 WHERE id = $1")
+        .bind(va)
+        .bind(library::VARIOUS_ARTISTS_MBID)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let b = album(&pool, va, "Hits", None).await;
+    track(&pool, b, "va/1.flac", false).await;
+    let other = album(&pool, va, "More Hits", None).await;
+    track(&pool, other, "va/2.flac", false).await;
+    let before = row(&pool, b).await;
+    let r = run(&pool, b, applied("Hits", "Real Artist", None, vec![])).await;
+    assert_eq!(apply(&pool, &r).await.unwrap().action, "created");
+    let vr = artist_row(&pool, va).await.unwrap();
+    assert_eq!(vr["name"], "Various Artists");
+    assert_eq!(vr["mbid"], json!(library::VARIOUS_ARTISTS_MBID));
+    assert_eq!(row(&pool, other).await["artistId"], json!(va));
+    undo(&pool, r.id).await.unwrap();
+    assert_eq!(row(&pool, b).await, before);
+    assert_eq!(
+        artist_row(&pool, va).await.unwrap()["mbid"],
+        json!(library::VARIOUS_ARTISTS_MBID)
+    );
 }

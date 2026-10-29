@@ -888,6 +888,7 @@ async fn restore(
     plan: ArtistPlan,
     before: &AlbumBefore,
 ) -> sqlx::Result<()> {
+    let mut created_row = None;
     let artist = match plan {
         ArtistPlan::Keep => current,
         ArtistPlan::Reparent(id) => id,
@@ -896,9 +897,10 @@ async fn restore(
             current
         }
         ArtistPlan::Create => {
-            create_artist(conn, &before.artist_name, &before.artist_key)
-                .await?
-                .0
+            let (id, created) =
+                create_artist(conn, &before.artist_name, &before.artist_key).await?;
+            created_row = created.then_some(id);
+            id
         }
     };
     if !applied.mbids_only {
@@ -946,8 +948,30 @@ async fn restore(
             .await?;
     }
     // Only the row the apply wrote, and only while it still holds the apply's value: a later
-    // run or a user edit on the same artist is left alone.
-    if let Some(w) = &before.artist_mbid_write {
+    // run or a user edit on the same artist is left alone. A row the apply renamed that keeps
+    // its new name (it gained albums, or another row holds the old name) keeps its MBID: that
+    // MBID belongs to its new identity. The old identity's MBID goes to a row created for the
+    // old name instead, never crossing the Various Artists line (the VA MBID only on the VA
+    // name, and only the VA name gets it).
+    let renamed_away = before.artist_mbid_write.as_ref().is_some_and(|w| {
+        w.id == current
+            && w.id == before.artist_id
+            && matches!(plan, ArtistPlan::Reparent(_) | ArtistPlan::Create)
+    });
+    if renamed_away {
+        if let (Some(id), Some(mbid)) = (created_row, before.artist_mbid)
+            && (mbid == VARIOUS_ARTISTS_MBID) == (before.artist_key == VARIOUS_ARTISTS_KEY)
+        {
+            sqlx::query!(
+                "UPDATE artists SET mbid = $2, mbid_source = $3 WHERE id = $1",
+                id,
+                mbid,
+                before.artist_mbid_source
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
+    } else if let Some(w) = &before.artist_mbid_write {
         sqlx::query!(
             "UPDATE artists SET mbid = $2, mbid_source = $3
              WHERE id = $1 AND mbid IS NOT DISTINCT FROM $4

@@ -470,6 +470,27 @@ pub async fn repoint_by_fingerprint_in(
     .await
 }
 
+/// Moves exactly this missing track to `new_path`, clearing its missing flag; waits for the
+/// row's lock (no `SKIP LOCKED`), so the scanner never stores a file under another track than
+/// the one whose override it merged. `None` when the track is gone, no longer missing, or
+/// `new_path` already has a row.
+pub async fn repoint_exact_in(
+    conn: &mut PgConnection,
+    track: Uuid,
+    new_path: &str,
+) -> sqlx::Result<Option<Uuid>> {
+    sqlx::query_scalar!(
+        r#"UPDATE tracks SET path = $2, missing_since = NULL, updated_at = now()
+           WHERE id = $1 AND missing_since IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM tracks WHERE path = $2)
+           RETURNING id"#,
+        track,
+        new_path
+    )
+    .fetch_optional(&mut *conn)
+    .await
+}
+
 /// The album of the track at `path`, if there is one, locking that track row for the rest of
 /// the transaction. Taken before the artist and album upserts, so a re-read locks track then
 /// album, in the same order as the recording stage's answer (which locks the track, then

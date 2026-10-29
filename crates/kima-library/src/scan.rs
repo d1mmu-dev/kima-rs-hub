@@ -167,8 +167,8 @@ struct Prepared {
     raw: RawTags,
     resolved: Resolved,
     fingerprint: [u8; 32],
-    /// The missing track whose stored override was merged into `raw` (a moved or renamed
-    /// database-only match): the file may only take over exactly that track.
+    /// The missing track the merge picked for this file (a moved or renamed one), its stored
+    /// override, if any, merged into `raw`: the file may only take over exactly that track.
     target: Option<Uuid>,
 }
 
@@ -178,9 +178,10 @@ enum Repoint {
     /// The path has a row; nothing is re-pointed.
     No,
     /// Any missing track with the same fingerprint (earliest missing first, locked rows skipped).
+    /// Only for a file the merge found no missing track for.
     Any,
-    /// Exactly this track, whose override was merged into the file's tags; waits for its row
-    /// lock. If it is no longer missing (or gone), nothing is stored.
+    /// Exactly the track the merge picked (its override, if any, merged into the file's tags);
+    /// waits for its row lock. If it is no longer missing (or gone), nothing is stored.
     Exact(Uuid),
 }
 
@@ -808,9 +809,10 @@ async fn prepare_with(
 /// (`store`'s re-point). If that track has a stored override (a database-only match), the file
 /// is resolved with it, so a renamed or moved file keeps the matched identity (spec §19.7). The
 /// track is picked by the re-point's own order (earliest missing, then id), skipping tracks
-/// earlier kept files of the folder were given; a file whose override was merged is then stored
-/// only onto exactly that track ([`Repoint::Exact`]), never another. A file dropped here (an
-/// unreadable override) claims nothing.
+/// earlier kept files of the folder were given; a file that was given a track, with or without
+/// an override, is then stored only onto exactly that track ([`Repoint::Exact`]), never another
+/// (so it can neither land on a duplicate that carries an override without merging it, nor skip
+/// a locked one). A file dropped here (an unreadable override) claims nothing.
 async fn merge_moved_overrides(
     pool: &PgPool,
     prepared: Vec<Prepared>,
@@ -837,7 +839,6 @@ async fn merge_moved_overrides(
                 Ok(o) => {
                     p.raw.apply_overrides(&o);
                     p.resolved = resolve(&p.raw, Path::new(&p.disk.rel));
-                    p.target = Some(track);
                 }
                 Err(e) => {
                     out.failed.push((
@@ -848,6 +849,7 @@ async fn merge_moved_overrides(
                 }
             }
         }
+        p.target = Some(track);
         claimed.push(track);
         kept.push(p);
     }
@@ -918,7 +920,7 @@ async fn process_folder(
         match retry_once_on_conflict(|| store(&ctx.pool, &track, &p.raw, repoint, cause)).await {
             Ok(None) => out.failed.push((
                 rel,
-                "the moved track this file carries the override of is no longer missing; \
+                "the moved track this file was matched to is no longer missing; \
                  it is read again on the next scan"
                     .to_string(),
             )),

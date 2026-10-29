@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists SET mbid = $2, mbid_source = $3\n             WHERE id = $1 AND mbid IS NOT DISTINCT FROM $4\n               AND mbid_source IS NOT DISTINCT FROM\n                   (CASE WHEN $4::uuid IS NULL THEN NULL ELSE 'autotag' END)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f6cf3343e5bd272b2cd1c2abd0e19a0ec2a27af470705abee02dfde1e76f9b21"
+}

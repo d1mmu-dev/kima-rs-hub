@@ -782,6 +782,53 @@ async fn prepare_with(
     }
 }
 
+/// A file with no row at its path will take over a missing track with the same content
+/// (`store`'s re-point). If that track has a stored override (a database-only match), the file
+/// is resolved with it, so a renamed or moved file keeps the matched identity (spec §19.7). The
+/// track is picked by the re-point's own rule, in the order the files are stored, so the
+/// override is the one of the track the file will become.
+async fn merge_moved_overrides(
+    pool: &PgPool,
+    prepared: Vec<Prepared>,
+    known: &HashMap<String, IndexedTrack>,
+    overrides: &HashMap<String, Result<TagOverrides, String>>,
+    out: &mut FolderResult,
+) -> sqlx::Result<Vec<Prepared>> {
+    let mut claimed: Vec<Uuid> = Vec::new();
+    let mut kept = Vec::with_capacity(prepared.len());
+    for mut p in prepared {
+        if known.contains_key(&p.disk.rel) || overrides.contains_key(&p.disk.rel) {
+            kept.push(p);
+            continue;
+        }
+        let Some((track, fields)) =
+            kima_db::autotag::override_by_missing_fingerprint(pool, &p.fingerprint, &claimed)
+                .await?
+        else {
+            kept.push(p);
+            continue;
+        };
+        claimed.push(track);
+        if let Some(v) = fields {
+            match serde_json::from_value::<TagOverrides>(v) {
+                Ok(o) => {
+                    p.raw.apply_overrides(&o);
+                    p.resolved = resolve(&p.raw, Path::new(&p.disk.rel));
+                }
+                Err(e) => {
+                    out.failed.push((
+                        p.disk.rel.clone(),
+                        format!("the stored tag override is unreadable: {e}"),
+                    ));
+                    continue;
+                }
+            }
+        }
+        kept.push(p);
+    }
+    Ok(kept)
+}
+
 /// Reads and stores the changed files of one folder. `siblings` are the folder's other
 /// present rows, unchanged on disk; they count towards the album year, and any whose album
 /// year or conflict flag changes is re-read and stored too (unless it sits on an autotagged
@@ -814,6 +861,7 @@ async fn process_folder(
             Err(e) => out.failed.push((rel, e)),
         }
     }
+    let prepared = merge_moved_overrides(&ctx.pool, prepared, known, &overrides, &mut out).await?;
 
     let mut groups: HashMap<GroupKey, Vec<Option<i32>>> = HashMap::new();
     for p in &prepared {
@@ -861,8 +909,9 @@ async fn process_folder(
         if s.album_year == year && s.year_conflict == conflicts(s.track_year, year) {
             continue;
         }
-        // On an autotagged album with its own year agreeing: the store would pin it there and
-        // keep the applied year, so a re-read would change nothing.
+        // On an autotagged album whose applied identity is the row's own (`album_autotag`),
+        // with its own year agreeing: the store would pin it there and keep the applied year,
+        // so a re-read would change nothing.
         if s.album_autotag && !s.year_conflict && !conflicts(s.track_year, s.album_year) {
             continue;
         }
@@ -1240,6 +1289,10 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
 /// handled as [`update_path`] does (never indexed anew), and an invalid one is reported in
 /// `failed`. With [`ReadCause::TagWrite`] (the files kima-rs just tagged, audio proven
 /// unchanged) no stage is reopened and no fingerprint row dropped (spec §19.7).
+///
+/// Must run on the concurrency-1 `library` queue, like [`update_path`] and every other library
+/// writer: it may call `prune_empty`, which must not race upserts (an autotag apply or undo
+/// enqueues its re-read there, or runs it inside its own `library` job).
 pub async fn reread_paths(
     ctx: &LibraryCtx,
     paths: &[String],

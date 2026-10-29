@@ -176,13 +176,17 @@ pub struct AppliedIdentity {
 }
 
 /// The album's applied identity, only while `identity_source = 'autotag'`. A stored value that
-/// does not parse counts as none (the track is then resolved normally).
+/// does not parse counts as none (the track is then resolved normally). An autotagged row is
+/// locked (`FOR NO KEY UPDATE`) for the rest of the caller's transaction, so an undo or re-apply
+/// cannot change the identity between this read and a pinned upsert. The scanner calls it after
+/// locking the track row (`album_of_path`), keeping the track-then-album lock order.
 pub async fn autotag_identity(
     conn: &mut PgConnection,
     album: Uuid,
 ) -> sqlx::Result<Option<AppliedIdentity>> {
     let v = sqlx::query_scalar!(
-        "SELECT applied_identity FROM albums WHERE id = $1 AND identity_source = 'autotag'",
+        "SELECT applied_identity FROM albums WHERE id = $1 AND identity_source = 'autotag'
+         FOR NO KEY UPDATE",
         album
     )
     .fetch_optional(&mut *conn)
@@ -576,7 +580,8 @@ pub struct IndexedTrack {
     pub year_conflict: bool,
     /// `guessed.viaSymlink`: the row stands for a file reached through a symlink.
     pub via_symlink: bool,
-    /// The track's album has `identity_source = 'autotag'` (spec §19.7).
+    /// The track's album has `identity_source = 'autotag'` and its `applied_identity` names the
+    /// row's own artist key, title key and year (spec §19.7): a track agreeing with it is pinned.
     pub album_autotag: bool,
 }
 
@@ -594,7 +599,12 @@ pub async fn scan_index(
                   b.title_key AS album_key, a.name_key AS artist_key,
                   COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS "year_conflict!",
                   COALESCE((t.guessed ->> 'viaSymlink')::boolean, false) AS "via_symlink!",
-                  b.identity_source = 'autotag' AS "album_autotag!"
+                  COALESCE(b.identity_source = 'autotag'
+                           AND b.applied_identity ->> 'artistKey' = a.name_key
+                           AND b.applied_identity ->> 'titleKey' = b.title_key
+                           AND COALESCE(b.applied_identity -> 'year', 'null'::jsonb)
+                               = COALESCE(to_jsonb(b.year), 'null'::jsonb),
+                           false) AS "album_autotag!"
            FROM tracks t
            JOIN albums b ON b.id = t.album_id
            JOIN artists a ON a.id = b.artist_id

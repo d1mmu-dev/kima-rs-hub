@@ -2973,3 +2973,178 @@ async fn scan_cause_reopens_changed_file(pool: PgPool) {
     assert_eq!(stage_statuses(&pool, id).await, vec!["pending", "pending"]);
     assert_eq!(acoustid_rows(&pool, id).await, 0);
 }
+
+// ---- Task 14 fix round 1: pinning where the key lookup would miss; moved overridden files ----
+
+/// Album rows with this title and year.
+async fn rows_with(pool: &PgPool, title: &str, year: i32) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM albums WHERE title = $1 AND year = $2")
+        .bind(title)
+        .bind(year)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn files_target_partial_write_stays_pinned(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let files = [
+        "Artist/Old/01.flac",
+        "Artist/Old/02.flac",
+        "Artist/Old/03.flac",
+        "Artist/Old/04.flac",
+    ];
+    for (n, f) in files.iter().enumerate() {
+        let t = format!("{}", n + 1);
+        make_audio(root, f, tags("Artist", "Old", &format!("t{t}"), "1999", &t));
+    }
+    rescan(&pool, root).await;
+    let album = album_of(&pool, files[0]).await;
+    let (a, b) = (
+        track_id(&pool, files[0]).await,
+        track_id(&pool, files[1]).await,
+    );
+    seed_done_stages(&pool, a).await;
+    seed_done_stages(&pool, b).await;
+
+    // Applied New/2001. Two files get the whole identity; two keep DATE=1999 (their date was not
+    // written), so the folder's year mode for Artist/New is 1999 and the key lookup would miss.
+    set_applied(&pool, album, "New", "artist", 2001).await;
+    retag(&root.join(files[0]), Some("New"), None, Some("2001"));
+    retag(&root.join(files[1]), Some("New"), None, Some("2001"));
+    retag(&root.join(files[2]), Some("New"), None, None);
+    retag(&root.join(files[3]), Some("New"), None, None);
+    reread(&pool, root, &files, ReadCause::TagWrite).await;
+
+    let r = scan::reconcile(&ctx(&pool, root)).await.unwrap();
+    assert!(r.failed.is_empty(), "{:?}", r.failed);
+    assert_eq!(r.tags_read, 0, "{r:?}");
+    bump_mtime(&root.join(files[0]));
+    let out = scan::update_path(&ctx(&pool, root), files[0])
+        .await
+        .unwrap();
+    assert_eq!(out, PathOutcome::Updated);
+
+    assert_eq!(album_of(&pool, files[0]).await, album);
+    assert_eq!(album_of(&pool, files[1]).await, album);
+    assert_eq!(album_year(&pool, album).await, Some(2001));
+    assert_eq!(rows_with(&pool, "New", 2001).await, 1);
+    for id in [a, b] {
+        assert_eq!(stage_statuses(&pool, id).await, vec!["done", "done"]);
+        assert_eq!(acoustid_rows(&pool, id).await, 1);
+    }
+    assert_eq!(identity(&pool, album).await.0, "autotag");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn db_target_overrides_stay_pinned(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (a, b) = ("Artist/Disc/01.flac", "Artist/Disc/02.flac");
+    make_audio(root, a, tags("Artist", "Old", "one", "1999", "1"));
+    make_audio(root, b, tags("Artist", "Old", "two", "1999", "2"));
+    // Another album in the same folder already named New, from 1999: it drags the folder's year
+    // mode for Artist/New to 1999, so the key lookup would land on its row.
+    make_audio(
+        root,
+        "Artist/Disc/03.flac",
+        tags("Artist", "New", "x", "1999", "3"),
+    );
+    make_audio(
+        root,
+        "Artist/Disc/04.flac",
+        tags("Artist", "New", "y", "1999", "4"),
+    );
+    rescan(&pool, root).await;
+    let album = album_of(&pool, a).await;
+    let other = album_of(&pool, "Artist/Disc/03.flac").await;
+    assert_ne!(album, other);
+    let (ta, tb) = (track_id(&pool, a).await, track_id(&pool, b).await);
+    seed_done_stages(&pool, ta).await;
+    seed_done_stages(&pool, tb).await;
+
+    // Database-only apply: the row in place and overrides; the files are not touched.
+    set_applied(&pool, album, "New", "artist", 2001).await;
+    let fields = serde_json::json!({"album": "New", "albumArtist": "Artist", "year": 2001});
+    put_override(&pool, ta, fields.clone()).await;
+    put_override(&pool, tb, fields).await;
+    reread(&pool, root, &[a, b], ReadCause::TagWrite).await;
+
+    bump_mtime(&root.join(a));
+    bump_mtime(&root.join(b));
+    rescan(&pool, root).await;
+    bump_mtime(&root.join(a));
+    let out = scan::update_path(&ctx(&pool, root), a).await.unwrap();
+    assert_eq!(out, PathOutcome::Updated);
+
+    assert_eq!(album_of(&pool, a).await, album);
+    assert_eq!(album_of(&pool, b).await, album);
+    assert_eq!(album_year(&pool, album).await, Some(2001));
+    assert_eq!(rows_with(&pool, "New", 2001).await, 1);
+    for id in [ta, tb] {
+        assert_eq!(stage_statuses(&pool, id).await, vec!["done", "done"]);
+        assert_eq!(acoustid_rows(&pool, id).await, 1);
+    }
+    assert_eq!(identity(&pool, album).await.0, "autotag");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn db_matched_file_renamed_or_moved_keeps_override(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (a, b) = ("Artist/Old/01.flac", "Artist/Old/02.flac");
+    make_audio(root, a, tags("Artist", "Old", "one", "1999", "1"));
+    make_audio(root, b, tags("Artist", "Old", "two", "1999", "2"));
+    rescan(&pool, root).await;
+    let album = album_of(&pool, a).await;
+    let (ta, tb) = (track_id(&pool, a).await, track_id(&pool, b).await);
+    set_applied(&pool, album, "New", "artist", 2001).await;
+    let fields = serde_json::json!({"album": "New", "albumArtist": "Artist", "year": 2001});
+    put_override(&pool, ta, fields.clone()).await;
+    put_override(&pool, tb, fields).await;
+
+    // Renamed in its folder, picked up by a reconcile.
+    let a2 = "Artist/Old/01 renamed.flac";
+    std::fs::rename(root.join(a), root.join(a2)).unwrap();
+    rescan(&pool, root).await;
+    assert_eq!(track_id(&pool, a2).await, ta);
+    assert_eq!(album_of(&pool, a2).await, album);
+    assert_eq!(identity(&pool, album).await.0, "autotag");
+
+    // The last other track moved to another folder, seen by the watcher (old path, then new).
+    let b2 = "Elsewhere/02.flac";
+    std::fs::create_dir_all(root.join("Elsewhere")).unwrap();
+    std::fs::rename(root.join(b), root.join(b2)).unwrap();
+    let c = ctx(&pool, root);
+    assert_eq!(
+        scan::update_path(&c, b).await.unwrap(),
+        PathOutcome::MarkedMissing
+    );
+    assert_eq!(
+        scan::update_path(&c, b2).await.unwrap(),
+        PathOutcome::Repointed
+    );
+    assert_eq!(track_id(&pool, b2).await, tb);
+    assert_eq!(album_of(&pool, b2).await, album);
+
+    // And the renamed one moved again, by a reconcile: no present track ever left the row.
+    let a3 = "Elsewhere/01.flac";
+    std::fs::rename(root.join(a2), root.join(a3)).unwrap();
+    rescan(&pool, root).await;
+    assert_eq!(track_id(&pool, a3).await, ta);
+    assert_eq!(album_of(&pool, a3).await, album);
+    assert_eq!(album_year(&pool, album).await, Some(2001));
+    assert_eq!(rows_with(&pool, "New", 2001).await, 1);
+    assert_eq!(identity(&pool, album).await.0, "autotag");
+}

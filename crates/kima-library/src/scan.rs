@@ -22,7 +22,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::resolve::{ArtistFrom, Resolved, parse_credit, resolve};
-use crate::tags::{self, RawTags};
+use crate::tags::{self, RawTags, TagOverrides};
 use crate::{fingerprint, names};
 
 /// Tracks missing for longer than this are deleted (spec §4.3).
@@ -141,6 +141,16 @@ pub enum ScanError {
     /// folders. What was stored so far stays; the next reconcile finishes the rest.
     #[error("scan cancelled")]
     Cancelled,
+}
+
+/// Why a file is read. A file kima-rs itself just tagged (`TagWrite`, spec §19.7) is proven to
+/// carry the same audio (the audio MD5 matched before the rename), so its re-read neither
+/// reopens the track's stages nor drops its stored fingerprint; a `Scan` read of a changed file
+/// reopens them as always.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadCause {
+    Scan,
+    TagWrite,
 }
 
 /// A file found on disk.
@@ -376,7 +386,13 @@ fn under_any(rel: &str, prefixes: &[String]) -> bool {
     })
 }
 
-async fn prepare(root: &Path, disk: DiskFile) -> Result<Prepared, String> {
+/// Reads one file and resolves it, with the path's stored override (if any) merged over the
+/// file's tags first (spec §19.7: every read, so a database-only match survives rescans).
+async fn prepare(
+    root: &Path,
+    disk: DiskFile,
+    over: Option<&TagOverrides>,
+) -> Result<Prepared, String> {
     let full = root.join(&disk.rel);
     let rel = disk.rel.clone();
     let read = tokio::task::spawn_blocking(move || {
@@ -386,7 +402,10 @@ async fn prepare(root: &Path, disk: DiskFile) -> Result<Prepared, String> {
     })
     .await
     .map_err(|e| format!("reading tags panicked: {e}"))?;
-    let (raw, fingerprint) = read?;
+    let (mut raw, fingerprint) = read?;
+    if let Some(o) = over {
+        raw.apply_overrides(o);
+    }
     let resolved = resolve(&raw, Path::new(&rel));
     Ok(Prepared {
         disk,
@@ -473,16 +492,27 @@ struct StoreResult {
     upserted: library::Upserted,
 }
 
+/// The track agrees with its album's applied identity (spec §19.7): the same artist and title
+/// keys, and its own year equal to the applied one or missing.
+fn agrees(id: &library::AppliedIdentity, t: &ResolvedTrack) -> bool {
+    id.artist_key == t.album_artist_key
+        && id.title_key == t.album_key
+        && (t.track_year.is_none() || t.track_year == id.year)
+}
+
 /// Stores one file in its own transaction: the row with its tag ids, the file's genres, its
 /// embedded lyrics (or the removal of an `embedded` row), and the stage reopen. For a path with
 /// no row (`repoint`), first tries to re-point a missing track with the same fingerprint; the
 /// re-point and the metadata upsert commit or roll back together, so a failed upsert never
-/// leaves a half-moved track.
+/// leaves a half-moved track. A track on an autotagged album that still agrees with the
+/// applied identity stays on that row by id, and the row's year is left as applied (spec
+/// §19.7). With [`ReadCause::TagWrite`] no stage is reopened and the fingerprint row is kept.
 async fn store(
     pool: &PgPool,
     t: &ResolvedTrack,
     raw: &RawTags,
     repoint: bool,
+    cause: ReadCause,
 ) -> sqlx::Result<StoreResult> {
     let mut tx = pool.begin().await?;
     let repointed = if repoint {
@@ -493,7 +523,23 @@ async fn store(
     // Locks the track row (if any) before the album upsert locks the album: the recording
     // stage locks track then album, and the same order keeps the two from deadlocking.
     let old_album = library::album_of_path(&mut tx, &t.path).await?;
-    let up = library::upsert_track(&mut tx, t).await?;
+    let pin = match old_album {
+        Some(album) => library::autotag_identity(&mut tx, album)
+            .await?
+            .filter(|id| agrees(id, t))
+            .map(|id| (album, id)),
+        None => None,
+    };
+    let up = match pin {
+        Some((album, id)) => {
+            // The applied year stands: the folder mode is not the album's year here.
+            let mut t = t.clone();
+            t.album_year = id.year;
+            t.guessed.year_conflict = conflicts(t.track_year, id.year);
+            library::upsert_track_pinned(&mut tx, &t, album).await?
+        }
+        None => library::upsert_track(&mut tx, t).await?,
+    };
     genres::replace_track_genres(&mut tx, up.track, GenreSource::File, &raw.genres).await?;
     match &raw.lyrics {
         Some(l) => {
@@ -502,10 +548,11 @@ async fn store(
         }
         None => lyrics::delete_embedded(&mut tx, up.track).await?,
     }
-    if up.content_changed {
+    if up.content_changed && cause == ReadCause::Scan {
         stages::reopen_for_changed_file(&mut tx, up.track).await?;
     } else {
-        // A re-point, or a missing row re-read at its own path: the file is back.
+        // A re-point, a missing row re-read at its own path, or kima-rs's own tag write (the
+        // audio is proven unchanged): the file is back, nothing else is reopened.
         stages::reopen_file_missing(&mut tx, up.track).await?;
     }
     tx.commit().await?;
@@ -615,6 +662,9 @@ async fn refresh_touched_once(pool: &PgPool, touched: &Touched) -> sqlx::Result<
     for &album in &albums {
         library::refresh_album_mbids(&mut tx, album).await?;
     }
+    // Rows already locked above; an autotagged album no present track is on any more goes
+    // back to `scan` (spec §19.7).
+    library::release_autotag_albums(&mut tx, &albums).await?;
     // The artists the folder gives an MBID or a new album, locked in one id-ordered pass. A
     // new album by a `completed` artist puts the artist back to `pending`, so the album gets
     // its cover fallback (final review I1; the cached answers make the re-run cheap).
@@ -658,6 +708,7 @@ async fn refresh_albums_in(conn: &mut PgConnection, albums: &[Uuid]) -> sqlx::Re
     for &album in albums {
         library::refresh_album_mbids(conn, album).await?;
     }
+    library::release_autotag_albums(conn, albums).await?;
     let mut artists = library::artists_of_albums(conn, albums).await?;
     artists.sort_unstable();
     genres::recompute_file_genres(conn, albums, &artists).await
@@ -701,23 +752,64 @@ struct FolderResult {
     album_moved: bool,
 }
 
+/// The stored overrides of these paths, parsed. A value that does not parse is an error for
+/// that path: reading the file without it could move a database-only match off its album.
+async fn overrides_of(
+    pool: &PgPool,
+    paths: Vec<String>,
+) -> sqlx::Result<HashMap<String, Result<TagOverrides, String>>> {
+    Ok(kima_db::autotag::overrides_for_paths(pool, &paths)
+        .await?
+        .into_iter()
+        .map(|(path, v)| {
+            let o = serde_json::from_value::<TagOverrides>(v)
+                .map_err(|e| format!("the stored tag override is unreadable: {e}"));
+            (path, o)
+        })
+        .collect())
+}
+
+/// [`prepare`] with the path's override from `overrides`.
+async fn prepare_with(
+    root: &Path,
+    disk: DiskFile,
+    overrides: &HashMap<String, Result<TagOverrides, String>>,
+) -> Result<Prepared, String> {
+    match overrides.get(&disk.rel) {
+        Some(Err(e)) => Err(e.clone()),
+        Some(Ok(o)) => prepare(root, disk, Some(o)).await,
+        None => prepare(root, disk, None).await,
+    }
+}
+
 /// Reads and stores the changed files of one folder. `siblings` are the folder's other
 /// present rows, unchanged on disk; they count towards the album year, and any whose album
-/// year or conflict flag changes is re-read and stored too. `known` holds every row at a path
-/// of `changed`.
+/// year or conflict flag changes is re-read and stored too (unless it sits on an autotagged
+/// album whose applied year it agrees with: that year stands, spec §19.7). `known` holds every
+/// row at a path of `changed`. `cause` applies to `changed`; a sibling is always a `Scan` read.
 async fn process_folder(
     ctx: &LibraryCtx,
     changed: Vec<DiskFile>,
     siblings: &[&IndexedTrack],
     known: &HashMap<String, IndexedTrack>,
+    cause: ReadCause,
 ) -> Result<FolderResult, ScanError> {
     let mut out = FolderResult::default();
     let mut touched = Touched::default();
+    let overrides = overrides_of(
+        &ctx.pool,
+        changed
+            .iter()
+            .map(|d| d.rel.clone())
+            .chain(siblings.iter().map(|s| s.path.clone()))
+            .collect(),
+    )
+    .await?;
     let mut prepared = Vec::with_capacity(changed.len());
     for disk in changed {
         out.tags_read += 1;
         let rel = disk.rel.clone();
-        match prepare(&ctx.root.get(), disk).await {
+        match prepare_with(&ctx.root.get(), disk, &overrides).await {
             Ok(p) => prepared.push(p),
             Err(e) => out.failed.push((rel, e)),
         }
@@ -745,8 +837,10 @@ async fn process_folder(
         let year = years.get(&group_key(&p.resolved)).copied().flatten();
         let track = to_track(p, year);
         let rel = p.disk.rel.clone();
-        match retry_once_on_conflict(|| store(&ctx.pool, &track, &p.raw, !known.contains_key(&rel)))
-            .await
+        match retry_once_on_conflict(|| {
+            store(&ctx.pool, &track, &p.raw, !known.contains_key(&rel), cause)
+        })
+        .await
         {
             Ok(r) => {
                 touched.add(&r, &track);
@@ -767,6 +861,11 @@ async fn process_folder(
         if s.album_year == year && s.year_conflict == conflicts(s.track_year, year) {
             continue;
         }
+        // On an autotagged album with its own year agreeing: the store would pin it there and
+        // keep the applied year, so a re-read would change nothing.
+        if s.album_autotag && !s.year_conflict && !conflicts(s.track_year, s.album_year) {
+            continue;
+        }
         let full = ctx.root.get().join(&s.path);
         // The scanner's own flag, not a tag. The changed files share this folder and are not
         // under a symlinked one, so only the sibling itself can be a link (an indexed one,
@@ -782,7 +881,13 @@ async fn process_folder(
             }
         };
         out.tags_read += 1;
-        let p = match prepare(&ctx.root.get(), disk_file(s.path.clone(), &meta)).await {
+        let p = match prepare_with(
+            &ctx.root.get(),
+            disk_file(s.path.clone(), &meta),
+            &overrides,
+        )
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
                 out.failed.push((s.path.clone(), e));
@@ -793,7 +898,9 @@ async fn process_folder(
         let year = years.get(&group_key(&p.resolved)).copied().unwrap_or(year);
         let mut track = to_track(&p, year);
         track.guessed.via_symlink = linked;
-        match retry_once_on_conflict(|| store(&ctx.pool, &track, &p.raw, false)).await {
+        match retry_once_on_conflict(|| store(&ctx.pool, &track, &p.raw, false, ReadCause::Scan))
+            .await
+        {
             Ok(r) => {
                 touched.add(&r, &track);
                 out.album_moved |= r.album_moved;
@@ -950,7 +1057,7 @@ pub async fn reconcile_cancellable(
         check()?;
         let n = files.len();
         let siblings = settled.get(folder.as_str()).map_or(&[][..], Vec::as_slice);
-        let result = process_folder(ctx, files, siblings, &index).await?;
+        let result = process_folder(ctx, files, siblings, &index, ReadCause::Scan).await?;
         report.tags_read += result.tags_read;
         report.failed.extend(result.failed);
         for (_, stored) in result.stored {
@@ -1099,7 +1206,7 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
         .filter(|t| t.path != rel && !t.missing)
         .collect();
 
-    let result = process_folder(ctx, vec![disk], &siblings, &known).await?;
+    let result = process_folder(ctx, vec![disk], &siblings, &known, ReadCause::Scan).await?;
     let mine = result
         .stored
         .iter()
@@ -1125,6 +1232,104 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
         prune_empty(ctx).await?;
     }
     Ok(outcome)
+}
+
+/// Re-reads exactly these files (paths relative to the library root), whatever their size and
+/// mtime, grouped per folder with the folder's other present rows as siblings (as
+/// [`update_path`]). A path that is gone is marked missing, one reached through a symlink is
+/// handled as [`update_path`] does (never indexed anew), and an invalid one is reported in
+/// `failed`. With [`ReadCause::TagWrite`] (the files kima-rs just tagged, audio proven
+/// unchanged) no stage is reopened and no fingerprint row dropped (spec §19.7).
+pub async fn reread_paths(
+    ctx: &LibraryCtx,
+    paths: &[String],
+    cause: ReadCause,
+) -> Result<ScanReport, ScanError> {
+    let mut report = ScanReport::default();
+    let mut folders: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for p in paths {
+        match clean_rel(p).filter(|r| tags::is_audio(Path::new(r))) {
+            Some(rel) => {
+                let list = folders.entry(folder_of(&rel).to_string()).or_default();
+                if !list.contains(&rel) {
+                    list.push(rel);
+                }
+            }
+            None => report.failed.push((
+                p.clone(),
+                "not an audio file under the library root".to_string(),
+            )),
+        }
+    }
+    let root = ctx.root.get();
+    let mut album_moved = false;
+    for (folder, rels) in folders {
+        let index: HashMap<String, IndexedTrack> =
+            library::scan_index(&ctx.pool, Some(&dir_prefix(&folder)))
+                .await?
+                .into_iter()
+                .map(|t| (t.path.clone(), t))
+                .collect();
+        let mut changed = Vec::new();
+        let mut known = HashMap::new();
+        for rel in &rels {
+            let linked = {
+                let (root, rel) = (root.clone(), rel.clone());
+                tokio::task::spawn_blocking(move || symlinked(&root, &rel)).await?
+            };
+            let outcome = if linked {
+                Some(update_linked(ctx, rel).await?)
+            } else {
+                match tokio::fs::symlink_metadata(root.join(rel)).await {
+                    Ok(m) if m.is_file() => {
+                        changed.push(disk_file(rel.clone(), &m));
+                        if let Some(row) = index.get(rel) {
+                            known.insert(rel.clone(), row.clone());
+                        }
+                        None
+                    }
+                    Ok(_) => Some(PathOutcome::Failed("not a regular file".to_string())),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        Some(gone(ctx, rel).await?)
+                    }
+                    Err(e) => Some(PathOutcome::Failed(e.to_string())),
+                }
+            };
+            match outcome {
+                None => {}
+                Some(PathOutcome::MarkedMissing) => report.missing += 1,
+                Some(PathOutcome::Updated) => report.restored += 1,
+                Some(PathOutcome::Unchanged | PathOutcome::Ignored) => report.unchanged += 1,
+                Some(PathOutcome::RootUnavailable) => report
+                    .failed
+                    .push((rel.clone(), "the library root is unavailable".to_string())),
+                Some(PathOutcome::Failed(e)) => report.failed.push((rel.clone(), e)),
+                Some(PathOutcome::Added | PathOutcome::Repointed) => report.updated += 1,
+            }
+        }
+        if changed.is_empty() {
+            continue;
+        }
+        let siblings: Vec<&IndexedTrack> = index
+            .values()
+            .filter(|t| !t.missing && !rels.contains(&t.path))
+            .collect();
+        let result = process_folder(ctx, changed, &siblings, &known, cause).await?;
+        report.tags_read += result.tags_read;
+        report.failed.extend(result.failed);
+        album_moved |= result.album_moved;
+        for (_, stored) in result.stored {
+            match stored {
+                Stored::Added => report.added += 1,
+                Stored::Updated => report.updated += 1,
+                Stored::Repointed(_) => report.repointed += 1,
+            }
+        }
+    }
+    if album_moved {
+        prune_empty(ctx).await?;
+    }
+    Ok(report)
 }
 
 /// Prunes empty albums and artists, then (after the commit) deletes the cover cache of each

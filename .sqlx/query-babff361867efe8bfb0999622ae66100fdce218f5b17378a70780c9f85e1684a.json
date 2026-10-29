@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE albums a SET identity_source = 'scan', applied_identity = NULL\n         WHERE a.id = ANY($1) AND a.identity_source = 'autotag'\n           AND NOT EXISTS (SELECT 1 FROM tracks t\n                           WHERE t.album_id = a.id AND t.missing_since IS NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "babff361867efe8bfb0999622ae66100fdce218f5b17378a70780c9f85e1684a"
+}

@@ -154,8 +154,96 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
     )
     .fetch_one(&mut *tx)
     .await?;
-    let album_id = album.id;
+    let (track_id, content_changed) = upsert_track_row(tx, t, album.id).await?;
+    Ok(Upserted {
+        track: track_id,
+        album: album.id,
+        artist: artist_id,
+        content_changed,
+        album_created: album.created,
+    })
+}
 
+/// The album identity an autotag apply set (`albums.applied_identity`, spec §19.7): the keys
+/// and year the scanner derives from the applied values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedIdentity {
+    pub artist_key: String,
+    pub title_key: String,
+    #[serde(default)]
+    pub year: Option<i32>,
+}
+
+/// The album's applied identity, only while `identity_source = 'autotag'`. A stored value that
+/// does not parse counts as none (the track is then resolved normally).
+pub async fn autotag_identity(
+    conn: &mut PgConnection,
+    album: Uuid,
+) -> sqlx::Result<Option<AppliedIdentity>> {
+    let v = sqlx::query_scalar!(
+        "SELECT applied_identity FROM albums WHERE id = $1 AND identity_source = 'autotag'",
+        album
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .flatten();
+    Ok(v.and_then(|v| match serde_json::from_value(v) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(album = %album, error = %e, "unreadable applied_identity; ignored");
+            None
+        }
+    }))
+}
+
+/// [`upsert_track`] onto a known album row (an autotagged album the track agrees with, spec
+/// §19.7): no artist or album upsert, so the row's title, year and compilation flag stay as
+/// the apply set them.
+pub async fn upsert_track_pinned(
+    tx: &mut PgConnection,
+    t: &ResolvedTrack,
+    album: Uuid,
+) -> sqlx::Result<Upserted> {
+    let artist = sqlx::query_scalar!("SELECT artist_id FROM albums WHERE id = $1", album)
+        .fetch_one(&mut *tx)
+        .await?;
+    let (track, content_changed) = upsert_track_row(tx, t, album).await?;
+    Ok(Upserted {
+        track,
+        album,
+        artist,
+        content_changed,
+        album_created: false,
+    })
+}
+
+/// Albums among `albums` with `identity_source = 'autotag'` and no present track go back to
+/// `scan` with `applied_identity = NULL` (no track agrees with the applied identity any more,
+/// spec §19.7). Returns how many.
+pub async fn release_autotag_albums(conn: &mut PgConnection, albums: &[Uuid]) -> sqlx::Result<u64> {
+    if albums.is_empty() {
+        return Ok(0);
+    }
+    let r = sqlx::query!(
+        "UPDATE albums a SET identity_source = 'scan', applied_identity = NULL
+         WHERE a.id = ANY($1) AND a.identity_source = 'autotag'
+           AND NOT EXISTS (SELECT 1 FROM tracks t
+                           WHERE t.album_id = a.id AND t.missing_since IS NULL)",
+        albums
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// The track row of [`upsert_track`] on `album_id`: answers the track id and whether its stored
+/// content fingerprint differed.
+async fn upsert_track_row(
+    tx: &mut PgConnection,
+    t: &ResolvedTrack,
+    album_id: Uuid,
+) -> sqlx::Result<(Uuid, bool)> {
     let previous: Option<Vec<u8>> =
         sqlx::query_scalar!("SELECT fingerprint FROM tracks WHERE path = $1", t.path)
             .fetch_optional(&mut *tx)
@@ -218,13 +306,10 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
     )
     .fetch_one(&mut *tx)
     .await?;
-    Ok(Upserted {
-        track: track_id,
-        album: album_id,
-        artist: artist_id,
-        content_changed: previous.is_some_and(|f| f.as_slice() != t.fingerprint.as_slice()),
-        album_created: album.created,
-    })
+    Ok((
+        track_id,
+        previous.is_some_and(|f| f.as_slice() != t.fingerprint.as_slice()),
+    ))
 }
 
 /// Sets the album's `release_mbid` and `release_group_mbid` to the mode of its present tracks'
@@ -491,6 +576,8 @@ pub struct IndexedTrack {
     pub year_conflict: bool,
     /// `guessed.viaSymlink`: the row stands for a file reached through a symlink.
     pub via_symlink: bool,
+    /// The track's album has `identity_source = 'autotag'` (spec §19.7).
+    pub album_autotag: bool,
 }
 
 /// Every track (`dir_prefix = None`), or only the tracks directly inside one folder:
@@ -506,7 +593,8 @@ pub async fn scan_index(
                   t.year AS track_year, b.year AS album_year,
                   b.title_key AS album_key, a.name_key AS artist_key,
                   COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS "year_conflict!",
-                  COALESCE((t.guessed ->> 'viaSymlink')::boolean, false) AS "via_symlink!"
+                  COALESCE((t.guessed ->> 'viaSymlink')::boolean, false) AS "via_symlink!",
+                  b.identity_source = 'autotag' AS "album_autotag!"
            FROM tracks t
            JOIN albums b ON b.id = t.album_id
            JOIN artists a ON a.id = b.artist_id

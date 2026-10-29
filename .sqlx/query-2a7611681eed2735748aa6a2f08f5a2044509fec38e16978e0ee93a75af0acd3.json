@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT applied_identity FROM albums WHERE id = $1 AND identity_source = 'autotag'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "applied_identity",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "2a7611681eed2735748aa6a2f08f5a2044509fec38e16978e0ee93a75af0acd3"
+}

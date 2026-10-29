@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tracks SET recording_mbid = $3, recording_source = 'autotag', updated_at = now()\n             WHERE id = $1 AND album_id = $2 RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9854273aa5aa21b98a8b970935b83face57261bcaa40fdb85d534fd70b3c3101"
+}

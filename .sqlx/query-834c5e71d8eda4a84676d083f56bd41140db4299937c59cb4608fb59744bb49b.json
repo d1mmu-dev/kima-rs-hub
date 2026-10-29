@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id, t.recording_mbid, t.recording_source,\n                  s.status AS \"status?\", s.source AS \"stage_source?\", s.evidence AS \"evidence?\",\n                  to_jsonb(s.finished_at) AS \"finished_at?\"\n           FROM tracks t\n           LEFT JOIN track_stages s ON s.track_id = t.id AND s.stage = 'recording'\n           WHERE t.album_id = $1 ORDER BY t.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "recording_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "recording_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "status?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "stage_source?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "evidence?",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "finished_at?",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "834c5e71d8eda4a84676d083f56bd41140db4299937c59cb4608fb59744bb49b"
+}

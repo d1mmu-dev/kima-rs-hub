@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE albums SET\n           release_mbid = CASE WHEN release_mbid_source = 'user' THEN release_mbid ELSE $2 END,\n           release_mbid_source = CASE WHEN release_mbid_source = 'user' THEN 'user'\n                                      ELSE 'autotag' END,\n           release_group_mbid = CASE WHEN release_group_mbid_source = 'user'\n                                     THEN release_group_mbid ELSE $3 END,\n           release_group_mbid_source = CASE WHEN release_group_mbid_source = 'user' THEN 'user'\n                                            ELSE 'autotag' END\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "daef6f379e3909e1c085f9b3b4959e43211bae6461eb05ff6d318ffc7160f6fd"
+}

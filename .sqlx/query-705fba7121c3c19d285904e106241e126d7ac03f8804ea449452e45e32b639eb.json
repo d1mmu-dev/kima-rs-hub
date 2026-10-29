@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id\n         WHERE ag.album_id = $1 AND ag.source = 'musicbrainz' ORDER BY ag.rank, g.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "705fba7121c3c19d285904e106241e126d7ac03f8804ea449452e45e32b639eb"
+}

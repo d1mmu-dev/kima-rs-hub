@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO artists (id, name, name_key, mbid, enrichment_status)\n         VALUES ($1, $2, $3, $4, $5)\n         ON CONFLICT (name_key) DO NOTHING RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "552a6eb008993effd85c4956b3cb08829957c6fa88334b4d8de0808b36920e0c"
+}

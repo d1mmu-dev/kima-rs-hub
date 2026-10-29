@@ -3,9 +3,13 @@
 
 pub mod albums;
 pub mod applied;
+pub mod identity;
+pub mod runs;
 
 pub use albums::*;
 pub use applied::*;
+pub use identity::*;
+pub use runs::*;
 
 use std::collections::HashMap;
 

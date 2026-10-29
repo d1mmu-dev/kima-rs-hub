@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists SET mbid = $2, mbid_source = $3\n             WHERE id = $1 AND mbid_source = 'autotag'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "068556eb29925c0931782e3331c846eb305be69eb3362b085cd80928cce56a82"
+}

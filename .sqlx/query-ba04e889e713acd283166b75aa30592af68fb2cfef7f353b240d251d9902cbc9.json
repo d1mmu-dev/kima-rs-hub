@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE albums SET title = $2, title_key = $3, year = $4, is_compilation = $5,\n                    artist_id = $6, identity_source = $7, applied_identity = $8\n             WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Bool",
+        "Uuid",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ba04e889e713acd283166b75aa30592af68fb2cfef7f353b240d251d9902cbc9"
+}

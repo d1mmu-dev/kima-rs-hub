@@ -1,0 +1,106 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT al.title, al.title_key, al.year, al.is_compilation, al.release_mbid,\n                al.release_mbid_source, al.release_group_mbid, al.release_group_mbid_source,\n                al.identity_source, al.applied_identity, al.artist_id, ar.name, ar.name_key,\n                ar.mbid, ar.mbid_source\n         FROM albums al JOIN artists ar ON ar.id = al.artist_id WHERE al.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "title_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "year",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_compilation",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "release_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "release_mbid_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "release_group_mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "release_group_mbid_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "identity_source",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "applied_identity",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "artist_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 11,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "name_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "mbid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 14,
+        "name": "mbid_source",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "419e0caaf142f877a9ba450d8d9b2f2f86fc446e5eeab2eb0ff7e514ce28f3d1"
+}

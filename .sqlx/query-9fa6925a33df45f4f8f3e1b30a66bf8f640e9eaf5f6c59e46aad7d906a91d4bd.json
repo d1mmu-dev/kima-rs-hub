@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n             SELECT 1 FROM jobs WHERE queue = $1 AND state IN ('queued', 'running')\n               AND payload ->> 'kind' IN ('autotag-apply', 'autotag-undo')\n               AND payload ->> 'runId' = $2::uuid::text) AS \"e!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "e!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9fa6925a33df45f4f8f3e1b30a66bf8f640e9eaf5f6c59e46aad7d906a91d4bd"
+}

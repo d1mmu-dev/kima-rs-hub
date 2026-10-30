@@ -311,18 +311,40 @@ pub async fn latest_other_run_state(
     .await
 }
 
-/// Whether an `autotag-apply` or `autotag-undo` job of the run waits or runs on the `library`
-/// queue.
-pub async fn job_pending(pool: &PgPool, run: Uuid) -> sqlx::Result<bool> {
+/// Whether an `autotag-apply` or `autotag-undo` job of the run waits or runs on `queue`.
+pub async fn job_pending(pool: &PgPool, queue: &str, run: Uuid) -> sqlx::Result<bool> {
     sqlx::query_scalar!(
         r#"SELECT EXISTS (
-             SELECT 1 FROM jobs WHERE queue = 'library' AND state IN ('queued', 'running')
+             SELECT 1 FROM jobs WHERE queue = $1 AND state IN ('queued', 'running')
                AND payload ->> 'kind' IN ('autotag-apply', 'autotag-undo')
-               AND payload ->> 'runId' = $1::uuid::text) AS "e!""#,
+               AND payload ->> 'runId' = $2::uuid::text) AS "e!""#,
+        queue,
         run
     )
     .fetch_one(pool)
     .await
+}
+
+/// The album's newest `failed` run other than `except` that left something to undo: files it
+/// wrote (`written` journal rows) or a committed identity (`album_before` set). Its id and error.
+pub async fn needs_undo_run(
+    conn: &mut PgConnection,
+    album: Uuid,
+    except: Uuid,
+) -> sqlx::Result<Option<(Uuid, Option<String>)>> {
+    Ok(sqlx::query!(
+        "SELECT r.id, r.error FROM autotag_runs r
+         WHERE r.album_id = $1 AND r.id <> $2 AND r.state = 'failed'
+           AND (r.album_before IS NOT NULL
+                OR EXISTS (SELECT 1 FROM autotag_journal j
+                           WHERE j.run_id = r.id AND j.state = 'written'))
+         ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
+        album,
+        except
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .map(|r| (r.id, r.error)))
 }
 
 /// Runs a job still owes work to (`queued`, `writing`, `organizing`, `undoing`): `(id, state)`.

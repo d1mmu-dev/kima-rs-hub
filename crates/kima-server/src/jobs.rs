@@ -107,6 +107,12 @@ pub async fn prepare_library_queue(pool: &PgPool) -> sqlx::Result<()> {
     if resumed > 0 {
         tracing::info!(resumed, "queued interrupted organizer runs");
     }
+    // Autotag runs left writing/organizing/undoing (or queued) with no job: the job resumes
+    // from the journal (spec §19.9), so no album stays busy.
+    let resumed = kima_library::autotag::apply::resume_interrupted(pool).await?;
+    if resumed > 0 {
+        tracing::info!(resumed, "queued interrupted autotag runs");
+    }
     library_jobs::enqueue_reconcile(pool).await?;
     Ok(())
 }

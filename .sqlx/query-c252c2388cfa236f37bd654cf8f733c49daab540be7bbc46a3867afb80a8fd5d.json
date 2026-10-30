@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM autotag_runs\n         WHERE album_id = $1 AND id <> $2 AND state IN ('queued', 'writing', 'organizing', 'undoing')\n         ORDER BY created_at, id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c252c2388cfa236f37bd654cf8f733c49daab540be7bbc46a3867afb80a8fd5d"
+}

@@ -1,6 +1,8 @@
-//! Jobs on the `library` queue (concurrency 1): reconciles, single-file updates and organizer
-//! runs. Payloads are `{"kind":"reconcile"}`, `{"kind":"path","path":"<rel>"}` and
-//! `{"kind":"organize","runId":"<uuid>","action":"preview"|"apply"|"undo"|"switch-root"}`.
+//! Jobs on the `library` queue (concurrency 1): reconciles, single-file updates, organizer runs
+//! and autotag applies and undos. Payloads are `{"kind":"reconcile"}`,
+//! `{"kind":"path","path":"<rel>"}`,
+//! `{"kind":"organize","runId":"<uuid>","action":"preview"|"apply"|"undo"|"switch-root"}`,
+//! `{"kind":"autotag-apply","runId":"<uuid>"}` and `{"kind":"autotag-undo","runId":"<uuid>"}`.
 
 use std::sync::Arc;
 
@@ -13,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 use uuid::Uuid;
 
+use crate::autotag::apply as autotag;
 use crate::organize::apply::{self as organize, Action};
 use crate::scan::{self, LibraryCtx, PathOutcome};
 
@@ -31,6 +34,16 @@ pub enum LibraryJob {
         #[serde(rename = "runId")]
         run_id: Uuid,
         action: Action,
+    },
+    #[serde(rename = "autotag-apply")]
+    AutotagApply {
+        #[serde(rename = "runId")]
+        run_id: Uuid,
+    },
+    #[serde(rename = "autotag-undo")]
+    AutotagUndo {
+        #[serde(rename = "runId")]
+        run_id: Uuid,
     },
 }
 
@@ -141,6 +154,11 @@ pub async fn run(
                 .map_err(|e| JobError::Retry(e.to_string()))?;
             Ok(false)
         }
+        LibraryJob::AutotagApply { run_id } => autotag::run_job(ctx, run_id, cancel).await,
+        // Task 18: the undo job.
+        LibraryJob::AutotagUndo { run_id } => Err(JobError::Permanent(format!(
+            "autotag undo of run {run_id} is not available yet"
+        ))),
     }
 }
 
@@ -193,6 +211,15 @@ mod tests {
             serde_json::from_value::<LibraryJob>(json!({"kind": "organize", "runId": run}))
                 .is_err()
         );
+        assert_eq!(
+            parse(json!({"kind": "autotag-apply", "runId": run})),
+            LibraryJob::AutotagApply { run_id: run }
+        );
+        assert_eq!(
+            parse(json!({"kind": "autotag-undo", "runId": run})),
+            LibraryJob::AutotagUndo { run_id: run }
+        );
+        assert!(serde_json::from_value::<LibraryJob>(json!({"kind": "autotag-apply"})).is_err());
         assert!(serde_json::from_value::<LibraryJob>(json!({"kind": "nope"})).is_err());
         assert!(serde_json::from_value::<LibraryJob>(json!({"kind": "path"})).is_err());
     }

@@ -4,3 +4,4 @@ pub mod distance;
 pub mod proposal;
 pub mod score;
 pub mod search;
+pub mod start;

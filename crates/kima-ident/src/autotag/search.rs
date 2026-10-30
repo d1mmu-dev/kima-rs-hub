@@ -6,26 +6,32 @@
 //! Outcomes: a rate limit from any request puts the same job back at the pause's end and
 //! returns `Ok` (the album stays `queued`); a transient failure is retried by the queue and
 //! marks the album `failed` only on the last attempt; a permanent one fails it at once.
+//!
+//! A search whose best candidate is `strong` may start its apply (`autotagAutoApply`, off by
+//! default; see [`auto_apply`]).
 
 use std::collections::{HashMap, HashSet};
 
 use kima_db::PgPool;
 use kima_db::autotag::{
-    self, AlbumState, LocalAlbum, LocalTrack, NewCandidate, Origin, local_album, set_state,
-    store_search,
+    self, AlbumState, LocalAlbum, LocalTrack, NewCandidate, Origin, Recommendation, Target,
+    local_album, set_state, store_search,
 };
+use kima_db::settings_kv::AutoApply;
 use kima_jobs::queue;
 use kima_jobs::worker::{self, Handler, JobError};
+use kima_library::autotag::capability::{album_refusal, capabilities};
 use kima_library::autotag::events::{AutotagEvents, AutotagJob};
 use kima_net::{Failure, Net, Outcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::score::{self, Scored};
+use super::start::{ApplyRequest, start};
 use crate::IdentCtx;
 use crate::mbid::Mbid;
 use crate::musicbrainz::{self, ArtistClause, Release, ReleaseGroup};
@@ -474,6 +480,68 @@ async fn fetch(
     Ok(Some((release, group)))
 }
 
+/// The optional auto-apply of a strong match (spec §19.5, `autotagAutoApply`): `off` (the
+/// default) does nothing; `db` starts the apply of `best` with the `db` target; `files` only
+/// when the library files can be written for this album (else nothing). Never reorganizes;
+/// `created_by` is NULL. The apply goes through [`start`] and its refusals (an applied match,
+/// a run that needs undo, a busy album, a collision): a refusal is logged and the album stays
+/// `proposed`. Answers whether an apply was started.
+async fn auto_apply(ctx: &IdentCtx, album: Uuid, best: Uuid) -> bool {
+    let setting = match ctx.settings.get().await {
+        Ok(s) => s.autotag_auto_apply,
+        Err(e) => {
+            info!(%album, "auto-apply skipped: settings unreadable: {e}");
+            return false;
+        }
+    };
+    let target = match setting {
+        AutoApply::Off => return false,
+        AutoApply::Db => Target::Db,
+        AutoApply::Files => match files_writable(ctx, album).await {
+            Ok(true) => Target::Files,
+            Ok(false) => {
+                info!(%album, "strong match not auto-applied: the files cannot be written");
+                return false;
+            }
+            Err(e) => {
+                info!(%album, "strong match not auto-applied: {e}");
+                return false;
+            }
+        },
+    };
+    let req = ApplyRequest {
+        album_id: album,
+        candidate_id: best,
+        target,
+        reorganize: false,
+        mbids_only: false,
+        created_by: None,
+    };
+    match start(&ctx.pool, &ctx.library, &req).await {
+        Ok(s) => {
+            info!(%album, run = %s.run_id, target = target.as_str(), "auto-applying a strong match");
+            true
+        }
+        Err(e) => {
+            info!(%album, reason = %e, "strong match not auto-applied");
+            false
+        }
+    }
+}
+
+/// The `files` target is available and the album's files can be written.
+async fn files_writable(ctx: &IdentCtx, album: Uuid) -> sqlx::Result<bool> {
+    if !capabilities(&ctx.library).await?.files.available {
+        return Ok(false);
+    }
+    let Some(local) = local_album(&ctx.pool, album).await? else {
+        return Ok(false);
+    };
+    Ok(album_refusal(&ctx.library, &local, Target::Files)
+        .await?
+        .is_none())
+}
+
 fn db(e: sqlx::Error) -> JobError {
     JobError::Retry(format!("autotag state: {e}"))
 }
@@ -529,16 +597,26 @@ pub async fn run_search(
     let result = match search_and_score(ctx, &album, job, &attempt.cancel, &mut events).await {
         Ok(ordered) => store_search(pool, album_id, &ordered)
             .await
-            .map(|_| ordered.len())
+            .map(|best| {
+                (
+                    ordered.len(),
+                    best,
+                    ordered.first().map(|c| c.recommendation),
+                )
+            })
             .map_err(Stop::Db),
         Err(stop) => Err(stop),
     };
     match result {
-        Ok(n) => {
-            let state = if n == 0 {
-                AlbumState::NoCandidates
-            } else {
-                AlbumState::Proposed
+        Ok((n, best, recommendation)) => {
+            let state = match (best, recommendation) {
+                (None, _) => AlbumState::NoCandidates,
+                (Some(best), Some(Recommendation::Strong))
+                    if auto_apply(ctx, album_id, best).await =>
+                {
+                    AlbumState::Applying
+                }
+                _ => AlbumState::Proposed,
             };
             finish(&mut events, n, state);
             Ok(())

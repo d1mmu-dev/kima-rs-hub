@@ -328,12 +328,31 @@ pub async fn candidate(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Candidate
     .await
 }
 
-/// Albums with a present track and no release MBID.
+/// Albums with a present track and no release MBID, that may be searched: not one with a run
+/// still working (`queued`, `writing`, `organizing`, `undoing`; a search would replace the
+/// candidates under it and reset its state), nor one with a run that needs undo (a `failed`
+/// files run keeps `release_mbid` NULL; a search would hide that it needs attention). The
+/// needs-undo predicate is [`super::needs_undo_run`]'s.
 pub async fn unmatched_albums(pool: &PgPool) -> sqlx::Result<Vec<Uuid>> {
     sqlx::query_scalar!(
         r#"SELECT al.id AS "id!" FROM albums al
            WHERE al.release_mbid IS NULL
              AND EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = al.id AND t.missing_since IS NULL)
+             AND NOT EXISTS (
+               SELECT 1 FROM autotag_runs r
+               WHERE r.album_id = al.id
+                 AND (r.state IN ('queued', 'writing', 'organizing', 'undoing')
+                      OR (r.state = 'failed'
+                          AND (r.album_before IS NOT NULL
+                               OR EXISTS (SELECT 1 FROM autotag_journal j
+                                          WHERE j.run_id = r.id AND j.state = 'written')))
+                      OR (r.state = 'undo_failed'
+                          AND (EXISTS (SELECT 1 FROM autotag_journal j
+                                       WHERE j.run_id = r.id
+                                         AND j.state IN ('written', 'undo_failed'))
+                               OR (r.album_before IS NOT NULL
+                                   AND NOT COALESCE((r.summary ->> 'identityRestored')::boolean,
+                                                    false))))))
            ORDER BY al.id"#
     )
     .fetch_all(pool)

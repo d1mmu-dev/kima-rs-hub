@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT al.id AS \"id!\" FROM albums al\n           WHERE al.release_mbid IS NULL\n             AND EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = al.id AND t.missing_since IS NULL)\n             AND NOT EXISTS (\n               SELECT 1 FROM autotag_runs r\n               WHERE r.album_id = al.id\n                 AND (r.state IN ('queued', 'writing', 'organizing', 'undoing')\n                      OR (r.state = 'failed'\n                          AND (r.album_before IS NOT NULL\n                               OR EXISTS (SELECT 1 FROM autotag_journal j\n                                          WHERE j.run_id = r.id AND j.state = 'written')))\n                      OR (r.state = 'undo_failed'\n                          AND (EXISTS (SELECT 1 FROM autotag_journal j\n                                       WHERE j.run_id = r.id\n                                         AND j.state IN ('written', 'undo_failed'))\n                               OR (r.album_before IS NOT NULL\n                                   AND NOT COALESCE((r.summary ->> 'identityRestored')::boolean,\n                                                    false))))))\n           ORDER BY al.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "224de9b209750337717fcaddb9dd6b09541eca6d1f316944b6c7bb25448aee2d"
+}

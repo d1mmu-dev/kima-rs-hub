@@ -276,6 +276,21 @@ pub async fn other_active_run(
     .await
 }
 
+/// Whether an organizer run that may move this album's files is mid-way (`planning`,
+/// `applying` or `undoing`): a whole-library run, or a scoped one listing the album. An apply
+/// is not started under it (plan constraint 11: "busy").
+pub async fn organizer_busy(conn: &mut PgConnection, album: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM organizer_runs
+             WHERE state IN ('planning', 'applying', 'undoing')
+               AND (album_ids IS NULL OR $1 = ANY(album_ids))) AS "e!""#,
+        album
+    )
+    .fetch_one(&mut *conn)
+    .await
+}
+
 /// Whether any track of the album (missing ones included) has a tag override stored by a run
 /// other than `run`: an applied match that must be undone before another apply.
 pub async fn foreign_override(

@@ -105,11 +105,12 @@ pub struct ApplyHooks {
 /// Where [`ApplyHooks::fail_at`] fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailPoint {
-    /// Right before the files are written (a fresh or a resumed run).
+    /// Right before the files are written (a fresh or a resumed run); for an undo, right
+    /// before the files are restored.
     BeforeWrites,
-    /// After the files, right before the identity transaction.
+    /// After the files, right before the identity transaction (apply or undo).
     BeforeIdentity,
-    /// Right after the identity transaction committed.
+    /// Right after the identity transaction committed (apply or undo).
     AfterIdentity,
     /// An `organizing` run, right before its organizer run is made or resumed.
     BeforeOrganize,
@@ -122,7 +123,7 @@ pub enum AutotagError {
     #[error("{0}")]
     Refused(String),
     /// The cancel token fired or a test hook stopped the job; the run stays resumable.
-    #[error("autotag apply interrupted")]
+    #[error("autotag job interrupted")]
     Interrupted,
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
@@ -143,7 +144,8 @@ pub async fn enqueue_apply(pool: &kima_db::PgPool, run_id: Uuid) -> sqlx::Result
     .await
 }
 
-/// Queues the undo job of `run_id` on the `library` queue (the job is Task 18's).
+/// Queues the undo job of `run_id` on the `library` queue ([`super::undo`]). The caller
+/// moves the run to `undoing` first (`kima_db::autotag::start_undo`).
 pub async fn enqueue_undo(pool: &kima_db::PgPool, run_id: Uuid) -> sqlx::Result<Uuid> {
     kima_jobs::queue::enqueue(
         pool,
@@ -423,11 +425,11 @@ struct Job<'a> {
     done: usize,
 }
 
-fn io(e: impl std::fmt::Display) -> AutotagError {
+pub(super) fn io(e: impl std::fmt::Display) -> AutotagError {
     AutotagError::Io(e.to_string())
 }
 
-fn target_of(run: &RunRow) -> Result<Target> {
+pub(super) fn target_of(run: &RunRow) -> Result<Target> {
     match run.target.as_str() {
         "files" => Ok(Target::Files),
         "copy" => Ok(Target::Copy),

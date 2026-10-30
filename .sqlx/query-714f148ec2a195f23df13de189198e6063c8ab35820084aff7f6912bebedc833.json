@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, run_id, track_id, root, path, before_sha, after_sha, audio_md5, old_tags,\n                new_tags, id3_version, state, note, applied_seq\n         FROM autotag_journal WHERE run_id = $1 AND state IN ('written', 'undo_failed')\n         ORDER BY applied_seq DESC, id DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "run_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "track_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "root",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "before_sha",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 6,
+        "name": "after_sha",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 7,
+        "name": "audio_md5",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 8,
+        "name": "old_tags",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 9,
+        "name": "new_tags",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "id3_version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "state",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "note",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "applied_seq",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "714f148ec2a195f23df13de189198e6063c8ab35820084aff7f6912bebedc833"
+}

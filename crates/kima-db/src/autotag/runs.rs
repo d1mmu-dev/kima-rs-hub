@@ -368,8 +368,11 @@ pub async fn job_pending(pool: &PgPool, queue: &str, run: Uuid) -> sqlx::Result<
     .await
 }
 
-/// The album's newest `failed` run other than `except` that left something to undo: files it
-/// wrote (`written` journal rows) or a committed identity (`album_before` set). Its id and error.
+/// The album's newest run other than `except` that still needs undo (and blocks new applies):
+/// a `failed` run that left something to undo (files it wrote: `written` journal rows; or a
+/// committed identity: `album_before` set), or an `undo_failed` run that still has files to
+/// restore (`written` or `undo_failed` rows) or whose identity was not restored
+/// (`album_before` set, `summary.identityRestored` not true). Its id and error.
 pub async fn needs_undo_run(
     conn: &mut PgConnection,
     album: Uuid,
@@ -377,10 +380,17 @@ pub async fn needs_undo_run(
 ) -> sqlx::Result<Option<(Uuid, Option<String>)>> {
     Ok(sqlx::query!(
         "SELECT r.id, r.error FROM autotag_runs r
-         WHERE r.album_id = $1 AND r.id <> $2 AND r.state = 'failed'
-           AND (r.album_before IS NOT NULL
-                OR EXISTS (SELECT 1 FROM autotag_journal j
-                           WHERE j.run_id = r.id AND j.state = 'written'))
+         WHERE r.album_id = $1 AND r.id <> $2
+           AND ((r.state = 'failed'
+                 AND (r.album_before IS NOT NULL
+                      OR EXISTS (SELECT 1 FROM autotag_journal j
+                                 WHERE j.run_id = r.id AND j.state = 'written')))
+                OR (r.state = 'undo_failed'
+                    AND (EXISTS (SELECT 1 FROM autotag_journal j
+                                 WHERE j.run_id = r.id AND j.state IN ('written', 'undo_failed'))
+                         OR (r.album_before IS NOT NULL
+                             AND NOT COALESCE((r.summary ->> 'identityRestored')::boolean,
+                                              false)))))
          ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
         album,
         except
@@ -388,6 +398,91 @@ pub async fn needs_undo_run(
     .fetch_optional(&mut *conn)
     .await?
     .map(|r| (r.id, r.error)))
+}
+
+/// A run of the album created after `run` that is undoable: `done`, or needing undo as
+/// [`needs_undo_run`] says. Undo goes newest first, so `run` must wait for it.
+pub async fn newer_undoable_run(
+    conn: &mut PgConnection,
+    album: Uuid,
+    run: Uuid,
+) -> sqlx::Result<Option<Uuid>> {
+    sqlx::query_scalar!(
+        "SELECT r.id FROM autotag_runs r JOIN autotag_runs me ON me.id = $2
+         WHERE r.album_id = $1 AND r.id <> $2
+           AND (r.created_at, r.id) > (me.created_at, me.id)
+           AND (r.state = 'done'
+                OR (r.state = 'failed'
+                    AND (r.album_before IS NOT NULL
+                         OR EXISTS (SELECT 1 FROM autotag_journal j
+                                    WHERE j.run_id = r.id AND j.state = 'written')))
+                OR (r.state = 'undo_failed'
+                    AND (EXISTS (SELECT 1 FROM autotag_journal j
+                                 WHERE j.run_id = r.id AND j.state IN ('written', 'undo_failed'))
+                         OR (r.album_before IS NOT NULL
+                             AND NOT COALESCE((r.summary ->> 'identityRestored')::boolean,
+                                              false)))))
+         ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
+        album,
+        run
+    )
+    .fetch_optional(&mut *conn)
+    .await
+}
+
+/// Starts an undo: a `done`, `failed` or `undo_failed` run becomes `undoing`, remembering the
+/// state it came from (`summary.undoFrom`) so a refused undo can go back to it, and dropping
+/// the step marks of an earlier undo attempt (`undoChecked`, `organizerUndone`,
+/// `organizeUndoError`; `identityRestored` is kept: a restored identity is never restored
+/// twice). `false` when the run was in none of those states.
+pub async fn start_undo(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let r = sqlx::query!(
+        "UPDATE autotag_runs
+         SET state = 'undoing', finished_at = NULL,
+             summary = (COALESCE(summary, '{}'::jsonb) - 'undoChecked' - 'organizerUndone'
+                        - 'organizeUndoError') || jsonb_build_object('undoFrom', state)
+         WHERE id = $1 AND state IN ('done', 'failed', 'undo_failed')",
+        id
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
+/// A refused undo: the run goes back to the state it was undone from (`done`, `failed` or
+/// `undo_failed`; `failed` when unknown) with the reason in `error`.
+pub async fn revert_undo(pool: &PgPool, id: Uuid, reason: &str) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE autotag_runs
+         SET state = CASE WHEN summary ->> 'undoFrom' IN ('done', 'failed', 'undo_failed')
+                          THEN summary ->> 'undoFrom' ELSE 'failed' END,
+             error = $2, finished_at = now(),
+             summary = COALESCE(summary, '{}'::jsonb) - 'undoFrom' - 'undoChecked'
+                       - 'organizerUndone' - 'organizeUndoError'
+         WHERE id = $1 AND state = 'undoing'",
+        id,
+        reason
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Merges `fields` (an object) into the run's summary, on the caller's connection (the undo
+/// records `identityRestored` in its identity transaction).
+pub async fn merge_run_summary(
+    conn: &mut PgConnection,
+    id: Uuid,
+    fields: &Value,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE autotag_runs SET summary = COALESCE(summary, '{}'::jsonb) || $2 WHERE id = $1",
+        id,
+        fields
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// Runs a job still owes work to (`queued`, `writing`, `organizing`, `undoing`): `(id, state)`.

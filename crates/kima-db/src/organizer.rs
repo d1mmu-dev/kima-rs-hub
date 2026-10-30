@@ -319,14 +319,15 @@ pub async fn set_summary(pool: &PgPool, id: Uuid, summary: &Value) -> sqlx::Resu
 }
 
 /// Runs left mid-way (`planning`, `applying`, `undoing`), except the reorganize run of an
-/// autotag apply still `organizing`: that apply's own job resumes it (spec §19.9 step 5), and
-/// two jobs must never drive one run.
+/// autotag apply still `organizing` or `undoing`: that run's own job resumes it (spec §19.9
+/// step 5 and undo step 1), and two jobs must never drive one run.
 pub async fn interrupted_runs(pool: &PgPool) -> sqlx::Result<Vec<Run>> {
     sqlx::query_as(&format!(
         "SELECT {RUN_COLUMNS} FROM organizer_runs o
          WHERE state IN ('planning', 'applying', 'undoing')
            AND NOT EXISTS (SELECT 1 FROM autotag_runs a
-                           WHERE a.organizer_run_id = o.id AND a.state = 'organizing')
+                           WHERE a.organizer_run_id = o.id
+                             AND a.state IN ('organizing', 'undoing'))
          ORDER BY created_at"
     ))
     .fetch_all(pool)
@@ -593,6 +594,20 @@ pub async fn track_at(pool: &PgPool, path: &str) -> sqlx::Result<Option<Uuid>> {
         .bind(path)
         .fetch_optional(pool)
         .await
+}
+
+/// Whether an `organize` job of the run waits or runs on `queue`.
+pub async fn job_pending(pool: &PgPool, queue: &str, run: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM jobs WHERE queue = $1 AND state IN ('queued', 'running')
+               AND payload ->> 'kind' = 'organize'
+               AND payload ->> 'runId' = $2::uuid::text) AS "e!""#,
+        queue,
+        run
+    )
+    .fetch_one(pool)
+    .await
 }
 
 /// A track's current path.

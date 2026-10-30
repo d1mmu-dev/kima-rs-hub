@@ -433,14 +433,15 @@ pub async fn newer_undoable_run(
 /// Starts an undo: a `done`, `failed` or `undo_failed` run becomes `undoing`, remembering the
 /// state it came from (`summary.undoFrom`) so a refused undo can go back to it, and dropping
 /// the step marks of an earlier undo attempt (`undoChecked`, `organizerUndone`,
-/// `organizeUndoError`; `identityRestored` is kept: a restored identity is never restored
+/// `organizeUndoError`, `undoRefused`; `identityRestored` is kept: a restored identity is never restored
 /// twice). `false` when the run was in none of those states.
 pub async fn start_undo(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
     let r = sqlx::query!(
         "UPDATE autotag_runs
          SET state = 'undoing', finished_at = NULL,
              summary = (COALESCE(summary, '{}'::jsonb) - 'undoChecked' - 'organizerUndone'
-                        - 'organizeUndoError') || jsonb_build_object('undoFrom', state)
+                        - 'organizeUndoError' - 'undoRefused')
+                       || jsonb_build_object('undoFrom', state)
          WHERE id = $1 AND state IN ('done', 'failed', 'undo_failed')",
         id
     )
@@ -450,15 +451,19 @@ pub async fn start_undo(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
 }
 
 /// A refused undo: the run goes back to the state it was undone from (`done`, `failed` or
-/// `undo_failed`; `failed` when unknown) with the reason in `error`.
+/// `undo_failed`; `failed` when unknown), with the reason in `summary.undoRefused`. A `done`
+/// run also gets it as `error`; a `failed` or `undo_failed` run keeps its own error (why it
+/// needs attention).
 pub async fn revert_undo(pool: &PgPool, id: Uuid, reason: &str) -> sqlx::Result<()> {
     sqlx::query!(
         "UPDATE autotag_runs
          SET state = CASE WHEN summary ->> 'undoFrom' IN ('done', 'failed', 'undo_failed')
                           THEN summary ->> 'undoFrom' ELSE 'failed' END,
-             error = $2, finished_at = now(),
-             summary = COALESCE(summary, '{}'::jsonb) - 'undoFrom' - 'undoChecked'
-                       - 'organizerUndone' - 'organizeUndoError'
+             error = CASE WHEN summary ->> 'undoFrom' = 'done' THEN $2 ELSE error END,
+             finished_at = now(),
+             summary = (COALESCE(summary, '{}'::jsonb) - 'undoFrom' - 'undoChecked'
+                        - 'organizerUndone' - 'organizeUndoError')
+                       || jsonb_build_object('undoRefused', $2::text)
          WHERE id = $1 AND state = 'undoing'",
         id,
         reason

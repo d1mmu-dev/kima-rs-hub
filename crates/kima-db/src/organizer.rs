@@ -596,6 +596,19 @@ pub async fn track_at(pool: &PgPool, path: &str) -> sqlx::Result<Option<Uuid>> {
         .await
 }
 
+/// Whether an autotag undo drives this organizer run's undo (an autotag run with this
+/// `organizer_run_id` is `undoing`).
+pub async fn undo_owned_by_autotag(pool: &PgPool, run: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM autotag_runs
+             WHERE organizer_run_id = $1 AND state = 'undoing') AS "e!""#,
+        run
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// Whether an `organize` job of the run waits or runs on `queue`.
 pub async fn job_pending(pool: &PgPool, queue: &str, run: Uuid) -> sqlx::Result<bool> {
     sqlx::query_scalar!(

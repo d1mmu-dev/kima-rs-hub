@@ -63,7 +63,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::apply::{ALBUM_BUSY, ApplyHooks, AutotagError, FailPoint, io, target_of};
+use super::apply::{
+    ALBUM_BUSY, ApplyHooks, AutotagError, FailPoint, io, mark_renamed_planned, target_of,
+};
 use super::events::{AutotagEvents, AutotagJob};
 use super::journal::{join_rel, scrub, tags_of};
 use super::{
@@ -207,6 +209,9 @@ async fn finish(ctx: &LibraryCtx, run: &RunRow, error: Option<&str>, extra: Valu
     for k in MARKS {
         summary.remove(k);
     }
+    if summary.get("organizeUndoError").is_some_and(Value::is_null) {
+        summary.remove("organizeUndoError");
+    }
     let restored = summary
         .get("identityRestored")
         .and_then(Value::as_bool)
@@ -329,6 +334,10 @@ impl Undo<'_> {
 
     async fn undo(&mut self) -> Result<()> {
         let target = target_of(self.run)?;
+        // A file renamed before its row's commit is written (and restored below).
+        if !self.mark("undoChecked") {
+            mark_renamed_planned(self.ctx, self.run).await?;
+        }
         let rows = jdb::undo_rows_desc(&self.ctx.pool, self.run.id).await?;
         let place = match self.place(target, !rows.is_empty()).await {
             // A resumed undo already touched things: it ends `undo_failed`, never back.
@@ -368,6 +377,9 @@ impl Undo<'_> {
 
         // Step 3: the identity, then the re-read.
         self.fail_point(FailPoint::BeforeIdentity)?;
+        if let Some(h) = &self.hooks.before_identity {
+            h();
+        }
         let identity_error = if self.mark("identityRestored") {
             None
         } else {
@@ -382,7 +394,8 @@ impl Undo<'_> {
         };
         self.fail_point(FailPoint::AfterIdentity)?;
         if identity_error.is_none() {
-            self.reread(place.as_ref()).await?;
+            let library_files = self.library_files(target).await?;
+            self.reread(library_files).await?;
         }
 
         // Step 4.
@@ -404,6 +417,22 @@ impl Undo<'_> {
         };
         self.finish_event(state.as_str());
         Ok(())
+    }
+
+    /// Whether the run's journalled files are library files (re-read as tag writes): the
+    /// `files` target, or a `copy` whose copy run the library was switched to and still is.
+    /// From the run's target, not from what is left to restore (a resume may have none).
+    async fn library_files(&self, target: Target) -> Result<bool> {
+        Ok(match target {
+            Target::Files => true,
+            Target::Db => false,
+            Target::Copy => match self.run.copy_run_id {
+                Some(id) => odb::get_run(&self.ctx.pool, id).await?.is_some_and(|c| {
+                    c.switched_at.is_some() && self.ctx.root.get() == Path::new(&c.target_root)
+                }),
+                None => false,
+            },
+        })
     }
 
     /// Where the files are restored, `None` for nothing to restore (`db`, or no row left).
@@ -651,7 +680,7 @@ impl Undo<'_> {
 
     /// Prunes what the undo left empty, then re-reads the album's library files: the restored
     /// ones as tag writes, the others as a scan; files whose restore failed are left alone.
-    async fn reread(&self, place: Option<&Place>) -> Result<()> {
+    async fn reread(&self, library_files: bool) -> Result<()> {
         let pool = &self.ctx.pool;
         kima_db::library::prune_empty(pool).await?;
         let rows = jdb::rows(pool, self.run.id).await?;
@@ -669,13 +698,13 @@ impl Undo<'_> {
                 Ok::<_, AutotagError>(out)
             }
         };
-        let tag_write = match place {
-            Some(p) if p.in_library() => track_paths("undone").await?,
-            _ => BTreeSet::new(),
-        };
-        let skip = match place {
-            Some(p) if p.in_library() => track_paths("undo_failed").await?,
-            _ => BTreeSet::new(),
+        let (tag_write, skip) = if library_files {
+            (
+                track_paths("undone").await?,
+                track_paths("undo_failed").await?,
+            )
+        } else {
+            (BTreeSet::new(), BTreeSet::new())
         };
         let album_paths: BTreeSet<String> = adb::local_album(pool, self.run.album_id)
             .await?

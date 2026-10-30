@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n             SELECT 1 FROM track_tag_overrides o JOIN tracks t ON t.id = o.track_id\n             WHERE t.album_id = $1 AND o.run_id <> $2) AS \"e!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "e!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0ec5dee2370dd39315a42e57a1380660dd23f4ef5d3c44bbfe1028a1502a2ad3"
+}

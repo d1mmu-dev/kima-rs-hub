@@ -105,6 +105,17 @@ pub async fn run(
     payload: &serde_json::Value,
     cancel: &CancellationToken,
 ) -> Result<bool, JobError> {
+    run_attempt(ctx, payload, cancel, false).await
+}
+
+/// [`run`], told whether this is the job's final attempt (`attempts >= max_attempts`): an
+/// autotag apply that fails then settles its run instead of leaving it `writing`.
+pub async fn run_attempt(
+    ctx: &LibraryCtx,
+    payload: &serde_json::Value,
+    cancel: &CancellationToken,
+    final_attempt: bool,
+) -> Result<bool, JobError> {
     let job: LibraryJob = serde_json::from_value(payload.clone())
         .map_err(|e| JobError::Permanent(format!("invalid library job payload: {e}")))?;
     match job {
@@ -154,7 +165,9 @@ pub async fn run(
                 .map_err(|e| JobError::Retry(e.to_string()))?;
             Ok(false)
         }
-        LibraryJob::AutotagApply { run_id } => autotag::run_job(ctx, run_id, cancel).await,
+        LibraryJob::AutotagApply { run_id } => {
+            autotag::run_job(ctx, run_id, cancel, final_attempt).await
+        }
         // Task 18: the undo job.
         LibraryJob::AutotagUndo { run_id } => Err(JobError::Permanent(format!(
             "autotag undo of run {run_id} is not available yet"
@@ -176,7 +189,8 @@ pub fn handler_with(ctx: LibraryCtx, on_change: OnChange) -> Handler {
     worker::handler_ctx(move |job, job_ctx| {
         let (ctx, on_change) = (ctx.clone(), on_change.clone());
         async move {
-            if run(&ctx, &job.payload, &job_ctx.cancel).await? {
+            let last = job.attempts >= job.max_attempts;
+            if run_attempt(&ctx, &job.payload, &job_ctx.cancel, last).await? {
                 on_change(ctx.pool.clone()).await;
             }
             Ok(())

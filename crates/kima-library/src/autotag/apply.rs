@@ -44,7 +44,7 @@ use uuid::Uuid;
 use super::capability::album_refusal;
 use super::events::{AutotagEvents, AutotagJob};
 use super::journal::{self, RowCheck};
-use super::{CHANGED_OUTSIDE, FILES_READ_ONLY, TRACKS_CHANGED};
+use super::{APPLIED_MATCH_EXISTS, CHANGED_OUTSIDE, FILES_READ_ONLY, TRACKS_CHANGED};
 use crate::jobs;
 use crate::names;
 use crate::organize::apply::{SYMLINK_NOTE, writable};
@@ -73,6 +73,9 @@ pub struct ApplyHooks {
     pub stop_after_files: Option<usize>,
     /// Called once, right after the journal commit and before the first write.
     pub after_journal: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Fail as a database or I/O error would, right before the files are written (a fresh or
+    /// a resumed run).
+    pub fail_before_writes: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -121,16 +124,7 @@ pub async fn enqueue_undo(pool: &kima_db::PgPool, run_id: Uuid) -> sqlx::Result<
 pub async fn resume_interrupted(pool: &kima_db::PgPool) -> sqlx::Result<usize> {
     let mut queued = 0;
     for (id, state) in adb::unfinished_runs(pool).await? {
-        let pending: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM jobs WHERE queue = $1 AND state IN ('queued', 'running')
-                            AND payload ->> 'kind' IN ('autotag-apply', 'autotag-undo')
-                            AND payload ->> 'runId' = $2)",
-        )
-        .bind(jobs::QUEUE)
-        .bind(id.to_string())
-        .fetch_one(pool)
-        .await?;
-        if pending {
+        if adb::job_pending(pool, id).await? {
             continue;
         }
         info!(run = %id, %state, "resuming an interrupted autotag run");
@@ -146,17 +140,96 @@ pub async fn resume_interrupted(pool: &kima_db::PgPool) -> sqlx::Result<usize> {
 
 /// The `autotag-apply` job body: [`run_apply`] without hooks. A refusal (already recorded on
 /// the run) fails the job for good; anything else is retried, resuming from the journal.
-/// Answers whether the library changed.
+/// `final_attempt`: the queue will not retry this job again, so a database or I/O error
+/// settles the run as a refusal would ([`settle_failed`]) instead of leaving it `writing`
+/// (an interruption, e.g. a shutdown, gets its attempt back and is left as it is). Answers
+/// whether the library changed.
 pub async fn run_job(
     ctx: &LibraryCtx,
     run_id: Uuid,
     cancel: &CancellationToken,
+    final_attempt: bool,
 ) -> std::result::Result<bool, JobError> {
-    match run_apply(ctx, run_id, &ApplyHooks::default(), cancel).await {
+    run_job_with(ctx, run_id, &ApplyHooks::default(), cancel, final_attempt).await
+}
+
+/// [`run_job`] with test hooks.
+pub async fn run_job_with(
+    ctx: &LibraryCtx,
+    run_id: Uuid,
+    hooks: &ApplyHooks,
+    cancel: &CancellationToken,
+    final_attempt: bool,
+) -> std::result::Result<bool, JobError> {
+    match run_apply(ctx, run_id, hooks, cancel).await {
         Ok(()) => Ok(true),
         Err(AutotagError::Refused(m)) => Err(JobError::Permanent(m)),
+        Err(AutotagError::Interrupted) => {
+            Err(JobError::Retry(AutotagError::Interrupted.to_string()))
+        }
+        Err(e) if final_attempt => {
+            let msg = e.to_string();
+            warn!(run = %run_id, error = %msg, "autotag apply failed on its final attempt");
+            if let Ok(Some(run)) = adb::get_run(&ctx.pool, run_id).await
+                && run.state == RunState::Writing.as_str()
+                && let Err(e) = settle_failed(ctx, &run, &msg).await
+            {
+                warn!(run = %run_id, "cannot settle the failed run: {e}");
+            }
+            Err(JobError::Permanent(msg))
+        }
         Err(e) => Err(JobError::Retry(e.to_string())),
     }
+}
+
+/// Ends a run that will not complete: `failed` with `msg`, and the album's search state says
+/// what is left.
+///
+/// - The run wrote files (`written` journal rows): nothing in the database changes (no identity,
+///   no re-read: the files' new tags would otherwise move the tracks on the next scan, or merge
+///   them into an album that collides). The album is `failed` with the message (it needs
+///   attention: the run must be undone, which Task 18 accepts for a `failed` run with written
+///   rows), and the summary says `needsUndo`.
+/// - Nothing written: the album goes back to `proposed`, or `applied` when its newest other run
+///   that did not fail is `done` (that match stands); it is left alone while another run of it
+///   is working.
+///
+/// Answers the album state set, if any.
+pub async fn settle_failed(
+    ctx: &LibraryCtx,
+    run: &RunRow,
+    msg: &str,
+) -> Result<Option<AlbumState>> {
+    let rows = jdb::rows(&ctx.pool, run.id).await?;
+    let n = |s: &str| rows.iter().filter(|r| r.state == s).count();
+    let written = n("written");
+    let summary = if written > 0 {
+        json!({"written": written, "skipped": n("skipped"), "failed": n("failed"),
+               "organized": 0, "rolledBack": false, "needsUndo": true})
+    } else {
+        json!({"written": 0, "skipped": n("skipped"), "failed": n("failed"), "organized": 0})
+    };
+    adb::finish_run(&ctx.pool, run.id, RunState::Failed, &summary, Some(msg)).await?;
+    let state = if written > 0 {
+        Some(AlbumState::Failed)
+    } else {
+        match adb::latest_other_run_state(&ctx.pool, run.album_id, run.id)
+            .await?
+            .as_deref()
+        {
+            Some("queued" | "writing" | "organizing" | "undoing") => None,
+            Some("done") => Some(AlbumState::Applied),
+            _ => Some(AlbumState::Proposed),
+        }
+    };
+    if let Some(state) = state {
+        let error = (state == AlbumState::Failed).then_some(msg);
+        if let Err(e) = adb::set_state(&ctx.pool, run.album_id, state, error).await {
+            // The album row went away (and the run with it, by cascade): nothing left to mark.
+            info!(run = %run.id, "album state not set: {e}");
+        }
+    }
+    Ok(state)
 }
 
 /// Runs (or resumes) the apply of `run_id`; see the module doc. A `queued` run moves to
@@ -290,7 +363,15 @@ impl Job<'_> {
         // done goes on to the identity step whatever the mount says now.
         let to_write = !resumed || rows.iter().any(|r| r.state == "planned");
         if target == Target::Files && to_write && !self.files_writable(&root).await {
-            return Err(AutotagError::Refused(FILES_READ_ONLY.to_string()));
+            if !resumed {
+                return Err(AutotagError::Refused(FILES_READ_ONLY.to_string()));
+            }
+            // A resumed run already wrote some files: read-only is per file. The files left
+            // fail, and the run goes on with what was written (refused below when nothing was).
+            for r in rows.iter().filter(|r| r.state == "planned") {
+                jdb::set_row_state(&self.ctx.pool, r.id, "failed", Some(FILES_READ_ONLY)).await?;
+            }
+            rows = jdb::rows(&self.ctx.pool, self.run.id).await?;
         }
         let mut db_paths = Vec::new();
         if resumed {
@@ -320,6 +401,9 @@ impl Job<'_> {
 
         let summary = match target {
             Target::Files => {
+                if self.hooks.fail_before_writes {
+                    return Err(AutotagError::Io("forced failure (test hook)".to_string()));
+                }
                 self.write_rows(&root, &rows, resumed).await?;
                 let rows = jdb::rows(&self.ctx.pool, self.run.id).await?;
                 let n = |s: &str| rows.iter().filter(|r| r.state == s).count();
@@ -420,6 +504,10 @@ impl Job<'_> {
             .is_some()
         {
             return Err(AutotagError::Refused(ALBUM_BUSY.to_string()));
+        }
+        // Another run's overrides would be replaced, and lost when this run is undone.
+        if adb::foreign_override(&mut tx, album, self.run.id).await? {
+            return Err(AutotagError::Refused(APPLIED_MATCH_EXISTS.to_string()));
         }
         let want: BTreeSet<Uuid> = applied.tracks.iter().map(|t| t.track_id).collect();
         let have: BTreeSet<Uuid> = present.iter().map(|t| t.id).collect();
@@ -581,32 +669,9 @@ impl Job<'_> {
         Ok(())
     }
 
-    /// A refusal: the run `failed` with the message (its journal counts as the summary), the
-    /// album back to `proposed` (a failed apply is not a failed search).
+    /// A refusal: see [`settle_failed`].
     async fn refuse(&mut self, msg: &str) -> Result<()> {
-        let rows = jdb::rows(&self.ctx.pool, self.run.id).await?;
-        let n = |s: &str| rows.iter().filter(|r| r.state == s).count();
-        let summary = json!({"written": n("written"), "skipped": n("skipped"),
-                             "failed": n("failed"), "organized": 0});
-        adb::finish_run(
-            &self.ctx.pool,
-            self.run.id,
-            RunState::Failed,
-            &summary,
-            Some(msg),
-        )
-        .await?;
-        if let Err(e) = adb::set_state(
-            &self.ctx.pool,
-            self.run.album_id,
-            AlbumState::Proposed,
-            None,
-        )
-        .await
-        {
-            // The album row went away (and the run with it, by cascade): nothing left to mark.
-            info!(run = %self.run.id, "album state not reset: {e}");
-        }
+        settle_failed(self.ctx, self.run, msg).await?;
         self.finish_event(RunState::Failed.as_str());
         Ok(())
     }
@@ -664,7 +729,10 @@ fn write_row_inner(
     };
     // The version the journal recorded (NULL: no ID3v2 tag, written as v2.4).
     let id3 = row.id3_version.as_deref().and_then(Id3Version::parse);
-    match tagwrite::safe_write(&abs, row.id, container, id3, &new, ignore, hooks) {
+    let expected = row.before_sha.as_deref();
+    match tagwrite::safe_write_expecting(
+        &abs, row.id, container, id3, &new, ignore, hooks, expected,
+    ) {
         Ok(w) => RowOutcome::Written(w.after_sha.to_vec()),
         Err(_) if hooks.stop_after_rename => RowOutcome::Crash,
         Err(e) => RowOutcome::Failed(e.to_string()),

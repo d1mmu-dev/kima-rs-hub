@@ -19,3 +19,6 @@ pub const TRACKS_CHANGED: &str =
     "The album's tracks changed since the match was computed; search again";
 /// A journalled file that no longer holds what was planned, nor the new tags (spec §19.9).
 pub const CHANGED_OUTSIDE: &str = "changed outside kima-rs";
+/// An album whose tracks hold another run's tag overrides: a new apply would replace them and
+/// an undo of it would lose them, so a re-match requires undoing first.
+pub const APPLIED_MATCH_EXISTS: &str = "This album already has an applied match; undo it first";

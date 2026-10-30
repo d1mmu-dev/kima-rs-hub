@@ -1,4 +1,5 @@
-//! The autotag apply job (spec §19.9): files and database targets, journal, crash recovery.
+//! The autotag apply job (spec §19.9): files, copy and database targets, journal, crash
+//! recovery, the reorganize chain.
 
 mod common;
 
@@ -14,10 +15,16 @@ use kima_db::autotag::{
     self as adb, Applied, AppliedAlbum, AppliedTrack, NewCandidate, NewRun, Origin, Recommendation,
     Target,
 };
+use kima_db::organizer as odb;
 use kima_library::autotag::apply::ALBUM_BUSY;
 use kima_library::autotag::apply::{self, ApplyHooks, AutotagError, FailPoint};
+use kima_library::autotag::capability;
 use kima_library::autotag::{
-    APPLIED_MATCH_EXISTS, CHANGED_OUTSIDE, FILES_READ_ONLY, TRACKS_CHANGED,
+    APPLIED_MATCH_EXISTS, CHANGED_OUTSIDE, COPY_FIRST, FILES_READ_ONLY, REORGANIZE_FILES_ONLY,
+    TRACKS_CHANGED,
+};
+use kima_library::organize::apply::{
+    self as organize, Action, COPY_IN_USE, Hooks, OrganizeError, REORGANIZE_COLLISION,
 };
 use kima_library::scan::{self, LibraryCtx, ReadCause};
 use kima_library::tagwrite::{NativeTags, audio_md5, container_of, read_native};
@@ -193,6 +200,17 @@ async fn applied_for(
 
 /// Stores a candidate for `applied` and creates the run (`queued`), as the request will.
 async fn make_run(pool: &PgPool, album: Uuid, applied: &Applied, target: Target) -> Uuid {
+    make_run_with(pool, album, applied, target, false).await
+}
+
+/// [`make_run`] with `reorganize`.
+async fn make_run_with(
+    pool: &PgPool,
+    album: Uuid,
+    applied: &Applied,
+    target: Target,
+    reorganize: bool,
+) -> Uuid {
     let mapping: Vec<Value> = applied
         .tracks
         .iter()
@@ -228,7 +246,7 @@ async fn make_run(pool: &PgPool, album: Uuid, applied: &Applied, target: Target)
             candidate_id: candidate,
             applied: applied.clone(),
             target,
-            reorganize: false,
+            reorganize,
             created_by: None,
         },
     )
@@ -1221,7 +1239,7 @@ async fn applied_match_must_be_undone_first(pool: PgPool) {
     let kept = overrides().await;
     assert_eq!(kept.len(), 3);
 
-    for target in [Target::Files, Target::Db] {
+    for target in [Target::Files, Target::Copy, Target::Db] {
         let run = make_run(&pool, album, &applied, target).await;
         let res = apply_run(&ctx(&pool, root), run, &ApplyHooks::default()).await;
         assert!(
@@ -1238,10 +1256,9 @@ async fn applied_match_must_be_undone_first(pool: PgPool) {
         );
     }
 
-    // Once the first match is undone (its overrides gone), a new apply goes through.
-    let mut conn = pool.acquire().await.unwrap();
-    adb::delete_overrides(&mut conn, first).await.unwrap();
-    drop(conn);
+    // Once the first match is undone (album row restored, overrides gone), a new apply goes
+    // through.
+    undo_identity_only(&pool, first).await;
     let run = make_run(&pool, album, &applied, Target::Db).await;
     apply_run(&ctx(&pool, root), run, &ApplyHooks::default())
         .await
@@ -1395,13 +1412,15 @@ async fn already_tagged_files_skipped(pool: PgPool) {
     let root = dir.path();
     let album = album_fixture(&pool, root, "flac", 3, "2001").await;
     let rels = paths("flac", 3);
-    // No applied year: the files apply stores no override, so a second apply may run.
+    // No applied year: the files apply stores no override. Its identity is then undone in the
+    // database only (a re-match requires undoing first), so the files still carry its tags.
     let mut applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
     applied.album.year = None;
     let first = make_run(&pool, album, &applied, Target::Files).await;
     apply_run(&ctx(&pool, root), first, &ApplyHooks::default())
         .await
         .unwrap();
+    undo_identity_only(&pool, first).await;
     let after_first = shas(root, &rels);
 
     let run = make_run(&pool, album, &applied, Target::Files).await;
@@ -1522,6 +1541,14 @@ async fn resumed_read_only_keeps_file_renamed_before_crash(pool: PgPool) {
     assert_eq!(run_row(&pool, run).await.state, "done");
 }
 
+/// `undo_identity` of a done run (album row, artist step, overrides), files left as they are.
+async fn undo_identity_only(pool: &PgPool, run: Uuid) {
+    let row = run_row(pool, run).await;
+    let mut tx = pool.begin().await.unwrap();
+    adb::undo_identity(&mut tx, &row).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
 /// Run A applied (files, no year), then run B wrote its files but collided under the locks:
 /// B needs undo.
 async fn album_with_needs_undo_run(pool: &PgPool, root: &Path) -> (Uuid, Uuid, Applied) {
@@ -1534,6 +1561,8 @@ async fn album_with_needs_undo_run(pool: &PgPool, root: &Path) -> (Uuid, Uuid, A
         .await
         .unwrap();
     assert_eq!(album_state(pool, album).await, "applied");
+    // A re-match requires undoing first (the database side is enough here).
+    undo_identity_only(pool, first).await;
 
     let mut b = applied_for(pool, &rels, "2001", "2001", 2001).await;
     b.album.title = "Other Album".into();
@@ -1564,8 +1593,8 @@ async fn needs_undo_run_blocks_applies_and_keeps_album_failed(pool: PgPool) {
     let rels = paths("flac", 3);
     let before = shas(root, &rels);
 
-    // A run refused with nothing written (the copy target): the album stays failed with B's
-    // message, not `applied`.
+    // A run refused with nothing written (here: the copy target, refused since B needs undo):
+    // the album stays failed with B's message, not `applied`.
     let run = make_run(&pool, album, &applied, Target::Copy).await;
     let res = apply_run(&ctx(&pool, root), run, &ApplyHooks::default()).await;
     assert!(matches!(&res, Err(AutotagError::Refused(_))), "{res:?}");
@@ -1573,7 +1602,7 @@ async fn needs_undo_run_blocks_applies_and_keeps_album_failed(pool: PgPool) {
     assert_eq!(album_error(&pool, album).await, b_error);
 
     // A new apply is refused while B needs undo; nothing is touched.
-    for target in [Target::Files, Target::Db] {
+    for target in [Target::Files, Target::Copy, Target::Db] {
         let run = make_run(&pool, album, &applied, target).await;
         let res = apply_run(&ctx(&pool, root), run, &ApplyHooks::default()).await;
         assert!(
@@ -1695,4 +1724,718 @@ async fn final_attempt_after_writes_needs_undo(pool: PgPool) {
         count(&pool, "SELECT count(*) FROM track_tag_overrides").await,
         0
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Task 17: the copy target, the reorganize chain, switch-root
+
+/// A copy-mode organizer run of the whole library at `root` into `target`, previewed and
+/// applied (`done`).
+async fn copy_library(pool: &PgPool, root: &Path, target: &Path) -> Uuid {
+    copy_run_scoped(pool, root, target, None).await
+}
+
+async fn copy_run_scoped(
+    pool: &PgPool,
+    root: &Path,
+    target: &Path,
+    albums: Option<&[Uuid]>,
+) -> Uuid {
+    std::fs::create_dir_all(target).unwrap();
+    let (src, dst) = (root.display().to_string(), target.display().to_string());
+    let id = Uuid::now_v7();
+    match albums {
+        Some(a) => odb::create_scoped_run(pool, id, "copy", &src, &dst, None, a, "user")
+            .await
+            .unwrap(),
+        None => odb::create_run(pool, id, "copy", &src, &dst, None)
+            .await
+            .unwrap(),
+    };
+    let c = ctx(pool, root);
+    organize::run_action(&c, id, Action::Preview, &Hooks::default())
+        .await
+        .unwrap();
+    assert!(odb::start_apply(pool, id).await.unwrap());
+    organize::run_action(&c, id, Action::Apply, &Hooks::default())
+        .await
+        .unwrap();
+    assert_eq!(organizer_state(pool, id).await, "done");
+    id
+}
+
+async fn organizer_state(pool: &PgPool, run: Uuid) -> String {
+    odb::get_run(pool, run).await.unwrap().unwrap().state
+}
+
+/// Track id → copy path (relative to the copy run's target), in `rels` order.
+async fn copy_paths(pool: &PgPool, copy_run: Uuid, rels: &[String]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for r in rels {
+        ids.push(track_id(pool, r).await);
+    }
+    let copies = odb::copy_rows_for_tracks(pool, copy_run, &ids)
+        .await
+        .unwrap();
+    ids.iter().map(|t| copies[t].clone()).collect()
+}
+
+fn mtimes(root: &Path, rels: &[String]) -> Vec<SystemTime> {
+    rels.iter()
+        .map(|r| std::fs::metadata(root.join(r)).unwrap().modified().unwrap())
+        .collect()
+}
+
+async fn overrides_of(pool: &PgPool, run: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM track_tag_overrides WHERE run_id = $1")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn track_path(pool: &PgPool, track: Uuid) -> String {
+    sqlx::query_scalar("SELECT path FROM tracks WHERE id = $1")
+        .bind(track)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn refused_with(res: &Result<(), AutotagError>, msg: &str) -> bool {
+    matches!(res, Err(AutotagError::Refused(m)) if m == msg)
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn copy_refused_without_done_copy_run(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let c = ctx(&pool, root);
+    let refused = |what: &'static str| {
+        let (pool, c, applied) = (pool.clone(), c.clone(), applied.clone());
+        async move {
+            let caps = capability::capabilities(&c).await.unwrap();
+            assert!(!caps.copy.available, "{what}");
+            assert_eq!(caps.copy.reason.as_deref(), Some(COPY_FIRST), "{what}");
+            assert_eq!(caps.copy_run_id, None, "{what}");
+            let run = make_run(&pool, album, &applied, Target::Copy).await;
+            let res = apply_run(&c, run, &ApplyHooks::default()).await;
+            assert!(refused_with(&res, COPY_FIRST), "{what}: {res:?}");
+            assert!(journal(&pool, run).await.is_empty(), "{what}");
+            let r = run_row(&pool, run).await;
+            assert_eq!(r.state, "failed", "{what}");
+            assert_eq!(r.copy_run_id, None, "{what}");
+            assert_eq!(overrides_of(&pool, run).await, 0, "{what}");
+        }
+    };
+
+    // No copy run at all.
+    refused("no copy run").await;
+    let originals = shas(root, &rels);
+
+    // A copy run only previewed.
+    let previewed = Uuid::now_v7();
+    std::fs::create_dir_all(out.path().join("a")).unwrap();
+    odb::create_run(
+        &pool,
+        previewed,
+        "copy",
+        &root.display().to_string(),
+        &out.path().join("a").display().to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+    organize::run_action(&c, previewed, Action::Preview, &Hooks::default())
+        .await
+        .unwrap();
+    refused("previewed copy run").await;
+
+    // A done copy run the library was switched to (it is the library now, not a copy).
+    let switched = copy_library(&pool, root, &out.path().join("b")).await;
+    sqlx::query("UPDATE organizer_runs SET switched_at = now() WHERE id = $1")
+        .bind(switched)
+        .execute(&pool)
+        .await
+        .unwrap();
+    refused("switched copy run").await;
+
+    // A done copy run of this album only (scoped: not a copy of the library).
+    copy_run_scoped(&pool, root, &out.path().join("c"), Some(&[album])).await;
+    refused("scoped copy run").await;
+
+    assert_eq!(shas(root, &rels), originals, "no file written");
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn copy_never_opens_an_original_for_writing(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (root, target) = (dir.path(), out.path().join("organized"));
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let copy_run = copy_library(&pool, root, &target).await;
+    let copies = copy_paths(&pool, copy_run, &rels).await;
+    let (originals, original_mtimes) = (shas(root, &rels), mtimes(root, &rels));
+    let copies_before = shas(&target, &copies);
+    assert_eq!(originals, copies_before, "verified copies");
+
+    let c = ctx(&pool, root);
+    let caps = capability::capabilities(&c).await.unwrap();
+    assert!(caps.copy.available, "{caps:?}");
+    assert_eq!(caps.copy_run_id, Some(copy_run));
+    let local = adb::local_album(&pool, album).await.unwrap().unwrap();
+    assert_eq!(
+        capability::album_refusal(&c, &local, Target::Copy)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let applied = applied_for(&pool, &rels, "2001-02-03", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Copy).await;
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+
+    // The originals: not one byte, not even the modification time.
+    assert_eq!(shas(root, &rels), originals);
+    assert_eq!(mtimes(root, &rels), original_mtimes);
+    assert!(leftovers(root).is_empty());
+    assert!(leftovers(&target).is_empty());
+    // The copies carry the tags, journalled against the copy root.
+    let rows = journal(&pool, run).await;
+    assert_eq!(rows.len(), 3);
+    let mut journalled: Vec<String> = rows.iter().map(|r| r.path.clone()).collect();
+    journalled.sort();
+    let mut want = copies.clone();
+    want.sort();
+    assert_eq!(journalled, want);
+    for row in &rows {
+        assert_eq!(row.root, "copy");
+        assert_eq!(row.state, "written", "{}", row.path);
+        assert_reads_back(&target, row);
+        let i = copies.iter().position(|p| p == &row.path).unwrap();
+        assert_eq!(row.before_sha.as_deref(), Some(copies_before[i].as_slice()));
+        assert_eq!(
+            row.after_sha.as_deref(),
+            Some(sha(&target.join(&row.path)).as_slice())
+        );
+    }
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "done");
+    assert_eq!(r.copy_run_id, Some(copy_run));
+    assert_eq!(r.organizer_run_id, None);
+    assert_eq!(
+        r.summary,
+        Some(json!({"written": 3, "skipped": 0, "failed": 0, "organized": 0}))
+    );
+    // The web app shows the match through the overrides; the tracks stay where they were.
+    assert_eq!(overrides_of(&pool, run).await, 3);
+    assert_eq!(album_title(&pool, album).await, "New Album");
+    for (i, r) in rels.iter().enumerate() {
+        assert_eq!(album_of(&pool, r).await, album);
+        let title: String = sqlx::query_scalar("SELECT title FROM tracks WHERE path = $1")
+            .bind(r)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(title, format!("Song {}", i + 1));
+    }
+    assert_eq!(album_state(&pool, album).await, "applied");
+    assert_eq!(organizer_state(&pool, copy_run).await, "done");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn copy_refused_when_album_not_fully_copied(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (root, target) = (dir.path(), out.path().join("organized"));
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let copy_run = copy_library(&pool, root, &target).await;
+    let copies = copy_paths(&pool, copy_run, &rels).await;
+    // One track's copy did not happen.
+    sqlx::query(
+        "UPDATE organizer_journal SET state = 'skipped' WHERE run_id = $1 AND track_id = $2",
+    )
+    .bind(copy_run)
+    .bind(track_id(&pool, &rels[1]).await)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (originals, copied) = (shas(root, &rels), shas(&target, &copies));
+
+    let c = ctx(&pool, root);
+    assert!(
+        capability::capabilities(&c).await.unwrap().copy.available,
+        "the copy run itself is usable"
+    );
+    let local = adb::local_album(&pool, album).await.unwrap().unwrap();
+    assert_eq!(
+        capability::album_refusal(&c, &local, Target::Copy)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(COPY_FIRST)
+    );
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Copy).await;
+    let res = apply_run(&c, run, &ApplyHooks::default()).await;
+    assert!(refused_with(&res, COPY_FIRST), "{res:?}");
+    assert!(journal(&pool, run).await.is_empty());
+    assert_eq!(shas(root, &rels), originals);
+    assert_eq!(shas(&target, &copies), copied);
+    assert_eq!(overrides_of(&pool, run).await, 0);
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+}
+
+/// "New Artist/2001 - New Album/0n - Song n.<ext>", where the organizer files track `n`.
+fn organized(n: usize, ext: &str) -> String {
+    format!("New Artist/2001 - New Album/0{n} - Song {n}.{ext}")
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reorganize_chains_scoped_move(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Another album, messily named too: the scoped move must leave it alone.
+    let other_rels: Vec<String> = (1..=2).map(|i| format!("misc/other/{i}.flac")).collect();
+    for (i, r) in other_rels.iter().enumerate() {
+        make_audio(
+            root,
+            r,
+            tags(
+                "Other Artist",
+                "Other Album",
+                "x",
+                "1990",
+                &(i + 1).to_string(),
+            ),
+        );
+    }
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let ids: Vec<Uuid> = {
+        let mut v = Vec::new();
+        for r in &rels {
+            v.push(track_id(&pool, r).await);
+        }
+        v
+    };
+    let other_album = album_of(&pool, &other_rels[0]).await;
+    let other_shas = shas(root, &other_rels);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run_with(&pool, album, &applied, Target::Files, true).await;
+
+    apply_run(&ctx(&pool, root), run, &ApplyHooks::default())
+        .await
+        .unwrap();
+
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "done");
+    assert_eq!(
+        r.summary,
+        Some(json!({"written": 3, "skipped": 0, "failed": 0, "organized": 3}))
+    );
+    let org = r.organizer_run_id.expect("organizer run stored");
+    let o = odb::get_run(&pool, org).await.unwrap().unwrap();
+    assert_eq!(
+        (o.mode.as_str(), o.state.as_str(), o.origin.as_str()),
+        ("move", "done", "autotag")
+    );
+    assert_eq!(o.album_ids, Some(vec![album]));
+    assert_eq!(count(&pool, "SELECT count(*) FROM organizer_runs").await, 1);
+    // The album's files at their organized paths, tagged; the old ones gone.
+    let rows = journal(&pool, run).await;
+    for (i, id) in ids.iter().enumerate() {
+        let want = organized(i + 1, "flac");
+        assert_eq!(track_path(&pool, *id).await, want);
+        assert!(root.join(&want).is_file(), "{want}");
+        assert!(!root.join(&rels[i]).exists(), "{}", rels[i]);
+        let row = rows.iter().find(|x| x.track_id == Some(*id)).unwrap();
+        let moved = JournalRow {
+            path: want.clone(),
+            ..row.clone()
+        };
+        assert_reads_back(root, &moved);
+    }
+    // The other album: same paths, same bytes.
+    for r in &other_rels {
+        assert_eq!(album_of(&pool, r).await, other_album);
+    }
+    assert_eq!(shas(root, &other_rels), other_shas);
+    assert_eq!(album_state(&pool, album).await, "applied");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reorganize_resumes_its_organizer_run(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run_with(&pool, album, &applied, Target::Files, true).await;
+    // Stops (as a crash would) after the first file moved.
+    let hooks = ApplyHooks {
+        organize: Hooks {
+            stop_after: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let res = apply_run(&ctx(&pool, root), run, &hooks).await;
+    assert!(matches!(res, Err(AutotagError::Interrupted)), "{res:?}");
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "organizing");
+    let org = r.organizer_run_id.expect("stored with the organizer run");
+    assert_eq!(organizer_state(&pool, org).await, "applying");
+
+    // Startup: the autotag run is re-queued; the organizer leaves its run to it.
+    assert_eq!(organize::resume_interrupted(&pool).await.unwrap(), 0);
+    assert_eq!(apply::resume_interrupted(&pool).await.unwrap(), 1);
+
+    // The resumed job goes straight to the re-filing: steps 1-4 are not run again.
+    let bus = EventBus::new(1024);
+    let mut rx = bus.subscribe();
+    apply_run(&ctx_with(&pool, root, bus), run, &ApplyHooks::default())
+        .await
+        .unwrap();
+    let mut states = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        if e.data["type"] == "autotag:progress" {
+            assert_eq!(e.data["runId"], json!(run));
+            states.push(e.data["state"].as_str().unwrap_or("").to_string());
+        }
+    }
+    assert_eq!(
+        states.first().map(String::as_str),
+        Some("organizing"),
+        "{states:?}"
+    );
+    assert_eq!(
+        states.last().map(String::as_str),
+        Some("done"),
+        "{states:?}"
+    );
+    assert!(!states.iter().any(|s| s == "writing"), "{states:?}");
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "done");
+    assert_eq!(r.organizer_run_id, Some(org), "the same organizer run");
+    assert_eq!(count(&pool, "SELECT count(*) FROM organizer_runs").await, 1);
+    assert_eq!(organizer_state(&pool, org).await, "done");
+    assert_eq!(r.summary.as_ref().unwrap()["organized"], json!(3));
+    for n in 1..=3 {
+        assert!(root.join(organized(n, "flac")).is_file());
+    }
+    assert_eq!(album_state(&pool, album).await, "applied");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reorganize_failure_keeps_the_tags(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    // Something already holds the first track's organized name.
+    let taken = root.join(organized(1, "flac"));
+    std::fs::create_dir_all(taken.parent().unwrap()).unwrap();
+    std::fs::write(&taken, b"not ours").unwrap();
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run_with(&pool, album, &applied, Target::Files, true).await;
+
+    apply_run(&ctx(&pool, root), run, &ApplyHooks::default())
+        .await
+        .unwrap();
+
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "done", "{:?}", r.error);
+    assert_eq!(
+        r.summary,
+        Some(
+            json!({"written": 2, "skipped": 0, "failed": 0, "organized": 0,
+                    "organizeError": REORGANIZE_COLLISION})
+        )
+    );
+    // The tags and the identity stand; nothing moved; the plan waits for a review.
+    for row in journal(&pool, run).await {
+        assert_eq!(row.state, "written");
+        assert_reads_back(root, &row);
+    }
+    for r in &rels {
+        assert_eq!(album_of(&pool, r).await, album);
+    }
+    assert_eq!(std::fs::read(&taken).unwrap(), b"not ours");
+    assert_eq!(album_title(&pool, album).await, "New Album");
+    assert_eq!(album_state(&pool, album).await, "applied");
+    let org = r.organizer_run_id.unwrap();
+    assert_eq!(organizer_state(&pool, org).await, "previewed");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reorganize_refused_for_copy_and_db(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    copy_library(&pool, root, &out.path().join("organized")).await;
+    let originals = shas(root, &rels);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    for target in [Target::Db, Target::Copy] {
+        let run = make_run_with(&pool, album, &applied, target, true).await;
+        let res = apply_run(&ctx(&pool, root), run, &ApplyHooks::default()).await;
+        assert!(
+            refused_with(&res, REORGANIZE_FILES_ONLY),
+            "{target:?}: {res:?}"
+        );
+        assert!(journal(&pool, run).await.is_empty());
+        assert_eq!(overrides_of(&pool, run).await, 0);
+        assert_eq!(run_row(&pool, run).await.organizer_run_id, None);
+    }
+    assert_eq!(shas(root, &rels), originals);
+    for r in &rels {
+        assert!(root.join(r).is_file());
+    }
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM organizer_runs WHERE mode = 'move'"
+        )
+        .await,
+        0
+    );
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn applied_identity_alone_blocks_rematch(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let first = make_run(&pool, album, &applied, Target::Db).await;
+    apply_run(&ctx(&pool, root), first, &ApplyHooks::default())
+        .await
+        .unwrap();
+    // A done run that left no override (as a `files` run without a year does): only the album
+    // row says a match is applied.
+    let mut conn = pool.acquire().await.unwrap();
+    adb::delete_overrides(&mut conn, first).await.unwrap();
+    drop(conn);
+    let before = shas(root, &rels);
+    for target in [Target::Files, Target::Copy, Target::Db] {
+        let run = make_run(&pool, album, &applied, target).await;
+        let res = apply_run(&ctx(&pool, root), run, &ApplyHooks::default()).await;
+        assert!(
+            refused_with(&res, APPLIED_MATCH_EXISTS),
+            "{target:?}: {res:?}"
+        );
+        assert!(journal(&pool, run).await.is_empty());
+        assert_eq!(overrides_of(&pool, run).await, 0);
+        assert_eq!(album_state(&pool, album).await, "applied");
+    }
+    assert_eq!(shas(root, &rels), before);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn switch_root_deletes_copy_overrides(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (root, target) = (dir.path(), out.path().join("organized"));
+    // Album B gets a database-only match; its overrides are not the copy's.
+    let other_rels: Vec<String> = (1..=2).map(|i| format!("misc/other/{i}.flac")).collect();
+    for (i, r) in other_rels.iter().enumerate() {
+        make_audio(
+            root,
+            r,
+            tags(
+                "Other Artist",
+                "Other Album",
+                "x",
+                "1990",
+                &(i + 1).to_string(),
+            ),
+        );
+    }
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let other = album_of(&pool, &other_rels[0]).await;
+    let copy_run = copy_library(&pool, root, &target).await;
+    let c = ctx(&pool, root);
+
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Copy).await;
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    let mut other_applied = applied_for(&pool, &other_rels, "1990", "1990", 1990).await;
+    other_applied.album.title = "Other New".into();
+    other_applied.album.release_mbid = Uuid::from_u128(0x7777);
+    let db_run = make_run(&pool, other, &other_applied, Target::Db).await;
+    apply_run(&c, db_run, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(overrides_of(&pool, run).await, 3);
+    assert_eq!(overrides_of(&pool, db_run).await, 2);
+
+    organize::run_action(&c, copy_run, Action::SwitchRoot, &Hooks::default())
+        .await
+        .unwrap();
+    assert!(
+        odb::get_run(&pool, copy_run)
+            .await
+            .unwrap()
+            .unwrap()
+            .switched_at
+            .is_some()
+    );
+    assert_eq!(
+        overrides_of(&pool, run).await,
+        0,
+        "the copies' tags are the truth"
+    );
+    assert_eq!(overrides_of(&pool, db_run).await, 2, "another run's stay");
+    assert_eq!(run_row(&pool, run).await.state, "done");
+
+    // The tagged copies are the library: a full re-read keeps the match without overrides.
+    let report = scan::reconcile(&ctx(&pool, &target)).await.unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let copies: Vec<String> = sqlx::query_scalar(
+        "SELECT path FROM tracks WHERE album_id = $1 AND missing_since IS NULL ORDER BY path",
+    )
+    .bind(album)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(copies.len(), 3);
+    assert_eq!(album_title(&pool, album).await, "New Album");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn switch_refused_while_copy_apply_in_progress(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (root, target) = (dir.path(), out.path().join("organized"));
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let copy_run = copy_library(&pool, root, &target).await;
+    let originals = shas(root, &rels);
+    let c = ctx(&pool, root);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Copy).await;
+    let hooks = ApplyHooks {
+        stop_after_files: Some(1),
+        ..Default::default()
+    };
+    let res = apply_run(&c, run, &hooks).await;
+    assert!(matches!(res, Err(AutotagError::Interrupted)), "{res:?}");
+    assert_eq!(run_row(&pool, run).await.copy_run_id, Some(copy_run));
+
+    let res = organize::run_action(&c, copy_run, Action::SwitchRoot, &Hooks::default()).await;
+    assert!(
+        matches!(&res, Err(OrganizeError::Refused(m)) if m == COPY_IN_USE),
+        "{res:?}"
+    );
+    assert!(
+        odb::get_run(&pool, copy_run)
+            .await
+            .unwrap()
+            .unwrap()
+            .switched_at
+            .is_none()
+    );
+    assert_eq!(c.root.get(), root);
+
+    // The resumed apply finishes into the same copy; then the switch goes through.
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    let rows = journal(&pool, run).await;
+    assert!(
+        rows.iter()
+            .all(|r| r.state == "written" && r.root == "copy")
+    );
+    assert_eq!(shas(root, &rels), originals);
+    organize::run_action(&c, copy_run, Action::SwitchRoot, &Hooks::default())
+        .await
+        .unwrap();
+    assert_eq!(overrides_of(&pool, run).await, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn final_attempt_while_organizing_ends_done(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run_with(&pool, album, &applied, Target::Files, true).await;
+    let hooks = ApplyHooks {
+        fail_at: Some(FailPoint::BeforeOrganize),
+        ..Default::default()
+    };
+    let (c, cancel) = (ctx(&pool, root), CancellationToken::new());
+
+    let res = apply::run_job_with(&c, run, &hooks, &cancel, false).await;
+    assert!(
+        matches!(res, Err(kima_jobs::worker::JobError::Retry(_))),
+        "{res:?}"
+    );
+    assert_eq!(
+        run_row(&pool, run).await.state,
+        "organizing",
+        "retried later"
+    );
+
+    // The last attempt: the tags stand, so the run ends `done` with the reason.
+    let res = apply::run_job_with(&c, run, &hooks, &cancel, true).await;
+    assert!(matches!(res, Ok(true)), "{res:?}");
+    let r = run_row(&pool, run).await;
+    assert_eq!((r.state.as_str(), r.error.as_deref()), ("done", None));
+    assert_eq!(
+        r.summary,
+        Some(
+            json!({"written": 2, "skipped": 0, "failed": 0, "organized": 0,
+                    "organizeError": "forced failure (test hook)"})
+        )
+    );
+    assert_eq!(r.organizer_run_id, None);
+    assert_eq!(album_state(&pool, album).await, "applied");
+    assert_eq!(album_title(&pool, album).await, "New Album");
+    for row in journal(&pool, run).await {
+        assert_eq!(row.state, "written");
+        assert_reads_back(root, &row);
+    }
 }

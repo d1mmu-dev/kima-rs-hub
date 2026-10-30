@@ -106,8 +106,9 @@ pub async fn create_run(
     target_root: &str,
     created_by: Option<Uuid>,
 ) -> sqlx::Result<Run> {
+    let mut conn = pool.acquire().await?;
     insert_run(
-        pool,
+        &mut conn,
         id,
         mode,
         source_root,
@@ -131,8 +132,35 @@ pub async fn create_scoped_run(
     album_ids: &[Uuid],
     origin: &str,
 ) -> sqlx::Result<Run> {
+    let mut conn = pool.acquire().await?;
     insert_run(
-        pool,
+        &mut conn,
+        id,
+        mode,
+        source_root,
+        target_root,
+        created_by,
+        Some(album_ids),
+        origin,
+    )
+    .await
+}
+
+/// [`create_scoped_run`] in the caller's transaction (the autotag reorganize stores the run's id
+/// on its own run in the same transaction, so a crash never leaves two).
+#[allow(clippy::too_many_arguments)]
+pub async fn create_scoped_run_in(
+    conn: &mut PgConnection,
+    id: Uuid,
+    mode: &str,
+    source_root: &str,
+    target_root: &str,
+    created_by: Option<Uuid>,
+    album_ids: &[Uuid],
+    origin: &str,
+) -> sqlx::Result<Run> {
+    insert_run(
+        conn,
         id,
         mode,
         source_root,
@@ -146,7 +174,7 @@ pub async fn create_scoped_run(
 
 #[allow(clippy::too_many_arguments)]
 async fn insert_run(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     id: Uuid,
     mode: &str,
     source_root: &str,
@@ -166,7 +194,7 @@ async fn insert_run(
     .bind(created_by)
     .bind(album_ids)
     .bind(origin)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await
 }
 
@@ -290,11 +318,16 @@ pub async fn set_summary(pool: &PgPool, id: Uuid, summary: &Value) -> sqlx::Resu
     Ok(())
 }
 
-/// Runs left mid-way (`planning`, `applying`, `undoing`).
+/// Runs left mid-way (`planning`, `applying`, `undoing`), except the reorganize run of an
+/// autotag apply still `organizing`: that apply's own job resumes it (spec §19.9 step 5), and
+/// two jobs must never drive one run.
 pub async fn interrupted_runs(pool: &PgPool) -> sqlx::Result<Vec<Run>> {
     sqlx::query_as(&format!(
-        "SELECT {RUN_COLUMNS} FROM organizer_runs
-         WHERE state IN ('planning', 'applying', 'undoing') ORDER BY created_at"
+        "SELECT {RUN_COLUMNS} FROM organizer_runs o
+         WHERE state IN ('planning', 'applying', 'undoing')
+           AND NOT EXISTS (SELECT 1 FROM autotag_runs a
+                           WHERE a.organizer_run_id = o.id AND a.state = 'organizing')
+         ORDER BY created_at"
     ))
     .fetch_all(pool)
     .await
@@ -604,7 +637,8 @@ pub async fn paths_outside(pool: &PgPool, album_ids: &[Uuid]) -> sqlx::Result<Ve
 
 /// Switches the library to a copy run's target: every done track row's track takes its
 /// `to_path`, the run is stamped `switched_at`, and `system_settings.library_root` becomes the
-/// target root. One transaction. Returns how many tracks were re-pointed.
+/// target root, and the tag overrides of every autotag run that tagged this run's copies are
+/// deleted. One transaction. Returns how many tracks were re-pointed.
 pub async fn switch_root(pool: &PgPool, run_id: Uuid, target_root: &str) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
     // Two steps through a unique placeholder, so a track taking a path another track is
@@ -630,9 +664,58 @@ pub async fn switch_root(pool: &PgPool, run_id: Uuid, target_root: &str) -> sqlx
         .bind(run_id)
         .execute(&mut *tx)
         .await?;
+    // The tagged copies become the library: their tags are the truth now, so the overrides
+    // that showed a copy-target match on the old library go (spec §19.9).
+    crate::autotag::delete_copy_overrides(&mut tx, run_id).await?;
     crate::settings::set_library_root(&mut *tx, Some(target_root)).await?;
     tx.commit().await?;
     Ok(moved)
+}
+
+/// The whole-library copy an autotag `copy` apply writes into (spec §19.9): the newest
+/// copy-mode run that is `done`, not switched to and not scoped.
+pub async fn latest_copy_run(pool: &PgPool) -> sqlx::Result<Option<Run>> {
+    sqlx::query_as!(
+        Run,
+        "SELECT id, mode, state, source_root, target_root, created_by, created_at, finished_at,
+                switched_at, summary, error, album_ids, origin
+         FROM organizer_runs
+         WHERE mode = 'copy' AND state = 'done' AND switched_at IS NULL AND album_ids IS NULL
+         ORDER BY created_at DESC, id DESC LIMIT 1"
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// The copy of each of `tracks` that `run` holds, by track: the `to_path` (relative to the run's
+/// target) of its `done` row, or of an `unchanged` row the apply verified (a copy an earlier run
+/// made, which the switch also counts as copied). A track without one is not in the copy.
+pub async fn copy_rows_for_tracks(
+    pool: &PgPool,
+    run_id: Uuid,
+    tracks: &[Uuid],
+) -> sqlx::Result<std::collections::HashMap<Uuid, String>> {
+    let rows = sqlx::query!(
+        r#"SELECT track_id AS "track_id!", to_path FROM organizer_journal
+           WHERE run_id = $1 AND track_id = ANY($2)
+             AND (state = 'done' OR (state = 'unchanged' AND sha256 IS NOT NULL))
+           ORDER BY id"#,
+        run_id,
+        tracks
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.track_id, r.to_path)).collect())
+}
+
+/// How many rows of a run are `done` (the files it moved or copied).
+pub async fn done_count(pool: &PgPool, run_id: Uuid) -> sqlx::Result<i64> {
+    sqlx::query_scalar!(
+        r#"SELECT count(*) AS "n!" FROM organizer_journal WHERE run_id = $1 AND state = 'done'"#,
+        run_id
+    )
+    .fetch_one(pool)
+    .await
 }
 
 /// Track paths that are staging names of rows left parked mid-run (`staged`, `undo_staged`).

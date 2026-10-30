@@ -198,6 +198,110 @@ async fn run_action_cancellable(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Preview then apply (the autotag reorganize)
+
+/// The reorganize run's preview went out of date before it was applied.
+pub const REORGANIZE_STALE: &str = "The reorganize preview went out of date; preview again";
+/// The reorganize plan claims a name another file holds (it would be suffixed ` (2)`): with no
+/// human step, the run is left `previewed` for a review in Settings > Organize.
+pub const REORGANIZE_COLLISION: &str =
+    "The organized names collide with other files; review the preview in Settings > Organize";
+/// The reorganize plan holds no track of the album.
+pub const REORGANIZE_EMPTY: &str = "Nothing to reorganize: the album has no files to plan";
+
+/// Plans and applies `run_id` with no human step in between (spec §19.9 step 5, the autotag
+/// apply's reorganize of one album): `planning` is previewed, a `previewed` run is applied when
+/// its plan holds a track of the album and no collision, an `applying` run (an interrupted
+/// call) resumes from its journal, a `done` run is left as it is. Refused (nothing touched by
+/// this call) for a `superseded` preview, an empty plan or one with collisions (the run stays
+/// `previewed`, so it can be reviewed and applied by hand), a `failed` run (its error) and any
+/// other state. A failure while applying ends the run `failed` (as the organizer job does) and
+/// is returned; [`OrganizeError::Interrupted`] once `cancel` fires, the run left resumable.
+pub async fn preview_then_apply(
+    ctx: &LibraryCtx,
+    run_id: Uuid,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    preview_then_apply_with(ctx, run_id, &Hooks::default(), cancel).await
+}
+
+/// [`preview_then_apply`] with test hooks (passed to the apply).
+pub async fn preview_then_apply_with(
+    ctx: &LibraryCtx,
+    run_id: Uuid,
+    hooks: &Hooks,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let load = || async {
+        db::get_run(&ctx.pool, run_id)
+            .await?
+            .ok_or_else(|| OrganizeError::Invalid(format!("organizer run {run_id} not found")))
+    };
+    let mut run = load().await?;
+    if run.state == "planning" {
+        if cancel.is_cancelled() {
+            return Err(OrganizeError::Interrupted);
+        }
+        if let Err(e) = preview(ctx, run).await {
+            warn!(run = %run_id, error = %e, "reorganize preview failed");
+            db::fail_run(&ctx.pool, run_id, &e.to_string()).await?;
+            return Err(e);
+        }
+        run = load().await?;
+    }
+    match run.state.as_str() {
+        "done" => return Ok(()),
+        "applying" => {}
+        "previewed" => {
+            let rows = db::all_rows(&ctx.pool, run.id).await?;
+            if !rows.iter().any(|r| r.track_id.is_some()) {
+                return Err(OrganizeError::Refused(REORGANIZE_EMPTY.into()));
+            }
+            if rows.iter().any(|r| r.collision) {
+                return Err(OrganizeError::Refused(REORGANIZE_COLLISION.into()));
+            }
+            if cancel.is_cancelled() {
+                return Err(OrganizeError::Interrupted);
+            }
+            if !db::start_apply(&ctx.pool, run.id).await? {
+                // Superseded (or taken) between the read and the update.
+                return Err(OrganizeError::Refused(REORGANIZE_STALE.into()));
+            }
+            run = load().await?;
+        }
+        "superseded" => return Err(OrganizeError::Refused(REORGANIZE_STALE.into())),
+        "failed" => {
+            return Err(OrganizeError::Refused(
+                run.error
+                    .unwrap_or_else(|| "the reorganize run failed".into()),
+            ));
+        }
+        other => {
+            return Err(OrganizeError::Refused(format!(
+                "the reorganize run is {other}"
+            )));
+        }
+    }
+    match apply(ctx, run, hooks, cancel).await {
+        Ok(()) => {}
+        Err(OrganizeError::Interrupted) => return Err(OrganizeError::Interrupted),
+        Err(e) => {
+            warn!(run = %run_id, error = %e, "reorganize apply failed");
+            db::fail_run(&ctx.pool, run_id, &e.to_string()).await?;
+            return Err(e);
+        }
+    }
+    // `finish` ends it `failed` when files are left parked.
+    let run = load().await?;
+    match run.state.as_str() {
+        "done" => Ok(()),
+        _ => Err(OrganizeError::Refused(run.error.unwrap_or_else(|| {
+            format!("the reorganize run is {}", run.state)
+        }))),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Preview
 
 /// `rel` joined to `root`, refusing anything but plain components.
@@ -1674,6 +1778,8 @@ async fn uncopy_rows(r: &mut Runner<'_>) -> Result<()> {
 
 /// Why a scoped run cannot become the library (shared with the API's answer).
 pub const SCOPED_SWITCH: &str = "Only a whole-library copy can become the library";
+/// An autotag apply is tagging the copy (spec §19.9).
+pub const COPY_IN_USE: &str = "An autotag apply is tagging this copy; wait for it to finish";
 
 /// Copy runs only, once `done`: tracks take their copied paths, the library root becomes the
 /// target (stored in system settings and switched in the running process, watcher included),
@@ -1689,6 +1795,11 @@ async fn switch_root(ctx: &LibraryCtx, run: Run) -> Result<()> {
     }
     if run.switched_at.is_some() {
         return Ok(());
+    }
+    // An autotag apply tagging these copies is mid-way: its journal and overrides would end up
+    // half in the old library and half in the new one.
+    if kima_db::autotag::copy_run_in_use(&ctx.pool, run.id).await? {
+        return Err(OrganizeError::Refused(COPY_IN_USE.into()));
     }
     // An `unchanged` copy was never written by this run: it counts as copied only while it
     // still holds what the apply verified.

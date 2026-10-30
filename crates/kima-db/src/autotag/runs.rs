@@ -294,6 +294,49 @@ pub async fn foreign_override(
     .await
 }
 
+/// Whether the album row holds an applied match (`identity_source = 'autotag'`): a re-match must
+/// undo it first. `false` when the album is gone.
+pub async fn album_identity_applied(conn: &mut PgConnection, album: Uuid) -> sqlx::Result<bool> {
+    Ok(sqlx::query_scalar!(
+        r#"SELECT identity_source = 'autotag' AS "a!" FROM albums WHERE id = $1"#,
+        album
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .unwrap_or(false))
+}
+
+/// Records the copy-mode organizer run a `copy` apply writes into, in the caller's transaction
+/// (with the journal, so a resumed run writes into the same copy).
+pub async fn set_copy_run(conn: &mut PgConnection, run: Uuid, copy_run: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE autotag_runs SET copy_run_id = $2 WHERE id = $1",
+        run,
+        copy_run
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Records the reorganize's organizer run, in the caller's transaction (the one that creates
+/// it). `false` when the run already has one: never two organizer runs for one apply.
+pub async fn set_organizer_run(
+    conn: &mut PgConnection,
+    run: Uuid,
+    organizer_run: Uuid,
+) -> sqlx::Result<bool> {
+    let r = sqlx::query!(
+        "UPDATE autotag_runs SET organizer_run_id = $2
+         WHERE id = $1 AND organizer_run_id IS NULL",
+        run,
+        organizer_run
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
 /// The state of the album's newest run other than `run` that did not fail (a refused run
 /// changed nothing), if it has one.
 pub async fn latest_other_run_state(

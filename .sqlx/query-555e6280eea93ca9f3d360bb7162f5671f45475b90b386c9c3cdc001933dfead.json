@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n             SELECT 1 FROM autotag_runs\n             WHERE copy_run_id = $1 AND state IN ('writing', 'organizing', 'undoing')) AS \"e!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "e!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "555e6280eea93ca9f3d360bb7162f5671f45475b90b386c9c3cdc001933dfead"
+}

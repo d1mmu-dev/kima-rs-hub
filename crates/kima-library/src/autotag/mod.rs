@@ -22,3 +22,6 @@ pub const CHANGED_OUTSIDE: &str = "changed outside kima-rs";
 /// An album whose tracks hold another run's tag overrides: a new apply would replace them and
 /// an undo of it would lose them, so a re-match requires undoing first.
 pub const APPLIED_MATCH_EXISTS: &str = "This album already has an applied match; undo it first";
+/// `reorganize` moves the library files (spec §19.9 step 5): only with the `files` target.
+pub const REORGANIZE_FILES_ONLY: &str =
+    "Reorganizing is only available when tagging the library files";

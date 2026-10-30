@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT track_id AS \"track_id!\", to_path FROM organizer_journal\n           WHERE run_id = $1 AND track_id = ANY($2)\n             AND (state = 'done' OR (state = 'unchanged' AND sha256 IS NOT NULL))\n           ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "track_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "to_path",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "ba7ee721191e717a12497f3b12be8ce640a1cb5259581f7fe72dbe69819c9492"
+}

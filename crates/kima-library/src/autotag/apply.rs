@@ -1,30 +1,49 @@
 //! The apply job (spec §19.9, on the concurrency-1 `library` queue): writes a run's §19.6 values
-//! into the album's files (`files`) or as tag overrides (`db`), then updates the album row in
-//! place (§19.7) and re-reads the files.
+//! into the album's files (`files`), into their organized copies (`copy`) or as tag overrides
+//! (`db`), then updates the album row in place (§19.7), re-reads the files and, with
+//! `reorganize`, re-files the album.
 //!
-//! Steps (`files`):
+//! Steps (`files`; `copy` the same on the copies):
 //! 1. pre-check, before any file is touched: the target is available, the candidate belongs to
-//!    the album, no other run of the album is working, the album's present tracks are exactly the
-//!    run's tracks (else [`TRACKS_CHANGED`]), every file is writable by kima-rs
-//!    ([`album_refusal`]) and the new identity collides with no other album;
+//!    the album, no other run of the album is working, no applied match stands (another run's
+//!    overrides, a failed run that needs undo, or the album row's `identity_source='autotag'`;
+//!    else [`APPLIED_MATCH_EXISTS`]), the album's present tracks are exactly the run's tracks
+//!    (else [`TRACKS_CHANGED`]), every file is writable by kima-rs ([`album_refusal`]) and the
+//!    new identity collides with no other album;
 //! 2. journal: one `planned` row per file, committed before any file is touched;
 //! 3. per file: the file must still hash to `before_sha` (else the row fails
 //!    [`CHANGED_OUTSIDE`] and the others go on), then the safe write and, in one transaction, the
 //!    row `written`; the cancel token is checked between files;
 //! 4. one transaction: the album identity (`apply_identity`) and the tag overrides (all §19.6
-//!    values for `db`; the applied year for every file the `files` target wrote, so a reissue's
-//!    tracks, whose files say the release date, keep deriving the applied year); then
+//!    values for `db` and `copy`; the applied year for every file the `files` target wrote, so a
+//!    reissue's tracks, whose files say the release date, keep deriving the applied year); then
 //!    `prune_empty` and the re-read;
+//! 5. `reorganize` (`files` only): the run goes `organizing`, a scoped move organizer run of the
+//!    album (`origin='autotag'`) is created with its id stored on the run in one transaction,
+//!    then previewed and applied with no human step
+//!    ([`organize::apply::preview_then_apply`](crate::organize::apply::preview_then_apply));
 //! 6. the album `applied`, the run `done` with `{written, skipped, failed, organized}`.
 //!
-//! Step 5 (reorganize) and the `copy` target are Task 17; the undo job is Task 18.
+//! **The `copy` target** writes only the copies of the newest finished, unswitched
+//! whole-library copy run (`copy_run_id`, recorded with the journal): journal rows are
+//! `root='copy'` with paths relative to that run's target, and nothing under the library root
+//! is ever opened for writing. The library files keep their tags; the overrides show the match
+//! until the organizer's `switch-root` makes the copies the library and deletes them.
 //!
-//! **Crash recovery.** The run stays `writing` until step 6. A job that finds journal rows
+//! **A failed reorganize** never hides or rolls back the tags: the files, identity and
+//! re-read are done by then, so the run still ends `done`, with what moved as `organized` and
+//! the reason as `organizeError` in its summary (spec §19.9 step 5 has no failure path of its
+//! own; step 6 follows step 4 whatever the re-filing does). The organizer run stays as the
+//! organizer left it (`previewed` for a refused plan, `failed` after a failed apply), so it can
+//! be reviewed in Settings > Organize.
+//!
+//! **Crash recovery.** The run stays `writing` until step 5. A job that finds journal rows
 //! resumes: it deletes leftover `.kima-tag-<id>.*` copies, redoes a `planned` row whose file is
 //! still at `before_sha`, marks `written` one whose touched keys already read back the new values
 //! with the planned audio, and fails any other with [`CHANGED_OUTSIDE`]. A run is never applied
 //! twice: a finished run's job does nothing, and `apply_identity` answers a run that already
-//! has `album_before` without writing (crash safety only).
+//! has `album_before` without writing (crash safety only). A run found `organizing` goes
+//! straight to step 5 and resumes its organizer run (never a second one).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -41,19 +60,21 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::capability::album_refusal;
+use super::capability::{album_refusal, copy_refusal, usable_copy_run};
 use super::events::{AutotagEvents, AutotagJob};
 use super::journal::{self, RowCheck};
-use super::{APPLIED_MATCH_EXISTS, CHANGED_OUTSIDE, FILES_READ_ONLY, TRACKS_CHANGED};
+use super::{
+    APPLIED_MATCH_EXISTS, CHANGED_OUTSIDE, COPY_FIRST, FILES_READ_ONLY, REORGANIZE_FILES_ONLY,
+    TRACKS_CHANGED,
+};
 use crate::jobs;
 use crate::names;
-use crate::organize::apply::{SYMLINK_NOTE, writable};
+use crate::organize::apply::{self as organize, OrganizeError, SYMLINK_NOTE, writable};
 use crate::scan::{self, LibraryCtx, ReadCause};
 use crate::tags::TagOverrides;
 use crate::tagwrite::{self, Id3Version, TagValues, TagWriteError, WriteHooks};
+use kima_db::organizer::{self as odb, Run as OrganizerRun};
 
-/// The `copy` target until Task 17 wires it.
-pub const COPY_NOT_YET: &str = "Tagging an organized copy is not available yet";
 /// Another apply or undo of the album is still working.
 pub const ALBUM_BUSY: &str = "Another apply or undo of this album is in progress";
 /// The run's candidate belongs to another album.
@@ -75,6 +96,8 @@ pub struct ApplyHooks {
     pub after_journal: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Fail there as a database or I/O error would.
     pub fail_at: Option<FailPoint>,
+    /// Passed to the reorganize's organizer apply (step 5).
+    pub organize: organize::Hooks,
 }
 
 /// Where [`ApplyHooks::fail_at`] fails.
@@ -86,6 +109,8 @@ pub enum FailPoint {
     BeforeIdentity,
     /// Right after the identity transaction committed.
     AfterIdentity,
+    /// An `organizing` run, right before its organizer run is made or resumed.
+    BeforeOrganize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -180,11 +205,21 @@ pub async fn run_job_with(
         Err(e) if final_attempt => {
             let msg = e.to_string();
             warn!(run = %run_id, error = %msg, "autotag apply failed on its final attempt");
-            if let Ok(Some(run)) = adb::get_run(&ctx.pool, run_id).await
-                && run.state == RunState::Writing.as_str()
-                && let Err(e) = settle_failed(ctx, &run, &msg).await
-            {
-                warn!(run = %run_id, "cannot settle the failed run: {e}");
+            match adb::get_run(&ctx.pool, run_id).await {
+                Ok(Some(run)) if run.state == RunState::Writing.as_str() => {
+                    if let Err(e) = settle_failed(ctx, &run, &msg).await {
+                        warn!(run = %run_id, "cannot settle the failed run: {e}");
+                    }
+                }
+                // The tags, identity and re-read are done: only the re-filing failed. The run
+                // ends `done`, the reason in its summary (see the module doc).
+                Ok(Some(run)) if run.state == RunState::Organizing.as_str() => {
+                    match finish_organized(ctx, &run, Some(&msg)).await {
+                        Ok(()) => return Ok(true),
+                        Err(e) => warn!(run = %run_id, "cannot finish the run: {e}"),
+                    }
+                }
+                _ => {}
             }
             Err(JobError::Permanent(msg))
         }
@@ -256,6 +291,43 @@ pub async fn settle_failed(
     Ok(state)
 }
 
+/// `{written, skipped, failed, organized: 0}` from the run's journal (the summary of a `files`
+/// or `copy` run; only those reach step 5).
+async fn journal_summary(ctx: &LibraryCtx, run: Uuid) -> Result<Value> {
+    let rows = jdb::rows(&ctx.pool, run).await?;
+    let n = |s: &str| rows.iter().filter(|r| r.state == s).count();
+    Ok(
+        json!({"written": n("written"), "skipped": n("skipped"), "failed": n("failed"),
+              "organized": 0}),
+    )
+}
+
+/// Ends an `organizing` run (step 6): the album `applied`, the run `done` with the journal's
+/// counts, `organized` = the files its organizer run moved, and `organizeError` when the
+/// re-filing did not complete.
+async fn finish_organized(
+    ctx: &LibraryCtx,
+    run: &RunRow,
+    organize_error: Option<&str>,
+) -> Result<()> {
+    let mut summary = journal_summary(ctx, run.id).await?;
+    let organizer_run = adb::get_run(&ctx.pool, run.id)
+        .await?
+        .and_then(|r| r.organizer_run_id);
+    if let Some(id) = organizer_run {
+        summary["organized"] = json!(odb::done_count(&ctx.pool, id).await?);
+    }
+    if let Some(e) = organize_error {
+        // Users see it: files relative to the library (the organizer's errors may quote the
+        // absolute paths).
+        summary["organizeError"] = json!(journal::scrub(&ctx.root.get(), e));
+    }
+    adb::mark_album_applied(&ctx.pool, run.album_id).await?;
+    adb::finish_run(&ctx.pool, run.id, RunState::Done, &summary, None).await?;
+    info!(run = %run.id, album = %run.album_id, %summary, "autotag apply finished");
+    Ok(())
+}
+
 /// Runs (or resumes) the apply of `run_id`; see the module doc. A `queued` run moves to
 /// `writing`; a run in any state but `writing`/`organizing` is left alone (a finished run is
 /// never applied again).
@@ -301,6 +373,26 @@ pub async fn run_apply(
         }
         r => r,
     }
+}
+
+/// What step 1 found.
+struct Precheck {
+    /// Track id → library path, for the run's tracks.
+    paths: HashMap<Uuid, String>,
+    /// `copy`: the copy run written into, and each track's copy path (relative to its target).
+    copy: Option<(OrganizerRun, HashMap<Uuid, String>)>,
+}
+
+/// The §19.6 values of every applied track as tag overrides (`db` and `copy`).
+fn db_overrides(applied: &Applied) -> Result<Vec<(Uuid, Value)>> {
+    applied
+        .tracks
+        .iter()
+        .map(|t| {
+            let o = TagOverrides::from_applied(&applied.album, t);
+            Ok((t.track_id, serde_json::to_value(o).map_err(io)?))
+        })
+        .collect()
 }
 
 /// How the identity transaction ended.
@@ -372,24 +464,37 @@ impl Job<'_> {
             AutotagError::Refused(format!("the run's stored values cannot be read: {e}"))
         })?;
         let target = target_of(self.run)?;
-        if target == Target::Copy {
-            // Task 17: the copy target writes the copies of a done copy-mode organizer run.
-            return Err(AutotagError::Refused(COPY_NOT_YET.to_string()));
+        // Reorganizing moves library files: never with the copies or the database alone (the
+        // request refuses it too; this is the job's own guard).
+        if self.run.reorganize && target != Target::Files {
+            return Err(AutotagError::Refused(REORGANIZE_FILES_ONLY.to_string()));
         }
-        let root = self.ctx.root.get();
+        if self.run.state == RunState::Organizing.as_str() {
+            // Steps 1-4 are done (the files may already have moved): only step 5 is left.
+            return self.organize_and_finish().await;
+        }
         let keys = IdentityKeys {
             artist_key: names::key(&applied.album.artist),
             title_key: names::key(&applied.album.title),
         };
         let mut rows = jdb::rows(&self.ctx.pool, self.run.id).await?;
         let resumed = !rows.is_empty();
+        // Where the files are written: the library, or the copy the journal was planned in.
+        let mut root = match target {
+            Target::Copy if resumed => self.resumed_copy_root().await?,
+            _ => self.ctx.root.get(),
+        };
+        let read_only = match target {
+            Target::Copy => COPY_FIRST,
+            _ => FILES_READ_ONLY,
+        };
         // Checked whenever a file is still to be written: a resumed run whose files are all
         // done goes on to the identity step whatever the mount says now.
         let to_write = !resumed || rows.iter().any(|r| r.state == "planned");
-        if target == Target::Files && to_write && !self.files_writable(&root).await {
-            if !resumed {
-                return Err(AutotagError::Refused(FILES_READ_ONLY.to_string()));
-            }
+        if target == Target::Files && !resumed && !self.files_writable(&root).await {
+            return Err(AutotagError::Refused(FILES_READ_ONLY.to_string()));
+        }
+        if target != Target::Db && resumed && to_write && !self.files_writable(&root).await {
             // A resumed run already wrote some files: read-only is per file. Each file left is
             // checked (reading only) by the crash rules: one already holding the new tags (a
             // crash after its rename) is `written`, so it is undone with the others; one still
@@ -405,8 +510,7 @@ impl Job<'_> {
                         tx.commit().await?;
                     }
                     RowCheck::Write => {
-                        jdb::set_row_state(&self.ctx.pool, r.id, "failed", Some(FILES_READ_ONLY))
-                            .await?
+                        jdb::set_row_state(&self.ctx.pool, r.id, "failed", Some(read_only)).await?
                     }
                     RowCheck::Changed => {
                         jdb::set_row_state(&self.ctx.pool, r.id, "failed", Some(CHANGED_OUTSIDE))
@@ -425,11 +529,24 @@ impl Job<'_> {
             }
         } else {
             // Step 1 (also again after a crash before the journal commit: nothing was touched).
-            let paths = self.precheck(&applied, target, &keys).await?;
+            let pre = self.precheck(&applied, target, &keys).await?;
             match target {
-                Target::Files => {
-                    let planned = self.plan(&root, &applied, &paths).await?;
+                Target::Files | Target::Copy => {
+                    let (paths, copy_run, root_name) = match pre.copy {
+                        Some((run, copies)) => (copies, Some(run), "copy"),
+                        None => (pre.paths, None, "library"),
+                    };
+                    if let Some(run) = &copy_run {
+                        root = PathBuf::from(&run.target_root);
+                    }
+                    let mut planned = self.plan(&root, &applied, &paths).await?;
+                    for row in &mut planned {
+                        row.root = root_name.to_string();
+                    }
                     let mut tx = self.ctx.pool.begin().await?;
+                    if let Some(run) = &copy_run {
+                        adb::set_copy_run(&mut tx, self.run.id, run.id).await?;
+                    }
                     jdb::insert_planned(&mut tx, self.run.id, &planned).await?;
                     tx.commit().await?;
                     if let Some(h) = &self.hooks.after_journal {
@@ -437,13 +554,12 @@ impl Job<'_> {
                     }
                     rows = jdb::rows(&self.ctx.pool, self.run.id).await?;
                 }
-                Target::Db => db_paths = paths.into_values().collect(),
-                Target::Copy => unreachable!("refused above"),
+                Target::Db => db_paths = pre.paths.into_values().collect(),
             }
         }
 
         let summary = match target {
-            Target::Files => {
+            Target::Files | Target::Copy => {
                 self.fail_point(FailPoint::BeforeWrites)?;
                 self.write_rows(&root, &rows, resumed).await?;
                 let rows = jdb::rows(&self.ctx.pool, self.run.id).await?;
@@ -451,52 +567,58 @@ impl Job<'_> {
                 if n("written") + n("skipped") == 0 {
                     return Err(AutotagError::Refused(NOTHING_WRITTEN.to_string()));
                 }
-                let year = (!applied.mbids_only)
-                    .then_some(applied.album.year)
-                    .flatten();
-                let overrides: Vec<(Uuid, Value)> = match year {
-                    Some(y) => rows
-                        .iter()
-                        .filter(|r| r.state == "written" || r.state == "skipped")
-                        .filter_map(|r| r.track_id)
-                        .map(|t| {
-                            let o = TagOverrides {
-                                year: Some(y),
-                                ..TagOverrides::default()
-                            };
-                            Ok((t, serde_json::to_value(o).map_err(io)?))
-                        })
-                        .collect::<Result<_>>()?,
-                    None => Vec::new(),
+                let overrides: Vec<(Uuid, Value)> = if target == Target::Copy {
+                    // The library files keep their tags: the overrides show the match (as
+                    // `db`) until a switch makes the tagged copies the library.
+                    db_overrides(&applied)?
+                } else {
+                    let year = (!applied.mbids_only)
+                        .then_some(applied.album.year)
+                        .flatten();
+                    match year {
+                        Some(y) => rows
+                            .iter()
+                            .filter(|r| r.state == "written" || r.state == "skipped")
+                            .filter_map(|r| r.track_id)
+                            .map(|t| {
+                                let o = TagOverrides {
+                                    year: Some(y),
+                                    ..TagOverrides::default()
+                                };
+                                Ok((t, serde_json::to_value(o).map_err(io)?))
+                            })
+                            .collect::<Result<_>>()?,
+                        None => Vec::new(),
+                    }
                 };
                 self.fail_point(FailPoint::BeforeIdentity)?;
                 self.identity(&keys, &overrides).await?;
                 self.fail_point(FailPoint::AfterIdentity)?;
-                let (mut tag_write, mut scan_read) = (Vec::new(), Vec::new());
-                for r in &rows {
-                    match r.state.as_str() {
-                        "written" | "skipped" => tag_write.push(r.path.clone()),
-                        _ => scan_read.push(r.path.clone()),
+                if target == Target::Copy {
+                    // The library files did not change: a plain re-read, through the overrides.
+                    let mut paths = self.library_paths().await?;
+                    paths.sort();
+                    self.prune_and_reread(&paths, ReadCause::Scan).await?;
+                } else {
+                    let (mut tag_write, mut scan_read) = (Vec::new(), Vec::new());
+                    for r in &rows {
+                        match r.state.as_str() {
+                            "written" | "skipped" => tag_write.push(r.path.clone()),
+                            _ => scan_read.push(r.path.clone()),
+                        }
                     }
-                }
-                self.prune_and_reread(&tag_write, ReadCause::TagWrite)
-                    .await?;
-                if !scan_read.is_empty() {
-                    self.reread(&scan_read, ReadCause::Scan).await?;
+                    self.prune_and_reread(&tag_write, ReadCause::TagWrite)
+                        .await?;
+                    if !scan_read.is_empty() {
+                        self.reread(&scan_read, ReadCause::Scan).await?;
+                    }
                 }
                 json!({"written": n("written"), "skipped": n("skipped"), "failed": n("failed"),
                        "organized": 0})
             }
             Target::Db => {
                 self.total = applied.tracks.len();
-                let overrides: Vec<(Uuid, Value)> = applied
-                    .tracks
-                    .iter()
-                    .map(|t| {
-                        let o = TagOverrides::from_applied(&applied.album, t);
-                        Ok((t.track_id, serde_json::to_value(o).map_err(io)?))
-                    })
-                    .collect::<Result<_>>()?;
+                let overrides = db_overrides(&applied)?;
                 self.fail_point(FailPoint::BeforeIdentity)?;
                 self.identity(&keys, &overrides).await?;
                 self.fail_point(FailPoint::AfterIdentity)?;
@@ -505,16 +627,122 @@ impl Job<'_> {
                 self.done = self.total;
                 json!({"written": overrides.len(), "skipped": 0, "failed": 0, "organized": 0})
             }
-            Target::Copy => unreachable!("refused above"),
         };
 
-        // Step 5 (reorganize, files only) is Task 17's: it runs here, moving the run to
-        // `organizing` and storing `organizer_run_id`.
+        // Step 5: re-file the album's files under their new names.
+        if self.run.reorganize {
+            adb::transition_run(
+                &self.ctx.pool,
+                self.run.id,
+                &[RunState::Writing],
+                RunState::Organizing,
+            )
+            .await?;
+            return self.organize_and_finish().await;
+        }
         adb::mark_album_applied(&self.ctx.pool, self.run.album_id).await?;
         adb::finish_run(&self.ctx.pool, self.run.id, RunState::Done, &summary, None).await?;
         self.finish_event(RunState::Done.as_str());
         info!(run = %self.run.id, album = %self.run.album_id, %summary, "autotag apply finished");
         Ok(())
+    }
+
+    /// Step 5 and step 6 of an `organizing` run. An interruption (or a database error, retried)
+    /// leaves the run `organizing`, to resume the same organizer run; any other failure of the
+    /// re-filing ends the run `done` with `organizeError` (see the module doc).
+    async fn organize_and_finish(&mut self) -> Result<()> {
+        if self.total == 0 {
+            // A resumed run: the files were all handled before.
+            self.total = jdb::rows(&self.ctx.pool, self.run.id).await?.len();
+            self.done = self.total;
+        }
+        self.progress(RunState::Organizing.as_str());
+        self.fail_point(FailPoint::BeforeOrganize)?;
+        let error = match self.organize().await {
+            Ok(()) => None,
+            Err(OrganizeError::Interrupted) => return Err(AutotagError::Interrupted),
+            Err(OrganizeError::Db(e)) => return Err(AutotagError::Db(e)),
+            Err(e) => {
+                let msg = e.to_string();
+                warn!(run = %self.run.id, reason = %msg, "the reorganize did not complete");
+                Some(msg)
+            }
+        };
+        finish_organized(self.ctx, self.run, error.as_deref()).await?;
+        self.finish_event(RunState::Done.as_str());
+        Ok(())
+    }
+
+    /// The reorganize: the run's organizer run (made here, with its id stored on the run in the
+    /// same transaction, unless it has one), previewed then applied.
+    async fn organize(&self) -> std::result::Result<(), OrganizeError> {
+        let pool = &self.ctx.pool;
+        let current = adb::get_run(pool, self.run.id)
+            .await?
+            .and_then(|r| r.organizer_run_id);
+        let organizer_run = match current {
+            Some(id) => id,
+            None => {
+                let root = self.ctx.root.get();
+                if !self.files_writable(&root).await {
+                    return Err(OrganizeError::Refused(FILES_READ_ONLY.to_string()));
+                }
+                let root = root.display().to_string();
+                let id = Uuid::now_v7();
+                let mut tx = pool.begin().await?;
+                odb::create_scoped_run_in(
+                    &mut tx,
+                    id,
+                    odb::MODE_MOVE,
+                    &root,
+                    &root,
+                    self.run.created_by,
+                    &[self.run.album_id],
+                    "autotag",
+                )
+                .await?;
+                if !adb::set_organizer_run(&mut tx, self.run.id, id).await? {
+                    // Another call made it first (cannot happen on the concurrency-1 queue):
+                    // keep that one.
+                    tx.rollback().await?;
+                    return Err(OrganizeError::Invalid(
+                        "the run already has a reorganize run".to_string(),
+                    ));
+                }
+                tx.commit().await?;
+                info!(run = %self.run.id, organizer_run = %id, "reorganize run created");
+                id
+            }
+        };
+        organize::preview_then_apply_with(
+            self.ctx,
+            organizer_run,
+            &self.hooks.organize,
+            self.cancel,
+        )
+        .await
+    }
+
+    /// A resumed `copy` run's target: the copy run recorded with its journal, still `done` and
+    /// not switched to; else [`COPY_FIRST`].
+    async fn resumed_copy_root(&self) -> Result<PathBuf> {
+        let refused = || AutotagError::Refused(COPY_FIRST.to_string());
+        let id = self.run.copy_run_id.ok_or_else(refused)?;
+        let run = odb::get_run(&self.ctx.pool, id)
+            .await?
+            .ok_or_else(refused)?;
+        if run.state != "done" || run.switched_at.is_some() {
+            return Err(refused());
+        }
+        Ok(PathBuf::from(run.target_root))
+    }
+
+    /// The library paths of the album's present tracks.
+    async fn library_paths(&self) -> Result<Vec<String>> {
+        Ok(adb::local_album(&self.ctx.pool, self.run.album_id)
+            .await?
+            .map(|a| a.tracks.into_iter().map(|t| t.path).collect())
+            .unwrap_or_default())
     }
 
     fn fail_point(&self, at: FailPoint) -> Result<()> {
@@ -532,14 +760,14 @@ impl Job<'_> {
     }
 
     /// Step 1 under the row locks (tracks, then the album; released at the commit, before any
-    /// file is touched): the candidate's album, no other working run, the track set, the
-    /// collision; then the files check. Answers track id → path for the run's tracks.
+    /// file is touched): the candidate's album, no other working run, no applied match, the
+    /// track set, the collision; then the files check (for `copy`: the copy run and its copies).
     async fn precheck(
         &mut self,
         applied: &Applied,
         target: Target,
         keys: &IdentityKeys,
-    ) -> Result<HashMap<Uuid, String>> {
+    ) -> Result<Precheck> {
         let album = self.run.album_id;
         let mut tx = self.ctx.pool.begin().await?;
         let Some(present) = adb::lock_album_tracks(&mut tx, album).await? else {
@@ -559,10 +787,15 @@ impl Job<'_> {
         }
         // Another run's overrides would be replaced (and lost when this run is undone), or a
         // failed run's files and identity would become this run's `before`.
+        // The album row's own applied identity counts too (a done run that left no override,
+        // e.g. a `files` run without a year): unless it is this run's (`album_before` set: a
+        // `db` run resumed after its identity transaction).
         if adb::foreign_override(&mut tx, album, self.run.id).await?
             || adb::needs_undo_run(&mut tx, album, self.run.id)
                 .await?
                 .is_some()
+            || (self.run.album_before.is_none()
+                && adb::album_identity_applied(&mut tx, album).await?)
         {
             return Err(AutotagError::Refused(APPLIED_MATCH_EXISTS.to_string()));
         }
@@ -581,19 +814,32 @@ impl Job<'_> {
         }
         tx.commit().await?;
 
+        let mut copy = None;
         if target != Target::Db {
             let local = adb::local_album(&self.ctx.pool, album)
                 .await?
                 .ok_or_else(|| AutotagError::Refused(TRACKS_CHANGED.to_string()))?;
-            if let Some(reason) = album_refusal(self.ctx, &local, target).await? {
+            if target == Target::Copy {
+                let run = usable_copy_run(self.ctx)
+                    .await?
+                    .ok_or_else(|| AutotagError::Refused(COPY_FIRST.to_string()))?;
+                let copies = copy_refusal(self.ctx, &local, &run)
+                    .await?
+                    .map_err(AutotagError::Refused)?;
+                copy = Some((run, copies));
+            } else if let Some(reason) = album_refusal(self.ctx, &local, target).await? {
                 return Err(AutotagError::Refused(reason));
             }
         }
-        Ok(present.into_iter().map(|t| (t.id, t.path)).collect())
+        Ok(Precheck {
+            paths: present.into_iter().map(|t| (t.id, t.path)).collect(),
+            copy,
+        })
     }
 
-    /// Step 2's rows, one per track, in path order. A file that cannot be read refuses the
-    /// apply (nothing is touched yet), naming its library-relative path.
+    /// Step 2's rows, one per track (`paths`: track id → path under `root`), in path order. A
+    /// file that cannot be read refuses the apply (nothing is touched yet), naming its path
+    /// relative to `root`. The rows say `root='library'`; the caller sets `copy`.
     async fn plan(
         &self,
         root: &Path,

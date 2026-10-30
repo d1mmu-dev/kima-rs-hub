@@ -2439,3 +2439,153 @@ async fn final_attempt_while_organizing_ends_done(pool: PgPool) {
         assert_reads_back(root, &row);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Task 17 fix round 1
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn copy_unchanged_rows_not_offered(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (root, target) = (dir.path(), out.path().join("organized"));
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    let first = copy_library(&pool, root, &target).await;
+    let copies = copy_paths(&pool, first, &rels).await;
+    // A second copy run into the same target: every row `unchanged` (verified), none `done`.
+    let second = copy_library(&pool, root, &target).await;
+    let states: Vec<String> = sqlx::query_scalar(
+        "SELECT state FROM organizer_journal WHERE run_id = $1 AND track_id IS NOT NULL",
+    )
+    .bind(second)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(states.iter().all(|s| s == "unchanged"), "{states:?}");
+    let copied = shas(&target, &copies);
+
+    let c = ctx(&pool, root);
+    let local = adb::local_album(&pool, album).await.unwrap().unwrap();
+    assert_eq!(
+        capability::album_refusal(&c, &local, Target::Copy)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(COPY_FIRST)
+    );
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Copy).await;
+    let res = apply_run(&c, run, &ApplyHooks::default()).await;
+    assert!(refused_with(&res, COPY_FIRST), "{res:?}");
+    assert!(journal(&pool, run).await.is_empty());
+    assert_eq!(shas(&target, &copies), copied, "no copy rewritten");
+
+    // So the second copy can still become the library.
+    organize::run_action(&c, second, Action::SwitchRoot, &Hooks::default())
+        .await
+        .unwrap();
+    assert!(
+        odb::get_run(&pool, second)
+            .await
+            .unwrap()
+            .unwrap()
+            .switched_at
+            .is_some()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn copy_overrides_only_for_tagged_copies(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (root, target) = (dir.path(), out.path().join("organized"));
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let copy_run = copy_library(&pool, root, &target).await;
+    let copies = copy_paths(&pool, copy_run, &rels).await;
+    let second = track_id(&pool, &rels[1]).await;
+    // The second copy is re-tagged elsewhere between the journal and its write.
+    let changed = target.join(&copies[1]);
+    let hooks = ApplyHooks {
+        after_journal: Some(Arc::new(move || retag_elsewhere(&changed))),
+        ..Default::default()
+    };
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Copy).await;
+    apply_run(&ctx(&pool, root), run, &hooks).await.unwrap();
+
+    let rows = journal(&pool, run).await;
+    let failed: Vec<_> = rows.iter().filter(|r| r.state == "failed").collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].track_id, Some(second));
+    assert_eq!(failed[0].note.as_deref(), Some(CHANGED_OUTSIDE));
+    let with_override: Vec<Uuid> =
+        sqlx::query_scalar("SELECT track_id FROM track_tag_overrides WHERE run_id = $1")
+            .bind(run)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(with_override.len(), 2);
+    assert!(
+        !with_override.contains(&second),
+        "the untagged copy shows no match"
+    );
+    assert_eq!(run_row(&pool, run).await.state, "done");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn scoped_reorganize_leaves_a_shared_folders_sidecar(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // One folder: two tracks of the album, one of another album, and a cover.
+    let mine: Vec<String> = (1..=2).map(|i| format!("mix/a{i}.flac")).collect();
+    for (i, r) in mine.iter().enumerate() {
+        make_audio(
+            root,
+            r,
+            tags(
+                "Old Artist",
+                "Old Album",
+                "old",
+                "2001",
+                &(i + 1).to_string(),
+            ),
+        );
+    }
+    make_audio(
+        root,
+        "mix/b1.flac",
+        tags("Other Artist", "Other", "x", "1990", "1"),
+    );
+    std::fs::write(root.join("mix/cover.jpg"), b"jpeg").unwrap();
+    rescan(&pool, root).await;
+    let album = album_of(&pool, &mine[0]).await;
+    let other = track_id(&pool, "mix/b1.flac").await;
+    let applied = applied_for(&pool, &mine, "2001", "2001", 2001).await;
+    let run = make_run_with(&pool, album, &applied, Target::Files, true).await;
+
+    apply_run(&ctx(&pool, root), run, &ApplyHooks::default())
+        .await
+        .unwrap();
+
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "done");
+    assert_eq!(r.summary.as_ref().unwrap()["organized"], json!(2));
+    for n in 1..=2 {
+        assert!(root.join(organized(n, "flac")).is_file());
+    }
+    // The cover stays with the album that is not re-filed.
+    assert_eq!(std::fs::read(root.join("mix/cover.jpg")).unwrap(), b"jpeg");
+    assert!(!root.join("New Artist/2001 - New Album/cover.jpg").exists());
+    assert_eq!(track_path(&pool, other).await, "mix/b1.flac");
+    assert!(root.join("mix/b1.flac").is_file());
+}

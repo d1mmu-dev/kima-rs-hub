@@ -24,18 +24,20 @@
 //!    ([`organize::apply::preview_then_apply`](crate::organize::apply::preview_then_apply));
 //! 6. the album `applied`, the run `done` with `{written, skipped, failed, organized}`.
 //!
-//! **The `copy` target** writes only the copies of the newest finished, unswitched
-//! whole-library copy run (`copy_run_id`, recorded with the journal): journal rows are
+//! **The `copy` target** writes only the copies (the `done` rows) of the newest finished,
+//! unswitched whole-library copy run (`copy_run_id`, recorded with the journal): journal rows are
 //! `root='copy'` with paths relative to that run's target, and nothing under the library root
-//! is ever opened for writing. The library files keep their tags; the overrides show the match
-//! until the organizer's `switch-root` makes the copies the library and deletes them.
+//! is ever opened for writing. The library files keep their tags; the overrides of the tracks
+//! whose copy holds the new tags show the match until the organizer's `switch-root` makes the
+//! copies the library and deletes them.
 //!
 //! **A failed reorganize** never hides or rolls back the tags: the files, identity and
 //! re-read are done by then, so the run still ends `done`, with what moved as `organized` and
 //! the reason as `organizeError` in its summary (spec §19.9 step 5 has no failure path of its
 //! own; step 6 follows step 4 whatever the re-filing does). The organizer run stays as the
 //! organizer left it (`previewed` for a refused plan, `failed` after a failed apply), so it can
-//! be reviewed in Settings > Organize.
+//! be reviewed in Settings > Organize. A database error is retried; when the organizer's own
+//! apply raised it, that run is already `failed` and the retry ends the run `done` the same way.
 //!
 //! **Crash recovery.** The run stays `writing` until step 5. A job that finds journal rows
 //! resumes: it deletes leftover `.kima-tag-<id>.*` copies, redoes a `planned` row whose file is
@@ -569,8 +571,18 @@ impl Job<'_> {
                 }
                 let overrides: Vec<(Uuid, Value)> = if target == Target::Copy {
                     // The library files keep their tags: the overrides show the match (as
-                    // `db`) until a switch makes the tagged copies the library.
+                    // `db`) until a switch makes the tagged copies the library. Only for the
+                    // tracks whose copy holds the new tags (written, or already tagged): a
+                    // copy that failed was never tagged, and the switch would revert its match.
+                    let tagged: BTreeSet<Uuid> = rows
+                        .iter()
+                        .filter(|r| r.state == "written" || r.state == "skipped")
+                        .filter_map(|r| r.track_id)
+                        .collect();
                     db_overrides(&applied)?
+                        .into_iter()
+                        .filter(|(t, _)| tagged.contains(t))
+                        .collect()
                 } else {
                     let year = (!applied.mbids_only)
                         .then_some(applied.album.year)
@@ -647,9 +659,13 @@ impl Job<'_> {
         Ok(())
     }
 
-    /// Step 5 and step 6 of an `organizing` run. An interruption (or a database error, retried)
-    /// leaves the run `organizing`, to resume the same organizer run; any other failure of the
-    /// re-filing ends the run `done` with `organizeError` (see the module doc).
+    /// Step 5 and step 6 of an `organizing` run. An interruption leaves the run `organizing`,
+    /// to resume the same organizer run. A database error is returned (the job retries, the run
+    /// stays `organizing`): one raised by the organizer's preview or apply has already ended
+    /// that organizer run `failed` (as the organizer job does), so the retry ends the run `done`
+    /// with `organizeError`; one raised around it (creating the run, reading its state) retries
+    /// the same organizer run. Any other failure of the re-filing ends the run `done` with
+    /// `organizeError` at once (see the module doc).
     async fn organize_and_finish(&mut self) -> Result<()> {
         if self.total == 0 {
             // A resumed run: the files were all handled before.

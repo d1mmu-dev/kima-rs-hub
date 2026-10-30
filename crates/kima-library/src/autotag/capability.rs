@@ -119,10 +119,10 @@ pub async fn album_refusal(
     }
 }
 
-/// The `copy` check against one copy run: every present track of the album has a copy there
-/// ([`odb::copy_rows_for_tracks`]), else [`COPY_FIRST`]; then the format and symlink checks on
-/// the copies (under the run's target). Answers each track's copy path (relative to the
-/// target), or the refusal.
+/// The `copy` check against one copy run: every present track of the album has a copy that run
+/// made (a `done` row, [`odb::copy_rows_for_tracks`]), else [`COPY_FIRST`]; then the format and
+/// symlink checks on the copies (under the run's target). Answers each track's copy path
+/// (relative to the target), or the refusal.
 pub async fn copy_refusal(
     ctx: &LibraryCtx,
     album: &LocalAlbum,

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT track_id AS \"track_id!\", to_path FROM organizer_journal\n           WHERE run_id = $1 AND track_id = ANY($2)\n             AND (state = 'done' OR (state = 'unchanged' AND sha256 IS NOT NULL))\n           ORDER BY id",
+  "query": "SELECT track_id AS \"track_id!\", to_path FROM organizer_journal\n           WHERE run_id = $1 AND track_id = ANY($2)\n             AND state = 'done'\n           ORDER BY id",
   "describe": {
     "columns": [
       {
@@ -25,5 +25,5 @@
       false
     ]
   },
-  "hash": "ba7ee721191e717a12497f3b12be8ce640a1cb5259581f7fe72dbe69819c9492"
+  "hash": "0f42d4ec5672b9828c5e3113b663e9438be22030dd7b7988ddec46a5a270f5ca"
 }

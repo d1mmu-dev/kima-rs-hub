@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM track_tag_overrides o USING autotag_runs r\n         WHERE o.run_id = r.id AND r.copy_run_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "edcc1ab13765bd841f496f4bfa30b96f12738e7d4da1e878a3287ab7fc6fab76"
+}

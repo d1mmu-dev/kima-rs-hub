@@ -1,10 +1,12 @@
 //! Where an apply may write (spec §19.9, C14): `files` only to a writable library, `copy` only
-//! to an organized copy (Task 17), `db` always. The read-only default stays read-only (D-120).
+//! to the organized copies of a finished whole-library copy run, `db` always. The read-only
+//! default stays read-only (D-120).
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use kima_db::autotag::{LocalAlbum, Target};
+use kima_db::organizer::{self as odb, Run};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -48,23 +50,41 @@ pub struct Capabilities {
     pub copy_run_id: Option<Uuid>,
 }
 
-/// `files`: the library root passes the organizer's write probe. `copy`: not offered until
-/// Task 17 wires the organized copy.
-pub async fn capabilities(ctx: &LibraryCtx) -> Capabilities {
-    let root = ctx.root.get();
-    let files_ok = tokio::task::spawn_blocking(move || writable(&root))
-        .await
-        .unwrap_or(false);
-    Capabilities {
+/// `files`: the library root passes the organizer's write probe. `copy`: the newest finished,
+/// unswitched whole-library copy run ([`odb::latest_copy_run`]) exists and its target passes the
+/// probe (`copy_run_id` is that run); else [`COPY_FIRST`]. Whether the copy covers a given album
+/// is [`album_refusal`]'s.
+pub async fn capabilities(ctx: &LibraryCtx) -> sqlx::Result<Capabilities> {
+    let files_ok = probe(ctx.root.get()).await;
+    let copy_run = usable_copy_run(ctx).await?;
+    Ok(Capabilities {
         files: if files_ok {
             Availability::yes()
         } else {
             Availability::no(FILES_READ_ONLY)
         },
-        // Task 17: a done, unswitched copy-mode run covering the album, with a writable target.
-        copy: Availability::no(COPY_FIRST),
-        copy_run_id: None,
-    }
+        copy: if copy_run.is_some() {
+            Availability::yes()
+        } else {
+            Availability::no(COPY_FIRST)
+        },
+        copy_run_id: copy_run.map(|r| r.id),
+    })
+}
+
+/// The copy run a `copy` apply would write into now: [`odb::latest_copy_run`] when its target
+/// is writable.
+pub async fn usable_copy_run(ctx: &LibraryCtx) -> sqlx::Result<Option<Run>> {
+    let Some(run) = odb::latest_copy_run(&ctx.pool).await? else {
+        return Ok(None);
+    };
+    Ok(probe(run.target_root.clone().into()).await.then_some(run))
+}
+
+async fn probe(dir: std::path::PathBuf) -> bool {
+    tokio::task::spawn_blocking(move || writable(&dir))
+        .await
+        .unwrap_or(false)
 }
 
 /// `Tag writing is not supported for .wav files`, or for several:
@@ -77,21 +97,60 @@ pub fn unsupported_message(exts: &BTreeSet<String>) -> String {
 /// Why this album cannot be written for `target`, if it cannot: for `files` (and `copy`), any
 /// member in a format kima-rs does not write (the joined list), else any member that is a
 /// symbolic link, lies under a symlinked folder, or whose row says it was reached through one
-/// (M1's `SYMLINK_NOTE`). A file that cannot be probed is named by its library-relative path.
-/// `db` writes no file and works for any album. Blocking work runs off the async thread.
+/// (M1's `SYMLINK_NOTE`). A file that cannot be probed is named by its path relative to its
+/// root. `copy` checks the copies, not the library files: no usable copy run, or one without a
+/// copy of every present track of the album, is [`COPY_FIRST`]. `db` writes no file and works
+/// for any album. Blocking work runs off the async thread.
 pub async fn album_refusal(
     ctx: &LibraryCtx,
     album: &LocalAlbum,
     target: Target,
 ) -> sqlx::Result<Option<String>> {
-    if target == Target::Db {
-        return Ok(None);
+    match target {
+        Target::Db => Ok(None),
+        Target::Files => {
+            let rels: Vec<String> = album.tracks.iter().map(|t| t.path.clone()).collect();
+            members_refusal(ctx, album, ctx.root.get(), rels).await
+        }
+        Target::Copy => match usable_copy_run(ctx).await? {
+            Some(run) => Ok(copy_refusal(ctx, album, &run).await?.err()),
+            None => Ok(Some(COPY_FIRST.to_string())),
+        },
     }
-    // Task 17: a copy target checks the copies at the copy run's `to_path`s.
+}
+
+/// The `copy` check against one copy run: every present track of the album has a copy there
+/// ([`odb::copy_rows_for_tracks`]), else [`COPY_FIRST`]; then the format and symlink checks on
+/// the copies (under the run's target). Answers each track's copy path (relative to the
+/// target), or the refusal.
+pub async fn copy_refusal(
+    ctx: &LibraryCtx,
+    album: &LocalAlbum,
+    run: &Run,
+) -> sqlx::Result<Result<std::collections::HashMap<Uuid, String>, String>> {
+    let ids: Vec<Uuid> = album.tracks.iter().map(|t| t.id).collect();
+    let copies = odb::copy_rows_for_tracks(&ctx.pool, run.id, &ids).await?;
+    if ids.iter().any(|t| !copies.contains_key(t)) {
+        return Ok(Err(COPY_FIRST.to_string()));
+    }
+    let rels: Vec<String> = ids.iter().map(|t| copies[t].clone()).collect();
+    let root = std::path::PathBuf::from(&run.target_root);
+    Ok(match members_refusal(ctx, album, root, rels).await? {
+        Some(reason) => Err(reason),
+        None => Ok(copies),
+    })
+}
+
+/// The format and symlink checks of the files at `rels` under `root` that stand for the
+/// album's tracks.
+async fn members_refusal(
+    ctx: &LibraryCtx,
+    album: &LocalAlbum,
+    root: std::path::PathBuf,
+    rels: Vec<String>,
+) -> sqlx::Result<Option<String>> {
     let ids: Vec<Uuid> = album.tracks.iter().map(|t| t.id).collect();
     let linked_rows = kima_db::autotag::any_via_symlink(&ctx.pool, &ids).await?;
-    let root = ctx.root.get();
-    let rels: Vec<String> = album.tracks.iter().map(|t| t.path.clone()).collect();
     let verdict = tokio::task::spawn_blocking(move || files_refusal(&root, &rels))
         .await
         .unwrap_or_else(|e| Some(format!("cannot check the album's files: {e}")));

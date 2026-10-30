@@ -14,7 +14,8 @@ pub use runs::*;
 
 use std::collections::HashMap;
 
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
+use uuid::Uuid;
 
 /// The stored tag overrides (`track_tag_overrides.fields`, spec §6.8, §19.7) of the tracks at
 /// these paths, by path. The scanner merges them over the file's tags on every read.
@@ -56,4 +57,32 @@ pub async fn override_by_missing_fingerprint(
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|r| (r.id, r.fields)))
+}
+
+/// Deletes the tag overrides of every autotag run that tagged the copies of `copy_run`
+/// (`autotag_runs.copy_run_id`), in the caller's transaction: run by the organizer's
+/// `switch_root`, after which the tagged copies are the library and their tags the truth
+/// (spec §19.9). Answers how many were deleted.
+pub async fn delete_copy_overrides(conn: &mut PgConnection, copy_run: Uuid) -> sqlx::Result<u64> {
+    let r = sqlx::query!(
+        "DELETE FROM track_tag_overrides o USING autotag_runs r
+         WHERE o.run_id = r.id AND r.copy_run_id = $1",
+        copy_run
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// Whether an autotag run that writes into the copies of `copy_run` is still working
+/// (`writing`, `organizing`, `undoing`): the copy must not become the library under it.
+pub async fn copy_run_in_use(pool: &PgPool, copy_run: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM autotag_runs
+             WHERE copy_run_id = $1 AND state IN ('writing', 'organizing', 'undoing')) AS "e!""#,
+        copy_run
+    )
+    .fetch_one(pool)
+    .await
 }

@@ -238,6 +238,79 @@ async fn unmatched_albums_skip_tagged_and_empty(pool: PgPool) {
     assert_eq!(unmatched_albums(&pool).await.unwrap(), vec![open]);
 }
 
+/// An autotag run of the album in `state`, with `album_before` set or not, and one journal row
+/// in `row` (none when `None`).
+async fn run_in(
+    pool: &PgPool,
+    album: Uuid,
+    state: &str,
+    album_before: bool,
+    row: Option<&str>,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO autotag_runs (id, album_id, target, state, album_before)
+         VALUES ($1, $2, 'files', $3, CASE WHEN $4 THEN '{}'::jsonb END)",
+    )
+    .bind(id)
+    .bind(album)
+    .bind(state)
+    .bind(album_before)
+    .execute(pool)
+    .await
+    .unwrap();
+    if let Some(row) = row {
+        sqlx::query(
+            "INSERT INTO autotag_journal (run_id, root, path, old_tags, new_tags, state)
+             VALUES ($1, 'library', 'x.flac', '{}', '{}', $2)",
+        )
+        .bind(id)
+        .bind(row)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    id
+}
+
+/// Albums a "match all unmatched" search must leave alone: one whose run is still working, and
+/// one whose run needs undo (a failed files run leaves `release_mbid` NULL). A refused run that
+/// changed nothing, and an undone one, do not keep an album out.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unmatched_albums_skip_albums_with_runs(pool: PgPool) {
+    let mut open = Vec::new();
+    for (state, before, row, listed) in [
+        ("failed", false, Some("written"), false),
+        ("failed", true, None, false),
+        ("undo_failed", false, Some("undo_failed"), false),
+        ("undo_failed", true, None, false),
+        ("queued", false, None, false),
+        ("writing", false, Some("planned"), false),
+        ("undoing", false, Some("written"), false),
+        ("failed", false, Some("failed"), true),
+        ("failed", false, None, true),
+        ("undone", true, Some("undone"), true),
+    ] {
+        let a = album(&pool).await;
+        track(&pool, a, 1, 1, &format!("/m/{a}"), false).await;
+        run_in(&pool, a, state, before, row).await;
+        if listed {
+            open.push(a);
+        }
+    }
+    let restored = album(&pool).await;
+    track(&pool, restored, 1, 1, "/m/restored", false).await;
+    let r = run_in(&pool, restored, "undo_failed", true, None).await;
+    sqlx::query("UPDATE autotag_runs SET summary = '{\"identityRestored\": true}' WHERE id = $1")
+        .bind(r)
+        .execute(&pool)
+        .await
+        .unwrap();
+    open.push(restored);
+    open.sort();
+    assert_eq!(unmatched_albums(&pool).await.unwrap(), open);
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn cover_deferrals_column_and_check(pool: PgPool) {
     let a = artist(&pool).await;

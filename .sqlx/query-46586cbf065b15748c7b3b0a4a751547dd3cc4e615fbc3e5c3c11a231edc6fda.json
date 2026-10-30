@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (\n             SELECT 1 FROM organizer_runs\n             WHERE state IN ('planning', 'applying', 'undoing')\n               AND (album_ids IS NULL OR $1 = ANY(album_ids))) AS \"e!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "e!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "46586cbf065b15748c7b3b0a4a751547dd3cc4e615fbc3e5c3c11a231edc6fda"
+}

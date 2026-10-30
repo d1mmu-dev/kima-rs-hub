@@ -1665,8 +1665,13 @@ async fn finish(r: &Runner<'_>, dir: Dir) -> Result<()> {
             info!(run = %r.run.id, undone = count("undone"), left, "organizer undo finished");
         }
     }
-    // A safety net: anything the run could not account for is picked up by a scan.
-    jobs::enqueue_reconcile(&r.ctx.pool).await?;
+    // A safety net: anything the run could not account for is picked up by a scan. Not for
+    // the reorganize undo an autotag undo drives: that job re-reads the album itself once its
+    // identity is restored, and a scan between its file restore and that step would move the
+    // restored tracks off the album (spec §19.9 undo).
+    if !db::undo_owned_by_autotag(&r.ctx.pool, r.run.id).await? {
+        jobs::enqueue_reconcile(&r.ctx.pool).await?;
+    }
     Ok(())
 }
 

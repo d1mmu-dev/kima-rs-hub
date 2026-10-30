@@ -98,8 +98,10 @@ pub struct ApplyHooks {
     pub after_journal: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Fail there as a database or I/O error would.
     pub fail_at: Option<FailPoint>,
-    /// Passed to the reorganize's organizer apply (step 5).
+    /// Passed to the reorganize's organizer apply (step 5) and undo.
     pub organize: organize::Hooks,
+    /// Undo only: called once, right before the identity transaction (step 3).
+    pub before_identity: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Where [`ApplyHooks::fail_at`] fails.
@@ -234,6 +236,9 @@ pub async fn run_job_with(
 /// Ends a run that will not complete: `failed` with `msg`, and the album's search state says
 /// what is left.
 ///
+/// First, a `planned` row whose file already holds the new tags (renamed before its commit)
+/// is marked `written` ([`mark_renamed_planned`]).
+///
 /// - The run left something to undo: files it wrote (`written` journal rows) and/or a committed
 ///   identity transaction (`album_before` set on the re-read run: the album row, artist step and
 ///   overrides are in the database). Nothing more is changed: in particular nothing is re-read,
@@ -253,6 +258,7 @@ pub async fn settle_failed(
     run: &RunRow,
     msg: &str,
 ) -> Result<Option<AlbumState>> {
+    mark_renamed_planned(ctx, run).await?;
     let rows = jdb::rows(&ctx.pool, run.id).await?;
     let n = |s: &str| rows.iter().filter(|r| r.state == s).count();
     let written = n("written");
@@ -293,6 +299,62 @@ pub async fn settle_failed(
         info!(run = %run.id, "album state not set: {e}");
     }
     Ok(state)
+}
+
+/// Where a `files` or `copy` run's journal paths are: the library root, or the copy run's
+/// target (`None` for `db`, or a copy run that is gone).
+pub(super) async fn journal_root(ctx: &LibraryCtx, run: &RunRow) -> Result<Option<PathBuf>> {
+    Ok(match target_of(run)? {
+        Target::Db => None,
+        Target::Files => Some(ctx.root.get()),
+        Target::Copy => match run.copy_run_id {
+            Some(id) => odb::get_run(&ctx.pool, id)
+                .await?
+                .map(|r| PathBuf::from(r.target_root)),
+            None => None,
+        },
+    })
+}
+
+/// A `planned` row whose file already holds the new tags with the planned audio was renamed
+/// before its commit (a crash, or a database error on a final attempt): it is marked `written`
+/// with the file's current hash, so it counts as needing undo and the undo restores it. Only
+/// reads files. Answers how many rows were marked.
+pub(super) async fn mark_renamed_planned(ctx: &LibraryCtx, run: &RunRow) -> Result<usize> {
+    let rows: Vec<JournalRow> = jdb::rows(&ctx.pool, run.id)
+        .await?
+        .into_iter()
+        .filter(|r| r.state == "planned")
+        .collect();
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let Some(root) = journal_root(ctx, run).await? else {
+        return Ok(0);
+    };
+    let checks = blocking(move || {
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let c = journal::check_row(&root, &r, true);
+                (r.id, c)
+            })
+            .collect::<Vec<_>>())
+    })
+    .await?;
+    let mut marked = 0;
+    for (id, check) in checks {
+        if let RowCheck::AlreadyWritten(sha) = check {
+            let mut tx = ctx.pool.begin().await?;
+            jdb::mark_written(&mut tx, id, &sha).await?;
+            tx.commit().await?;
+            marked += 1;
+        }
+    }
+    if marked > 0 {
+        info!(run = %run.id, marked, "planned rows found already written");
+    }
+    Ok(marked)
 }
 
 /// `{written, skipped, failed, organized: 0}` from the run's journal (the summary of a `files`

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE autotag_runs\n         SET state = 'undoing', finished_at = NULL,\n             summary = (COALESCE(summary, '{}'::jsonb) - 'undoChecked' - 'organizerUndone'\n                        - 'organizeUndoError' - 'undoRefused')\n                       || jsonb_build_object('undoFrom', state)\n         WHERE id = $1 AND state IN ('done', 'failed', 'undo_failed')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cc7a159c9cdcbdc64aa4efef58f352af044cc78582267d67379bece5f3a02a95"
+}

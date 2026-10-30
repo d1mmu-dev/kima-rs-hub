@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE autotag_journal\n         SET state = 'written', after_sha = $2, note = NULL,\n             applied_seq = nextval('autotag_applied_seq')\n         WHERE id = $1 AND state = 'planned'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0558913ae20af910e12e7ecfe6b8e042f4cd57da4230e485702cb028c7a788d6"
+}

@@ -190,6 +190,119 @@ pub async fn finish_run(
     Ok(())
 }
 
+/// One present track of an album, as the apply job's pre-check sees it under the row locks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresentTrack {
+    pub id: Uuid,
+    pub path: String,
+    /// `guessed.viaSymlink`: the row stands for a file reached through a symbolic link.
+    pub via_symlink: bool,
+}
+
+/// The apply job's pre-check locks (spec §19.9 step 1), in the identity lock order: the album's
+/// tracks, missing ones included, in id order (`FOR NO KEY UPDATE`), then the album row. Answers
+/// the present tracks (by path), `None` when the album is gone.
+pub async fn lock_album_tracks(
+    conn: &mut PgConnection,
+    album: Uuid,
+) -> sqlx::Result<Option<Vec<PresentTrack>>> {
+    let rows = sqlx::query!(
+        r#"SELECT id, path, missing_since IS NOT NULL AS "missing!",
+                  COALESCE((guessed ->> 'viaSymlink')::boolean, false) AS "via_symlink!"
+           FROM tracks WHERE album_id = $1 ORDER BY id FOR NO KEY UPDATE"#,
+        album
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let found = sqlx::query_scalar!("SELECT id FROM albums WHERE id = $1 FOR UPDATE", album)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if found.is_none() {
+        return Ok(None);
+    }
+    let mut present: Vec<PresentTrack> = rows
+        .into_iter()
+        .filter(|r| !r.missing)
+        .map(|r| PresentTrack {
+            id: r.id,
+            path: r.path,
+            via_symlink: r.via_symlink,
+        })
+        .collect();
+    present.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(Some(present))
+}
+
+/// Whether any of these tracks has `guessed.viaSymlink` set.
+pub async fn any_via_symlink(pool: &PgPool, tracks: &[Uuid]) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM tracks WHERE id = ANY($1)
+               AND COALESCE((guessed ->> 'viaSymlink')::boolean, false)) AS "e!""#,
+        tracks
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// The album a candidate belongs to; `None` when the candidate is gone.
+pub async fn candidate_album(
+    conn: &mut PgConnection,
+    candidate: Uuid,
+) -> sqlx::Result<Option<Uuid>> {
+    sqlx::query_scalar!(
+        "SELECT album_id FROM autotag_candidates WHERE id = $1",
+        candidate
+    )
+    .fetch_optional(&mut *conn)
+    .await
+}
+
+/// Another run of the album that is still working (`queued`, `writing`, `organizing` or
+/// `undoing`), other than `run`.
+pub async fn other_active_run(
+    conn: &mut PgConnection,
+    album: Uuid,
+    run: Uuid,
+) -> sqlx::Result<Option<Uuid>> {
+    sqlx::query_scalar!(
+        "SELECT id FROM autotag_runs
+         WHERE album_id = $1 AND id <> $2 AND state IN ('queued', 'writing', 'organizing', 'undoing')
+         ORDER BY created_at, id LIMIT 1",
+        album,
+        run
+    )
+    .fetch_optional(&mut *conn)
+    .await
+}
+
+/// Runs a job still owes work to (`queued`, `writing`, `organizing`, `undoing`): `(id, state)`.
+pub async fn unfinished_runs(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, String)>> {
+    Ok(sqlx::query!(
+        "SELECT id, state FROM autotag_runs
+         WHERE state IN ('queued', 'writing', 'organizing', 'undoing')
+         ORDER BY created_at, id"
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| (r.id, r.state))
+    .collect())
+}
+
+/// The album's apply finished: `autotag_albums.state = 'applied'`, `applied_at` now.
+pub async fn mark_album_applied(pool: &PgPool, album: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO autotag_albums (album_id, state, applied_at) VALUES ($1, 'applied', now())
+         ON CONFLICT (album_id) DO UPDATE SET state = 'applied', applied_at = now(), error = NULL,
+           updated_at = now()",
+        album
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// The album's run that is still working (`queued`, `writing`, `organizing` or `undoing`), the
 /// newest if there were several.
 pub async fn active_run(pool: &PgPool, album: Uuid) -> sqlx::Result<Option<RunRow>> {

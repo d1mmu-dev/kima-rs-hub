@@ -687,9 +687,10 @@ pub async fn latest_copy_run(pool: &PgPool) -> sqlx::Result<Option<Run>> {
     .await
 }
 
-/// The copy of each of `tracks` that `run` holds, by track: the `to_path` (relative to the run's
-/// target) of its `done` row, or of an `unchanged` row the apply verified (a copy an earlier run
-/// made, which the switch also counts as copied). A track without one is not in the copy.
+/// The copy of each of `tracks` that `run` made, by track: the `to_path` (relative to the run's
+/// target) of its `done` row. A track without one is not in the copy. An `unchanged` row (a copy
+/// an earlier run made) does not count: tagging it would change the file the switch re-hashes
+/// against the row's checksum, and the copy could then never become the library.
 pub async fn copy_rows_for_tracks(
     pool: &PgPool,
     run_id: Uuid,
@@ -698,7 +699,7 @@ pub async fn copy_rows_for_tracks(
     let rows = sqlx::query!(
         r#"SELECT track_id AS "track_id!", to_path FROM organizer_journal
            WHERE run_id = $1 AND track_id = ANY($2)
-             AND (state = 'done' OR (state = 'unchanged' AND sha256 IS NOT NULL))
+             AND state = 'done'
            ORDER BY id"#,
         run_id,
         tracks

@@ -276,6 +276,55 @@ pub async fn other_active_run(
     .await
 }
 
+/// Whether any track of the album (missing ones included) has a tag override stored by a run
+/// other than `run`: an applied match that must be undone before another apply.
+pub async fn foreign_override(
+    conn: &mut PgConnection,
+    album: Uuid,
+    run: Uuid,
+) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM track_tag_overrides o JOIN tracks t ON t.id = o.track_id
+             WHERE t.album_id = $1 AND o.run_id <> $2) AS "e!""#,
+        album,
+        run
+    )
+    .fetch_one(&mut *conn)
+    .await
+}
+
+/// The state of the album's newest run other than `run` that did not fail (a refused run
+/// changed nothing), if it has one.
+pub async fn latest_other_run_state(
+    pool: &PgPool,
+    album: Uuid,
+    run: Uuid,
+) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar!(
+        "SELECT state FROM autotag_runs WHERE album_id = $1 AND id <> $2 AND state <> 'failed'
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+        album,
+        run
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Whether an `autotag-apply` or `autotag-undo` job of the run waits or runs on the `library`
+/// queue.
+pub async fn job_pending(pool: &PgPool, run: Uuid) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM jobs WHERE queue = 'library' AND state IN ('queued', 'running')
+               AND payload ->> 'kind' IN ('autotag-apply', 'autotag-undo')
+               AND payload ->> 'runId' = $1::uuid::text) AS "e!""#,
+        run
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// Runs a job still owes work to (`queued`, `writing`, `organizing`, `undoing`): `(id, state)`.
 pub async fn unfinished_runs(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, String)>> {
     Ok(sqlx::query!(

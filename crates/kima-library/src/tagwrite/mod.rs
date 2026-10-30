@@ -29,7 +29,7 @@ use lofty::file::FileType;
 use lofty::probe::Probe;
 
 pub use audio::audio_md5;
-pub use safe::{WriteHooks, Written, copy_path, safe_write};
+pub use safe::{WriteHooks, Written, copy_path, safe_write, safe_write_expecting};
 pub use values::{NumberPair, TagValues};
 
 /// Native key (spelled as in the §19.8 table: `TIT2`, `TXXX:MusicBrainz Album Id`,
@@ -80,6 +80,9 @@ pub enum TagWriteError {
     Symlink,
     #[error("the tag writer changed the audio; nothing written")]
     AudioChanged,
+    /// The file no longer holds the content the apply journalled (spec §19.9); nothing written.
+    #[error("changed outside kima-rs")]
+    ChangedOutside,
     /// A check refused the write (the message says which, and names the keys or frames);
     /// nothing was renamed.
     #[error("{0}")]

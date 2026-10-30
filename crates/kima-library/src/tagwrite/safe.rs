@@ -24,6 +24,9 @@ pub struct WriteHooks {
     pub corrupt_audio: bool,
     /// Panics once the copy exists, as a bug in the tag library would.
     pub panic_in_write: bool,
+    /// Called on the original right before it is copied, as another program writing it at
+    /// that moment would.
+    pub before_copy: Option<fn(&Path)>,
 }
 
 /// What the write left on disk.
@@ -123,6 +126,24 @@ pub fn safe_write(
     ignore: &IgnoreSet,
     hooks: &WriteHooks,
 ) -> Result<Written, TagWriteError> {
+    safe_write_expecting(path, journal_id, container, id3, new, ignore, hooks, None)
+}
+
+/// [`safe_write`] of a file whose whole content was journalled: right after the copy, before
+/// any tag is written, the copy's SHA-256 must equal `expected`, else
+/// [`TagWriteError::ChangedOutside`] (the copy is deleted, the original untouched). This closes
+/// the window between the caller's check of the original and the copy.
+#[allow(clippy::too_many_arguments)]
+pub fn safe_write_expecting(
+    path: &Path,
+    journal_id: i64,
+    container: Container,
+    id3: Option<Id3Version>,
+    new: &NativeTags,
+    ignore: &IgnoreSet,
+    hooks: &WriteHooks,
+    expected: Option<&[u8]>,
+) -> Result<Written, TagWriteError> {
     let copy = copy_path(path, journal_id)?;
     if path.file_name() == copy.file_name() {
         return Err(TagWriteError::Io(
@@ -130,7 +151,7 @@ pub fn safe_write(
         ));
     }
     let mut hold = Hold::new(ignore, path, copy);
-    run(&mut hold, container, id3, new, hooks)
+    run(&mut hold, container, id3, new, hooks, expected)
 }
 
 fn run(
@@ -139,6 +160,7 @@ fn run(
     id3: Option<Id3Version>,
     new: &NativeTags,
     hooks: &WriteHooks,
+    expected: Option<&[u8]>,
 ) -> Result<Written, TagWriteError> {
     let (path, copy) = (hold.path.clone(), hold.copy.clone());
     let (path, copy) = (path.as_path(), copy.as_path());
@@ -168,7 +190,15 @@ fn run(
     if fs::symlink_metadata(copy).is_ok() {
         fs::remove_file(copy)?;
     }
+    if let Some(f) = hooks.before_copy {
+        f(path);
+    }
     copy_file(path, copy)?;
+    if let Some(expected) = expected
+        && sha256_file(copy)? != expected
+    {
+        return Err(TagWriteError::ChangedOutside);
+    }
 
     if hooks.panic_in_write {
         panic!("forced panic in the tag write (test hook)");

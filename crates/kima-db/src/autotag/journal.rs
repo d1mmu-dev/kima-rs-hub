@@ -139,3 +139,17 @@ pub async fn written_desc(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Vec<Journ
     .fetch_all(pool)
     .await
 }
+
+/// The rows an undo restores (`written`, and `undo_failed` ones retried), newest write first.
+pub async fn undo_rows_desc(pool: &PgPool, run_id: Uuid) -> sqlx::Result<Vec<JournalRow>> {
+    sqlx::query_as!(
+        JournalRow,
+        "SELECT id, run_id, track_id, root, path, before_sha, after_sha, audio_md5, old_tags,
+                new_tags, id3_version, state, note, applied_seq
+         FROM autotag_journal WHERE run_id = $1 AND state IN ('written', 'undo_failed')
+         ORDER BY applied_seq DESC, id DESC",
+        run_id
+    )
+    .fetch_all(pool)
+    .await
+}

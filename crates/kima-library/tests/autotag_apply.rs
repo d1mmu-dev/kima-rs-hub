@@ -1,5 +1,5 @@
 //! The autotag apply job (spec §19.9): files, copy and database targets, journal, crash
-//! recovery, the reorganize chain.
+//! recovery, the reorganize chain, and the undo job.
 
 mod common;
 
@@ -16,12 +16,13 @@ use kima_db::autotag::{
     Target,
 };
 use kima_db::organizer as odb;
+use kima_library::autotag::REORGANIZE_IN_PROGRESS;
 use kima_library::autotag::apply::ALBUM_BUSY;
 use kima_library::autotag::apply::{self, ApplyHooks, AutotagError, FailPoint};
 use kima_library::autotag::capability;
 use kima_library::autotag::{
-    APPLIED_MATCH_EXISTS, CHANGED_OUTSIDE, COPY_FIRST, FILES_READ_ONLY, REORGANIZE_FILES_ONLY,
-    TRACKS_CHANGED,
+    APPLIED_MATCH_EXISTS, CHANGED_OUTSIDE, COPY_FIRST, COPY_GONE, FILES_READ_ONLY, NOTHING_TO_UNDO,
+    REORGANIZE_FILES_ONLY, TRACKS_CHANGED, UNDO_CHANGED, UNDO_INCOMPLETE, UNDO_NEWER_FIRST, undo,
 };
 use kima_library::organize::apply::{
     self as organize, Action, COPY_IN_USE, Hooks, OrganizeError, REORGANIZE_COLLISION,
@@ -2588,4 +2589,994 @@ async fn scoped_reorganize_leaves_a_shared_folders_sidecar(pool: PgPool) {
     assert!(!root.join("New Artist/2001 - New Album/cover.jpg").exists());
     assert_eq!(track_path(&pool, other).await, "mix/b1.flac");
     assert!(root.join("mix/b1.flac").is_file());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Task 18: the undo job
+
+async fn undo_run(ctx: &LibraryCtx, run: Uuid, hooks: &ApplyHooks) -> Result<(), AutotagError> {
+    undo::run_undo(ctx, run, hooks, &CancellationToken::new()).await
+}
+
+/// Every touched key of the row's file (at `rel` under `root`) reads back its journalled old
+/// value (`[]`: absent).
+fn assert_reads_old(root: &Path, rel: &str, row: &JournalRow) {
+    let path = root.join(rel);
+    let old = native(&row.old_tags);
+    let keys: Vec<String> = old.keys().cloned().collect();
+    let got = read_native(&path, container_of(&path).unwrap(), &keys).unwrap();
+    assert_eq!(got, old, "{rel}");
+}
+
+/// The touched keys of `rel` under `root` and of the same file under `orig` (a copy taken
+/// before the apply) read back the same values.
+fn assert_same_tags(orig: &Path, root: &Path, rel: &str, orig_rel: &str, row: &JournalRow) {
+    let keys: Vec<String> = native(&row.new_tags).keys().cloned().collect();
+    let (a, b) = (orig.join(orig_rel), root.join(rel));
+    let want = read_native(&a, container_of(&a).unwrap(), &keys).unwrap();
+    let got = read_native(&b, container_of(&b).unwrap(), &keys).unwrap();
+    assert_eq!(got, want, "{rel}");
+}
+
+/// A copy of every file under `root` in a new temporary folder (the files before an apply).
+fn snapshot(root: &Path) -> tempfile::TempDir {
+    let snap = tempfile::tempdir().unwrap();
+    for p in walk(root) {
+        let rel = p.strip_prefix(root).unwrap();
+        if rel.starts_with(".kima-data") {
+            continue;
+        }
+        let dst = snap.path().join(rel);
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        std::fs::copy(&p, &dst).unwrap();
+    }
+    snap
+}
+
+async fn artist_of(pool: &PgPool, album: Uuid) -> (Uuid, String) {
+    sqlx::query_as(
+        "SELECT ar.id, ar.name FROM albums al JOIN artists ar ON ar.id = al.artist_id
+         WHERE al.id = $1",
+    )
+    .bind(album)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn track_title(pool: &PgPool, path: &str) -> String {
+    sqlx::query_scalar("SELECT title FROM tracks WHERE path = $1")
+        .bind(path)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_restores_every_tag_and_path(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let ids: Vec<Uuid> = {
+        let mut v = Vec::new();
+        for r in &rels {
+            v.push(track_id(&pool, r).await);
+        }
+        v
+    };
+    let md5s: Vec<[u8; 16]> = rels
+        .iter()
+        .map(|r| audio_md5(&root.join(r)).unwrap())
+        .collect();
+    let orig = snapshot(root);
+    let (artist_id, _) = artist_of(&pool, album).await;
+    let applied = applied_for(&pool, &rels, "2001-02-03", "2001", 2001).await;
+    let run = make_run_with(&pool, album, &applied, Target::Files, true).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    let org = run_row(&pool, run).await.organizer_run_id.unwrap();
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(track_path(&pool, *id).await, organized(i + 1, "flac"));
+    }
+
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "undone", "{:?}", r.error);
+    assert_eq!(r.error, None);
+    let summary = r.summary.unwrap();
+    assert_eq!(summary["undone"], json!(3));
+    assert_eq!(summary["undoFailed"], json!(0));
+    assert_eq!(summary["identityRestored"], json!(true));
+    assert_eq!(summary["written"], json!(3), "the apply's counts kept");
+    assert!(summary.get("undoChecked").is_none() && summary.get("undoFrom").is_none());
+    assert_eq!(organizer_state(&pool, org).await, "undone");
+    let rows = journal(&pool, run).await;
+    for (i, id) in ids.iter().enumerate() {
+        // Paths back, the organized ones gone.
+        assert_eq!(track_path(&pool, *id).await, rels[i]);
+        assert!(root.join(&rels[i]).is_file());
+        assert!(!root.join(organized(i + 1, "flac")).exists());
+        let row = rows.iter().find(|x| x.track_id == Some(*id)).unwrap();
+        assert_eq!(row.state, "undone");
+        assert_eq!(row.note, None);
+        // Every touched key back to its old value (absent ones absent), as before the apply.
+        assert_reads_old(root, &rels[i], row);
+        assert_same_tags(orig.path(), root, &rels[i], &rels[i], row);
+        assert!(
+            native(&row.old_tags)
+                .get("MUSICBRAINZ_ALBUMID")
+                .is_some_and(|v| v.is_empty()),
+            "an absent key was journalled as absent"
+        );
+        assert_eq!(audio_md5(&root.join(&rels[i])).unwrap(), md5s[i]);
+        // The same album row, by id.
+        assert_eq!(album_of(&pool, &rels[i]).await, album);
+        assert_eq!(track_title(&pool, &rels[i]).await, format!("old {}", i + 1));
+    }
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+    assert_eq!(
+        artist_of(&pool, album).await,
+        (artist_id, "Old Artist".to_string())
+    );
+    let (source, applied_identity): (String, Option<Value>) =
+        sqlx::query_as("SELECT identity_source, applied_identity FROM albums WHERE id = $1")
+            .bind(album)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((source.as_str(), applied_identity), ("scan", None));
+    assert_eq!(count(&pool, "SELECT count(*) FROM albums").await, 1);
+    assert_eq!(overrides_of(&pool, run).await, 0);
+    assert_eq!(album_state(&pool, album).await, "proposed");
+    assert!(leftovers(root).is_empty());
+
+    // A finished undo's job does nothing more.
+    let before = shas(root, &rels);
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(shas(root, &rels), before);
+    // A re-match is accepted again.
+    let again = make_run(&pool, album, &applied, Target::Db).await;
+    apply_run(&c, again, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(album_title(&pool, album).await, "New Album");
+}
+
+/// Saves each file's ID3v2 tag again as v2.3.
+fn make_v23(path: &Path) {
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile;
+    use lofty::mpeg::MpegFile;
+    use lofty::tag::TagExt;
+    let mut f = std::fs::File::open(path).unwrap();
+    let tag = MpegFile::read_from(&mut f, ParseOptions::new().read_properties(false))
+        .unwrap()
+        .id3v2()
+        .cloned()
+        .unwrap();
+    tag.save_to_path(path, WriteOptions::default().use_id3v23(true))
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_v23_returns_v23(pool: PgPool) {
+    use kima_library::tagwrite::{Id3Version, id3_version};
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let rels = paths("mp3", 2);
+    for (i, r) in rels.iter().enumerate() {
+        make_audio(
+            root,
+            r,
+            tags(
+                "Old Artist",
+                "Old Album",
+                &format!("old {}", i + 1),
+                "2001",
+                &(i + 1).to_string(),
+            ),
+        );
+        make_v23(&root.join(r));
+        assert_eq!(id3_version(&root.join(r)).unwrap(), Some(Id3Version::V3));
+    }
+    rescan(&pool, root).await;
+    let album = album_of(&pool, &rels[0]).await;
+    let orig = snapshot(root);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Files).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    for r in &rels {
+        assert_eq!(id3_version(&root.join(r)).unwrap(), Some(Id3Version::V3));
+    }
+
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+
+    assert_eq!(run_row(&pool, run).await.state, "undone");
+    for row in journal(&pool, run).await {
+        assert_eq!(row.id3_version.as_deref(), Some("v3"));
+        assert_eq!(row.state, "undone");
+        assert_eq!(
+            id3_version(&root.join(&row.path)).unwrap(),
+            Some(Id3Version::V3),
+            "{}",
+            row.path
+        );
+        assert_reads_old(root, &row.path, &row);
+        assert_same_tags(orig.path(), root, &row.path, &row.path, &row);
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_db_removes_overrides_and_rescan_shows_originals(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    let files = shas(root, &rels);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Db).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    rescan(&pool, root).await;
+    assert_eq!(album_title(&pool, album).await, "New Album");
+    assert_eq!(track_title(&pool, &rels[0]).await, "Song 1");
+    assert_eq!(overrides_of(&pool, run).await, 2);
+
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+
+    assert_eq!(run_row(&pool, run).await.state, "undone");
+    assert_eq!(overrides_of(&pool, run).await, 0);
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+    assert_eq!(track_title(&pool, &rels[0]).await, "old 1");
+    rescan(&pool, root).await;
+    assert_eq!(album_of(&pool, &rels[0]).await, album);
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+    for (i, r) in rels.iter().enumerate() {
+        assert_eq!(track_title(&pool, r).await, format!("old {}", i + 1));
+    }
+    assert_eq!(shas(root, &rels), files, "no file written");
+    assert_eq!(album_state(&pool, album).await, "proposed");
+}
+
+/// Inserts "Old Artist – Old Album (2001)" on a new "Old Artist" row (the old identity).
+async fn take_old_identity(pool: &PgPool) -> Uuid {
+    let artist = Uuid::now_v7();
+    sqlx::query("INSERT INTO artists (id, name, name_key) VALUES ($1, 'Old Artist', 'old artist')")
+        .bind(artist)
+        .execute(pool)
+        .await
+        .unwrap();
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO albums (id, artist_id, title, title_key, year)
+         VALUES ($1, $2, 'Old Album', 'old album', 2001)",
+    )
+    .bind(id)
+    .bind(artist)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_refused_when_old_identity_taken_touches_nothing(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Files).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(artist_of(&pool, album).await.1, "New Artist", "renamed");
+    take_old_identity(&pool).await;
+    let (files, rows) = (shas(root, &rels), journal(&pool, run).await);
+
+    let res = undo_run(&c, run, &ApplyHooks::default()).await;
+    let msg = "Another album already has this identity: Old Artist \u{2013} Old Album (2001)";
+    assert!(refused_with(&res, msg), "{res:?}");
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "done", "back to its earlier state");
+    assert_eq!(r.error.as_deref(), Some(msg));
+    assert!(r.summary.unwrap().get("undoFrom").is_none());
+    assert_eq!(shas(root, &rels), files);
+    assert_eq!(journal(&pool, run).await, rows);
+    assert_eq!(album_title(&pool, album).await, "New Album");
+    assert_eq!(album_state(&pool, album).await, "applied");
+    assert!(leftovers(root).is_empty());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_row_changed_since_write_fails_that_row(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Files).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    retag_elsewhere(&root.join(&rels[1]));
+    let changed = sha(&root.join(&rels[1]));
+
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "undo_failed");
+    assert_eq!(r.error.as_deref(), Some(UNDO_INCOMPLETE));
+    for row in journal(&pool, run).await {
+        if row.path == rels[1] {
+            assert_eq!(row.state, "undo_failed");
+            assert_eq!(row.note.as_deref(), Some(UNDO_CHANGED));
+        } else {
+            assert_eq!(row.state, "undone", "{}", row.path);
+            assert_reads_old(root, &row.path, &row);
+        }
+    }
+    assert_eq!(sha(&root.join(&rels[1])), changed, "not written over");
+    assert_eq!(album_state(&pool, album).await, "failed");
+    assert_eq!(
+        album_error(&pool, album).await.as_deref(),
+        Some(UNDO_INCOMPLETE)
+    );
+    assert_eq!(
+        album_title(&pool, album).await,
+        "Old Album",
+        "identity restored"
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_failed_run_blocks_applies_until_retried(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Files).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    let tagged = std::fs::read(root.join(&rels[1])).unwrap();
+    retag_elsewhere(&root.join(&rels[1]));
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(run_row(&pool, run).await.state, "undo_failed");
+
+    // A file is left to restore: a new apply is refused, the album stays failed.
+    let later = make_run(&pool, album, &applied, Target::Db).await;
+    let res = apply_run(&c, later, &ApplyHooks::default()).await;
+    assert!(refused_with(&res, APPLIED_MATCH_EXISTS), "{res:?}");
+    assert_eq!(album_state(&pool, album).await, "failed");
+    assert_eq!(
+        album_error(&pool, album).await.as_deref(),
+        Some(UNDO_INCOMPLETE)
+    );
+
+    // The file is put back as the apply left it: a retry restores it and ends `undone`.
+    std::fs::write(root.join(&rels[1]), &tagged).unwrap();
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "undone", "{:?}", r.error);
+    for row in journal(&pool, run).await {
+        assert_eq!(row.state, "undone", "{}", row.path);
+        assert_reads_old(root, &row.path, &row);
+    }
+    assert_eq!(album_state(&pool, album).await, "proposed");
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+    let again = make_run(&pool, album, &applied, Target::Db).await;
+    apply_run(&c, again, &ApplyHooks::default()).await.unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_of_artist_rename_restores_name(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    let (artist, _) = artist_of(&pool, album).await;
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Files).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.artist_action.as_deref(), Some("renamed"));
+    assert_eq!(
+        artist_of(&pool, album).await,
+        (artist, "New Artist".to_string())
+    );
+
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+
+    assert_eq!(run_row(&pool, run).await.state, "undone");
+    assert_eq!(
+        artist_of(&pool, album).await,
+        (artist, "Old Artist".to_string()),
+        "the same row, renamed back"
+    );
+    let key: String = sqlx::query_scalar("SELECT name_key FROM artists WHERE id = $1")
+        .bind(artist)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(key, "old artist");
+    assert_eq!(count(&pool, "SELECT count(*) FROM artists").await, 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_goes_newest_first(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let orig = snapshot(root);
+    let c = ctx(&pool, root);
+    // Run A: a database-only match, its identity undone by hand (the run stays `done`).
+    let a_values = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let a = make_run(&pool, album, &a_values, Target::Db).await;
+    apply_run(&c, a, &ApplyHooks::default()).await.unwrap();
+    undo_identity_only(&pool, a).await;
+    // Run B: wrote its files, then collided under the locks: it needs undo.
+    let mut b_values = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    b_values.album.title = "Other Album".into();
+    let b = make_run(&pool, album, &b_values, Target::Files).await;
+    let p = pool.clone();
+    let hooks = ApplyHooks {
+        after_journal: Some(Arc::new(move || {
+            insert_conflicting_album(&p, "Other Album")
+        })),
+        ..Default::default()
+    };
+    assert!(apply_run(&c, b, &hooks).await.is_err());
+    assert_eq!(run_row(&pool, b).await.state, "failed");
+    let files = shas(root, &rels);
+
+    // A is older: refused while B is undoable; nothing touched.
+    let res = undo_run(&c, a, &ApplyHooks::default()).await;
+    assert!(refused_with(&res, UNDO_NEWER_FIRST), "{res:?}");
+    let r = run_row(&pool, a).await;
+    assert_eq!(r.state, "done");
+    assert_eq!(r.error.as_deref(), Some(UNDO_NEWER_FIRST));
+    assert_eq!(shas(root, &rels), files);
+    assert_eq!(run_row(&pool, b).await.state, "failed");
+
+    // B (failed, files written, identity never committed): the files come back.
+    assert!(run_row(&pool, b).await.album_before.is_none());
+    undo_run(&c, b, &ApplyHooks::default()).await.unwrap();
+    let r = run_row(&pool, b).await;
+    assert_eq!(r.state, "undone", "{:?}", r.error);
+    assert_eq!(r.summary.unwrap()["identityRestored"], json!(true));
+    for row in journal(&pool, b).await {
+        assert_eq!(row.state, "undone");
+        assert_reads_old(root, &row.path, &row);
+        assert_same_tags(orig.path(), root, &row.path, &row.path, &row);
+    }
+    assert_eq!(album_state(&pool, album).await, "proposed");
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+    for r in &rels {
+        assert_eq!(album_of(&pool, r).await, album);
+    }
+
+    // Then A.
+    undo_run(&c, a, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(run_row(&pool, a).await.state, "undone");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_failed_run_after_identity_restores_all(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let orig = snapshot(root);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Files).await;
+    let c = ctx(&pool, root);
+    let hooks = ApplyHooks {
+        fail_at: Some(FailPoint::AfterIdentity),
+        ..Default::default()
+    };
+    let res = apply::run_job_with(&c, run, &hooks, &CancellationToken::new(), true).await;
+    assert!(res.is_err());
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "failed");
+    assert!(r.album_before.is_some());
+    assert_eq!(overrides_of(&pool, run).await, 3);
+    assert_eq!(album_title(&pool, album).await, "New Album");
+
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "undone", "{:?}", r.error);
+    assert_eq!(overrides_of(&pool, run).await, 0);
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+    assert_eq!(artist_of(&pool, album).await.1, "Old Artist");
+    for row in journal(&pool, run).await {
+        assert_eq!(row.state, "undone");
+        assert_same_tags(orig.path(), root, &row.path, &row.path, &row);
+    }
+    for (i, r) in rels.iter().enumerate() {
+        assert_eq!(album_of(&pool, r).await, album);
+        assert_eq!(track_title(&pool, r).await, format!("old {}", i + 1));
+    }
+    assert_eq!(album_state(&pool, album).await, "proposed");
+    assert_eq!(album_error(&pool, album).await, None);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_nothing_to_undo_refused(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    // Refused before anything (read-only, here: a wrong target state is simplest: the copy
+    // target without a copy run).
+    let run = make_run(&pool, album, &applied, Target::Copy).await;
+    let c = ctx(&pool, root);
+    assert!(refused_with(
+        &apply_run(&c, run, &ApplyHooks::default()).await,
+        COPY_FIRST
+    ));
+    let res = undo_run(&c, run, &ApplyHooks::default()).await;
+    assert!(refused_with(&res, NOTHING_TO_UNDO), "{res:?}");
+    assert_eq!(run_row(&pool, run).await.state, "failed");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_resumes_after_crash(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let orig = snapshot(root);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Files).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    let newest = jdb::written_desc(&pool, run).await.unwrap()[0].clone();
+
+    // A crash right after the first restore's rename, before its row commit.
+    let crash = ApplyHooks {
+        write: kima_library::tagwrite::WriteHooks {
+            stop_after_rename: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let res = undo_run(&c, run, &crash).await;
+    assert!(matches!(res, Err(AutotagError::Interrupted)), "{res:?}");
+    assert_eq!(run_row(&pool, run).await.state, "undoing");
+    let rows = journal(&pool, run).await;
+    assert!(rows.iter().all(|r| r.state == "written"));
+    assert_reads_old(root, &newest.path, &newest);
+    // A leftover copy of the restored row's write (no later write of that row replaces it).
+    let leftover = root.join(DIR).join(format!(".kima-tag-{}.flac", newest.id));
+    std::fs::copy(root.join(&newest.path), &leftover).unwrap();
+    // Startup re-queues the undo.
+    assert_eq!(apply::resume_interrupted(&pool).await.unwrap(), 1);
+    let kind: String = sqlx::query_scalar(
+        "SELECT payload ->> 'kind' FROM jobs WHERE payload ->> 'runId' = $1::text",
+    )
+    .bind(run.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kind, "autotag-undo");
+
+    // The resumed job: the restored file is marked without a second write, the rest restored.
+    let restored = sha(&root.join(&newest.path));
+    undo::run_job(&c, run, &CancellationToken::new(), false)
+        .await
+        .unwrap();
+    assert_eq!(run_row(&pool, run).await.state, "undone");
+    assert_eq!(sha(&root.join(&newest.path)), restored, "not written twice");
+    for row in journal(&pool, run).await {
+        assert_eq!(row.state, "undone", "{}", row.path);
+        let note = (row.id == newest.id).then_some("already restored");
+        assert_eq!(row.note.as_deref(), note, "{}", row.path);
+        assert_same_tags(orig.path(), root, &row.path, &row.path, &row);
+    }
+    assert!(leftovers(root).is_empty());
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_resumes_interrupted_reorganize_undo(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run_with(&pool, album, &applied, Target::Files, true).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    let org = run_row(&pool, run).await.organizer_run_id.unwrap();
+
+    // The organizer's undo stops after one file moved back.
+    let hooks = ApplyHooks {
+        organize: Hooks {
+            stop_after: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let res = undo_run(&c, run, &hooks).await;
+    assert!(matches!(res, Err(AutotagError::Interrupted)), "{res:?}");
+    assert_eq!(run_row(&pool, run).await.state, "undoing");
+    assert_eq!(organizer_state(&pool, org).await, "undoing");
+    // The organizer's own startup resume leaves it to the autotag undo.
+    assert!(
+        odb::interrupted_runs(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.id != org)
+    );
+
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(run_row(&pool, run).await.state, "undone");
+    assert_eq!(organizer_state(&pool, org).await, "undone");
+    for (i, r) in rels.iter().enumerate() {
+        assert!(root.join(r).is_file(), "{r}");
+        assert!(!root.join(organized(i + 1, "flac")).exists());
+        assert_eq!(track_title(&pool, r).await, format!("old {}", i + 1));
+    }
+    for row in journal(&pool, run).await {
+        assert_eq!(row.state, "undone");
+        assert_reads_old(root, &row.path, &row);
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cancelled_undo_stays_resumable(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Files).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+
+    // Stopped between files: one restored, the run still `undoing`, not failed.
+    let hooks = ApplyHooks {
+        stop_after_files: Some(1),
+        ..Default::default()
+    };
+    let res = undo_run(&c, run, &hooks).await;
+    assert!(matches!(res, Err(AutotagError::Interrupted)), "{res:?}");
+    let states: Vec<String> = journal(&pool, run)
+        .await
+        .into_iter()
+        .map(|r| r.state)
+        .collect();
+    assert_eq!(states.iter().filter(|s| *s == "undone").count(), 1);
+    assert_eq!(run_row(&pool, run).await.state, "undoing");
+    // The cancel token: the job is retried (the worker gives the attempt back).
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let res = undo::run_job(&c, run, &cancel, true).await;
+    assert!(
+        matches!(res, Err(kima_jobs::worker::JobError::Retry(_))),
+        "{res:?}"
+    );
+    assert_eq!(run_row(&pool, run).await.state, "undoing");
+    assert_eq!(album_title(&pool, album).await, "New Album");
+
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(run_row(&pool, run).await.state, "undone");
+    assert!(
+        journal(&pool, run)
+            .await
+            .iter()
+            .all(|r| r.state == "undone")
+    );
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn final_attempt_undo_failure_settles_run(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Files).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    let hooks = ApplyHooks {
+        fail_at: Some(FailPoint::BeforeIdentity),
+        ..Default::default()
+    };
+
+    // Not the final attempt: retried, the run stays `undoing`.
+    let res = undo::run_job_with(&c, run, &hooks, &CancellationToken::new(), false).await;
+    assert!(
+        matches!(res, Err(kima_jobs::worker::JobError::Retry(_))),
+        "{res:?}"
+    );
+    assert_eq!(run_row(&pool, run).await.state, "undoing");
+    // The final attempt: `undo_failed`, the album needs attention.
+    let res = undo::run_job_with(&c, run, &hooks, &CancellationToken::new(), true).await;
+    assert!(
+        matches!(res, Err(kima_jobs::worker::JobError::Permanent(_))),
+        "{res:?}"
+    );
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "undo_failed");
+    assert!(r.error.is_some());
+    assert_eq!(r.summary.unwrap()["identityRestored"], json!(false));
+    assert!(
+        journal(&pool, run)
+            .await
+            .iter()
+            .all(|r| r.state == "undone")
+    );
+    assert_eq!(album_state(&pool, album).await, "failed");
+    assert_eq!(album_title(&pool, album).await, "New Album");
+    // Its identity is not restored: a new apply is refused.
+    let later = make_run(&pool, album, &applied, Target::Db).await;
+    assert!(refused_with(
+        &apply_run(&c, later, &ApplyHooks::default()).await,
+        APPLIED_MATCH_EXISTS
+    ));
+    // A retry finishes it.
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(run_row(&pool, run).await.state, "undone");
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+    assert_eq!(album_state(&pool, album).await, "proposed");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_copy_restores_the_copies_only(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let (root, target) = (dir.path(), out.path().join("organized"));
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let copy_run = copy_library(&pool, root, &target).await;
+    let copies = copy_paths(&pool, copy_run, &rels).await;
+    let (originals, original_mtimes) = (shas(root, &rels), mtimes(root, &rels));
+    let c = ctx(&pool, root);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Copy).await;
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(overrides_of(&pool, run).await, 3);
+
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+
+    assert_eq!(run_row(&pool, run).await.state, "undone");
+    for row in journal(&pool, run).await {
+        assert_eq!(row.root, "copy");
+        assert_eq!(row.state, "undone", "{}", row.path);
+        assert_reads_old(&target, &row.path, &row);
+        let i = copies.iter().position(|p| p == &row.path).unwrap();
+        assert_same_tags(root, &target, &row.path, &rels[i], &row);
+    }
+    // The library: not one byte, not even the modification time.
+    assert_eq!(shas(root, &rels), originals);
+    assert_eq!(mtimes(root, &rels), original_mtimes);
+    assert!(leftovers(&target).is_empty());
+    assert_eq!(overrides_of(&pool, run).await, 0);
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+    for (i, r) in rels.iter().enumerate() {
+        assert_eq!(album_of(&pool, r).await, album);
+        assert_eq!(track_title(&pool, r).await, format!("old {}", i + 1));
+    }
+    assert_eq!(organizer_state(&pool, copy_run).await, "done");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_switched_copy(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let (root, target) = (dir.path(), out.path().join("organized"));
+    let album = album_fixture(&pool, root, "flac", 2, "2001").await;
+    let rels = paths("flac", 2);
+    let copy_run = copy_library(&pool, root, &target).await;
+    let copies = copy_paths(&pool, copy_run, &rels).await;
+    let originals = shas(root, &rels);
+    let c = ctx(&pool, root);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run(&pool, album, &applied, Target::Copy).await;
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    organize::run_action(&c, copy_run, Action::SwitchRoot, &Hooks::default())
+        .await
+        .unwrap();
+    assert_eq!(c.root.get(), target);
+    let tagged = shas(&target, &copies);
+
+    // The library moved on from the copy: refused, nothing touched (the old library either).
+    let moved = ctx(&pool, elsewhere.path());
+    let res = undo_run(&moved, run, &ApplyHooks::default()).await;
+    assert!(refused_with(&res, COPY_GONE), "{res:?}");
+    assert_eq!(run_row(&pool, run).await.state, "done");
+    assert_eq!(shas(&target, &copies), tagged);
+    assert_eq!(shas(root, &rels), originals);
+    assert_eq!(album_title(&pool, album).await, "New Album");
+
+    // While the copy is the library: its files are restored there.
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(run_row(&pool, run).await.state, "undone");
+    for row in journal(&pool, run).await {
+        assert_eq!(row.state, "undone", "{}", row.path);
+        assert_reads_old(&target, &row.path, &row);
+    }
+    assert_eq!(shas(root, &rels), originals, "the old library untouched");
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+    for (i, p) in copies.iter().enumerate() {
+        assert_eq!(album_of(&pool, p).await, album);
+        assert_eq!(track_title(&pool, p).await, format!("old {}", i + 1));
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_with_reorganize_left_applying(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run_with(&pool, album, &applied, Target::Files, true).await;
+    let c = ctx(&pool, root);
+    // The reorganize stops after one file moved; the run then ended `done` (a final attempt)
+    // with its organizer run still `applying`.
+    let hooks = ApplyHooks {
+        organize: Hooks {
+            stop_after: Some(1),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(apply_run(&c, run, &hooks).await.is_err());
+    let org = run_row(&pool, run).await.organizer_run_id.unwrap();
+    assert_eq!(organizer_state(&pool, org).await, "applying");
+    sqlx::query("UPDATE autotag_runs SET state = 'done' WHERE id = $1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Its own job still waits: refused, nothing touched.
+    organize::enqueue(&pool, org, Action::Apply).await.unwrap();
+    let files: Vec<Vec<u8>> = walk(root)
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "flac"))
+        .map(|p| sha(p))
+        .collect();
+    let res = undo_run(&c, run, &ApplyHooks::default()).await;
+    assert!(refused_with(&res, REORGANIZE_IN_PROGRESS), "{res:?}");
+    assert_eq!(run_row(&pool, run).await.state, "done");
+    assert_eq!(organizer_state(&pool, org).await, "applying");
+    assert!(
+        journal(&pool, run)
+            .await
+            .iter()
+            .all(|r| r.state == "written")
+    );
+    let now: Vec<Vec<u8>> = walk(root)
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "flac"))
+        .map(|p| sha(p))
+        .collect();
+    assert_eq!(now, files);
+
+    // No job drives it (it died): the undo finishes the move, then undoes it.
+    sqlx::query("DELETE FROM jobs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    assert_eq!(run_row(&pool, run).await.state, "undone");
+    assert_eq!(organizer_state(&pool, org).await, "undone");
+    for (i, r) in rels.iter().enumerate() {
+        assert!(root.join(r).is_file(), "{r}");
+        assert!(!root.join(organized(i + 1, "flac")).exists());
+        assert_eq!(track_title(&pool, r).await, format!("old {}", i + 1));
+    }
+    for row in journal(&pool, run).await {
+        assert_eq!(row.state, "undone");
+        assert_reads_old(root, &row.path, &row);
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_with_reorganize_left_partly_moved(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let album = album_fixture(&pool, root, "flac", 3, "2001").await;
+    let rels = paths("flac", 3);
+    let first = track_id(&pool, &rels[0]).await;
+    let applied = applied_for(&pool, &rels, "2001", "2001", 2001).await;
+    let run = make_run_with(&pool, album, &applied, Target::Files, true).await;
+    let c = ctx(&pool, root);
+    apply_run(&c, run, &ApplyHooks::default()).await.unwrap();
+    let org = run_row(&pool, run).await.organizer_run_id.unwrap();
+    // Another file took the first track's old name: the organizer will not move it back.
+    std::fs::create_dir_all(root.join(DIR)).unwrap();
+    std::fs::write(root.join(&rels[0]), b"someone else's file").unwrap();
+
+    undo_run(&c, run, &ApplyHooks::default()).await.unwrap();
+
+    let r = run_row(&pool, run).await;
+    assert_eq!(r.state, "undo_failed");
+    assert_eq!(organizer_state(&pool, org).await, "failed");
+    let summary = r.summary.unwrap();
+    assert!(summary["organizeUndoError"].is_string(), "{summary}");
+    assert_eq!(r.error.as_deref(), summary["organizeUndoError"].as_str());
+    assert!(!r.error.unwrap().contains(&root.display().to_string()));
+    // Its tags are restored where it stayed (found through its track).
+    let stayed = organized(1, "flac");
+    assert_eq!(track_path(&pool, first).await, stayed);
+    for row in journal(&pool, run).await {
+        assert_eq!(row.state, "undone", "{}", row.path);
+        let at = if row.track_id == Some(first) {
+            stayed.clone()
+        } else {
+            row.path.clone()
+        };
+        assert_reads_old(root, &at, &row);
+    }
+    assert_eq!(
+        std::fs::read(root.join(&rels[0])).unwrap(),
+        b"someone else's file"
+    );
+    assert_eq!(album_title(&pool, album).await, "Old Album");
+    assert_eq!(album_state(&pool, album).await, "failed");
 }

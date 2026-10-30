@@ -16,6 +16,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::autotag::apply as autotag;
+use crate::autotag::undo as autotag_undo;
 use crate::organize::apply::{self as organize, Action};
 use crate::scan::{self, LibraryCtx, PathOutcome};
 
@@ -109,7 +110,8 @@ pub async fn run(
 }
 
 /// [`run`], told whether this is the job's final attempt (`attempts >= max_attempts`): an
-/// autotag apply that fails then settles its run instead of leaving it `writing`.
+/// autotag apply or undo that fails then settles its run instead of leaving it `writing` or
+/// `undoing`.
 pub async fn run_attempt(
     ctx: &LibraryCtx,
     payload: &serde_json::Value,
@@ -168,10 +170,9 @@ pub async fn run_attempt(
         LibraryJob::AutotagApply { run_id } => {
             autotag::run_job(ctx, run_id, cancel, final_attempt).await
         }
-        // Task 18: the undo job.
-        LibraryJob::AutotagUndo { run_id } => Err(JobError::Permanent(format!(
-            "autotag undo of run {run_id} is not available yet"
-        ))),
+        LibraryJob::AutotagUndo { run_id } => {
+            autotag_undo::run_job(ctx, run_id, cancel, final_attempt).await
+        }
     }
 }
 

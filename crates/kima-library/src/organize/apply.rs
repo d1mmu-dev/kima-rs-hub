@@ -179,7 +179,8 @@ pub async fn run_action(
     run_action_cancellable(ctx, run_id, action, hooks, &CancellationToken::new()).await
 }
 
-async fn run_action_cancellable(
+/// [`run_action`] with a cancel token (the autotag undo drives its reorganize run's undo).
+pub async fn run_action_cancellable(
     ctx: &LibraryCtx,
     run_id: Uuid,
     action: Action,

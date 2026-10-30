@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.id FROM autotag_runs r JOIN autotag_runs me ON me.id = $2\n         WHERE r.album_id = $1 AND r.id <> $2\n           AND (r.created_at, r.id) > (me.created_at, me.id)\n           AND (r.state = 'done'\n                OR (r.state = 'failed'\n                    AND (r.album_before IS NOT NULL\n                         OR EXISTS (SELECT 1 FROM autotag_journal j\n                                    WHERE j.run_id = r.id AND j.state = 'written')))\n                OR (r.state = 'undo_failed'\n                    AND (EXISTS (SELECT 1 FROM autotag_journal j\n                                 WHERE j.run_id = r.id AND j.state IN ('written', 'undo_failed'))\n                         OR (r.album_before IS NOT NULL\n                             AND NOT COALESCE((r.summary ->> 'identityRestored')::boolean,\n                                              false)))))\n         ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "be8f1aac34dd7a2bfeab5abae4b59403b174d76c01c209985b4584895ffbd95e"
+}

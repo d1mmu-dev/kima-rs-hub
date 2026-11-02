@@ -1,0 +1,82 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.id,r.album_id,al.title AS album,ar.name AS artist,r.target,r.reorganize,r.state,r.created_at,r.finished_at,r.summary,r.error\n        FROM autotag_runs r JOIN albums al ON al.id=r.album_id JOIN artists ar ON ar.id=al.artist_id WHERE r.id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "album_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "album",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "artist",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "reorganize",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "state",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "finished_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "summary",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "error",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "7df79fcdc2e9b0bf3b97089fbc5b5a98884b2bec7b4a98c9f2d34363659ab5f1"
+}

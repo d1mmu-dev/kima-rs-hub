@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.id,r.album_id,al.title AS album,ar.name AS artist,r.target,r.reorganize,r.state,r.created_at,r.finished_at,r.summary,r.error\n        FROM autotag_runs r JOIN albums al ON al.id=r.album_id JOIN artists ar ON ar.id=al.artist_id\n        ORDER BY r.created_at DESC,r.id DESC LIMIT $1 OFFSET $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "album_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "album",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "artist",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "reorganize",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "state",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "finished_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "summary",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 10,
+        "name": "error",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "017ddf17643e0639579201af5c2c1b47bff99160139025f13380912c373d144c"
+}

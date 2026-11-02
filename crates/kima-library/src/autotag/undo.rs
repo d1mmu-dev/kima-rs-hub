@@ -192,6 +192,68 @@ pub async fn run_undo(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RequestUndoError {
+    #[error("Run not found")]
+    NotFound,
+    #[error("{}", .0.message())]
+    Collision(adb::ConflictAlbum),
+    #[error(transparent)]
+    Other(#[from] AutotagError),
+}
+impl From<sqlx::Error> for RequestUndoError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Other(e.into())
+    }
+}
+
+/// Request-time undo checks and claim. Reuses the job's refusal policy; the job
+/// checks again after dequeue. A queue failure restores the prior run state.
+pub async fn request_undo(
+    ctx: &LibraryCtx,
+    run_id: Uuid,
+) -> std::result::Result<Uuid, RequestUndoError> {
+    let run = adb::get_run(&ctx.pool, run_id)
+        .await?
+        .ok_or(RequestUndoError::NotFound)?;
+    if !matches!(run.state.as_str(), "done" | "failed" | "undo_failed") {
+        return Err(AutotagError::Refused("Only a finished run can be undone".into()).into());
+    }
+    mark_renamed_planned(ctx, &run).await?;
+    let rows = jdb::undo_rows_desc(&ctx.pool, run.id).await?;
+    let hooks = ApplyHooks::default();
+    let cancel = CancellationToken::new();
+    let job = Undo {
+        ctx,
+        run: &run,
+        hooks: &hooks,
+        cancel: &cancel,
+        events: AutotagEvents::new(ctx.events.clone()),
+        total: 0,
+        done: 0,
+    };
+    let place = job.place(target_of(&run)?, !rows.is_empty()).await?;
+    if let Some(c) = job.check(&rows, place.as_ref()).await? {
+        return Err(RequestUndoError::Collision(c));
+    }
+    let mut tx = ctx.pool.begin().await?;
+    if let Some(c) = job.check_identity(&mut tx, &rows).await? {
+        return Err(RequestUndoError::Collision(c));
+    }
+    if !adb::start_undo_tx(&mut tx, run.id).await? {
+        return Err(AutotagError::Refused("Only a finished run can be undone".into()).into());
+    }
+    let job = kima_jobs::queue::enqueue_tx(
+        &mut tx,
+        jobs::QUEUE,
+        json!({"kind":"autotag-undo","runId":run.id}),
+        jobs::MAX_ATTEMPTS,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(job)
+}
+
 /// Ends an `undoing` run: `undone` (album `proposed`) without `error`, else `undo_failed` with
 /// it (album `failed` with it). The summary keeps the apply's counts and gains the journal's
 /// `undone`/`undoFailed` counts and `identityRestored`, plus `extra`; the step marks go.
@@ -349,7 +411,9 @@ impl Undo<'_> {
             r => r?,
         };
         if !self.mark("undoChecked") {
-            self.check(&rows, place.as_ref()).await?;
+            if let Some(c) = self.check(&rows, place.as_ref()).await? {
+                return Err(AutotagError::Refused(c.message()));
+            }
             self.merge_summary(json!({"undoChecked": true})).await?;
         }
 
@@ -462,20 +526,19 @@ impl Undo<'_> {
         }
     }
 
-    /// The refusals before anything is touched (see the module doc).
-    async fn check(&self, rows: &[JournalRow], place: Option<&Place>) -> Result<()> {
-        let (pool, run, album) = (&self.ctx.pool, self.run, self.run.album_id);
-        let mut tx = pool.begin().await?;
-        if adb::lock_album_tracks(&mut tx, album).await?.is_none() {
+    async fn check_identity(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        rows: &[JournalRow],
+    ) -> Result<Option<adb::ConflictAlbum>> {
+        let (run, album) = (self.run, self.run.album_id);
+        if adb::lock_album_tracks(conn, album).await?.is_none() {
             return Err(AutotagError::Refused(IdentityError::AlbumGone.to_string()));
         }
-        if adb::other_active_run(&mut tx, album, run.id)
-            .await?
-            .is_some()
-        {
+        if adb::other_active_run(conn, album, run.id).await?.is_some() {
             return Err(AutotagError::Refused(ALBUM_BUSY.to_string()));
         }
-        if adb::newer_undoable_run(&mut tx, album, run.id)
+        if adb::newer_undoable_run(conn, album, run.id)
             .await?
             .is_some()
         {
@@ -486,11 +549,22 @@ impl Undo<'_> {
             .as_ref()
             .and_then(|s| s.get("undoFrom"))
             .and_then(Value::as_str);
-        if from == Some("failed") && run.album_before.is_none() && rows.is_empty() {
+        if from.unwrap_or(&run.state) == "failed" && run.album_before.is_none() && rows.is_empty() {
             return Err(AutotagError::Refused(NOTHING_TO_UNDO.to_string()));
         }
-        if let Some(c) = adb::undo_collision(&mut tx, run).await? {
-            return Err(AutotagError::Refused(c.message()));
+        Ok(adb::undo_collision(conn, run).await?)
+    }
+
+    /// The refusals before anything is touched (see the module doc).
+    async fn check(
+        &self,
+        rows: &[JournalRow],
+        place: Option<&Place>,
+    ) -> Result<Option<adb::ConflictAlbum>> {
+        let (pool, run) = (&self.ctx.pool, self.run);
+        let mut tx = pool.begin().await?;
+        if let Some(c) = self.check_identity(&mut tx, rows).await? {
+            return Ok(Some(c));
         }
         tx.commit().await?;
 
@@ -510,7 +584,7 @@ impl Undo<'_> {
                 return Err(AutotagError::Refused(UNDO_READ_ONLY.to_string()));
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Step 1. Answers why the reorganize could not be fully undone, if it could not; a

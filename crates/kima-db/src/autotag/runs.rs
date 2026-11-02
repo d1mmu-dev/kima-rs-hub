@@ -451,6 +451,12 @@ pub async fn newer_undoable_run(
 /// `organizeUndoError`, `undoRefused`; `identityRestored` is kept: a restored identity is never restored
 /// twice). `false` when the run was in none of those states.
 pub async fn start_undo(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
+    let mut conn = pool.acquire().await?;
+    start_undo_tx(&mut conn, id).await
+}
+
+/// Starts an undo on the caller's transaction, atomic with its queue insertion.
+pub async fn start_undo_tx(conn: &mut PgConnection, id: Uuid) -> sqlx::Result<bool> {
     let r = sqlx::query!(
         "UPDATE autotag_runs
          SET state = 'undoing', finished_at = NULL,
@@ -460,7 +466,7 @@ pub async fn start_undo(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
          WHERE id = $1 AND state IN ('done', 'failed', 'undo_failed')",
         id
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
     Ok(r.rows_affected() == 1)
 }

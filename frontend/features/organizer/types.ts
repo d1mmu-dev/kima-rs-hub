@@ -10,7 +10,7 @@ export interface OrganizerCapabilities {
 export interface OrganizerRun {
     id: string;
     mode: OrganizerMode;
-    /** planning | previewed | applying | done | failed | undoing | undone */
+    /** planning | previewed | superseded | applying | done | failed | undoing | undone */
     state: string;
     sourceRoot: string;
     targetRoot: string;
@@ -45,6 +45,13 @@ export interface OrganizerRunDetail extends OrganizerRun {
     total: number;
     offset: number;
     limit: number;
+}
+
+export interface OrganizerAlbumGroup {
+    albumId: string | null;
+    artist: string | null;
+    album: string | null;
+    rows: OrganizerRow[];
 }
 
 export interface AttentionAlbum {

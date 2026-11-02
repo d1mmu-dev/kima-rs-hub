@@ -19,6 +19,7 @@ export function filterRows(rows: OrganizerRow[], f: RowFilters): OrganizerRow[] 
 }
 
 export const ISSUE_LABELS: Record<string, string> = {
+    symlink: "Symlinked files",
     artistFromPath: "Artist from folder",
     albumFromPath: "Album from folder",
     unknownArtist: "Unknown artist",

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { SettingsSection } from "../ui";
 import { buttonClass } from "@/components/ui/Button";
 
-/** Entry points to the admin-only organizer and attention report. */
+/** Entry points to the admin-only organizer, attention report and album matching. */
 export function LibraryToolsSection() {
     return (
         <SettingsSection
@@ -18,6 +18,9 @@ export function LibraryToolsSection() {
                 </Link>
                 <Link href="/settings/attention" className={buttonClass("secondary", "md")}>
                     Needs attention
+                </Link>
+                <Link href="/settings/autotag" className={buttonClass("secondary", "md")}>
+                    Match albums
                 </Link>
             </div>
         </SettingsSection>

@@ -1,0 +1,86 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT al.id AS album_id, ar.name AS artist, al.title AS album, al.year,\n        (SELECT count(*) FROM tracks t WHERE t.album_id=al.id AND t.missing_since IS NULL) AS \"track_count!\",\n        COALESCE(aa.state,'new') AS \"state!\", aa.recommendation AS \"recommendation?\", c.distance AS \"distance?\", c.release_mbid AS \"release_mbid?\",\n        aa.searched_at AS \"searched_at?\", aa.applied_at AS \"applied_at?\"\n        FROM albums al JOIN artists ar ON ar.id=al.artist_id\n        LEFT JOIN autotag_albums aa ON aa.album_id=al.id\n        LEFT JOIN autotag_candidates c ON c.id=aa.best_candidate\n        WHERE EXISTS (SELECT 1 FROM tracks t WHERE t.album_id=al.id AND t.missing_since IS NULL)\n        AND ($1::text IS NULL OR COALESCE(aa.state,'new')=$1)\n        AND ($2::text IS NULL OR aa.recommendation=$2)\n        AND ($3::text IS NULL OR unaccent(ar.name) ILIKE unaccent($3) OR unaccent(al.title) ILIKE unaccent($3))\n        ORDER BY lower(ar.name), lower(al.title), al.year, al.id LIMIT $4 OFFSET $5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "album_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "artist",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "album",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "year",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "track_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "state!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "recommendation?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "distance?",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 8,
+        "name": "release_mbid?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 9,
+        "name": "searched_at?",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "applied_at?",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null,
+      null,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "662b91145877e59b3af07b14e1979dba951e3b1d81d040225f73faaa1a46dab6"
+}

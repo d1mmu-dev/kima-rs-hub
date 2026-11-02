@@ -5,7 +5,9 @@ pub mod albums;
 pub mod applied;
 pub mod identity;
 pub mod journal;
+mod reads;
 pub mod runs;
+pub use reads::*;
 
 pub use albums::*;
 pub use applied::*;

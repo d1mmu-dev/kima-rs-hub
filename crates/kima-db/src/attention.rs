@@ -76,6 +76,35 @@ pub async fn report(pool: &PgPool) -> sqlx::Result<Vec<AlbumAttention>> {
     Ok(analyse(rows))
 }
 
+/// Analyse complete target albums and all present tracks sharing their folders, so a
+/// paginated/filtered result still sees folder splits across albums outside that page.
+/// Only requested albums with issues are returned (absent entries mean no issues).
+pub async fn report_for(
+    pool: &PgPool,
+    albums: &[Uuid],
+) -> sqlx::Result<HashMap<Uuid, Vec<&'static str>>> {
+    if albums.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query_as!(Row,
+        r#"WITH folders AS (
+            SELECT DISTINCT regexp_replace(path, '[^/]*$', '') AS folder
+            FROM tracks WHERE album_id=ANY($1) AND missing_since IS NULL
+        )
+        SELECT t.album_id,ar.name AS artist,al.title AS album,al.year AS album_year,
+        t.year AS track_year,t.disc,t.track_no,t.path,t.guessed AS "guessed: sqlx::types::Json<Guessed>"
+        FROM tracks t JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id
+        WHERE t.missing_since IS NULL AND (t.album_id=ANY($1) OR
+            regexp_replace(t.path, '[^/]*$', '') IN (SELECT folder FROM folders))
+        ORDER BY t.album_id,t.path"#,albums
+    ).fetch_all(pool).await?;
+    Ok(analyse(rows)
+        .into_iter()
+        .filter(|a| albums.contains(&a.album_id))
+        .map(|a| (a.album_id, a.issues))
+        .collect())
+}
+
 fn analyse(rows: Vec<Row>) -> Vec<AlbumAttention> {
     // Albums per folder, to spot a folder whose tracks land in several albums.
     let mut folders: HashMap<&str, HashSet<Uuid>> = HashMap::new();

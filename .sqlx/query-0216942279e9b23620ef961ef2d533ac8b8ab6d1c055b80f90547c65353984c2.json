@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH folders AS (\n            SELECT DISTINCT regexp_replace(path, '[^/]*$', '') AS folder\n            FROM tracks WHERE album_id=ANY($1) AND missing_since IS NULL\n        )\n        SELECT t.album_id,ar.name AS artist,al.title AS album,al.year AS album_year,\n        t.year AS track_year,t.disc,t.track_no,t.path,t.guessed AS \"guessed: sqlx::types::Json<Guessed>\"\n        FROM tracks t JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id\n        WHERE t.missing_since IS NULL AND (t.album_id=ANY($1) OR\n            regexp_replace(t.path, '[^/]*$', '') IN (SELECT folder FROM folders))\n        ORDER BY t.album_id,t.path",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "album_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "artist",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "album",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "album_year",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "track_year",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "disc",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "track_no",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "guessed: sqlx::types::Json<Guessed>",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0216942279e9b23620ef961ef2d533ac8b8ab6d1c055b80f90547c65353984c2"
+}

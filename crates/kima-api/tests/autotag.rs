@@ -1,5 +1,578 @@
 mod common;
 
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn search_queues_and_sets_state(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "First", Some(2001), "One")).await;
+    let (s, t, _) = setup(&pool).await;
+    for queued in [1, 0] {
+        let r = s
+            .post("/api/library/autotag/search")
+            .authorization_bearer(&t)
+            .json(&json!({"albumIds":[a.album,a.album]}))
+            .await;
+        r.assert_status(StatusCode::ACCEPTED);
+        r.assert_json(&json!({"queued":queued}));
+    }
+    let state: String = sqlx::query_scalar("SELECT state FROM autotag_albums WHERE album_id=$1")
+        .bind(a.album)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "queued");
+    let payload: Value = sqlx::query_scalar("SELECT payload FROM jobs WHERE queue='autotag'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload, json!({"kind":"search","albumId":a.album}));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn search_all_manual_validation_and_identify_switch(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "First", Some(2001), "One")).await;
+    let b = seed(&pool, Seed::new("Beta", "Second", None, "Two")).await;
+    sqlx::query("UPDATE albums SET release_mbid=$2 WHERE id=$1")
+        .bind(b.album)
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (s, t, _) = setup(&pool).await;
+    for body in [
+        json!({}),
+        json!({"all":false}),
+        json!({"albumIds":[]}),
+        json!({"all":true,"albumIds":[a.album]}),
+        json!({"albumIds":[a.album],"query":{"artist":"","album":"x"}}),
+        json!({"albumIds":[a.album,b.album],"releaseMbid":Uuid::now_v7()}),
+        json!({"all":true,"query":{"artist":"A","album":"B"}}),
+        json!({"albumIds":[a.album],"releaseMbid":"nope"}),
+        json!({"albumIds":[a.album],"releaseMbid":Uuid::now_v7(),"query":{"artist":"A","album":"B"}}),
+        json!({"albumIds":[a.album,"nope"]}),
+        json!({"albumIds":[a.album],"unknown":true}),
+    ] {
+        s.post("/api/library/autotag/search")
+            .authorization_bearer(&t)
+            .json(&body)
+            .await
+            .assert_status_bad_request();
+    }
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+    let r = s
+        .post("/api/library/autotag/search")
+        .authorization_bearer(&t)
+        .json(&json!({"all":true}))
+        .await;
+    r.assert_status(StatusCode::ACCEPTED);
+    r.assert_json(&json!({"queued":1}));
+    let release = Uuid::now_v7();
+    for _ in 0..2 {
+        s.post("/api/library/autotag/search").authorization_bearer(&t).json(&json!({"albumIds":[a.album],"releaseMbid":format!("https://musicbrainz.org/release/{release}")})).await.assert_json(&json!({"queued":1}));
+    }
+    let mut state = common::state(pool.clone());
+    state.identify = kima_core::identify::IdentifySwitch::new(true, true);
+    let token = t;
+    let off = TestServer::new(kima_api::router(state)).unwrap();
+    let r = off
+        .post("/api/library/autotag/search")
+        .authorization_bearer(&token)
+        .json(&json!({"albumIds":[a.album]}))
+        .await;
+    r.assert_status(StatusCode::CONFLICT);
+    r.assert_json(&json!({"error":"Outbound lookups are turned off"}));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn apply_202_then_job_done_db_target(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "First", Some(2001), "One")).await;
+    let c = db::store_search(&pool, a.album, &[candidate(a.track, "Renamed", 0.01)])
+        .await
+        .unwrap()
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = common::state(pool.clone()).with_library_root(root.path().to_path_buf());
+    let ctx = kima_library::scan::LibraryCtx {
+        pool: pool.clone(),
+        root: state.library_root.clone().unwrap(),
+        events: state.events.clone(),
+        data_dir: root.path().to_path_buf(),
+        ignore: state.library.ignore.clone(),
+    };
+    let (_, t) = common::user_with_token(&state, "admin").await;
+    let s = TestServer::new(kima_api::router(state)).unwrap();
+    let r = s
+        .post(&format!("/api/library/autotag/albums/{}/apply", a.album))
+        .authorization_bearer(&t)
+        .json(&json!({"candidateId":c,"target":"db"}))
+        .await;
+    r.assert_status(StatusCode::ACCEPTED);
+    let v: Value = r.json();
+    let run: Uuid = serde_json::from_value(v["runId"].clone()).unwrap();
+    let job: Value = sqlx::query_scalar("SELECT payload FROM jobs WHERE id=$1")
+        .bind(serde_json::from_value::<Uuid>(v["jobId"].clone()).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(job, json!({"kind":"autotag-apply","runId":run}));
+    kima_library::autotag::apply::run_job(
+        &ctx,
+        run,
+        &tokio_util::sync::CancellationToken::new(),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        db::get_run(&pool, run).await.unwrap().unwrap().state,
+        "done"
+    );
+    assert_eq!(
+        db::local_album(&pool, a.album)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "Renamed"
+    );
+    for endpoint in ["search", &format!("albums/{}/skip", a.album)] {
+        let r = s
+            .post(&format!("/api/library/autotag/{endpoint}"))
+            .authorization_bearer(&t)
+            .json(&json!({"albumIds":[a.album]}))
+            .await;
+        if endpoint == "search" {
+            r.assert_json(&json!({"queued":0}));
+        } else {
+            r.assert_status(StatusCode::CONFLICT);
+        }
+    }
+    let r = s
+        .post(&format!("/api/library/autotag/albums/{}/apply", a.album))
+        .authorization_bearer(&t)
+        .json(&json!({"candidateId":c,"target":"db"}))
+        .await;
+    r.assert_status_bad_request();
+    r.assert_json(&json!({"error":kima_library::autotag::APPLIED_MATCH_EXISTS}));
+    let r = s
+        .post(&format!("/api/library/autotag/runs/{run}/undo"))
+        .authorization_bearer(&t)
+        .await;
+    r.assert_status(StatusCode::ACCEPTED);
+    kima_library::autotag::undo::run_job(
+        &ctx,
+        run,
+        &tokio_util::sync::CancellationToken::new(),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        db::get_run(&pool, run).await.unwrap().unwrap().state,
+        "undone"
+    );
+    assert_eq!(
+        db::local_album(&pool, a.album)
+            .await
+            .unwrap()
+            .unwrap()
+            .title,
+        "First"
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn apply_conflict_busy_and_unavailable(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "First", Some(2001), "One")).await;
+    let b = seed(&pool, Seed::new("Alpha", "Taken", Some(2001), "Two")).await;
+    let c = db::store_search(&pool, a.album, &[candidate(a.track, "Taken", 0.01)])
+        .await
+        .unwrap()
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = common::state(pool.clone()).with_library_root(root.path().to_path_buf());
+    let (_, t) = common::user_with_token(&state, "admin").await;
+    let s = TestServer::new(kima_api::router(state)).unwrap();
+    let path = format!("/api/library/autotag/albums/{}/apply", a.album);
+    let r = s
+        .post(&path)
+        .authorization_bearer(&t)
+        .json(&json!({"candidateId":c,"target":"db"}))
+        .await;
+    r.assert_status(StatusCode::CONFLICT);
+    let v: Value = r.json();
+    assert_eq!(v["conflictAlbumId"], json!(b.album));
+    assert!(v["error"].as_str().unwrap().contains("Taken"));
+    let r = s
+        .post(&path)
+        .authorization_bearer(&t)
+        .json(&json!({"candidateId":c,"target":"copy"}))
+        .await;
+    r.assert_status_bad_request();
+    r.assert_json(&json!({"error":kima_library::autotag::COPY_FIRST}));
+    sqlx::query("INSERT INTO autotag_runs (id,album_id,target,reorganize,state) VALUES ($1,$2,'db',false,'queued')").bind(Uuid::now_v7()).bind(a.album).execute(&pool).await.unwrap();
+    let r = s
+        .post(&path)
+        .authorization_bearer(&t)
+        .json(&json!({"candidateId":c,"target":"db"}))
+        .await;
+    r.assert_status(StatusCode::CONFLICT);
+    r.assert_json(&json!({"error":kima_library::autotag::apply::ALBUM_BUSY}));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn skip_sets_state_and_preserves_protected_album(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "First", Some(2001), "One")).await;
+    let (s, t, _) = setup(&pool).await;
+    let path = format!("/api/library/autotag/albums/{}/skip", a.album);
+    s.post(&path)
+        .authorization_bearer(&t)
+        .await
+        .assert_json(&json!({"state":"skipped"}));
+    assert_eq!(
+        get(&s, &t, &format!("albums/{}", a.album)).await["state"],
+        "skipped"
+    );
+    sqlx::query("INSERT INTO autotag_runs (id,album_id,target,reorganize,state,album_before,error) VALUES ($1,$2,'db',false,'undo_failed','{}','keep me')").bind(Uuid::now_v7()).bind(a.album).execute(&pool).await.unwrap();
+    db::set_state(&pool, a.album, db::AlbumState::Failed, Some("keep me"))
+        .await
+        .unwrap();
+    s.post(&path)
+        .authorization_bearer(&t)
+        .await
+        .assert_status(StatusCode::CONFLICT);
+    let v = get(&s, &t, &format!("albums/{}", a.album)).await;
+    assert_eq!(v["state"], "failed");
+    assert_eq!(v["error"], "keep me");
+    s.post("/api/library/autotag/albums/nope/skip")
+        .authorization_bearer(&t)
+        .await
+        .assert_status_not_found();
+    s.post(&format!(
+        "/api/library/autotag/albums/{}/skip",
+        Uuid::now_v7()
+    ))
+    .authorization_bearer(&t)
+    .await
+    .assert_status_not_found();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_202_and_state_conflicts(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "First", Some(2001), "One")).await;
+    let root = tempfile::tempdir().unwrap();
+    let state = common::state(pool.clone()).with_library_root(root.path().to_path_buf());
+    let (_, t) = common::user_with_token(&state, "admin").await;
+    let s = TestServer::new(kima_api::router(state)).unwrap();
+    for state in [
+        "queued",
+        "writing",
+        "organizing",
+        "undoing",
+        "undone",
+        "failed",
+        "done",
+        "undo_failed",
+    ] {
+        let run = Uuid::now_v7();
+        let c = db::store_search(&pool, a.album, &[candidate(a.track, "First", 0.01)])
+            .await
+            .unwrap()
+            .unwrap();
+        let applied = kima_ident::autotag::start::applied_values(
+            &db::candidate(&pool, c).await.unwrap().unwrap(),
+            &db::local_album(&pool, a.album).await.unwrap().unwrap(),
+            false,
+        )
+        .unwrap();
+        sqlx::query("INSERT INTO autotag_runs (id,album_id,target,reorganize,state,applied) VALUES ($1,$2,'db',false,$3,$4)").bind(run).bind(a.album).bind(state).bind(serde_json::to_value(applied).unwrap()).execute(&pool).await.unwrap();
+        let r = s
+            .post(&format!("/api/library/autotag/runs/{run}/undo"))
+            .authorization_bearer(&t)
+            .await;
+        if ["done", "undo_failed"].contains(&state) {
+            r.assert_status(StatusCode::ACCEPTED);
+            let v: Value = r.json();
+            assert!(v["jobId"].is_string());
+            assert_eq!(
+                db::get_run(&pool, run).await.unwrap().unwrap().state,
+                "undoing"
+            );
+            let r = s
+                .post(&format!("/api/library/autotag/runs/{run}/undo"))
+                .authorization_bearer(&t)
+                .await;
+            r.assert_status(StatusCode::CONFLICT);
+        } else {
+            r.assert_status(StatusCode::CONFLICT);
+        }
+        sqlx::query("DELETE FROM autotag_runs WHERE id=$1")
+            .bind(run)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    s.post("/api/library/autotag/runs/nope/undo")
+        .authorization_bearer(&t)
+        .await
+        .assert_status_not_found();
+    s.post(&format!(
+        "/api/library/autotag/runs/{}/undo",
+        Uuid::now_v7()
+    ))
+    .authorization_bearer(&t)
+    .await
+    .assert_status_not_found();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_collision_has_album_id_and_preserves_failed_run(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "First", Some(2001), "One")).await;
+    let c = db::store_search(&pool, a.album, &[candidate(a.track, "Renamed", 0.01)])
+        .await
+        .unwrap()
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = common::state(pool.clone()).with_library_root(root.path().to_path_buf());
+    let ctx = kima_library::scan::LibraryCtx {
+        pool: pool.clone(),
+        root: state.library_root.clone().unwrap(),
+        events: state.events.clone(),
+        data_dir: root.path().to_path_buf(),
+        ignore: state.library.ignore.clone(),
+    };
+    let (_, t) = common::user_with_token(&state, "admin").await;
+    let s = TestServer::new(kima_api::router(state)).unwrap();
+    let r = s
+        .post(&format!("/api/library/autotag/albums/{}/apply", a.album))
+        .authorization_bearer(&t)
+        .json(&json!({"candidateId":c,"target":"db"}))
+        .await;
+    r.assert_status(StatusCode::ACCEPTED);
+    let v: Value = r.json();
+    let run: Uuid = serde_json::from_value(v["runId"].clone()).unwrap();
+    kima_library::autotag::apply::run_job(
+        &ctx,
+        run,
+        &tokio_util::sync::CancellationToken::new(),
+        true,
+    )
+    .await
+    .unwrap();
+    let b = seed(&pool, Seed::new("Alpha", "First", Some(2001), "Other")).await;
+    sqlx::query("UPDATE autotag_runs SET state='undo_failed',error='keep original' WHERE id=$1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let r = s
+        .post(&format!("/api/library/autotag/runs/{run}/undo"))
+        .authorization_bearer(&t)
+        .await;
+    r.assert_status(StatusCode::CONFLICT);
+    let v: Value = r.json();
+    assert_eq!(v["conflictAlbumId"], json!(b.album));
+    let run = db::get_run(&pool, run).await.unwrap().unwrap();
+    assert_eq!(run.state, "undo_failed");
+    assert_eq!(run.error.as_deref(), Some("keep original"));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_enqueue_failure_is_atomic(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "First", Some(2001), "One")).await;
+    let c = db::store_search(&pool, a.album, &[candidate(a.track, "First", 0.01)])
+        .await
+        .unwrap()
+        .unwrap();
+    let applied = kima_ident::autotag::start::applied_values(
+        &db::candidate(&pool, c).await.unwrap().unwrap(),
+        &db::local_album(&pool, a.album).await.unwrap().unwrap(),
+        false,
+    )
+    .unwrap();
+    let run = Uuid::now_v7();
+    sqlx::query("INSERT INTO autotag_runs (id,album_id,target,reorganize,state,applied,error,summary) VALUES ($1,$2,'db',false,'undo_failed',$3,'original','{\"needsUndo\":true}')").bind(run).bind(a.album).bind(serde_json::to_value(applied).unwrap()).execute(&pool).await.unwrap();
+    sqlx::query(
+        "ALTER TABLE jobs ADD CONSTRAINT refuse_undo CHECK (payload->>'kind' <> 'autotag-undo')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = common::state(pool.clone()).with_library_root(root.path().to_path_buf());
+    let (_, t) = common::user_with_token(&state, "admin").await;
+    let s = TestServer::new(kima_api::router(state)).unwrap();
+    let before = db::get_run(&pool, run).await.unwrap().unwrap();
+    s.post(&format!("/api/library/autotag/runs/{run}/undo"))
+        .authorization_bearer(&t)
+        .await
+        .assert_status_internal_server_error();
+    assert_eq!(db::get_run(&pool, run).await.unwrap().unwrap(), before);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn mutation_auth_input_and_search_protections(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "First", Some(2001), "One")).await;
+    let b = seed(&pool, Seed::new("Beta", "Second", Some(2001), "Two")).await;
+    let c = db::store_search(&pool, a.album, &[candidate(a.track, "First", 0.01)])
+        .await
+        .unwrap()
+        .unwrap();
+    let foreign = db::store_search(&pool, b.album, &[candidate(b.track, "Second", 0.01)])
+        .await
+        .unwrap()
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = common::state(pool.clone()).with_library_root(root.path().to_path_buf());
+    let (_, t) = common::user_with_token(&state, "admin").await;
+    let (_, u) = common::user_with_token(&state, "user").await;
+    let s = TestServer::new(kima_api::router(state)).unwrap();
+    let path = format!("/api/library/autotag/albums/{}/apply", a.album);
+    for p in [
+        "/api/library/autotag/search".into(),
+        path.clone(),
+        format!("/api/library/autotag/albums/{}/skip", a.album),
+        format!("/api/library/autotag/runs/{}/undo", Uuid::now_v7()),
+    ] {
+        s.post(&p)
+            .authorization_bearer(&u)
+            .json(&json!({}))
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
+        s.post(&p)
+            .json(&json!({}))
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+    for body in [
+        json!({}),
+        json!({"candidateId":c,"target":"bogus"}),
+        json!({"candidateId":c,"target":"db","reorganize":true}),
+        json!({"candidateId":c,"target":"db","mbidsOnly":"yes"}),
+        json!({"candidateId":c,"target":"db","unknown":1}),
+    ] {
+        s.post(&path)
+            .authorization_bearer(&t)
+            .json(&body)
+            .await
+            .assert_status_bad_request();
+    }
+    for id in [
+        "nope".into(),
+        foreign.to_string(),
+        Uuid::now_v7().to_string(),
+    ] {
+        s.post(&path)
+            .authorization_bearer(&t)
+            .json(&json!({"candidateId":id,"target":"db"}))
+            .await
+            .assert_status_not_found();
+    }
+    s.post("/api/library/autotag/albums/nope/apply")
+        .authorization_bearer(&t)
+        .json(&json!({"candidateId":c,"target":"db"}))
+        .await
+        .assert_status_not_found();
+    let run = Uuid::now_v7();
+    for run_state in [
+        "queued",
+        "writing",
+        "organizing",
+        "undoing",
+        "failed",
+        "undo_failed",
+    ] {
+        sqlx::query("INSERT INTO autotag_runs (id,album_id,target,reorganize,state,album_before) VALUES ($1,$2,'db',false,$3,'{}') ON CONFLICT (id) DO UPDATE SET state=$3").bind(run).bind(a.album).bind(run_state).execute(&pool).await.unwrap();
+        db::set_state(&pool, a.album, db::AlbumState::Failed, Some("keep me"))
+            .await
+            .unwrap();
+        for body in [
+            json!({"all":true}),
+            json!({"albumIds":[a.album],"query":{"artist":"A","album":"B"}}),
+        ] {
+            let r = s
+                .post("/api/library/autotag/search")
+                .authorization_bearer(&t)
+                .json(&body)
+                .await;
+            r.assert_status(StatusCode::ACCEPTED);
+            // all may queue B on its first call, never A.
+            let n: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE payload->>'albumId'=$1")
+                    .bind(a.album.to_string())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(n, 0);
+        }
+        s.post(&format!("/api/library/autotag/albums/{}/skip", a.album))
+            .authorization_bearer(&t)
+            .await
+            .assert_status(StatusCode::CONFLICT);
+        let v = get(&s, &t, &format!("albums/{}", a.album)).await;
+        assert_eq!(v["state"], "failed");
+        assert_eq!(v["error"], "keep me");
+        assert_eq!(v["candidates"][0]["id"], json!(c));
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn undo_latest_failed_written_single_connection_and_dedup(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "First", Some(2001), "One")).await;
+    let c = db::store_search(&pool, a.album, &[candidate(a.track, "First", 0.01)])
+        .await
+        .unwrap()
+        .unwrap();
+    let applied = kima_ident::autotag::start::applied_values(
+        &db::candidate(&pool, c).await.unwrap().unwrap(),
+        &db::local_album(&pool, a.album).await.unwrap().unwrap(),
+        true,
+    )
+    .unwrap();
+    let old = Uuid::now_v7();
+    let latest = Uuid::now_v7();
+    for (id, state, date) in [
+        (old, "done", "2026-01-01"),
+        (latest, "failed", "2026-01-02"),
+    ] {
+        sqlx::query("INSERT INTO autotag_runs (id,album_id,target,reorganize,state,applied,album_before,created_at) VALUES ($1,$2,'db',false,$3,$4,NULL,$5::text::timestamptz)").bind(id).bind(a.album).bind(state).bind(serde_json::to_value(&applied).unwrap()).bind(date).execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO autotag_journal (run_id,track_id,root,path,state,old_tags,new_tags) VALUES ($1,$2,'library','one.mp3','written','{}','{}')").bind(latest).bind(a.track).execute(&pool).await.unwrap();
+    let single = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let state = common::state(single).with_library_root(root.path().to_path_buf());
+    let (_, t) = common::user_with_token(&state, "admin").await;
+    let s = TestServer::new(kima_api::router(state)).unwrap();
+    let r = s
+        .post(&format!("/api/library/autotag/runs/{old}/undo"))
+        .authorization_bearer(&t)
+        .await;
+    r.assert_status(StatusCode::CONFLICT);
+    r.assert_json(&json!({"error":kima_library::autotag::UNDO_NEWER_FIRST}));
+    let path = format!("/api/library/autotag/runs/{latest}/undo");
+    let request = || async { s.post(&path).authorization_bearer(&t).await };
+    let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(request(), request())
+    })
+    .await
+    .unwrap();
+    let mut statuses = [a.status_code(), b.status_code()];
+    statuses.sort();
+    assert_eq!(statuses, [StatusCode::ACCEPTED, StatusCode::CONFLICT]);
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE payload->>'runId'=$1")
+        .bind(latest.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
 use axum::http::StatusCode;
 use axum_test::TestServer;
 use common::library::{Seed, mark_missing, seed};

@@ -30,6 +30,12 @@ pub enum ApiError {
     /// 409 with a message built at run time (the MetadataEditor's taken MBID).
     #[error("{0}")]
     ConflictMessage(String),
+    /// 409 with structured, non-secret conflict context.
+    #[error("{message}")]
+    ConflictWith {
+        message: String,
+        extra: serde_json::Value,
+    },
     #[error("{0}")]
     TooManyRequests(&'static str),
     /// 429 with `Retry-After`: the failed-login limiter refused the attempt.
@@ -88,7 +94,9 @@ impl ApiError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::Conflict(_) | Self::ConflictMessage(_) => StatusCode::CONFLICT,
+            Self::Conflict(_) | Self::ConflictMessage(_) | Self::ConflictWith { .. } => {
+                StatusCode::CONFLICT
+            }
             Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -104,6 +112,11 @@ impl ApiError {
             }
             Self::InvalidWithDetails { details, .. } => {
                 json!({ "error": self.to_string(), "details": details })
+            }
+            Self::ConflictWith { message, extra } => {
+                let mut body = extra.as_object().cloned().unwrap_or_default();
+                body.insert("error".into(), json!(message));
+                serde_json::Value::Object(body)
             }
             _ => json!({ "error": self.to_string() }),
         };

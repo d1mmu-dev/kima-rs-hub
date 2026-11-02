@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    routing::get,
+    http::StatusCode,
+    routing::{get, post},
 };
 use kima_db::{attention, autotag as db};
 use kima_ident::{
@@ -24,11 +25,209 @@ use crate::{auth::AdminUser, error::ApiError, state::AppState};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/library/autotag/runs/{id}/undo", post(undo))
+        .route("/library/autotag/albums/{id}/skip", post(skip))
+        .route("/library/autotag/albums/{id}/apply", post(apply))
+        .route("/library/autotag/search", post(search))
         .route("/library/autotag/capabilities", get(capabilities))
         .route("/library/autotag/albums", get(albums))
         .route("/library/autotag/albums/{id}", get(album))
         .route("/library/autotag/runs", get(runs))
         .route("/library/autotag/runs/{id}", get(run))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SearchRequest {
+    album_ids: Option<Vec<uuid::Uuid>>,
+    all: Option<bool>,
+    query: Option<SearchQuery>,
+    release_mbid: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchQuery {
+    artist: String,
+    album: String,
+}
+
+async fn search(
+    _: AdminUser,
+    State(s): State<AppState>,
+    crate::extract::ApiJson(q): crate::extract::ApiJson<SearchRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    use kima_ident::autotag::search::{ManualQuery, SearchJob, enqueue_search, parse_release_ref};
+    if q.all == Some(true) && q.album_ids.is_some() {
+        return Err(ApiError::BadRequest(
+            "Give albumIds or all, not both".into(),
+        ));
+    }
+    if q.all != Some(true) && q.album_ids.as_ref().is_none_or(Vec::is_empty) {
+        return Err(ApiError::BadRequest("Give albumIds or all".into()));
+    }
+    if q.query.is_some() && q.release_mbid.is_some() {
+        return Err(ApiError::BadRequest(
+            "Give query or releaseMbid, not both".into(),
+        ));
+    }
+    let ids = q
+        .album_ids
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if (q.query.is_some() || q.release_mbid.is_some()) && (q.all == Some(true) || ids.len() != 1) {
+        return Err(ApiError::BadRequest(
+            "query and releaseMbid need exactly one album".into(),
+        ));
+    }
+    let query = q
+        .query
+        .map(|q| {
+            if q.artist.trim().is_empty() || q.album.trim().is_empty() {
+                return Err(ApiError::BadRequest("query needs artist and album".into()));
+            }
+            Ok(ManualQuery {
+                artist: q.artist,
+                album: q.album,
+            })
+        })
+        .transpose()?;
+    let release_mbid = q
+        .release_mbid
+        .map(|s| {
+            parse_release_ref(&s)
+                .ok_or_else(|| ApiError::BadRequest("Not a MusicBrainz release id or URL".into()))
+        })
+        .transpose()?;
+    if !s.identify.enabled() {
+        return Err(ApiError::Conflict("Outbound lookups are turned off"));
+    }
+    let ids = if q.all == Some(true) {
+        db::unmatched_albums(&s.pool).await?.into_iter().collect()
+    } else {
+        ids
+    };
+    let mut queued = 0;
+    for album_id in ids {
+        let job = SearchJob {
+            album_id,
+            query: query.clone(),
+            release_mbid,
+        };
+        queued += usize::from(enqueue_search(&s.pool, &job).await?.is_some());
+    }
+    Ok((StatusCode::ACCEPTED, Json(json!({"queued":queued}))))
+}
+
+fn library_ctx(s: &AppState) -> Result<kima_library::scan::LibraryCtx, ApiError> {
+    Ok(kima_library::scan::LibraryCtx {
+        pool: s.pool.clone(),
+        root: s
+            .library_root
+            .clone()
+            .ok_or_else(|| ApiError::BadRequest("Library root is not configured".into()))?,
+        events: s.events.clone(),
+        data_dir: s.data_dir.clone().unwrap_or_default(),
+        ignore: s.library.ignore.clone(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ApplyBody {
+    candidate_id: String,
+    target: db::Target,
+    #[serde(default)]
+    reorganize: bool,
+    #[serde(default)]
+    mbids_only: bool,
+}
+async fn apply(
+    AdminUser(user): AdminUser,
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    crate::extract::ApiJson(body): crate::extract::ApiJson<ApplyBody>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let album_id = parse_id(&id).ok_or(ApiError::NotFound("Album not found"))?;
+    let candidate_id = parse_id(&body.candidate_id).ok_or(ApiError::NotFound(start::NOT_FOUND))?;
+    let started = start::start(
+        &s.pool,
+        &library_ctx(&s)?,
+        &start::ApplyRequest {
+            album_id,
+            candidate_id,
+            target: body.target,
+            reorganize: body.reorganize,
+            mbids_only: body.mbids_only,
+            created_by: Some(user.id),
+        },
+    )
+    .await
+    .map_err(|e| match e {
+        start::StartError::NotFound => ApiError::NotFound(start::NOT_FOUND),
+        start::StartError::Db(e) => e.into(),
+        start::StartError::Busy => ApiError::Conflict(kima_library::autotag::apply::ALBUM_BUSY),
+        start::StartError::Collision(c) => collision(c),
+        start::StartError::Invalid(m) | start::StartError::Unavailable(m) => {
+            ApiError::BadRequest(m)
+        }
+    })?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"runId":started.run_id,"jobId":started.job_id})),
+    ))
+}
+
+async fn undo(
+    _: AdminUser,
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    use kima_library::autotag::{
+        apply::AutotagError,
+        undo::{RequestUndoError, request_undo},
+    };
+    let id = parse_id(&id).ok_or(ApiError::NotFound("Run not found"))?;
+    let job = request_undo(&library_ctx(&s)?, id)
+        .await
+        .map_err(|e| match e {
+            RequestUndoError::NotFound => ApiError::NotFound("Run not found"),
+            RequestUndoError::Collision(c) => collision(c),
+            RequestUndoError::Other(AutotagError::Refused(m)) => ApiError::ConflictMessage(m),
+            RequestUndoError::Other(AutotagError::Db(e)) => e.into(),
+            e => ApiError::Internal(anyhow::anyhow!(e)),
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(json!({"jobId":job}))))
+}
+
+async fn skip(
+    _: AdminUser,
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let id = parse_id(&id).ok_or(ApiError::NotFound("Album not found"))?;
+    let mut tx = s.pool.begin().await?;
+    if db::lock_album_tracks(&mut tx, id)
+        .await?
+        .is_none_or(|t| t.is_empty())
+    {
+        return Err(ApiError::NotFound("Album not found"));
+    }
+    if !db::lock_search_eligible(&mut tx, id).await? {
+        return Err(ApiError::Conflict(
+            kima_library::autotag::APPLIED_MATCH_EXISTS,
+        ));
+    }
+    db::set_state_locked(&mut tx, id, db::AlbumState::Skipped, None).await?;
+    tx.commit().await?;
+    Ok(Json(json!({"state":"skipped"})))
+}
+
+fn collision(c: db::ConflictAlbum) -> ApiError {
+    ApiError::ConflictWith {
+        message: c.message(),
+        extra: json!({"conflictAlbumId":c.album_id}),
+    }
 }
 
 fn rfc3339(t: OffsetDateTime) -> Option<String> {

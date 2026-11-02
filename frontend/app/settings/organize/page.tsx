@@ -9,14 +9,13 @@ import { notify } from "@/lib/notify";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/Button";
 import { GradientSpinner } from "@/components/ui/GradientSpinner";
-import { PreviewTable } from "@/features/organizer/components/PreviewTable";
+import { AlbumGroupedPreview, ALBUMS_PER_PAGE } from "@/features/organizer/components/AlbumGroupedPreview";
 import { ProgressBar } from "@/features/organizer/components/ProgressBar";
 import { NotAvailable } from "@/features/organizer/components/NotAvailable";
 import { runActions } from "@/features/organizer/runActions";
 import { clearLibraryProgress } from "@/features/organizer/progress";
 import type { OrganizerMode } from "@/features/organizer/types";
 
-const PAGE = 200;
 const BUSY = ["planning", "applying", "undoing"];
 
 function errorMessage(e: unknown): string {
@@ -29,7 +28,7 @@ export default function OrganizePage() {
     const qc = useQueryClient();
     const [mode, setMode] = useState<OrganizerMode>("copy");
     const [runId, setRunId] = useState<string | null>(null);
-    const [offset, setOffset] = useState(0);
+    const [pagination, setPagination] = useState({ runId: "", page: 0 });
 
     const caps = useQuery({
         queryKey: ["organizer", "capabilities"],
@@ -49,12 +48,20 @@ export default function OrganizePage() {
     // Without a choice, show the newest run, so a reload keeps the last preview in view.
     const activeId = runId ?? runs.data?.runs[0]?.id ?? null;
 
+    const page = pagination.runId === activeId ? pagination.page : 0;
+
     const run = useQuery({
-        queryKey: ["organizer", "run", activeId, offset],
-        queryFn: () => api.getOrganizerRun(activeId!, offset, PAGE),
+        queryKey: ["organizer", "run", activeId],
+        queryFn: () => api.getOrganizerRun(activeId!, 0, 1),
         enabled: isAdmin && !!activeId,
-        placeholderData: (prev) => prev,
         refetchInterval: (q) => (q.state.data && BUSY.includes(q.state.data.state) ? 2000 : false),
+    });
+
+    const albums = useQuery({
+        queryKey: ["organizer", "albums", activeId, run.data?.state, page],
+        queryFn: () => api.getOrganizerRunAlbums(activeId!, page * ALBUMS_PER_PAGE, ALBUMS_PER_PAGE),
+        enabled: isAdmin && !!activeId,
+        refetchInterval: run.data && BUSY.includes(run.data.state) ? 2000 : false,
     });
 
     const refresh = () => {
@@ -73,7 +80,7 @@ export default function OrganizePage() {
         onSuccess: (res, action) => {
             if (action === "preview") {
                 setRunId(res.runId);
-                setOffset(0);
+                setPagination({ runId: res.runId, page: 0 });
             }
             refresh();
         },
@@ -167,7 +174,8 @@ export default function OrganizePage() {
                     <section className="space-y-4">
                         <div className="flex flex-wrap items-center gap-3 text-sm">
                             <span className="text-white">
-                                {d.mode === "copy" ? "Copy" : "Move"} run: {d.state}
+                                {d.mode === "copy" ? "Copy" : "Move"} run:{" "}
+                                {d.state === "superseded" ? "Out of date — preview again" : d.state}
                             </span>
                             <span className="text-[var(--text-muted)] tabular-nums">{d.total} files</span>
                             {d.switchedAt && <span className="text-brand">Library switched to this copy</span>}
@@ -194,25 +202,16 @@ export default function OrganizePage() {
                             )}
                         </div>
 
-                        <PreviewTable rows={d.rows} />
-
-                        {d.total > PAGE && (
-                            <div className="flex items-center gap-3 text-sm text-[var(--text-secondary)]">
-                                <Button variant="ghost" size="sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
-                                    Previous
-                                </Button>
-                                <span className="tabular-nums">
-                                    {offset + 1}-{Math.min(offset + PAGE, d.total)} of {d.total}
-                                </span>
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    disabled={offset + PAGE >= d.total}
-                                    onClick={() => setOffset(offset + PAGE)}
-                                >
-                                    Next
-                                </Button>
-                            </div>
+                        {albums.isLoading && <GradientSpinner size="sm" />}
+                        {albums.isError && <p role="alert" className="text-danger">Could not load album preview.</p>}
+                        {albums.data && (
+                            <AlbumGroupedPreview
+                                key={d.id}
+                                groups={albums.data.albums}
+                                page={page}
+                                total={albums.data.total}
+                                onPage={(n) => setPagination({ runId: d.id, page: n })}
+                            />
                         )}
                     </section>
                 )}

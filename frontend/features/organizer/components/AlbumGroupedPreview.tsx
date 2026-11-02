@@ -1,9 +1,67 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { Button } from "@/components/ui/Button";
 import { filterRows, NO_FILTERS, type RowFilters } from "../filters";
-import type { OrganizerRow } from "../types";
+import type { OrganizerAlbumGroup, OrganizerRow } from "../types";
 import { IssueChip } from "./IssueChip";
+
+export const ALBUMS_PER_PAGE = 20;
+
+/** Zero-based album pages; every group's journal rows stay together. */
+export function AlbumGroupedPreview({
+    groups,
+    page,
+    total,
+    onPage,
+}: {
+    groups: OrganizerAlbumGroup[];
+    page: number;
+    total: number;
+    onPage: (n: number) => void;
+}) {
+    return (
+        <div className="space-y-4">
+            {groups.map((group) => (
+                <details key={group.albumId ?? "other"} open className="rounded border border-white/10 p-3">
+                    <summary className="cursor-pointer text-sm text-white">
+                        {group.albumId === null
+                            ? "Other files"
+                            : `${group.artist ?? "Unknown artist"} — ${group.album ?? "Unknown album"}`}
+                        <span className="mx-3 text-[var(--text-muted)]">{group.rows.length} files</span>
+                        {[...new Set(group.rows.flatMap((row) => row.guessed))].map((code) => (
+                            <IssueChip key={code} code={code} />
+                        ))}
+                    </summary>
+                    <div className="mt-3">
+                        <GroupRows rows={group.rows} />
+                    </div>
+                </details>
+            ))}
+            {total > ALBUMS_PER_PAGE && (
+                <nav
+                    aria-label="Album preview pages"
+                    className="flex items-center gap-3 text-sm text-[var(--text-secondary)]"
+                >
+                    <Button variant="ghost" size="sm" disabled={page === 0} onClick={() => onPage(page - 1)}>
+                        Previous
+                    </Button>
+                    <span>
+                        {page * ALBUMS_PER_PAGE + 1}-{Math.min((page + 1) * ALBUMS_PER_PAGE, total)} of {total} albums
+                    </span>
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={(page + 1) * ALBUMS_PER_PAGE >= total}
+                        onClick={() => onPage(page + 1)}
+                    >
+                        Next
+                    </Button>
+                </nav>
+            )}
+        </div>
+    );
+}
 
 const FILTERS: Array<{ key: keyof RowFilters; label: string }> = [
     { key: "onlyChanges", label: "Only changes" },
@@ -11,8 +69,8 @@ const FILTERS: Array<{ key: keyof RowFilters; label: string }> = [
     { key: "guessed", label: "Guessed" },
 ];
 
-/** Current path -> proposed path, with warnings, for one page of a run's journal. */
-export function PreviewTable({ rows }: { rows: OrganizerRow[] }) {
+/** Independent, cumulative filters for the complete journal of one album. */
+function GroupRows({ rows }: { rows: OrganizerRow[] }) {
     const [filters, setFilters] = useState<RowFilters>(NO_FILTERS);
     const shown = useMemo(() => filterRows(rows, filters), [rows, filters]);
 
@@ -30,7 +88,7 @@ export function PreviewTable({ rows }: { rows: OrganizerRow[] }) {
                     </label>
                 ))}
                 <span className="text-xs text-[var(--text-muted)] tabular-nums">
-                    {shown.length} of {rows.length} on this page
+                    {shown.length} of {rows.length} in this group
                 </span>
             </div>
             <div className="overflow-x-auto">

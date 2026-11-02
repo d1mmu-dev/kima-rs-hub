@@ -5,6 +5,7 @@ import type {
     OrganizerMode,
     OrganizerRun,
     OrganizerRunDetail,
+    OrganizerAlbumGroup,
 } from "@/features/organizer/types";
 import { backendUrl } from "@/lib/backend-url";
 
@@ -1025,8 +1026,11 @@ class ApiClient {
         return this.get<OrganizerCapabilities>("/library/organizer/capabilities");
     }
 
-    async previewOrganizer(mode: OrganizerMode) {
-        return this.post<{ runId: string; jobId: string }>("/library/organizer/preview", { mode });
+    async previewOrganizer(mode: OrganizerMode, albumIds?: string[]) {
+        return this.post<{ runId: string; jobId: string }>("/library/organizer/preview", {
+            mode,
+            ...(albumIds === undefined ? {} : { albumIds }),
+        });
     }
 
     async getOrganizerRuns() {
@@ -1036,6 +1040,12 @@ class ApiClient {
     async getOrganizerRun(id: string, offset = 0, limit = 200) {
         return this.get<OrganizerRunDetail>(
             `/library/organizer/runs/${encodeURIComponent(id)}?offset=${offset}&limit=${limit}`
+        );
+    }
+
+    async getOrganizerRunAlbums(id: string, offset = 0, limit = 20) {
+        return this.get<{ albums: OrganizerAlbumGroup[]; total: number }>(
+            `/library/organizer/runs/${encodeURIComponent(id)}/albums?offset=${offset}&limit=${limit}`
         );
     }
 

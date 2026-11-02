@@ -10,6 +10,7 @@ import { GradientSpinner } from "@/components/ui/GradientSpinner";
 import { IssueChip } from "@/features/organizer/components/IssueChip";
 import { NotAvailable } from "@/features/organizer/components/NotAvailable";
 import { ISSUE_LABELS, issueLabel } from "@/features/organizer/filters";
+import { buttonClass } from "@/components/ui/Button";
 
 export default function AttentionPage() {
     const { user } = useAuth();
@@ -44,7 +45,7 @@ export default function AttentionPage() {
             <PageHeader
                 eyebrow="Settings"
                 title="Needs attention"
-                description="Albums where the scanner had to guess. This is a report; kima does not edit tags."
+                description="Albums where the scanner had to guess. Review a match before changing tags."
                 actions={
                     <Link href="/settings/organize" className="text-sm text-[var(--text-secondary)] hover:text-white">
                         Organize library
@@ -88,12 +89,13 @@ export default function AttentionPage() {
                                     <th className="py-2 pr-4 font-medium">Album</th>
                                     <th className="py-2 pr-4 font-medium">Year</th>
                                     <th className="py-2 font-medium">Issues</th>
+                                    <th className="py-2 font-medium">Match</th>
                                 </tr>
                             </thead>
                             {groups.map(([artist, list]) => (
                                 <tbody key={artist}>
                                     <tr>
-                                        <th colSpan={3} className="pt-5 pb-1 text-left text-white">
+                                        <th colSpan={4} className="pt-5 pb-1 text-left text-white">
                                             {artist}
                                         </th>
                                     </tr>
@@ -111,6 +113,14 @@ export default function AttentionPage() {
                                                         <IssueChip key={c} code={c} />
                                                     ))}
                                                 </div>
+                                            </td>
+                                            <td className="py-2 pl-3">
+                                                <Link
+                                                    href={`/settings/autotag/album/?albumId=${encodeURIComponent(a.albumId)}`}
+                                                    className={buttonClass("secondary", "sm")}
+                                                >
+                                                    Match
+                                                </Link>
                                             </td>
                                         </tr>
                                     ))}

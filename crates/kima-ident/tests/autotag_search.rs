@@ -847,6 +847,157 @@ async fn plain_search_deduped_manual_not(pool: PgPool) {
     );
 }
 
+/// Eligibility, state, manual/plain insertion and notification must share one connection.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_search_uses_one_connection(pool: PgPool) {
+    let tracks = titled("Song", 2);
+    let id = album(&pool, "A", "Band", false, None, &tracks).await;
+    let small = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let plain = SearchJob::plain(id);
+    let manual = SearchJob {
+        album_id: id,
+        query: None,
+        release_mbid: Some(mbid(R1)),
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        assert!(
+            search::enqueue_search(&small, &plain)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(search::enqueue_search(&small, &plain).await.unwrap(), None);
+        assert!(
+            search::enqueue_search(&small, &manual)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            search::enqueue_search(&small, &manual)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    })
+    .await
+    .expect("enqueue must not acquire a second connection");
+    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE queue = 'autotag'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 3);
+    assert_eq!(
+        album_state(&pool, id).await,
+        Some(("queued".into(), None, None))
+    );
+    small.close().await;
+}
+
+/// A failed insertion rolls back the state write for both plain and manual searches.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_search_failure_preserves_album_state(pool: PgPool) {
+    let tracks = titled("Song", 2);
+    let id = album(&pool, "A", "Band", false, None, &tracks).await;
+    autotag::set_state(
+        &pool,
+        id,
+        autotag::AlbumState::Failed,
+        Some("keep this error"),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "ALTER TABLE jobs ADD CONSTRAINT refuse_autotag CHECK (queue <> 'autotag') NOT VALID",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for release_mbid in [None, Some(mbid(R1))] {
+        let job = SearchJob {
+            album_id: id,
+            query: None,
+            release_mbid,
+        };
+        assert!(search::enqueue_search(&pool, &job).await.is_err());
+        assert_eq!(
+            album_state(&pool, id).await,
+            Some(("failed".into(), None, Some("keep this error".into())))
+        );
+    }
+    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 0);
+}
+
+/// Fill the pool with two same-album enqueues waiting on a row lock before releasing them.
+/// The old nested pool acquisition then starves deterministically, regardless of scheduling.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn concurrent_same_album_enqueues_do_not_starve(pool: PgPool) {
+    let tracks = titled("Song", 2);
+    let id = album(&pool, "A", "Band", false, None, &tracks).await;
+    let small = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM tracks WHERE album_id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..2 {
+        let small = small.clone();
+        tasks.spawn(async move { search::enqueue_search(&small, &SearchJob::plain(id)).await });
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both enqueues must hold their connection while waiting on the track lock");
+    blocker.commit().await.unwrap();
+    let inserted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut inserted = 0;
+        while let Some(result) = tasks.join_next().await {
+            inserted += usize::from(result.unwrap().unwrap().is_some());
+        }
+        inserted
+    })
+    .await
+    .expect("same-album enqueues must complete without a spare connection");
+    assert_eq!(inserted, 1);
+    let queued: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE queue = 'autotag'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, 1);
+    assert_eq!(
+        album_state(&pool, id).await,
+        Some(("queued".into(), None, None))
+    );
+    small.close().await;
+}
+
 /// A blank album artist is scored and searched as "Unknown Artist": no artist clause and no
 /// artist penalty.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

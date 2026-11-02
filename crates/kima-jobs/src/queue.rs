@@ -46,8 +46,31 @@ async fn insert(
     max_attempts: i32,
     run_at: Option<OffsetDateTime>,
 ) -> sqlx::Result<Uuid> {
-    let id = Uuid::now_v7();
     let mut tx = pool.begin().await?;
+    let id = insert_tx(&mut tx, queue, payload, max_attempts, run_at).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Adds a due-now job in the caller's transaction; notification is delivered only on commit.
+/// Does not acquire another pool connection or commit the transaction.
+pub async fn enqueue_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+) -> sqlx::Result<Uuid> {
+    insert_tx(tx, queue, payload, max_attempts, None).await
+}
+
+async fn insert_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+    run_at: Option<OffsetDateTime>,
+) -> sqlx::Result<Uuid> {
+    let id = Uuid::now_v7();
     let due = sqlx::query_scalar!(
         r#"INSERT INTO jobs (id, queue, payload, max_attempts, run_at)
            VALUES ($1, $2, $3, $4, COALESCE($5, now()))
@@ -58,12 +81,11 @@ async fn insert(
         max_attempts,
         run_at
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     if due {
-        notify(&mut tx, queue).await?;
+        notify(tx, queue).await?;
     }
-    tx.commit().await?;
     Ok(id)
 }
 
@@ -401,15 +423,42 @@ async fn insert_unless_queued_with_key(
     key: &str,
     run_at: RunAt,
 ) -> sqlx::Result<Option<Uuid>> {
+    let mut tx = pool.begin().await?;
+    let id = insert_unless_queued_with_key_tx(&mut tx, queue, payload, max_attempts, key, run_at)
+        .await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+/// Like [`enqueue_unless_queued_with_key`], using the caller's transaction and connection.
+/// Retains the per-queue advisory lock until the caller commits or rolls back; notification
+/// is delivered only on commit. Acquire application row locks before calling this helper.
+pub async fn enqueue_unless_queued_with_key_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+    key: &str,
+) -> sqlx::Result<Option<Uuid>> {
+    insert_unless_queued_with_key_tx(tx, queue, payload, max_attempts, key, RunAt::Now).await
+}
+
+async fn insert_unless_queued_with_key_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+    key: &str,
+    run_at: RunAt,
+) -> sqlx::Result<Option<Uuid>> {
     let (at, delay) = match run_at {
         RunAt::Now => (None, Duration::ZERO),
         RunAt::At(t) => (Some(t), Duration::ZERO),
         RunAt::In(d) => (None, d),
     };
-    let mut tx = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('kima_jobs_enqueue:' || $1))")
         .bind(queue)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     let inserted = sqlx::query!(
         r#"INSERT INTO jobs (id, queue, payload, max_attempts, run_at)
@@ -427,12 +476,11 @@ async fn insert_unless_queued_with_key(
         at,
         delay.as_secs_f64()
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     if inserted.as_ref().is_some_and(|r| r.due) {
-        notify(&mut tx, queue).await?;
+        notify(tx, queue).await?;
     }
-    tx.commit().await?;
     Ok(inserted.map(|r| r.id))
 }
 

@@ -216,6 +216,17 @@ pub async fn set_state(
     state: AlbumState,
     error: Option<&str>,
 ) -> sqlx::Result<()> {
+    let mut conn = pool.acquire().await?;
+    set_state_locked(&mut conn, album, state, error).await
+}
+
+/// Writes state using the caller's transaction/locks (searches must check eligibility first).
+pub async fn set_state_locked(
+    conn: &mut sqlx::PgConnection,
+    album: Uuid,
+    state: AlbumState,
+    error: Option<&str>,
+) -> sqlx::Result<()> {
     sqlx::query!(
         "INSERT INTO autotag_albums (album_id, state, error) VALUES ($1, $2, $3)
          ON CONFLICT (album_id) DO UPDATE SET state = EXCLUDED.state, error = EXCLUDED.error,
@@ -224,20 +235,72 @@ pub async fn set_state(
         state.as_str(),
         error
     )
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(())
 }
 
+/// Locks in the apply/start order and checks whether a search may change this album.
+/// Keep the transaction open through the search-state/candidate write, never across network IO.
+pub async fn lock_search_eligible(
+    conn: &mut sqlx::PgConnection,
+    album: Uuid,
+) -> sqlx::Result<bool> {
+    if super::lock_album_tracks(conn, album).await?.is_none() {
+        return Ok(false);
+    }
+    Ok(super::other_active_run(conn, album, Uuid::nil())
+        .await?
+        .is_none()
+        && super::needs_undo_run(conn, album, Uuid::nil())
+            .await?
+            .is_none()
+        && !super::album_identity_applied(conn, album).await?
+        && !super::foreign_override(conn, album, Uuid::nil()).await?)
+}
+
+/// Search-only state write. A superseded search must not hide an apply or its undo/error.
+/// Returns false without changing anything when the album is no longer eligible.
+pub async fn set_search_state(
+    pool: &PgPool,
+    album: Uuid,
+    state: AlbumState,
+    error: Option<&str>,
+) -> sqlx::Result<bool> {
+    let mut tx = pool.begin().await?;
+    if !lock_search_eligible(&mut tx, album).await? {
+        return Ok(false);
+    }
+    set_state_locked(&mut tx, album, state, error).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// The caller must serialize calls per album (one search job per album).
 /// Replaces the album's candidates with `ordered` (best first) in one transaction. A release
-/// already stored keeps its id and is refreshed; the others are deleted. Returns the best id.
+/// already stored keeps its id and is refreshed; the others are deleted. Returns the best id,
+/// or `None` without writing anything if an apply/undo protects the album. Call
+/// `store_search_if_eligible` to distinguish that refusal from an empty eligible result.
 pub async fn store_search(
     pool: &PgPool,
     album: Uuid,
     ordered: &[NewCandidate],
 ) -> sqlx::Result<Option<Uuid>> {
+    Ok(store_search_if_eligible(pool, album, ordered)
+        .await?
+        .flatten())
+}
+
+/// Like `store_search`, with an outer `None` when an apply superseded the search.
+pub async fn store_search_if_eligible(
+    pool: &PgPool,
+    album: Uuid,
+    ordered: &[NewCandidate],
+) -> sqlx::Result<Option<Option<Uuid>>> {
     let mut tx = pool.begin().await?;
+    if !lock_search_eligible(&mut tx, album).await? {
+        return Ok(None);
+    }
     let mut ids = Vec::with_capacity(ordered.len());
     for c in ordered {
         let id = sqlx::query_scalar!(
@@ -298,7 +361,7 @@ pub async fn store_search(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(best)
+    Ok(Some(best))
 }
 
 /// The album's stored candidates, best distance first.

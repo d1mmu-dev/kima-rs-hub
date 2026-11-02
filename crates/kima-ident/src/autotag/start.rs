@@ -187,6 +187,19 @@ pub async fn start(
     {
         return Err(StartError::Unavailable(APPLIED_MATCH_EXISTS.to_string()));
     }
+    // The pre-lock capability check used `local` paths and symlink flags. Do not create
+    // a run from that verdict if the locked snapshot no longer describes those files.
+    if target != Target::Db
+        && (present.iter().any(|t| t.via_symlink)
+            || present.iter().any(|t| {
+                !local
+                    .tracks
+                    .iter()
+                    .any(|old| old.id == t.id && old.path == t.path)
+            }))
+    {
+        return Err(StartError::Unavailable(TRACKS_CHANGED.to_string()));
+    }
     let want: BTreeSet<Uuid> = applied.tracks.iter().map(|t| t.track_id).collect();
     let have: BTreeSet<Uuid> = present.iter().map(|t| t.id).collect();
     if want != have || want.len() != applied.tracks.len() {

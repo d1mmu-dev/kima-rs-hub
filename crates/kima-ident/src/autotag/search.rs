@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use kima_db::PgPool;
 use kima_db::autotag::{
     self, AlbumState, LocalAlbum, LocalTrack, NewCandidate, Origin, Recommendation, Target,
-    local_album, set_state, store_search,
+    local_album, set_search_state, store_search_if_eligible,
 };
 use kima_db::settings_kv::AutoApply;
 use kima_jobs::queue;
@@ -146,18 +146,29 @@ pub fn parse_release_ref(s: &str) -> Option<Mbid> {
 }
 
 /// Queues a search for the album and marks it `queued`. A plain search is not queued again
-/// while another search of the album waits (`queued`); a manual one always is. Returns the new
-/// job's id, `None` for a duplicate.
+/// while another search of the album waits (`queued`); a manual one always is if eligible.
+/// Returns the new job's id, `None` for a duplicate or an album protected by an apply/undo.
 pub async fn enqueue_search(pool: &PgPool, job: &SearchJob) -> sqlx::Result<Option<Uuid>> {
-    set_state(pool, job.album_id, AlbumState::Queued, None).await?;
-    if job.is_plain() {
-        queue::enqueue_unless_queued_with_key(pool, QUEUE, job.payload(), MAX_ATTEMPTS, "albumId")
-            .await
-    } else {
-        queue::enqueue(pool, QUEUE, job.payload(), MAX_ATTEMPTS)
-            .await
-            .map(Some)
+    let mut tx = pool.begin().await?;
+    if !autotag::lock_search_eligible(&mut tx, job.album_id).await? {
+        return Ok(None);
     }
+    // Hold the album lock through queue insertion as well as the state write.
+    autotag::set_state_locked(&mut tx, job.album_id, AlbumState::Queued, None).await?;
+    let queued = if job.is_plain() {
+        queue::enqueue_unless_queued_with_key_tx(
+            &mut tx,
+            QUEUE,
+            job.payload(),
+            MAX_ATTEMPTS,
+            "albumId",
+        )
+        .await?
+    } else {
+        Some(queue::enqueue_tx(&mut tx, QUEUE, job.payload(), MAX_ATTEMPTS).await?)
+    };
+    tx.commit().await?;
+    Ok(queued)
 }
 
 /// Why a search stopped before storing.
@@ -563,6 +574,12 @@ pub async fn run_search(
     let Some(album) = local_album(pool, album_id).await.map_err(db)? else {
         return Err(JobError::Permanent("album not found".into()));
     };
+    if !set_search_state(pool, album_id, AlbumState::Searching, None)
+        .await
+        .map_err(db)?
+    {
+        return Ok(());
+    }
     let mut events = AutotagEvents::new(ctx.events.clone());
     let finish = |events: &mut AutotagEvents, done: usize, state: AlbumState| {
         events.finish(
@@ -575,16 +592,16 @@ pub async fn run_search(
         );
     };
     if !ctx.net.enabled() {
-        set_state(pool, album_id, AlbumState::Failed, Some(OFF_MESSAGE))
+        if !set_search_state(pool, album_id, AlbumState::Failed, Some(OFF_MESSAGE))
             .await
-            .map_err(db)?;
+            .map_err(db)?
+        {
+            return Ok(());
+        }
         finish(&mut events, 0, AlbumState::Failed);
         return Err(JobError::Permanent(OFF_MESSAGE.into()));
     }
     let album = for_scoring(album);
-    set_state(pool, album_id, AlbumState::Searching, None)
-        .await
-        .map_err(db)?;
     events.progress(
         AutotagJob::Search,
         Some(album_id),
@@ -595,16 +612,15 @@ pub async fn run_search(
     );
 
     let result = match search_and_score(ctx, &album, job, &attempt.cancel, &mut events).await {
-        Ok(ordered) => store_search(pool, album_id, &ordered)
-            .await
-            .map(|best| {
-                (
-                    ordered.len(),
-                    best,
-                    ordered.first().map(|c| c.recommendation),
-                )
-            })
-            .map_err(Stop::Db),
+        Ok(ordered) => match store_search_if_eligible(pool, album_id, &ordered).await {
+            Ok(Some(best)) => Ok((
+                ordered.len(),
+                best,
+                ordered.first().map(|c| c.recommendation),
+            )),
+            Ok(None) => return Ok(()),
+            Err(e) => Err(Stop::Db(e)),
+        },
         Err(stop) => Err(stop),
     };
     match result {
@@ -624,9 +640,12 @@ pub async fn run_search(
         Err(Stop::RateLimited(until)) => {
             // By design neither deduplicated nor capped: the job comes back once per pause,
             // which costs one request each time (the paused source answers at once until then).
-            set_state(pool, album_id, AlbumState::Queued, None)
+            if !set_search_state(pool, album_id, AlbumState::Queued, None)
                 .await
-                .map_err(db)?;
+                .map_err(db)?
+            {
+                return Ok(());
+            }
             queue::enqueue_at(pool, QUEUE, job.payload(), MAX_ATTEMPTS, until)
                 .await
                 .map_err(db)?;
@@ -635,9 +654,12 @@ pub async fn run_search(
         }
         Err(Stop::Permanent(f)) => {
             let text = failure_text(&f);
-            set_state(pool, album_id, AlbumState::Failed, Some(&text))
+            if !set_search_state(pool, album_id, AlbumState::Failed, Some(&text))
                 .await
-                .map_err(db)?;
+                .map_err(db)?
+            {
+                return Ok(());
+            }
             finish(&mut events, 0, AlbumState::Failed);
             Err(JobError::Permanent(text))
         }
@@ -662,8 +684,12 @@ pub async fn run_search(
             } else {
                 (AlbumState::Queued, None)
             };
-            if let Err(e) = set_state(pool, album_id, state, error).await {
-                warn!(error = %e, album = %album_id, "could not record the search's state");
+            match set_search_state(pool, album_id, state, error).await {
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(e) => {
+                    warn!(error = %e, album = %album_id, "could not record the search's state")
+                }
             }
             finish(&mut events, 0, state);
             Err(JobError::Retry(text))

@@ -71,6 +71,15 @@ async fn track(pool: &PgPool, album: Uuid, path: &str, missing: bool) -> Uuid {
 }
 
 async fn candidate(pool: &PgPool, album: Uuid) -> Uuid {
+    // Hand-made stacked runs test identity undo independently of search eligibility.
+    // Reuse the reviewed snapshot: a new search is forbidden once an apply stands.
+    if let Some(c) = kima_db::autotag::candidates(pool, album)
+        .await
+        .unwrap()
+        .first()
+    {
+        return c.id;
+    }
     store_search(
         pool,
         album,

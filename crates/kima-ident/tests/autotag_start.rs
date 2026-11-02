@@ -834,17 +834,240 @@ async fn auto_apply_files_only_when_available(pool: PgPool) {
     assert_eq!(album_state(&pool, album).await.as_deref(), Some("applying"));
 }
 
+/// A scanner/organizer can change path or guessed flags after capability validation but
+/// before start acquires the track locks. The stale verdict must not create a run.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn start_rejects_locked_path_or_symlink_drift(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (_replay, ctx) = ctx_at(&pool, dir.path()).await;
+    let album = file_album(&ctx, dir.path()).await;
+    let best = searched(&ctx, album).await;
+    for symlink in [false, true] {
+        let mut tx = pool.begin().await.unwrap();
+        let track: Uuid = sqlx::query_scalar(
+            "SELECT id FROM tracks WHERE album_id = $1 ORDER BY id LIMIT 1 FOR UPDATE",
+        )
+        .bind(album)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let (p, lib) = (pool.clone(), ctx.library.clone());
+        let request = req(album, best.id, Target::Files);
+        let starting = tokio::spawn(async move { start::start(&p, &lib, &request).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
+                    .bind(pid).fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        if symlink {
+            sqlx::query("UPDATE tracks SET guessed = '{\"viaSymlink\": true}' WHERE id = $1")
+                .bind(track)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        } else {
+            sqlx::query("UPDATE tracks SET path = path || '.wav' WHERE id = $1")
+                .bind(track)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+        let result = starting.await.unwrap();
+        assert!(unavailable(&result, TRACKS_CHANGED), "{result:?}");
+        assert!(runs(&pool, album).await.is_empty());
+        // Restore the row for the second scenario (the actual file never moved).
+        sqlx::query("UPDATE tracks SET path = regexp_replace(path, '\\.wav$', ''), guessed = '{}' WHERE id = $1")
+            .bind(track).execute(&pool).await.unwrap();
+    }
+}
+
+async fn search_snapshot(pool: &PgPool, album: Uuid) -> Value {
+    sqlx::query_scalar(
+        "SELECT jsonb_build_object('album', to_jsonb(a), 'candidates',
+           (SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) FROM autotag_candidates c
+            WHERE c.album_id = a.album_id)) FROM autotag_albums a WHERE album_id = $1",
+    )
+    .bind(album)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn queued_second_search_after_auto_apply_is_discarded(pool: PgPool) {
+    set_auto_apply(&pool, "db").await;
+    let album = db_album(&pool, 10).await;
+    let (replay, ctx) = ctx_at(&pool, Path::new("/nonexistent")).await;
+    let first = SearchJob::plain(album);
+    let second = SearchJob {
+        query: Some(search::ManualQuery {
+            artist: "Fixture Band".into(),
+            album: "Fixture Album".into(),
+        }),
+        ..first.clone()
+    };
+    assert!(
+        search::enqueue_search(&pool, &first)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        search::enqueue_search(&pool, &second)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    search(&ctx, album).await;
+    let before = search_snapshot(&pool, album).await;
+    let asked = replay.asked().len();
+    search::run_search(&ctx, &second, SearchAttempt::default())
+        .await
+        .unwrap();
+    assert_eq!(search::enqueue_search(&pool, &second).await.unwrap(), None);
+    assert_eq!(search_snapshot(&pool, album).await, before);
+    assert_eq!(replay.asked().len(), asked);
+    assert_eq!(runs(&pool, album).await.len(), 1);
+}
+
+/// Gate the first network connection, so the apply deterministically overtakes a running
+/// search (not a sleep-based race). Success and every failure outcome must preserve state.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn inflight_search_overtaken_by_apply_or_failure(pool: PgPool) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::oneshot;
+    for outcome in ["success", "permanent", "transient", "rate_limit"] {
+        for failed in [false, true] {
+            let album = db_album(&pool, 10).await;
+            let (replay, ctx) = ctx_at(&pool, Path::new("/nonexistent")).await;
+            let best = searched(&ctx, album).await;
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let upstream = replay
+                .url()
+                .trim_start_matches("http://")
+                .trim_end_matches('/')
+                .to_string();
+            let (entered_tx, entered) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            let gate = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                entered_tx.send(()).unwrap();
+                released.await.unwrap();
+                if outcome == "success" {
+                    let mut remote = TcpStream::connect(upstream).await.unwrap();
+                    tokio::io::copy_bidirectional(&mut socket, &mut remote)
+                        .await
+                        .unwrap();
+                } else {
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        request.push(socket.read_u8().await.unwrap());
+                    }
+                    let status = match outcome {
+                        "permanent" => "403 Forbidden",
+                        "transient" => "503 Service Unavailable",
+                        _ => "429 Too Many Requests",
+                    };
+                    socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\nRetry-After: 60\r\nConnection: close\r\n\r\n{{}}").as_bytes()).await.unwrap();
+                }
+            });
+            let gated = common::ident_ctx_with(
+                &pool,
+                Path::new("/nonexistent"),
+                Bases::all(&base),
+                IdentifySwitch::new(false, true),
+            );
+            let searching = tokio::spawn(async move {
+                search::run_search(
+                    &gated,
+                    &SearchJob::plain(album),
+                    SearchAttempt {
+                        last: true,
+                        ..SearchAttempt::default()
+                    },
+                )
+                .await
+            });
+            entered.await.unwrap();
+            let started = start::start(&pool, &ctx.library, &req(album, best.id, Target::Db))
+                .await
+                .unwrap();
+            if failed {
+                sqlx::query("UPDATE autotag_runs SET state = 'failed', album_before = '{}', error = 'needs undo' WHERE id = $1")
+                    .bind(started.run_id).execute(&pool).await.unwrap();
+                autotag::set_state(
+                    &pool,
+                    album,
+                    autotag::AlbumState::Failed,
+                    Some("needs undo"),
+                )
+                .await
+                .unwrap();
+            }
+            let before = search_snapshot(&pool, album).await;
+            release.send(()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(15), searching)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            gate.abort();
+            assert_eq!(
+                search_snapshot(&pool, album).await,
+                before,
+                "{outcome}, failed={failed}"
+            );
+            assert_eq!(
+                search::enqueue_search(&pool, &SearchJob::plain(album))
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+    }
+}
+
 /// A strong match of an album whose earlier run needs undo (or holds an applied match) is not
 /// auto-applied: the same refusals as a request.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn auto_apply_refused_when_a_match_stands(pool: PgPool) {
-    set_auto_apply(&pool, "db").await;
+    set_auto_apply(&pool, "off").await;
     let (_replay, ctx) = ctx_at(&pool, Path::new("/nonexistent")).await;
 
     let needs_undo = db_album(&pool, 10).await;
-    let failed = past_run(&pool, needs_undo, "failed", Some("written")).await;
+    // Preserve the reviewed candidates and the failure instead of searching over them.
     let best = searched(&ctx, needs_undo).await;
     assert_eq!(best.recommendation, "strong");
+    let failed = past_run(&pool, needs_undo, "failed", Some("written")).await;
+    autotag::set_state(
+        &pool,
+        needs_undo,
+        autotag::AlbumState::Failed,
+        Some("needs undo"),
+    )
+    .await
+    .unwrap();
+    set_auto_apply(&pool, "db").await;
+    let (_blocked_replay, ctx) = ctx_at(&pool, Path::new("/nonexistent")).await;
+    search(&ctx, needs_undo).await;
+    assert_eq!(
+        album_state(&pool, needs_undo).await.as_deref(),
+        Some("failed")
+    );
     let all = runs(&pool, needs_undo).await;
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].id, failed);
@@ -859,13 +1082,15 @@ async fn auto_apply_refused_when_a_match_stands(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let best = searched(&ctx, applied).await;
-    assert_eq!(best.recommendation, "strong");
-    assert!(runs(&pool, applied).await.is_empty());
-    assert_eq!(
-        album_state(&pool, applied).await.as_deref(),
-        Some("proposed")
+    search(&ctx, applied).await;
+    assert!(
+        autotag::candidates(&pool, applied)
+            .await
+            .unwrap()
+            .is_empty()
     );
+    assert!(runs(&pool, applied).await.is_empty());
+    assert_eq!(album_state(&pool, applied).await, None);
     assert_eq!(
         count(&pool, "SELECT count(*) FROM jobs WHERE queue = 'library'").await,
         0

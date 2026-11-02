@@ -28,6 +28,90 @@ fn backoff_doubles_from_five_seconds_and_caps_at_an_hour() {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn transactional_enqueues_commit_or_rollback_with_notification(pool: PgPool) {
+    let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+        .await
+        .unwrap();
+    listener.listen(queue::NOTIFY_CHANNEL).await.unwrap();
+    for dedupe in [false, true] {
+        for commit in [false, true] {
+            let mut tx = pool.begin().await.unwrap();
+            let name = format!("tx-{dedupe}-{commit}");
+            let id = if dedupe {
+                let id = queue::enqueue_unless_queued_with_key_tx(
+                    &mut tx,
+                    &name,
+                    json!({"albumId": 1}),
+                    3,
+                    "albumId",
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    queue::enqueue_unless_queued_with_key_tx(
+                        &mut tx,
+                        &name,
+                        json!({"albumId": 1}),
+                        3,
+                        "albumId",
+                    )
+                    .await
+                    .unwrap(),
+                    None
+                );
+                id
+            } else {
+                queue::enqueue_tx(&mut tx, &name, json!({}), 3)
+                    .await
+                    .unwrap()
+            };
+            let visible: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE id = $1)")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(!visible, "helper must not commit the caller's transaction");
+            if commit {
+                tx.commit().await.unwrap();
+            } else {
+                tx.rollback().await.unwrap();
+            }
+            // A committed sentinel orders the notifications without a negative timeout check.
+            sqlx::query("SELECT pg_notify($1, 'sentinel')")
+                .bind(queue::NOTIFY_CHANNEL)
+                .execute(&pool)
+                .await
+                .unwrap();
+            if commit {
+                let notification = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(notification.payload(), name);
+            }
+            let notification = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                notification.payload(),
+                "sentinel",
+                "rollback must discard notification"
+            );
+            let visible: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM jobs WHERE id = $1)")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(visible, commit);
+        }
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn claimed_job_is_not_claimed_twice(pool: PgPool) {
     let id = queue::enqueue(&pool, "scan", json!({"path": "/music"}), 3)
         .await

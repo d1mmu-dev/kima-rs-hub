@@ -217,26 +217,32 @@ async fn make_run_with(
         .iter()
         .map(|t| json!({"trackId": t.track_id, "medium": 1, "position": t.track_no}))
         .collect();
-    let candidate = adb::store_search(
-        pool,
-        album,
-        &[NewCandidate {
-            release_mbid: applied.album.release_mbid,
-            release_group_mbid: applied.album.release_group_mbid,
-            origin: Origin::Search,
-            distance: 0.01,
-            recommendation: Recommendation::Strong,
-            penalties: json!({}),
-            mapping: json!(mapping),
-            extra_tracks: json!([]),
-            missing_tracks: json!([]),
-            release: json!({}),
-            release_group: json!({}),
-        }],
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    // Job refusal tests deliberately create otherwise-forbidden stacked runs. Reuse the
+    // existing reviewed snapshot rather than making a forbidden search replace it.
+    let candidate = if let Some(c) = adb::candidates(pool, album).await.unwrap().first() {
+        c.id
+    } else {
+        adb::store_search(
+            pool,
+            album,
+            &[NewCandidate {
+                release_mbid: applied.album.release_mbid,
+                release_group_mbid: applied.album.release_group_mbid,
+                origin: Origin::Search,
+                distance: 0.01,
+                recommendation: Recommendation::Strong,
+                penalties: json!({}),
+                mapping: json!(mapping),
+                extra_tracks: json!([]),
+                missing_tracks: json!([]),
+                release: json!({}),
+                release_group: json!({}),
+            }],
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    };
     let id = Uuid::now_v7();
     let mut tx = pool.begin().await.unwrap();
     adb::create_run(

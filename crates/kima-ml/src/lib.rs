@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod clap;
 pub mod musicnn;
+pub mod onnx;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -63,6 +64,10 @@ impl VerifiedBytes {
 
     pub fn into_bytes(self) -> Box<[u8]> {
         self.bytes
+    }
+
+    pub fn from_verified_bytes(id: ArtifactId, bytes: Box<[u8]>) -> Self {
+        Self { id, bytes }
     }
 }
 

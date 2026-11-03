@@ -118,6 +118,9 @@ fn test_clap_embedding_unit_norm_guard() {
     unit[0] = 1.0;
     let emb = ClapEmbedding::from_normalized(unit).unwrap();
     assert_eq!(emb.as_slice()[0], 1.0);
+    assert_eq!(emb.as_slice().len(), CLAP_EMBEDDING_DIM);
+    assert_eq!(emb.as_array()[0], 1.0);
+    assert_eq!(emb.as_array(), &unit);
     assert_eq!(emb.into_inner()[0], 1.0);
 
     // Within tolerance 1e-3 (e.g. 1.0005)

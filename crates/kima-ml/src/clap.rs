@@ -388,6 +388,7 @@ pub const CLAP_EMBEDDING_DIM: usize = 512;
 pub const MAX_CLAP_WINDOWS: usize = 5;
 
 /// Validated 512-dimensional CLAP embedding vector with unit L2 norm.
+#[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClapEmbedding([f32; CLAP_EMBEDDING_DIM]);
 
@@ -406,8 +407,13 @@ impl ClapEmbedding {
         Ok(Self(vector))
     }
 
+    /// Return the embedding as a fixed-size array reference of 512 floats.
+    pub fn as_array(&self) -> &[f32; CLAP_EMBEDDING_DIM] {
+        &self.0
+    }
+
     /// Return the embedding as a slice of 512 floats.
-    pub fn as_slice(&self) -> &[f32; CLAP_EMBEDDING_DIM] {
+    pub fn as_slice(&self) -> &[f32] {
         &self.0
     }
 
@@ -515,6 +521,14 @@ pub fn mean_embeddings(
 }
 
 /// Aggregate 1 to 5 window embeddings into a single 512-dimensional track embedding.
+///
+/// Expects each input window embedding to already be unit-normalized (as produced
+/// by [`normalize_embedding`]). If starting from raw model outputs, prefer
+/// [`postprocess_clap_model_outputs`], which performs per-window normalization before
+/// aggregation.
+///
+/// Computes the arithmetic mean of the unit-norm window vectors and L2-normalizes
+/// the resulting aggregate vector.
 pub fn aggregate_window_embeddings(
     windows: &[[f32; CLAP_EMBEDDING_DIM]],
 ) -> Result<ClapEmbedding, ClapAggregationError> {

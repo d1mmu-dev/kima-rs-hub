@@ -1,10 +1,25 @@
+mod common;
+
 use std::collections::BTreeMap;
 
 use kima_ml::onnx::{
     MINIMAL_IDENTITY_ONNX, MusiCnnHead, MusiCnnSessions, OnnxError, OnnxModel, OnnxModelConsumer,
     SharedSession,
 };
-use kima_ml::{ArtifactId, Capability, ModelConsumer, VerifiedBytes};
+use kima_ml::{ArtifactId, Capability, ModelConsumer};
+
+#[test]
+fn production_descriptors_reject_identity_bytes_under_real_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    for model in OnnxModel::all_models() {
+        let descriptor = model.descriptor();
+        std::fs::write(dir.path().join(descriptor.basename), MINIMAL_IDENTITY_ONNX).unwrap();
+        assert!(matches!(
+            kima_ml::verify_artifact(dir.path(), &descriptor),
+            Err(kima_ml::ArtifactError::HashMismatch { .. })
+        ));
+    }
+}
 
 #[test]
 fn test_onnx_model_inventory_coverage() {
@@ -33,7 +48,7 @@ fn test_musicnn_sessions_container_requires_core_and_all_10_heads() {
     let consumer = OnnxModelConsumer::new();
     let make_session = |id_str: &'static str| -> SharedSession {
         let bytes = MINIMAL_IDENTITY_ONNX.to_vec().into_boxed_slice();
-        let artifact = VerifiedBytes::from_verified_bytes(ArtifactId::from_static(id_str), bytes);
+        let artifact = common::verified_fixture(ArtifactId::from_static(id_str), bytes);
         consumer
             .load(artifact)
             .expect("session load should succeed")
@@ -80,7 +95,7 @@ fn test_model_session_registry() {
     let consumer = OnnxModelConsumer::new();
     let make_session = |id_str: &'static str| -> SharedSession {
         let bytes = MINIMAL_IDENTITY_ONNX.to_vec().into_boxed_slice();
-        let artifact = VerifiedBytes::from_verified_bytes(ArtifactId::from_static(id_str), bytes);
+        let artifact = common::verified_fixture(ArtifactId::from_static(id_str), bytes);
         consumer
             .load(artifact)
             .expect("session load should succeed")

@@ -47,6 +47,13 @@ pub struct ArtifactDescriptor {
     pub max_bytes: u64,
 }
 
+/// Owned bytes produced only by [`verify_artifact`] after size and digest checks.
+/// Callers cannot label arbitrary bytes as verified:
+/// ```compile_fail
+/// use kima_ml::{ArtifactId, VerifiedBytes};
+/// let _ = VerifiedBytes::from_verified_bytes(
+///     ArtifactId::from_static("msd-musicnn-1"), Box::from(&b"unchecked"[..]));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedBytes {
     id: ArtifactId,
@@ -64,10 +71,6 @@ impl VerifiedBytes {
 
     pub fn into_bytes(self) -> Box<[u8]> {
         self.bytes
-    }
-
-    pub fn from_verified_bytes(id: ArtifactId, bytes: Box<[u8]>) -> Self {
-        Self { id, bytes }
     }
 }
 

@@ -1,8 +1,8 @@
-//! Default CLAP window offsets in seconds, independent of decoding and inference.
+//! Default CLAP window offsets and bounded source-frame collection.
 //!
 //! Port of `compute_window_offsets` in [upstream analyzer.py](https://github.com/Chevron7Locked/kima-hub/blob/12faf1cd34ff53054221818b0ccde58b8e9b0020/services/audio-analyzer-clap/analyzer.py).
 //! This is only the default five-window, ten-second configuration. It does not
-//! perform sample indexing, repeat padding, feature extraction, or inference.
+//! perform repeat padding, feature extraction, inference or source verification.
 
 /// Select default CLAP window start times for a finite, nonnegative track duration.
 /// Returns `None` for invalid duration. Zero follows upstream's five zero offsets;
@@ -31,6 +31,38 @@ pub fn window_offsets(duration: f64) -> Option<Vec<f64>> {
     Some(starts)
 }
 
+/// Derive half-open source-frame ranges from a complete decoded frame count.
+///
+/// Uses exact rational arithmetic for the upstream default offsets and floors
+/// each start, then takes at most ten seconds and caps at the observed end.
+/// This intentionally avoids Python float boundary rounding; it is not a claim
+/// of librosa waveform or compressed-container parity. Empty input is refused.
+pub fn source_window_ranges(
+    expected: usize,
+    rate: u32,
+) -> Result<Vec<std::ops::Range<usize>>, WindowCollectorError> {
+    if expected == 0 || rate == 0 || rate > crate::audio::MAX_SAMPLE_RATE {
+        return Err(WindowCollectorError::InvalidRanges);
+    }
+    let frames = expected as u128;
+    let width = u128::from(rate) * 10;
+    let count = (frames / width).clamp(1, 5) as usize;
+    let tiled = count < 5 || 3 * frames < 200 * u128::from(rate);
+    let mut ranges = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = if count == 1 {
+            0
+        } else if tiled {
+            (frames - width) * i as u128 / (count - 1) as u128
+        } else {
+            ((2 * i + 1) as u128 * frames / 10).min(frames - width)
+        };
+        let end = (start + width).min(frames);
+        ranges.push(start as usize..end as usize);
+    }
+    Ok(ranges)
+}
+
 /// Collects caller-selected source-frame ranges without retaining the whole track.
 ///
 /// Ranges are half-open, in mono source frames, and are supplied in output order.
@@ -56,6 +88,17 @@ pub enum WindowCollectorError {
 }
 
 impl WindowCollector {
+    /// Collect default CLAP ranges, retaining at most 50 seconds at 192 kHz.
+    /// Caller must establish source identity and clean EOF independently.
+    pub fn for_clap(expected: usize, rate: u32) -> Result<Self, WindowCollectorError> {
+        let ranges = source_window_ranges(expected, rate)?;
+        Self::new(
+            expected,
+            &ranges,
+            5 * 10 * crate::audio::MAX_SAMPLE_RATE as usize,
+        )
+    }
+
     /// Limit requested window samples to `sample_budget` across at most five windows.
     /// Allocator overhead and input/decoder buffers are outside this bound.
     pub fn new(

@@ -1481,6 +1481,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kima-ml"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "kima-net"
 version = "0.1.0"
 dependencies = [

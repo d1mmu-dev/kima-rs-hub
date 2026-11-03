@@ -74,9 +74,9 @@ const review: Review = {
     },
     userMbidKept: true,
 };
-async function render(data: Review = { ...review, candidates: review.candidates.map(c => ({ ...c, stale: false })) }) {
+async function render(data: Review = { ...review, candidates: review.candidates.map(c => ({ ...c, stale: false })) }, identifyEnabled = true) {
     vi.spyOn(api, "getAutotagCapabilities").mockResolvedValue({
-        identifyEnabled: true,
+        identifyEnabled,
         files: { available: true, reason: null },
         copy: { available: true, reason: null, copyRunId: "copy" },
         db: { available: true },
@@ -296,10 +296,20 @@ it("disables both apply paths if a cached review refetch fails", async () => {
     expect(apply).not.toHaveBeenCalled();
 });
 
-it("requires a stale candidate to be refreshed before either apply action", async () => {
-    await render(review);
-    const button = [...el.querySelectorAll("button")].find(b => b.textContent === "Apply MBIDs only")!;
-    expect(button.disabled).toBe(true);
+it.each([
+    { label: "Accept", conflict: null, mbidsOnly: false },
+    { label: "Apply MBIDs only", conflict: review.conflict, mbidsOnly: true },
+])("applies an old snapshot offline via $label while warning about its age", async ({ label, conflict, mbidsOnly }) => {
+    const apply = vi.spyOn(api, "applyAutotagAlbum").mockResolvedValue({ runId: "r", jobId: "j" });
+    vi.spyOn(api, "getAutotagRun").mockReturnValue(new Promise(() => {}));
+    await render({ ...review, conflict }, false);
+    const button = (name: string) => [...el.querySelectorAll("button")].find(b => b.textContent === name)!;
+    expect(button("Refresh candidates").disabled).toBe(true);
+    expect(button(label).disabled).toBe(false);
+    expect(el.textContent).toContain("older than 30 days");
+    act(() => button(label).click());
+    await settle();
+    expect(apply).toHaveBeenCalledWith("a", { candidateId: "c", target: "db", reorganize: false, mbidsOnly });
 });
 
 it("recovers when another search removes the selected candidate", async () => {

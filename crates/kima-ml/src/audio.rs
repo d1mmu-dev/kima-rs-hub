@@ -4,6 +4,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 use rubato::{FftFixedInOut, Resampler};
+use sha2::{Digest, Sha256};
 use symphonia::core::audio::sample::Sample;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
@@ -66,6 +67,9 @@ pub enum AudioError {
 
     #[error("expected {expected} frames but decoded {actual}")]
     FrameCountMismatch { expected: usize, actual: usize },
+
+    #[error("decoded audio changed between passes")]
+    DecodedIdentityMismatch,
 }
 
 /// Decodes an audio file from `path`, windowing to the last 90 seconds (or full track if <= 90s),
@@ -100,7 +104,26 @@ fn decode_and_resample_media_source(
     source: Box<dyn MediaSource>,
     hint: &Hint,
 ) -> Result<DecodedAudio, AudioError> {
-    decode_pass(source, hint, None).map(|(audio, _, _)| audio)
+    decode_pass(source, hint, None).map(|(audio, _, _, _)| audio)
+}
+
+/// Identity of the full decoded mono stream, not of the encoded media file.
+/// Equal values do not prove the source was immutable during either decode, or
+/// that the container exposed all of its encoded audio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedFingerprint {
+    pub frames: usize,
+    pub sample_rate: u32,
+    /// SHA-256 of consecutive IEEE-754 f32 little-endian mono sample bits.
+    pub digest: [u8; 32],
+}
+
+/// Decode and fingerprint all native-rate mono frames, without persisting PCM.
+pub fn fingerprint_decoded_audio(
+    source: Box<dyn MediaSource>,
+    hint: &Hint,
+) -> Result<DecodedFingerprint, AudioError> {
+    decode_pass(source, hint, None).map(|(_, _, _, fingerprint)| fingerprint)
 }
 
 /// Collect source-rate CLAP windows alongside the tail in one decoding pass.
@@ -111,11 +134,25 @@ pub fn decode_with_clap_windows(
     hint: &Hint,
     expected: usize,
 ) -> Result<(DecodedAudio, Vec<Vec<f32>>, u32), AudioError> {
-    let (audio, windows, rate) = decode_pass(source, hint, Some(expected))?;
+    let (audio, windows, rate, _) = decode_pass(source, hint, Some(expected))?;
     Ok((audio, windows.unwrap_or_default(), rate))
 }
 
-type DecodePassOutput = (DecodedAudio, Option<Vec<Vec<f32>>>, u32);
+/// Collect windows only if the decoded stream matches a prior discovery pass.
+/// This compares decoded mono content, not file identity or encoded bytes.
+pub fn decode_verified_clap_windows(
+    source: Box<dyn MediaSource>,
+    hint: &Hint,
+    expected: &DecodedFingerprint,
+) -> Result<(DecodedAudio, Vec<Vec<f32>>, u32), AudioError> {
+    let (audio, windows, rate, fingerprint) = decode_pass(source, hint, Some(expected.frames))?;
+    if &fingerprint != expected {
+        return Err(AudioError::DecodedIdentityMismatch);
+    }
+    Ok((audio, windows.unwrap_or_default(), rate))
+}
+
+type DecodePassOutput = (DecodedAudio, Option<Vec<Vec<f32>>>, u32, DecodedFingerprint);
 
 fn decode_pass(
     source: Box<dyn MediaSource>,
@@ -174,6 +211,7 @@ fn decode_pass(
         .transpose()
         .map_err(|e| AudioError::CorruptAudio(e.to_string()))?;
     let mut actual = 0usize;
+    let mut digest = Sha256::new();
 
     let track_id = track.id;
     let mut interleaved: Vec<f32> = Vec::new();
@@ -281,6 +319,9 @@ fn decode_pass(
                     }
                     mono *= inv_ch;
 
+                    validate_samples(std::slice::from_ref(&mono))?;
+                    digest.update(mono.to_bits().to_le_bytes());
+
                     actual = actual.checked_add(1).ok_or(AudioError::BufferOverflow)?;
                     if let Some(collector) = &mut collector {
                         if actual <= expected.unwrap_or(0) {
@@ -339,6 +380,11 @@ fn decode_pass(
         },
         windows,
         sample_rate,
+        DecodedFingerprint {
+            frames: actual,
+            sample_rate,
+            digest: digest.finalize().into(),
+        },
     ))
 }
 
@@ -428,6 +474,49 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_fingerprint_detects_early_and_late_changes() {
+        let frames = 100_000u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        wav.extend_from_slice(&32_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 2).to_le_bytes());
+        wav.resize(44 + frames as usize * 2, 0);
+        let mut hint = Hint::new();
+        hint.with_extension("wav");
+        let fingerprint = |bytes: &[u8]| {
+            fingerprint_decoded_audio(Box::new(Cursor::new(bytes.to_vec())), &hint).unwrap()
+        };
+        let original = fingerprint(&wav);
+        assert_eq!(original.frames, frames as usize);
+        assert_eq!(original.sample_rate, 16_000);
+        assert_eq!(original, fingerprint(&wav));
+        let collect = |bytes: &[u8]| {
+            decode_verified_clap_windows(Box::new(Cursor::new(bytes.to_vec())), &hint, &original)
+        };
+        assert!(collect(&wav).is_ok());
+        for index in [44, wav.len() - 2] {
+            let mut changed = wav.clone();
+            changed[index] = 1;
+            assert!(matches!(
+                collect(&changed),
+                Err(AudioError::DecodedIdentityMismatch)
+            ));
+            let changed = fingerprint(&changed);
+            assert_ne!(original.digest, changed.digest);
+            assert_eq!(original.frames, changed.frames);
+        }
+    }
 
     #[test]
     fn changed_decoded_sample_rate_after_valid_packet_fails_closed() {

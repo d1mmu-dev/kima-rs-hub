@@ -293,6 +293,12 @@ fn decode_pass(
         .transpose()
         .map_err(|e| AudioError::CorruptAudio(e.to_string()))?;
 
+    if let Some(windows) = &windows {
+        for window in windows {
+            validate_samples(window)?;
+        }
+    }
+
     let mono_raw: Vec<f32> = ring_buffer.into();
     let duration_seconds = mono_raw.len() as f64 / sample_rate as f64;
 
@@ -310,8 +316,7 @@ fn decode_pass(
     ))
 }
 
-/// Resamples a single-channel (mono) slice of `f32` audio from `in_rate` to `out_rate`.
-pub fn resample_mono(samples: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, AudioError> {
+fn validate_samples(samples: &[f32]) -> Result<(), AudioError> {
     // Keep FFT intermediate arithmetic far below f32 overflow; ordinary normalized
     // PCM and filter overshoots are unaffected, and nothing is silently clipped.
     if samples.iter().any(|s| !s.is_finite() || s.abs() > 1.0e12) {
@@ -319,6 +324,12 @@ pub fn resample_mono(samples: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec
             "non-finite or excessive audio sample".into(),
         ));
     }
+    Ok(())
+}
+
+/// Resamples a single-channel (mono) slice of `f32` audio from `in_rate` to `out_rate`.
+pub fn resample_mono(samples: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, AudioError> {
+    validate_samples(samples)?;
     if in_rate == out_rate {
         return Ok(samples.to_vec());
     }
@@ -390,6 +401,45 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn early_clap_window_rejects_invalid_samples_outside_tail() {
+        let rate = 8_000u32;
+        let frames = rate * 120;
+        let ranges = crate::clap::source_window_ranges(frames as usize, rate).unwrap();
+        let bad_frame = ranges[0].start + 1;
+        assert!(bad_frame < (frames - rate * 90) as usize);
+        assert!(ranges[0].contains(&bad_frame));
+
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 4).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&32u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 4).to_le_bytes());
+        wav.resize(44 + frames as usize * 4, 0);
+        let mut hint = Hint::new();
+        hint.with_extension("wav");
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.1e12] {
+            wav[44 + bad_frame * 4..48 + bad_frame * 4].copy_from_slice(&invalid.to_le_bytes());
+            let result = decode_with_clap_windows(
+                Box::new(Cursor::new(wav.clone())),
+                &hint,
+                frames as usize,
+            );
+            assert!(
+                matches!(result, Err(AudioError::CorruptAudio(_))),
+                "accepted {invalid}"
+            );
+        }
+    }
 
     #[test]
     fn decoded_clap_windows_cover_full_track_and_reject_wrong_count() {

@@ -134,7 +134,13 @@ pub fn decode_with_clap_windows(
     hint: &Hint,
     expected: usize,
 ) -> Result<(DecodedAudio, Vec<Vec<f32>>, u32), AudioError> {
-    let (audio, windows, rate, _) = decode_pass(source, hint, Some(expected))?;
+    let (audio, windows, rate, fingerprint) = decode_pass(source, hint, Some(expected))?;
+    if fingerprint.frames != expected {
+        return Err(AudioError::FrameCountMismatch {
+            expected,
+            actual: fingerprint.frames,
+        });
+    }
     Ok((audio, windows.unwrap_or_default(), rate))
 }
 
@@ -150,6 +156,24 @@ pub fn decode_verified_clap_windows(
         return Err(AudioError::DecodedIdentityMismatch);
     }
     Ok((audio, windows.unwrap_or_default(), rate))
+}
+
+/// Collect windows in one pass when the frame hint is accurate; otherwise reopen
+/// and verify the complete decoded mono fingerprint before returning any result.
+/// The factory must provide a fresh source positioned at the beginning on each call.
+/// Fingerprints do not establish encoded-file identity or detect demuxer silent EOF.
+pub fn decode_clap_auto(
+    mut open: impl FnMut() -> Result<Box<dyn MediaSource>, AudioError>,
+    hint: &Hint,
+    frame_hint: Option<usize>,
+) -> Result<(DecodedAudio, Vec<Vec<f32>>, u32), AudioError> {
+    let (audio, windows, rate, fingerprint) = decode_pass(open()?, hint, frame_hint)?;
+    if frame_hint == Some(fingerprint.frames) {
+        return Ok((audio, windows.unwrap_or_default(), rate));
+    }
+    drop(audio);
+    drop(windows);
+    decode_verified_clap_windows(open()?, hint, &fingerprint)
 }
 
 type DecodePassOutput = (DecodedAudio, Option<Vec<Vec<f32>>>, u32, DecodedFingerprint);
@@ -350,12 +374,8 @@ fn decode_pass(
         return Err(AudioError::EmptyAudio);
     }
 
-    if let Some(expected) = expected {
-        if expected != actual {
-            return Err(AudioError::FrameCountMismatch { expected, actual });
-        }
-    }
     let windows = collector
+        .filter(|_| expected == Some(actual))
         .map(|c| c.finish())
         .transpose()
         .map_err(|e| AudioError::CorruptAudio(e.to_string()))?;
@@ -474,6 +494,75 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_clap_retries_only_for_inaccurate_or_missing_count() {
+        let rate = 8_000u32;
+        let frames = rate * 120;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 2).to_le_bytes());
+        wav.resize(44 + frames as usize * 2, 0);
+        let mut hint = Hint::new();
+        hint.with_extension("wav");
+        for (count, passes) in [
+            (Some(frames as usize), 1),
+            (None, 2),
+            (Some(frames as usize - 1), 2),
+            (Some(frames as usize + 1), 2),
+        ] {
+            let mut opens = 0;
+            let result = decode_clap_auto(
+                || {
+                    opens += 1;
+                    Ok(Box::new(Cursor::new(wav.clone())))
+                },
+                &hint,
+                count,
+            );
+            assert!(result.is_ok(), "{count:?}: {result:?}");
+            assert_eq!(opens, passes);
+        }
+        let ranges = crate::clap::source_window_ranges(frames as usize, rate).unwrap();
+        let untouched = (0..(frames - rate * 90) as usize)
+            .find(|i| ranges.iter().all(|r| !r.contains(i)))
+            .unwrap();
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&wav).unwrap();
+        let before = file.as_file().metadata().unwrap();
+        let mut opens = 0;
+        let result = decode_clap_auto(
+            || {
+                opens += 1;
+                if opens == 2 {
+                    file.as_file_mut()
+                        .seek(SeekFrom::Start((44 + untouched * 2) as u64))?;
+                    file.as_file_mut().write_all(&[1])?;
+                    file.as_file()
+                        .set_times(std::fs::FileTimes::new().set_modified(before.modified()?))?;
+                    let after = file.as_file().metadata()?;
+                    assert_eq!(after.len(), before.len());
+                    assert_eq!(after.modified()?, before.modified()?);
+                }
+                Ok(Box::new(File::open(file.path())?))
+            },
+            &hint,
+            Some(frames as usize - 1),
+        );
+        assert!(matches!(result, Err(AudioError::DecodedIdentityMismatch)));
+        assert_eq!(opens, 2);
+    }
 
     #[test]
     fn decoded_fingerprint_detects_early_and_late_changes() {

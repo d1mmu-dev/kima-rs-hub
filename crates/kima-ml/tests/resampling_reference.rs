@@ -14,29 +14,32 @@ fn passband_sine_preserves_phase_and_amplitude() {
         let input = tone(input_rate, 1_000.0, input_rate as usize);
         let output = resample_mono(&input, input_rate, output_rate).unwrap();
         assert_eq!(output.len(), output_rate as usize);
-        // Exclude finite-clip boundaries. 1% RMS error is a broad signal sanity
-        // check, not a model-parity threshold or a complete filter specification.
-        // Rubato's finite symmetric filter may leave a fractional-sample
-        // phase offset; fit within one output sample, not an arbitrary phase.
-        let error = (-20..=20)
-            .map(|step| {
-                let shift = f64::from(step) / 20.0;
-                output[512..output.len() - 512]
-                    .iter()
-                    .enumerate()
-                    .map(|(j, x)| {
-                        let expected = 0.5
-                            * (TAU * 1_000.0 * ((j + 512) as f64 + shift) / f64::from(output_rate))
-                                .sin();
-                        (f64::from(*x) - expected).powi(2)
-                    })
-                    .sum::<f64>()
-                    / (output.len() - 1024) as f64
+        // rubato 0.16.2 chooses input/output FFT lengths (1323,480),
+        // (1029,1120), (1026,342). Its sinc center is floor(input/2),
+        // while output_delay is floor(output/2). Thus the output grid is
+        // advanced by delay - center * output_rate/input_rate samples.
+        let shift = match (input_rate, output_rate) {
+            (44_100, 16_000) => 240.0 - 661.0 * 160.0 / 441.0,
+            (44_100, 48_000) => 560.0 - 514.0 * 160.0 / 147.0,
+            (48_000, 16_000) => 0.0,
+            _ => unreachable!(),
+        };
+        let error = (output[512..output.len() - 512]
+            .iter()
+            .enumerate()
+            .map(|(j, x)| {
+                let expected = 0.5
+                    * (TAU * 1_000.0 * ((j + 512) as f64 + shift) / f64::from(output_rate)).sin();
+                (f64::from(*x) - expected).powi(2)
             })
-            .fold(f64::INFINITY, f64::min)
+            .sum::<f64>()
+            / (output.len() - 1024) as f64)
             .sqrt();
+        // A 0.01-output-sample timing error at 1 kHz yields RMS >=
+        // 0.000462 at 48 kHz. Measured RMS is below 2.4e-7 for all
+        // three pairs; 1e-4 leaves FFT/platform margin without masking it.
         assert!(
-            error < 0.005,
+            error < 0.0001,
             "{input_rate}->{output_rate} rms error {error}"
         );
     }

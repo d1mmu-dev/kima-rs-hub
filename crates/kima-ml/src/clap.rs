@@ -1,8 +1,8 @@
-//! Default CLAP window offsets and bounded source-frame collection.
+//! Default CLAP window selection, preparation, and model-independent log-mel.
 //!
-//! Port of `compute_window_offsets` in [upstream analyzer.py](https://github.com/Chevron7Locked/kima-hub/blob/12faf1cd34ff53054221818b0ccde58b8e9b0020/services/audio-analyzer-clap/analyzer.py).
-//! This is only the default five-window, ten-second configuration. It does not
-//! perform feature extraction, inference or source verification.
+//! Window selection ports `compute_window_offsets` in [upstream analyzer.py](https://github.com/Chevron7Locked/kima-hub/blob/12faf1cd34ff53054221818b0ccde58b8e9b0020/services/audio-analyzer-clap/analyzer.py).
+//! Only the default five-window, ten-second configuration is implemented.
+//! Model inference and source verification are outside this module.
 
 /// Prepare one native-rate mono window for the default ONNX CLAP frontend.
 ///
@@ -273,5 +273,110 @@ impl WindowCollector {
             .into_iter()
             .map(|(_, samples)| samples)
             .collect())
+    }
+}
+
+/// Default model-independent CLAP log-mel frontend for a mono 48 kHz window.
+/// Output is 1001 frames of 64 dB values in frame-major order.
+pub struct ClapMelFrontend {
+    fft: std::sync::Arc<dyn rustfft::Fft<f64>>,
+    filters: [[f64; 513]; 64],
+    window: [f64; 1024],
+}
+
+impl Default for ClapMelFrontend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ClapMelFrontend {
+    pub fn new() -> Self {
+        let fft = rustfft::FftPlanner::new().plan_fft_forward(1024);
+        let step = 6.4_f64.ln() / 27.0;
+        let low = 0.75;
+        let high = 15.0 + 14.0_f64.ln() / step;
+        let hz: [f64; 66] = std::array::from_fn(|i| {
+            let mel = low + (high - low) * i as f64 / 65.0;
+            if mel < 15.0 {
+                200.0 * mel / 3.0
+            } else {
+                1000.0 * (step * (mel - 15.0)).exp()
+            }
+        });
+        let filters = std::array::from_fn(|b| {
+            std::array::from_fn(|k| {
+                let f = k as f64 * 46.875;
+                ((f - hz[b]) / (hz[b + 1] - hz[b]))
+                    .min((hz[b + 2] - f) / (hz[b + 2] - hz[b + 1]))
+                    .max(0.0)
+                    * 2.0
+                    / (hz[b + 2] - hz[b])
+            })
+        });
+        let window = std::array::from_fn(|i| {
+            0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / 1024.0).cos()
+        });
+        Self {
+            fft,
+            filters,
+            window,
+        }
+    }
+
+    /// Repeat whole copies and zero-fill the remainder, matching upstream.
+    /// Empty, nonfinite and over-ten-second inputs fail closed.
+    pub fn compute(&self, samples: &[f32]) -> Result<Vec<[f32; 64]>, &'static str> {
+        const LEN: usize = 480_000;
+        if samples.is_empty() {
+            return Err("empty input");
+        }
+        if samples.len() > LEN {
+            return Err("input exceeds ten seconds");
+        }
+        if samples.iter().any(|x| !x.is_finite()) {
+            return Err("non-finite input");
+        }
+        let repeated = LEN / samples.len() * samples.len();
+        let sample = |index: usize| {
+            if index < repeated {
+                samples[index % samples.len()] as f64
+            } else {
+                0.0
+            }
+        };
+        let mut out = Vec::with_capacity(1001);
+        let mut fft = vec![rustfft::num_complex::Complex64::default(); 1024];
+        for frame in 0..1001 {
+            for (i, v) in fft.iter_mut().enumerate() {
+                let pos = frame * 480 + i;
+                let index = if pos < 512 {
+                    512 - pos
+                } else if pos >= LEN + 512 {
+                    2 * LEN + 510 - pos
+                } else {
+                    pos - 512
+                };
+                *v = rustfft::num_complex::Complex64::new(sample(index) * self.window[i], 0.0);
+            }
+            self.fft.process(&mut fft);
+            let power: [f64; 513] = std::array::from_fn(|i| {
+                let re = fft[i].re as f32 as f64;
+                let im = fft[i].im as f32 as f64;
+                re * re + im * im
+            });
+            if power.iter().any(|p| !p.is_finite()) {
+                return Err("non-finite frontend output");
+            }
+            let bands = std::array::from_fn(|b| {
+                let sum: f64 = power.iter().zip(self.filters[b]).map(|(p, w)| p * w).sum();
+                (10.0 * sum.max(1e-10).log10()) as f32
+            });
+            if bands.iter().any(|v: &f32| !v.is_finite()) {
+                return Err("non-finite frontend output");
+            }
+            out.push(bands);
+        }
+        Ok(out)
     }
 }

@@ -5,6 +5,8 @@ pub mod audio;
 pub mod clap;
 pub mod musicnn;
 pub mod onnx;
+#[cfg(feature = "pg-publish")]
+pub mod publish;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

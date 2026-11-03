@@ -1490,15 +1490,18 @@ dependencies = [
 name = "kima-ml"
 version = "0.1.0"
 dependencies = [
+ "kima-db",
  "libc",
  "ort",
  "rubato",
  "rustfft",
  "serde",
  "sha2 0.11.0",
+ "sqlx",
  "symphonia",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 

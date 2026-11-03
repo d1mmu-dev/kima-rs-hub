@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id AS track_id, s.started_at AS \"started_at!\", t.ml_generation AS file_generation\n         FROM tracks t JOIN track_stages s ON s.track_id=t.id AND s.stage='embedding'\n         WHERE t.id=$1 AND t.missing_since IS NULL AND s.status='working'\n           AND s.started_at IS NOT NULL AND s.next_attempt_at > clock_timestamp()",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "track_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "started_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "file_generation",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "58697e7fdf444e495f093efe7c87d667b3cb4754cbe6418f258aee3b64d4af58"
+}

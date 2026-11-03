@@ -219,6 +219,14 @@ pub fn cut_chars(s: &str, max: usize) -> &str {
 /// fingerprint deleted, since the audio may have changed (upstream
 /// `reopenStagesForChangedFile`).
 pub async fn reopen_for_changed_file(conn: &mut PgConnection, track: Uuid) -> sqlx::Result<()> {
+    // Take the track fence before stage locks, just as ML publication does. Explicitly
+    // bump even when the scanner detects changed bytes with identical stored metadata.
+    sqlx::query!(
+        "UPDATE tracks SET ml_generation = ml_generation + 1 WHERE id = $1",
+        track
+    )
+    .execute(&mut *conn)
+    .await?;
     sqlx::query!(
         r#"UPDATE track_stages
            SET status = 'pending', attempts = 0, redelivered = 0, next_attempt_at = NULL,

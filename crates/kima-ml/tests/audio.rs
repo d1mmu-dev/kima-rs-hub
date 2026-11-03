@@ -50,6 +50,25 @@ fn create_pcm_wav(channels: u16, sample_rate: u32, channel_samples: &[Vec<f32>])
 }
 
 #[test]
+fn float_wav_nonfinite_is_rejected() {
+    let mut wav = create_pcm_wav(1, 16_000, &[vec![0.0; 4096]]);
+    wav[20..22].copy_from_slice(&3u16.to_le_bytes());
+    wav[28..32].copy_from_slice(&64_000u32.to_le_bytes());
+    wav[32..34].copy_from_slice(&4u16.to_le_bytes());
+    wav[34..36].copy_from_slice(&32u16.to_le_bytes());
+    wav[4..8].copy_from_slice(&(36u32 + 4096 * 4).to_le_bytes());
+    wav[40..44].copy_from_slice(&(4096u32 * 4).to_le_bytes());
+    wav.truncate(44);
+    for i in 0..4096 {
+        wav.extend_from_slice(&(if i == 42 { f32::NAN } else { 0.5 }).to_le_bytes());
+    }
+    assert!(matches!(
+        decode_and_resample_bytes(&wav, Some("wav")),
+        Err(AudioError::CorruptAudio(_))
+    ));
+}
+
+#[test]
 fn test_decode_short_mono_track() {
     let sample_rate = 44100;
     let duration_sec = 2.0;
@@ -182,6 +201,13 @@ fn test_decode_from_file_path() {
 
     let decoded = decode_and_resample(tmp.path()).expect("decode from path");
     assert_eq!(decoded.mono_16k.len(), 16000);
+}
+
+#[test]
+fn test_truncated_wav_is_not_a_clean_end() {
+    let mut wav = create_pcm_wav(1, 16_000, &[vec![0.5; 100_000]]);
+    wav.truncate(120_000);
+    assert!(decode_and_resample_bytes(&wav, Some("wav")).is_err());
 }
 
 #[test]

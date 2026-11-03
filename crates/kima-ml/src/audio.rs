@@ -15,8 +15,9 @@ use symphonia::core::meta::MetadataOptions;
 /// Maximum duration of the decoded audio window (90 seconds).
 pub const MAX_WINDOW_SECONDS: f64 = 90.0;
 
-/// Bounded maximum number of audio frames allowed to be decoded across a single track.
-/// Prevents memory and CPU exhaustion on infinite/stream inputs (e.g. 4 hours at 192 kHz).
+/// Absolute work bound, independent of sample rate: 2,764,800,000 decoded frames.
+/// This permits about 17.4 hours at 44.1 kHz and 4 hours at 192 kHz;
+/// longer inputs fail instead of returning a truncated window.
 pub const MAX_TOTAL_DECODE_FRAMES: usize = 192_000 * 3600 * 4;
 
 /// Minimum supported sample rate (8 kHz).
@@ -30,9 +31,10 @@ pub const MAX_CHANNELS: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedAudio {
-    /// Mono 16 kHz audio samples (normalized f32 in [-1.0, 1.0], for MusiCNN and DSP).
+    /// Finite mono 16 kHz samples for MusiCNN and DSP. Not clipped: floating-point
+    /// input and resampling may exceed the nominal PCM range [-1, 1].
     pub mono_16k: Vec<f32>,
-    /// Mono 48 kHz audio samples (normalized f32 in [-1.0, 1.0], for CLAP).
+    /// Finite mono 48 kHz samples for CLAP, with the same unclipped policy.
     pub mono_48k: Vec<f32>,
     /// Duration in seconds of the retained audio slice.
     pub duration_seconds: f64,
@@ -156,11 +158,7 @@ fn decode_and_resample_media_source(
         let packet_opt = match format.next_packet() {
             Ok(Some(pkg)) => Some(pkg),
             Ok(None) => None,
-            Err(SymphoniaError::IoError(err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                None
-            }
+            Err(SymphoniaError::IoError(err)) => return Err(AudioError::Io(err)),
             Err(SymphoniaError::ResetRequired) => {
                 decoder.reset();
                 continue;
@@ -168,7 +166,7 @@ fn decode_and_resample_media_source(
             Err(SymphoniaError::Unsupported(msg)) => {
                 return Err(AudioError::UnsupportedFormat(msg.to_string()));
             }
-            Err(_) => None,
+            Err(err) => return Err(AudioError::CorruptAudio(err.to_string())),
         };
 
         let Some(packet) = packet_opt else {
@@ -244,6 +242,13 @@ fn decode_and_resample_media_source(
 
 /// Resamples a single-channel (mono) slice of `f32` audio from `in_rate` to `out_rate`.
 pub fn resample_mono(samples: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, AudioError> {
+    // Keep FFT intermediate arithmetic far below f32 overflow; ordinary normalized
+    // PCM and filter overshoots are unaffected, and nothing is silently clipped.
+    if samples.iter().any(|s| !s.is_finite() || s.abs() > 1.0e12) {
+        return Err(AudioError::CorruptAudio(
+            "non-finite or excessive audio sample".into(),
+        ));
+    }
     if in_rate == out_rate {
         return Ok(samples.to_vec());
     }
@@ -297,12 +302,101 @@ pub fn resample_mono(samples: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec
         result.resize(expected_len, 0.0);
     }
 
+    if result.iter().any(|s| !s.is_finite()) {
+        return Err(AudioError::CorruptAudio(
+            "non-finite resampler output".into(),
+        ));
+    }
     Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_failure_after_audio_packets_is_not_eof() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        struct FailingSource(Cursor<Vec<u8>>);
+        impl Read for FailingSource {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let remaining = 1_048_576u64.saturating_sub(self.0.position()) as usize;
+                if remaining == 0 {
+                    return Err(std::io::Error::other("injected read failure"));
+                }
+                let len = buf.len().min(remaining);
+                self.0.read(&mut buf[..len])
+            }
+        }
+        impl Seek for FailingSource {
+            fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+                self.0.seek(pos)
+            }
+        }
+        impl MediaSource for FailingSource {
+            fn is_seekable(&self) -> bool {
+                false
+            }
+            fn byte_len(&self) -> Option<u64> {
+                Some(self.0.get_ref().len() as u64)
+            }
+        }
+        let frames = 1_000_000u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        wav.extend_from_slice(&32_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 2).to_le_bytes());
+        wav.resize(44 + frames as usize * 2, 1);
+        let mut hint = Hint::new();
+        hint.with_extension("wav");
+        let result =
+            decode_and_resample_media_source(Box::new(FailingSource(Cursor::new(wav))), &hint);
+        assert!(
+            matches!(result, Err(AudioError::Io(ref e)) if e.kind() == std::io::ErrorKind::Other)
+        );
+    }
+
+    #[test]
+    fn resampler_rejects_nonfinite_input_even_without_rate_change() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(matches!(
+                resample_mono(&[0.1, value], 16_000, 16_000),
+                Err(AudioError::CorruptAudio(_))
+            ));
+            assert!(matches!(
+                resample_mono(&[0.1, value], 16_000, 48_000),
+                Err(AudioError::CorruptAudio(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn resampler_rejects_overflow_from_finite_input() {
+        assert!(matches!(
+            resample_mono(&vec![f32::MAX; 4096], 16_000, 48_000),
+            Err(AudioError::CorruptAudio(_))
+        ));
+    }
+
+    #[test]
+    fn resampling_preserves_finite_overshoot_without_clipping() {
+        let mut input = vec![0.0; 4096];
+        input[1024..3072].fill(1.0);
+        let output = resample_mono(&input, 16_000, 48_000).unwrap();
+        assert!(output.iter().all(|x| x.is_finite()));
+        assert!(output.iter().any(|x| *x > 1.0));
+        assert_eq!(resample_mono(&[1.25], 16_000, 16_000).unwrap(), vec![1.25]);
+    }
 
     #[test]
     fn test_resample_rates_supported() {

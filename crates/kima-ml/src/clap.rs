@@ -380,3 +380,178 @@ impl ClapMelFrontend {
         Ok(out)
     }
 }
+
+/// Fixed dimensionality of CLAP audio and text embeddings (512 dimensions).
+pub const CLAP_EMBEDDING_DIM: usize = 512;
+
+/// Maximum number of windows aggregated for a single track (5 windows).
+pub const MAX_CLAP_WINDOWS: usize = 5;
+
+/// Validated 512-dimensional CLAP embedding vector with unit L2 norm.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClapEmbedding([f32; CLAP_EMBEDDING_DIM]);
+
+impl ClapEmbedding {
+    /// Construct a ClapEmbedding from an already-normalized 512-vector.
+    ///
+    /// Validates that all elements are finite and that the L2 norm satisfies
+    /// upstream's unit-norm guard: `|norm - 1.0| <= 1e-3` (from `analyzer.py` line 853).
+    pub fn from_normalized(
+        vector: [f32; CLAP_EMBEDDING_DIM],
+    ) -> Result<Self, ClapAggregationError> {
+        let norm = l2_norm(&vector)?;
+        if (norm - 1.0).abs() > 1e-3 {
+            return Err(ClapAggregationError::UnitNormGuardFailed { norm });
+        }
+        Ok(Self(vector))
+    }
+
+    /// Return the embedding as a slice of 512 floats.
+    pub fn as_slice(&self) -> &[f32; CLAP_EMBEDDING_DIM] {
+        &self.0
+    }
+
+    /// Unwrap the inner 512-element array.
+    pub fn into_inner(self) -> [f32; CLAP_EMBEDDING_DIM] {
+        self.0
+    }
+}
+
+impl AsRef<[f32]> for ClapEmbedding {
+    fn as_ref(&self) -> &[f32] {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for ClapEmbedding {
+    type Target = [f32; CLAP_EMBEDDING_DIM];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Errors during CLAP embedding normalization, aggregation, or validation.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ClapAggregationError {
+    #[error("window collection is empty; at least one window is required")]
+    EmptyWindows,
+    #[error("too many windows: {count} exceeds maximum of {max}")]
+    TooManyWindows { count: usize, max: usize },
+    #[error("window embedding contains non-finite values (NaN or infinity)")]
+    NonFiniteInput,
+    #[error(
+        "embedding vector has zero or near-zero norm (norm = {norm:.6e}); cannot be normalized"
+    )]
+    ZeroNorm { norm: f64 },
+    #[error("unit-norm guard failed: norm {norm:.6} deviates from 1.0 by more than 1e-3")]
+    UnitNormGuardFailed { norm: f64 },
+}
+
+/// Compute the L2 norm of a 512-dimensional vector using double-precision accumulation.
+/// Returns error if any element is non-finite.
+pub fn l2_norm(vector: &[f32; CLAP_EMBEDDING_DIM]) -> Result<f64, ClapAggregationError> {
+    let mut sum_sq = 0.0_f64;
+    for &x in vector {
+        if !x.is_finite() {
+            return Err(ClapAggregationError::NonFiniteInput);
+        }
+        let v = f64::from(x);
+        sum_sq += v * v;
+    }
+    Ok(sum_sq.sqrt())
+}
+
+/// L2-normalize a 512-dimensional vector.
+///
+/// Refuses non-finite input (`NonFiniteInput`) and vectors whose norm is zero
+/// or below 1e-12 (`ZeroNorm`).
+pub fn normalize_embedding(
+    vector: &[f32; CLAP_EMBEDDING_DIM],
+) -> Result<[f32; CLAP_EMBEDDING_DIM], ClapAggregationError> {
+    let norm = l2_norm(vector)?;
+    if norm <= 1e-12 {
+        return Err(ClapAggregationError::ZeroNorm { norm });
+    }
+    let mut out = [0.0_f32; CLAP_EMBEDDING_DIM];
+    for (i, &x) in vector.iter().enumerate() {
+        out[i] = (f64::from(x) / norm) as f32;
+    }
+    Ok(out)
+}
+
+/// Compute the arithmetic mean of 1 to 5 window embeddings across each of the 512 dimensions.
+///
+/// Uses double precision accumulation to prevent precision loss.
+/// Refuses empty slices (`EmptyWindows`), window counts exceeding 5 (`TooManyWindows`),
+/// and non-finite values (`NonFiniteInput`).
+pub fn mean_embeddings(
+    windows: &[[f32; CLAP_EMBEDDING_DIM]],
+) -> Result<[f32; CLAP_EMBEDDING_DIM], ClapAggregationError> {
+    if windows.is_empty() {
+        return Err(ClapAggregationError::EmptyWindows);
+    }
+    if windows.len() > MAX_CLAP_WINDOWS {
+        return Err(ClapAggregationError::TooManyWindows {
+            count: windows.len(),
+            max: MAX_CLAP_WINDOWS,
+        });
+    }
+    let mut sums = [0.0_f64; CLAP_EMBEDDING_DIM];
+    for window in windows {
+        for (i, &x) in window.iter().enumerate() {
+            if !x.is_finite() {
+                return Err(ClapAggregationError::NonFiniteInput);
+            }
+            sums[i] += f64::from(x);
+        }
+    }
+    let n = windows.len() as f64;
+    let mut out = [0.0_f32; CLAP_EMBEDDING_DIM];
+    for (i, &sum) in sums.iter().enumerate() {
+        out[i] = (sum / n) as f32;
+    }
+    Ok(out)
+}
+
+/// Aggregate 1 to 5 window embeddings into a single 512-dimensional track embedding.
+pub fn aggregate_window_embeddings(
+    windows: &[[f32; CLAP_EMBEDDING_DIM]],
+) -> Result<ClapEmbedding, ClapAggregationError> {
+    let mean = mean_embeddings(windows)?;
+    let normalized = normalize_embedding(&mean)?;
+    ClapEmbedding::from_normalized(normalized)
+}
+
+/// Pure postprocessing of raw model output vectors for 1 to 5 windows.
+///
+/// Ports the complete upstream CLAP embedding pipeline:
+/// 1. Each raw window output vector is L2-normalized to unit norm (as in `onnx_backend.embed_clips`).
+/// 2. The unit-norm window vectors are aggregated by taking their arithmetic mean across windows
+///    (as in `analyzer.py:366`).
+/// 3. The aggregate vector is L2-normalized to unit norm (as in `analyzer.py:368`).
+/// 4. Validates that the resulting vector satisfies the unit-norm guard: `|norm - 1.0| <= 1e-3`.
+///
+/// Refuses:
+/// - Empty windows (`EmptyWindows`)
+/// - More than 5 windows (`TooManyWindows`)
+/// - Non-finite values (`NonFiniteInput`)
+/// - Zero or near-zero norms or complete cancellation (`ZeroNorm`)
+pub fn postprocess_clap_model_outputs(
+    raw_windows: &[[f32; CLAP_EMBEDDING_DIM]],
+) -> Result<ClapEmbedding, ClapAggregationError> {
+    if raw_windows.is_empty() {
+        return Err(ClapAggregationError::EmptyWindows);
+    }
+    if raw_windows.len() > MAX_CLAP_WINDOWS {
+        return Err(ClapAggregationError::TooManyWindows {
+            count: raw_windows.len(),
+            max: MAX_CLAP_WINDOWS,
+        });
+    }
+    let mut normalized_windows = Vec::with_capacity(raw_windows.len());
+    for raw in raw_windows {
+        normalized_windows.push(normalize_embedding(raw)?);
+    }
+    aggregate_window_embeddings(&normalized_windows)
+}

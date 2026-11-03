@@ -1,3 +1,4 @@
+import type { Capabilities, Album, Review, Run, RunDetail, Search, Apply } from "@/features/autotag/types";
 import type { MapTrack } from "@/features/vibe/types";
 import type {
     AttentionAlbum,
@@ -1019,6 +1020,52 @@ class ApiClient {
         imports?: boolean;
     }> {
         return this.request("/system/features");
+    }
+
+    // Stored album matching (admin; snapshot apply and undo work offline).
+    getAutotagCapabilities() {
+        return this.get<Capabilities>("/library/autotag/capabilities");
+    }
+
+    getAutotagAlbums(filters: {
+        q?: string; state?: string; recommendation?: string; offset?: number; limit?: number;
+    } = {}) {
+        return this.get<{ albums: Album[]; total: number }>(
+            `/library/autotag/albums?${toSearchParams(filters)}`,
+        );
+    }
+
+    getAutotagAlbum(id: string, candidateId?: string) {
+        const query = candidateId ? `?candidateId=${encodeURIComponent(candidateId)}` : "";
+        return this.get<Review>(`/library/autotag/albums/${encodeURIComponent(id)}${query}`);
+    }
+
+    searchAutotag(body: Search) {
+        return this.post<{ queued: number }>("/library/autotag/search", body);
+    }
+
+    applyAutotagAlbum(id: string, body: Apply) {
+        return this.post<{ runId: string; jobId: string }>(
+            `/library/autotag/albums/${encodeURIComponent(id)}/apply`, body,
+        );
+    }
+
+    skipAutotagAlbum(id: string) {
+        return this.post<{ state: string }>(`/library/autotag/albums/${encodeURIComponent(id)}/skip`, {});
+    }
+
+    getAutotagRuns(offset = 0, limit = 20) {
+        return this.get<{ runs: Run[] }>(`/library/autotag/runs?offset=${offset}&limit=${limit}`);
+    }
+
+    getAutotagRun(id: string, offset = 0, limit = 200) {
+        return this.get<RunDetail>(
+            `/library/autotag/runs/${encodeURIComponent(id)}?offset=${offset}&limit=${limit}`,
+        );
+    }
+
+    undoAutotagRun(id: string) {
+        return this.post<{ jobId: string }>(`/library/autotag/runs/${encodeURIComponent(id)}/undo`, {});
     }
 
     // Library organizer and attention report (admin)

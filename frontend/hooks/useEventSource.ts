@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth-context";
 import { searchResultStore } from "@/lib/search-result-store";
 import { api, getApiBaseUrl } from "@/lib/api";
+import { applyAutotagProgress } from "@/features/autotag/progress";
 import { applyLibraryProgress } from "@/features/organizer/progress";
 
 /** In proxy mode this is "", so events go through the streaming route in app/api/events. */
@@ -92,6 +93,9 @@ export function useEventSource() {
                             );
                             queryClient.invalidateQueries({ queryKey: ["enrichment-progress"] });
                             queryClient.invalidateQueries({ queryKey: ["library", "recently-added"] });
+                            break;
+                        case "autotag:progress":
+                            applyAutotagProgress(queryClient, data);
                             break;
                         case "enrichment:progress":
                             queryClient.invalidateQueries({ queryKey: ["enrichment-progress"] });

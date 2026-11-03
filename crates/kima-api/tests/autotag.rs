@@ -706,6 +706,14 @@ async fn run_paging_defaults_caps_and_stable_order(pool: PgPool) {
     ids.sort();
     ids.reverse();
     let run = ids[0];
+    let organizer = Uuid::now_v7();
+    sqlx::query("INSERT INTO organizer_runs (id,mode,state,source_root,target_root) VALUES ($1,'move','done','/music','/music')").bind(organizer).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE autotag_runs SET organizer_run_id=$1,reorganize=true WHERE id=$2")
+        .bind(organizer)
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
     let mut tx = pool.begin().await.unwrap();
     let row = db::journal::NewJournalRow {
         track_id: None,
@@ -729,6 +737,7 @@ async fn run_paging_defaults_caps_and_stable_order(pool: PgPool) {
     assert_eq!(v["runs"][0]["id"], json!(ids[1]));
     for query in ["", "?limit=999"] {
         let v = get(&s, &t, &format!("runs/{run}{query}")).await;
+        assert_eq!(v["organizerRunId"], json!(organizer));
         assert_eq!(v["total"], 203);
         assert_eq!(v["rows"].as_array().unwrap().len(), 200);
         assert_eq!(v["rows"][0]["trackId"], Value::Null);

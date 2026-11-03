@@ -490,6 +490,12 @@ async fn run(
     let (rows, total) = db::run_rows(&s.pool, id, q.offset(), q.limit(200).min(200)).await?;
     let mut v = run_json(&r);
     v["rows"]=json!(rows.iter().map(|r|json!({"id":r.id,"trackId":r.track_id,"path":r.path,"state":r.state,"note":r.note,"changes":tag_changes(&r.old_tags,&r.new_tags)})).collect::<Vec<_>>());
+    // Link only the public organizer run id; never serialize the private apply snapshot.
+    v["organizerRunId"] = json!(
+        db::get_run(&s.pool, id)
+            .await?
+            .and_then(|r| r.organizer_run_id)
+    );
     v["total"] = json!(total);
     Ok(Json(v))
 }

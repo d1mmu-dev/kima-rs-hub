@@ -101,8 +101,16 @@ async fn undecryptable_secret_reads_as_unset(pool: PgPool) {
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn cache_serves_until_ttl_and_replace_is_immediate(pool: PgPool) {
     let cipher = Arc::new(Cipher::random());
-    let cache = SettingsCache::new(pool.clone(), cipher).with_ttl(Duration::from_millis(100));
+    // Use a long-lived view for the cache-hit assertion and a short-lived view
+    // of the same slot for expiry. Slow database operations must not make the
+    // cache-hit assertion race a 100 ms deadline.
+    let cache = SettingsCache::new(pool.clone(), cipher).with_ttl(Duration::MAX);
+    let expiring_cache = cache.clone().with_ttl(Duration::from_millis(100));
     assert!(!cache.get().await.unwrap().fanart_enabled);
+    sqlx::query("SELECT pg_sleep(0.2)")
+        .execute(&pool)
+        .await
+        .unwrap();
     settings_kv::set_plain(&pool, Key::FanartEnabled, Some(&json!(true)))
         .await
         .unwrap();
@@ -110,9 +118,8 @@ async fn cache_serves_until_ttl_and_replace_is_immediate(pool: PgPool) {
         !cache.get().await.unwrap().fanart_enabled,
         "served from cache"
     );
-    tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(
-        cache.get().await.unwrap().fanart_enabled,
+        expiring_cache.get().await.unwrap().fanart_enabled,
         "reloaded after the ttl"
     );
     cache.replace(KvSettings {

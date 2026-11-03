@@ -14,8 +14,8 @@ Milestones M1 (library and playback) and M2 (Subsonic) are done. On top of M0's 
 login, kima-rs now scans and watches a music folder, shows it as Artist, then Year - Album, then songs, and lets you
 browse, search, stream (with transcodes), keep playlists and resume playback. An admin can also
 preview and apply a tidy on-disk layout. Music apps that speak Subsonic/OpenSubsonic can connect
-with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Identification (MusicBrainz, M3a) is built;
-not yet built: tag writing and the autotagger (M3b), audio analysis, podcasts and audiobooks, integrations. See
+with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Identification and the album
+autotagger are built; audio analysis, podcasts and audiobooks, and integrations are not yet built. See
 `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` for what comes next.
 
 ## Quick start
@@ -59,7 +59,7 @@ bundles it) and are cached under `KIMA_DATA_DIR/transcode`, up to
 
 **Needs attention.** Settings > Library Tools > Needs attention (admin) lists albums whose
 details were guessed from folder names or look wrong: missing artist, album or year,
-conflicting years, missing or duplicate track numbers.
+conflicting years, missing or duplicate track numbers, and tracks reached through symlinks.
 
 ### Organizer
 
@@ -67,6 +67,8 @@ Settings > Library Tools > Organize library (admin) previews and applies a clean
 `Album artist/Year - Album/NN - Title.ext` (multi-disc `D-NN`, compilations under
 `Various Artists`). Nothing is changed until you apply a previewed run, files are never
 overwritten, and every step is journaled in Postgres, so a run resumes after a crash.
+Previews may cover selected albums, and are grouped by album. `.lrc` and `.nfo` sidecars
+travel with their album; a scoped move leaves sidecars in a folder shared with an out-of-scope album.
 
 - **Copy** (default, safe): writes the organized tree to `KIMA_ORGANIZE_TARGET` and leaves the
   originals alone. Mount a writable folder for it, for example uncomment the `/organized`
@@ -77,13 +79,33 @@ overwritten, and every step is journaled in Postgres, so a run resumes after a c
 - **Move**: renames files inside `MUSIC_PATH`, which must be mounted writable (drop `:ro`).
   Undo restores every original path from the journal.
 
+### Autotagger
+
+Settings > Library Tools > Match albums lets an admin search MusicBrainz for album releases,
+review stored candidates, track mappings and proposed changes, and apply a match. Stored snapshots
+can be applied or undone even with `KIMA_IDENTIFY=off`; searching needs identification enabled.
+Choose a target:
+
+- **Database (`db`)** stores overrides without changing music files, including on a read-only library.
+- **Files (`files`)** writes tags to the library only when it is writable and the files are supported;
+  optionally reorganize the album after tagging.
+- **Copy (`copy`)** writes tags only to a writable organized copy, after a qualifying whole-library
+  copy run covers the album. The original library files are not written.
+
+The default read-only mount therefore offers database-only and, after a qualifying copy run, copy;
+mount the library writable to use files. Writes are journaled and checked to preserve audio; unsupported
+or unsafe files are refused. Undo restores the previous values where safe, but can be refused if files
+changed or identities collide. Resolve such collisions before retrying; no accept-as-is operation is
+currently provided. Automatic application of strong matches (`autotagAutoApply`) is off by default;
+when enabled it targets `db` or writable `files`, never reorganizing automatically.
+
 ### Identification
 
 Once a library is scanned, kima identifies it on its own, with no button to press: each track's
 MusicBrainz recording (from file tags first, then an AcoustID fingerprint match), then
 artist photos, biographies, similar artists and genres, album cover fallbacks and synced lyrics.
-Progress shows under Settings > Library Tools; new files are picked up as they arrive. In M3a
-nothing is written to your music files; identification only fills the database.
+Progress shows under Settings > Library Tools; new files are picked up as they arrive. Identification
+itself only fills the database; the separate autotagger can write tags when explicitly configured.
 
 - **Switch it off.** `KIMA_IDENTIFY=off` stops every outbound lookup for the whole server. An admin can
   also turn "Auto enrich metadata" off in Settings > Artwork; the environment switch wins and

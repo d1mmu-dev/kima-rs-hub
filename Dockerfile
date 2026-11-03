@@ -8,6 +8,8 @@ COPY frontend/ ./
 RUN npm run build
 
 FROM rust:1-bookworm AS backend
+RUN apt-get update && apt-get install -y --no-install-recommends libsoxr-dev \
+ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 ENV SQLX_OFFLINE=true
@@ -16,7 +18,7 @@ RUN cargo build --release -p kima-server
 # Postgres 17 + pgvector on Debian bookworm; adds the kima binary and the exported frontend.
 FROM pgvector/pgvector:pg17
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tini ca-certificates ffmpeg \
+ && apt-get install -y --no-install-recommends tini ca-certificates ffmpeg libsoxr0 \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --home /data --shell /usr/sbin/nologin kima
 COPY --from=backend /src/target/release/kima /usr/local/bin/kima

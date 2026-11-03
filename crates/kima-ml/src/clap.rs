@@ -6,12 +6,11 @@
 
 /// Prepare one native-rate mono window for the default ONNX CLAP frontend.
 ///
-/// Resamples independently with rubato, fixes the length using librosa's
+/// Resamples independently with libsoxr HQ, fixes the length using librosa's
 /// ceiling rule, cuts to ten seconds, then tiles whole copies and zero-pads
 /// the remainder, as in upstream `onnx_backend.py` and `clap_mel.py` at
 /// commit 12faf1cd34ff53054221818b0ccde58b8e9b0020. Empty input is an error.
-/// Only 8–192 kHz and up to ten seconds of input are accepted. Rubato and
-/// librosa's soxr filter are different; waveform or model parity is not implied.
+/// Only 8–192 kHz and up to ten seconds of input are accepted.
 pub fn prepare_window(samples: &[f32], rate: u32) -> Result<Vec<f32>, crate::audio::AudioError> {
     use crate::audio::{AudioError, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE};
     if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&rate) {
@@ -20,10 +19,15 @@ pub fn prepare_window(samples: &[f32], rate: u32) -> Result<Vec<f32>, crate::aud
     if samples.len() > rate as usize * 10 {
         return Err(AudioError::BufferOverflow);
     }
-    let mut output = crate::audio::resample_mono_ceil(samples, rate, 48_000)?;
-    if output.is_empty() {
+    crate::audio::validate_samples(samples)?;
+    if samples.is_empty() {
         return Err(crate::audio::AudioError::EmptyAudio);
     }
+    let mut output = if rate == 48_000 {
+        samples.to_vec()
+    } else {
+        soxr_resample(samples, rate)?
+    };
     output.truncate(480_000);
     let length = output.len();
     let repeated = (480_000 / length) * length;
@@ -33,6 +37,72 @@ pub fn prepare_window(samples: &[f32], rate: u32) -> Result<Vec<f32>, crate::aud
         output.extend_from_within(..count);
     }
     output.resize(480_000, 0.0);
+    Ok(output)
+}
+
+// C ABI is defined by libsoxr's public soxr.h. The library remains dynamically linked.
+#[repr(C)]
+struct SoxrQuality {
+    precision: f64,
+    phase_response: f64,
+    passband_end: f64,
+    stopband_begin: f64,
+    reserved: *mut std::ffi::c_void,
+    flags: std::ffi::c_ulong,
+}
+
+#[link(name = "soxr")]
+unsafe extern "C" {
+    fn soxr_quality_spec(recipe: std::ffi::c_ulong, flags: std::ffi::c_ulong) -> SoxrQuality;
+    fn soxr_oneshot(
+        input_rate: f64,
+        output_rate: f64,
+        channels: std::ffi::c_uint,
+        input: *const std::ffi::c_void,
+        input_len: usize,
+        input_done: *mut usize,
+        output: *mut std::ffi::c_void,
+        output_len: usize,
+        output_done: *mut usize,
+        io_spec: *const std::ffi::c_void,
+        quality: *const SoxrQuality,
+        runtime: *const std::ffi::c_void,
+    ) -> *const std::ffi::c_char;
+}
+
+fn soxr_resample(samples: &[f32], rate: u32) -> Result<Vec<f32>, crate::audio::AudioError> {
+    use crate::audio::AudioError;
+    let length = ((48_000_f64 / f64::from(rate)) * samples.len() as f64).ceil() as usize;
+    let mut output = vec![0.0_f32; length];
+    let (mut consumed, mut produced) = (0, 0);
+    // SAFETY: bounded slices outlive the call, sizes are in frames, null requests defaults.
+    let error = unsafe {
+        let quality = soxr_quality_spec(4, 0); // SOXR_HQ, not oneshot's LQ default.
+        soxr_oneshot(
+            f64::from(rate),
+            48_000.0,
+            1,
+            samples.as_ptr().cast(),
+            samples.len(),
+            &mut consumed,
+            output.as_mut_ptr().cast(),
+            output.len(),
+            &mut produced,
+            std::ptr::null(),
+            &quality,
+            std::ptr::null(),
+        )
+    };
+    if !error.is_null() {
+        // SAFETY: libsoxr returns a static NUL-terminated error string.
+        let message = unsafe { std::ffi::CStr::from_ptr(error) }.to_string_lossy();
+        return Err(AudioError::Resample(message.into_owned()));
+    }
+    if consumed != samples.len() || produced > length || produced.saturating_add(1) < length {
+        return Err(AudioError::Resample("incomplete soxr conversion".into()));
+    }
+    // soxr rounds its output count; librosa pads the final ceil sample with zero.
+    crate::audio::validate_samples(&output)?;
     Ok(output)
 }
 

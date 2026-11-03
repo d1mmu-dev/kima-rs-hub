@@ -123,7 +123,9 @@ itself only fills the database; the separate autotagger can write tags when expl
 
 ## Local development
 
-Requirements: Rust 1.85+, Node.js, Docker (for the dev database).
+Requirements: Rust 1.85+, Node.js, Docker (for the dev database), and libsoxr development files (Debian/Ubuntu: `libsoxr-dev`; Arch: `soxr`). The resulting binaries dynamically link libsoxr and need its shared library at runtime (Debian: `libsoxr0`).
+
+libsoxr is LGPL-2.1-or-later; see [upstream source and license](https://sourceforge.net/projects/soxr/) and the license notices shipped by the OS package. Distributors must provide the applicable notices and corresponding library source and preserve users' ability to replace the shared library, among other LGPL obligations. The Docker image installs Debian's unmodified shared library package. Check the exact distribution and its obligations separately; this is not legal advice.
 
 1. Start the dev Postgres (listens on `localhost:5456`):
    ```bash

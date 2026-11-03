@@ -1,6 +1,54 @@
 use kima_ml::clap::prepare_window;
 
 #[test]
+fn synthetic_waveforms_match_pinned_librosa_at_multiple_rates() {
+    let mut input: Vec<f32> = (0..257)
+        .map(|i| ((i * 37 % 101) as f32 - 50.0) / 64.0)
+        .collect();
+    input[0] = 1.0;
+    input[256] = -1.0;
+    let cases: &[(u32, &[u8])] = &[
+        (8000, include_bytes!("fixtures/soxr-8000.f32le")),
+        (16000, include_bytes!("fixtures/soxr-16000.f32le")),
+        (44100, include_bytes!("fixtures/soxr-44100.f32le")),
+        (48000, include_bytes!("fixtures/soxr-48000.f32le")),
+        (96000, include_bytes!("fixtures/soxr-96000.f32le")),
+        (192000, include_bytes!("fixtures/soxr-192000.f32le")),
+    ];
+    for &(rate, bytes) in cases {
+        let reference: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        let actual = prepare_window(&input, rate).unwrap();
+        let repeated = 480_000 / reference.len() * reference.len();
+        for (i, &value) in actual.iter().enumerate() {
+            let expected = if i < repeated {
+                reference[i % reference.len()]
+            } else {
+                0.0
+            };
+            assert!(
+                (value - expected).abs() < 3e-6,
+                "rate={rate} index={i}: {value} != {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn short_upsample_matches_librosa_soxr_hq() {
+    // librosa 0.11.0, python-soxr 1.1.0, input float32 [1.0].
+    let expected = [
+        0.9431157, 0.990415, 0.8996531, 0.69999254, 0.44553354, 0.19518423,
+    ];
+    let output = prepare_window(&[1.0], 8_000).unwrap();
+    for (actual, expected) in output.iter().zip(expected) {
+        assert!((actual - expected).abs() < 2e-6, "{actual} != {expected}");
+    }
+}
+
+#[test]
 fn same_rate_repeatpad_uses_whole_repeats_then_zero_remainder() {
     let input = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
     let output = prepare_window(&input, 48_000).unwrap();
@@ -44,7 +92,7 @@ fn empty_and_nonfinite_inputs_are_rejected() {
         prepare_window(&[], 48_000),
         Err(AudioError::EmptyAudio)
     ));
-    for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+    for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
         assert!(matches!(
             prepare_window(&[sample], 48_000),
             Err(AudioError::CorruptAudio(_))

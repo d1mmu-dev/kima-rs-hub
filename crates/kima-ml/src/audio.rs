@@ -236,6 +236,32 @@ fn decode_pass(
         let decoded = decoder.decode(&packet);
         match decoded {
             Ok(audio_buf) => {
+                #[cfg(test)]
+                let injected_buffer = INJECT_RATE_CHANGE.with(|count| {
+                    let n = count.get();
+                    if n > 0 {
+                        count.set(n - 1);
+                    }
+                    if n == 1 {
+                        let spec = symphonia::core::audio::AudioSpec::new(
+                            8_000,
+                            audio_buf.spec().channels().clone(),
+                        );
+                        let mut buffer = symphonia::core::audio::AudioBuffer::<f32>::new(spec, 16);
+                        buffer.render_silence(None);
+                        Some(buffer)
+                    } else {
+                        None
+                    }
+                });
+                #[cfg(test)]
+                let audio_buf = injected_buffer.as_ref().map_or(audio_buf, Into::into);
+                if audio_buf.spec().rate() != sample_rate {
+                    return Err(AudioError::CorruptAudio(format!(
+                        "decoded sample rate changed from {sample_rate} Hz to {} Hz",
+                        audio_buf.spec().rate()
+                    )));
+                }
                 let num_channels = audio_buf.spec().channels().count();
                 if num_channels == 0 || num_channels > MAX_CHANNELS as usize {
                     return Err(AudioError::UnsupportedChannels(num_channels as u32));
@@ -396,11 +422,38 @@ thread_local! {
     static INJECT_DECODE_ERROR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static INJECT_RESET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static INJECT_DEMUX_RESET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static INJECT_RATE_CHANGE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_decoded_sample_rate_after_valid_packet_fails_closed() {
+        let frames = 100_000u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        wav.extend_from_slice(&32_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 2).to_le_bytes());
+        wav.resize(44 + frames as usize * 2, 1);
+        INJECT_RATE_CHANGE.with(|count| count.set(2));
+        let result = decode_and_resample_bytes(&wav, Some("wav"));
+        let remaining = INJECT_RATE_CHANGE.with(|count| count.replace(0));
+        assert_eq!(remaining, 0, "changed buffer follows a valid packet");
+        assert!(
+            matches!(result, Err(AudioError::CorruptAudio(ref msg)) if msg.contains("16000 Hz to 8000 Hz"))
+        );
+    }
 
     #[test]
     fn early_clap_window_rejects_invalid_samples_outside_tail() {
@@ -413,22 +466,23 @@ mod tests {
 
         let mut wav = Vec::new();
         wav.extend_from_slice(b"RIFF");
-        wav.extend_from_slice(&(36 + frames * 4).to_le_bytes());
+        wav.extend_from_slice(&(36 + frames * 8).to_le_bytes());
         wav.extend_from_slice(b"WAVEfmt ");
         wav.extend_from_slice(&16u32.to_le_bytes());
         wav.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
-        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
         wav.extend_from_slice(&rate.to_le_bytes());
-        wav.extend_from_slice(&(rate * 4).to_le_bytes());
-        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&(rate * 8).to_le_bytes());
+        wav.extend_from_slice(&8u16.to_le_bytes());
         wav.extend_from_slice(&32u16.to_le_bytes());
         wav.extend_from_slice(b"data");
-        wav.extend_from_slice(&(frames * 4).to_le_bytes());
-        wav.resize(44 + frames as usize * 4, 0);
+        wav.extend_from_slice(&(frames * 8).to_le_bytes());
+        wav.resize(44 + frames as usize * 8, 0);
         let mut hint = Hint::new();
         hint.with_extension("wav");
-        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.1e12] {
-            wav[44 + bad_frame * 4..48 + bad_frame * 4].copy_from_slice(&invalid.to_le_bytes());
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 2.2e12] {
+            // Only the right channel is invalid; downmixing must not hide it.
+            wav[48 + bad_frame * 8..52 + bad_frame * 8].copy_from_slice(&invalid.to_le_bytes());
             let result = decode_with_clap_windows(
                 Box::new(Cursor::new(wav.clone())),
                 &hint,
@@ -459,7 +513,7 @@ mod tests {
         wav.extend_from_slice(b"data");
         wav.extend_from_slice(&(frames * 2).to_le_bytes());
         for i in 0..frames {
-            wav.extend_from_slice(&((i / rate) as i16 * 100).to_le_bytes());
+            wav.extend_from_slice(&((i % 30_000) as i16).to_le_bytes());
         }
         let mut hint = Hint::new();
         hint.with_extension("wav");
@@ -473,10 +527,12 @@ mod tests {
         assert_eq!(windows.len(), ranges.len());
         for (window, range) in windows.iter().zip(ranges) {
             assert_eq!(window.len(), range.len());
-            assert_eq!(
-                window[0],
-                (range.start as u32 / rate) as f32 * 100.0 / 32768.0
-            );
+            for index in [0, range.len() - 1] {
+                assert_eq!(
+                    window[index],
+                    ((range.start + index) % 30_000) as f32 / 32768.0
+                );
+            }
         }
         for expected in [frames as usize - 1, frames as usize + 1] {
             assert!(

@@ -149,13 +149,28 @@ fn decode_and_resample_media_source(
     let mut interleaved: Vec<f32> = Vec::new();
 
     loop {
-        let packet_opt = match format.next_packet() {
+        #[cfg(test)]
+        let next_packet = if INJECT_DEMUX_RESET.with(|count| {
+            let n = count.get();
+            if n > 0 {
+                count.set(n - 1);
+            }
+            n == 1
+        }) {
+            Err(SymphoniaError::ResetRequired)
+        } else {
+            format.next_packet()
+        };
+        #[cfg(not(test))]
+        let next_packet = format.next_packet();
+        let packet_opt = match next_packet {
             Ok(Some(pkg)) => Some(pkg),
             Ok(None) => None,
             Err(SymphoniaError::IoError(err)) => return Err(AudioError::Io(err)),
             Err(SymphoniaError::ResetRequired) => {
-                decoder.reset();
-                continue;
+                // The demuxer may have changed tracks and codec parameters;
+                // resetting only the old decoder would use stale settings.
+                return Err(AudioError::CorruptAudio("demuxer reset required".into()));
             }
             Err(SymphoniaError::Unsupported(msg)) => {
                 return Err(AudioError::UnsupportedFormat(msg.to_string()));
@@ -316,11 +331,42 @@ pub fn resample_mono(samples: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec
 thread_local! {
     static INJECT_DECODE_ERROR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static INJECT_RESET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static INJECT_DEMUX_RESET: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demux_reset_after_valid_packet_fails_closed() {
+        let frames = 100_000u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        wav.extend_from_slice(&32_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 2).to_le_bytes());
+        wav.resize(44 + frames as usize * 2, 1);
+        INJECT_DEMUX_RESET.with(|count| count.set(2));
+        let result = decode_and_resample_bytes(&wav, Some("wav"));
+        let remaining = INJECT_DEMUX_RESET.with(|count| count.replace(0));
+        assert_eq!(
+            remaining, 0,
+            "reset must be injected after the first packet"
+        );
+        assert!(
+            matches!(result, Err(AudioError::CorruptAudio(_))),
+            "demux reset must reject all audio"
+        );
+    }
 
     #[test]
     fn decode_has_no_total_duration_cap() {

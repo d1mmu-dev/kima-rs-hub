@@ -1,5 +1,5 @@
 "use client";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 import { useSearchParams } from "next/navigation";
@@ -35,6 +35,7 @@ function ReviewAlbum({ id }: { id: string }) {
     const admin = user?.role === "admin";
     const qc = useQueryClient();
     const [candidateId, setCandidate] = useState<string>();
+    const [searchGeneration, setSearchGeneration] = useState(0);
     const [target, setTarget] = useState<Target>("db");
     const caps = useQuery({
         queryKey: ["autotag-capabilities"],
@@ -42,11 +43,23 @@ function ReviewAlbum({ id }: { id: string }) {
         enabled: admin,
     });
     const review = useQuery({
-        queryKey: ["autotag-album", id, candidateId],
+        queryKey: ["autotag-album", id, searchGeneration, candidateId],
         queryFn: () => api.getAutotagAlbum(id, candidateId),
         enabled: admin && !!id,
         refetchInterval: 2000,
     });
+    useEffect(() => {
+        if (
+            candidateId &&
+            (review.isError ||
+                (review.data &&
+                    !review.data.candidates.some((c) => c.id === candidateId)))
+        ) {
+            // Reconcile local selection with the asynchronously updated server review.
+            // eslint-disable-next-line react-hooks/set-state-in-effect
+            setCandidate(undefined);
+        }
+    }, [candidateId, review.isError, review.data]);
     const refresh = () => {
         qc.invalidateQueries({ queryKey: ["autotag-album", id] });
         qc.invalidateQueries({ queryKey: ["autotag-runs"] });
@@ -57,7 +70,11 @@ function ReviewAlbum({ id }: { id: string }) {
     const [release, setRelease] = useState("");
     const search = useMutation({
         mutationFn: (body: Search) => api.searchAutotag(body),
-        onSuccess: refresh,
+        onSuccess: () => {
+            setCandidate(undefined);
+            setSearchGeneration((generation) => generation + 1);
+            refresh();
+        },
     });
     const skip = useMutation({
         mutationFn: () => api.skipAutotagAlbum(id),
@@ -91,6 +108,9 @@ function ReviewAlbum({ id }: { id: string }) {
     )?.data?.conflictAlbumId;
     const d = review.data,
         s = d?.selected;
+    const selectedCandidate = d?.candidates.find((c) => c.id === s?.candidateId);
+    const unsafeReview =
+        review.isFetching || review.isError || !s || !selectedCandidate || selectedCandidate.stale;
     const busy =
         apply.isPending ||
         skip.isPending ||
@@ -126,7 +146,7 @@ function ReviewAlbum({ id }: { id: string }) {
                             {!caps.data?.identifyEnabled && (
                                 <p>
                                     Outbound lookups are turned off. Stored
-                                    candidates can still be applied.
+                                    fresh candidates can still be applied.
                                 </p>
                             )}
                             <label>
@@ -204,6 +224,9 @@ function ReviewAlbum({ id }: { id: string }) {
                                 Refresh candidates
                             </Button>
                         )}
+                        {selectedCandidate?.stale && (
+                            <p>Refresh this stale candidate before applying it.</p>
+                        )}
                         {d.userMbidKept && (
                             <p>Your user-set MusicBrainz IDs will be kept.</p>
                         )}
@@ -218,7 +241,7 @@ function ReviewAlbum({ id }: { id: string }) {
                                     </Link>
                                 </p>
                                 <Button
-                                    disabled={busy || !s}
+                                    disabled={busy || unsafeReview}
                                     onClick={() => apply.mutate(true)}
                                 >
                                     Apply MBIDs only
@@ -265,6 +288,7 @@ function ReviewAlbum({ id }: { id: string }) {
                                 <Button
                                     disabled={
                                         busy ||
+                                        unsafeReview ||
                                         !!d.conflict ||
                                         !caps.data?.[target].available
                                     }

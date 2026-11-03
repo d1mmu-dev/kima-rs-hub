@@ -167,6 +167,7 @@ pub fn decode_clap_auto(
     hint: &Hint,
     frame_hint: Option<usize>,
 ) -> Result<(DecodedAudio, Vec<Vec<f32>>, u32), AudioError> {
+    let frame_hint = frame_hint.filter(|&count| count != 0);
     let (audio, windows, rate, fingerprint) = decode_pass(open()?, hint, frame_hint)?;
     if frame_hint == Some(fingerprint.frames) {
         return Ok((audio, windows.unwrap_or_default(), rate));
@@ -515,9 +516,12 @@ mod tests {
         wav.resize(44 + frames as usize * 2, 0);
         let mut hint = Hint::new();
         hint.with_extension("wav");
+        let baseline =
+            decode_clap_auto(|| Ok(Box::new(Cursor::new(wav.clone()))), &hint, None).unwrap();
         for (count, passes) in [
             (Some(frames as usize), 1),
             (None, 2),
+            (Some(0), 2),
             (Some(frames as usize - 1), 2),
             (Some(frames as usize + 1), 2),
         ] {
@@ -531,6 +535,7 @@ mod tests {
                 count,
             );
             assert!(result.is_ok(), "{count:?}: {result:?}");
+            assert_eq!(result.unwrap(), baseline, "{count:?}");
             assert_eq!(opens, passes);
         }
         let ranges = crate::clap::source_window_ranges(frames as usize, rate).unwrap();
@@ -558,10 +563,25 @@ mod tests {
                 Ok(Box::new(File::open(file.path())?))
             },
             &hint,
-            Some(frames as usize - 1),
+            Some(0),
         );
         assert!(matches!(result, Err(AudioError::DecodedIdentityMismatch)));
         assert_eq!(opens, 2);
+
+        let mut empty = wav[..44].to_vec();
+        empty[4..8].copy_from_slice(&36u32.to_le_bytes());
+        empty[40..44].copy_from_slice(&0u32.to_le_bytes());
+        let mut empty_opens = 0;
+        let result = decode_clap_auto(
+            || {
+                empty_opens += 1;
+                Ok(Box::new(Cursor::new(empty.to_vec())))
+            },
+            &hint,
+            Some(0),
+        );
+        assert!(matches!(result, Err(AudioError::EmptyAudio)), "{result:?}");
+        assert_eq!(empty_opens, 1);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! kima-ml: Model integrity verification, capability evaluation, and ML runtime.
 
 pub mod audio;
+pub mod musicnn;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;

@@ -122,6 +122,20 @@ jobs:
           done
           cat "$RUNNER_TEMP/kima.log"
           exit 1
+      - name: Seed stored autotag candidate after the first scan
+        env:
+          DATABASE_URL: postgres://kima:kima@localhost:5432/kima
+        run: |
+          ready=0
+          for i in $(seq 1 60); do
+            if [ "$(psql "$DATABASE_URL" -Atqc "SELECT count(*)=14 AND NOT EXISTS (SELECT 1 FROM jobs WHERE queue='library' AND state IN ('queued','running') AND payload->>'kind'='scan') FROM tracks WHERE missing_since IS NULL")" = t ]; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tools/seed-autotag-candidate.sql
       - run: npx playwright install --with-deps chromium
         working-directory: frontend
       - run: npx playwright test -c playwright.kima-rs.config.ts

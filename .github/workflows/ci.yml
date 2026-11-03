@@ -45,7 +45,7 @@ jobs:
       - run: |
           set -o pipefail
           cargo test --workspace 2>&1 | tee test.log || {
-            grep -E 'panicked at|FAILED|^---- |left:|right:|Error' test.log | head -40 | sed 's/^/::error::/'
+            grep -A2 -E 'panicked at|FAILED|^---- |left:|right:|Error' test.log | head -80 | sed 's/^/::error::/'
             exit 1
           }
       - run: DATABASE_URL=postgres://kima:kima@localhost:5433/kima cargo test -p kima-api --test login_limit

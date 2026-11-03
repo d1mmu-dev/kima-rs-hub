@@ -2,7 +2,39 @@
 //!
 //! Port of `compute_window_offsets` in [upstream analyzer.py](https://github.com/Chevron7Locked/kima-hub/blob/12faf1cd34ff53054221818b0ccde58b8e9b0020/services/audio-analyzer-clap/analyzer.py).
 //! This is only the default five-window, ten-second configuration. It does not
-//! perform repeat padding, feature extraction, inference or source verification.
+//! perform feature extraction, inference or source verification.
+
+/// Prepare one native-rate mono window for the default ONNX CLAP frontend.
+///
+/// Resamples independently with rubato, fixes the length using librosa's
+/// ceiling rule, cuts to ten seconds, then tiles whole copies and zero-pads
+/// the remainder, as in upstream `onnx_backend.py` and `clap_mel.py` at
+/// commit 12faf1cd34ff53054221818b0ccde58b8e9b0020. Empty input is an error.
+/// Only 8–192 kHz and up to ten seconds of input are accepted. Rubato and
+/// librosa's soxr filter are different; waveform or model parity is not implied.
+pub fn prepare_window(samples: &[f32], rate: u32) -> Result<Vec<f32>, crate::audio::AudioError> {
+    use crate::audio::{AudioError, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE};
+    if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&rate) {
+        return Err(AudioError::UnsupportedSampleRate(rate));
+    }
+    if samples.len() > rate as usize * 10 {
+        return Err(AudioError::BufferOverflow);
+    }
+    let mut output = crate::audio::resample_mono_ceil(samples, rate, 48_000)?;
+    if output.is_empty() {
+        return Err(crate::audio::AudioError::EmptyAudio);
+    }
+    output.truncate(480_000);
+    let length = output.len();
+    let repeated = (480_000 / length) * length;
+    output.reserve(480_000 - length);
+    while output.len() < repeated {
+        let count = (repeated - output.len()).min(length);
+        output.extend_from_within(..count);
+    }
+    output.resize(480_000, 0.0);
+    Ok(output)
+}
 
 /// Select default CLAP window start times for a finite, nonnegative track duration.
 /// Returns `None` for invalid duration. Zero follows upstream's five zero offsets;

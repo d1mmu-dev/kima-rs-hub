@@ -422,6 +422,23 @@ fn validate_samples(samples: &[f32]) -> Result<(), AudioError> {
 
 /// Resamples a single-channel (mono) slice of `f32` audio from `in_rate` to `out_rate`.
 pub fn resample_mono(samples: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec<f32>, AudioError> {
+    resample_mono_impl(samples, in_rate, out_rate, false)
+}
+
+pub(crate) fn resample_mono_ceil(
+    samples: &[f32],
+    in_rate: u32,
+    out_rate: u32,
+) -> Result<Vec<f32>, AudioError> {
+    resample_mono_impl(samples, in_rate, out_rate, true)
+}
+
+fn resample_mono_impl(
+    samples: &[f32],
+    in_rate: u32,
+    out_rate: u32,
+    ceil: bool,
+) -> Result<Vec<f32>, AudioError> {
     validate_samples(samples)?;
     if in_rate == out_rate {
         return Ok(samples.to_vec());
@@ -435,8 +452,11 @@ pub fn resample_mono(samples: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec
         FftFixedInOut::<f32>::new(in_rate as usize, out_rate as usize, chunk_size, 1)
             .map_err(|e| AudioError::Resample(e.to_string()))?;
 
-    let expected_len =
-        ((samples.len() as f64) * (out_rate as f64) / (in_rate as f64)).round() as usize;
+    let expected_len = if ceil {
+        ((out_rate as f64 / in_rate as f64) * samples.len() as f64).ceil() as usize
+    } else {
+        ((samples.len() as f64) * (out_rate as f64) / (in_rate as f64)).round() as usize
+    };
 
     let delay = resampler.output_delay();
     let mut output = Vec::with_capacity(expected_len + delay + chunk_size * 2);

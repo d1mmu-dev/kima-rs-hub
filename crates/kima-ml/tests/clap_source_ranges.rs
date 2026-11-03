@@ -19,38 +19,23 @@ fn derived_windows_are_collected_from_complete_source() {
 }
 
 #[test]
-fn rational_boundaries_and_upstream_float_differences_are_explicit() {
-    // Values from a manual transcription of the pinned Python offset code and
-    // librosa's int(offset * sr), int(duration * sr) soundfile extraction.
-    // At 67 seconds Python gives 964799..1444799 for window 2, while exact
-    // rational 30% is one frame later. At 40 s + 1 frame Python gives the
-    // last window 1440000..1920000 because of binary64 rounding.
-    assert_eq!(
-        source_window_ranges(3_216_000, 48_000).unwrap()[1],
-        964_800..1_444_800
-    );
-    assert_eq!(
-        source_window_ranges(1_920_001, 48_000).unwrap()[3],
-        1_440_001..1_920_001
-    );
-    assert_eq!(
-        source_window_ranges(432_001, 48_000).unwrap(),
-        vec![0..432_001]
-    );
-    assert_eq!(
-        source_window_ranges(960_000, 48_000).unwrap(),
-        vec![0..480_000, 480_000..960_000]
-    );
-    assert_eq!(
-        source_window_ranges(3_200_000, 48_000).unwrap(),
-        vec![
-            320_000..800_000,
-            960_000..1_440_000,
-            1_600_000..2_080_000,
-            2_240_000..2_720_000,
-            2_720_000..3_200_000
-        ]
-    );
+fn source_ranges_match_transcribed_python_reference() {
+    for line in include_str!("fixtures/clap_ranges_reference.txt").lines() {
+        let mut fields = line.split_whitespace();
+        let frames: usize = fields.next().unwrap().parse().unwrap();
+        let rate: u32 = fields.next().unwrap().parse().unwrap();
+        let expected: Vec<_> = fields
+            .map(|pair| {
+                let (start, end) = pair.split_once(':').unwrap();
+                start.parse::<usize>().unwrap()..end.parse::<usize>().unwrap()
+            })
+            .collect();
+        assert_eq!(
+            source_window_ranges(frames, rate).unwrap(),
+            expected,
+            "{line}"
+        );
+    }
 }
 
 #[test]

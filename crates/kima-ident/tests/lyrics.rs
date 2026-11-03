@@ -482,6 +482,9 @@ async fn limiter_wait_over_5s_answers_from_storage(pool: PgPool) {
         "{:?}",
         start.elapsed()
     );
+    // Resume before releasing the blocking guard: otherwise Tokio may auto-advance
+    // database pool timeouts while the following queries and SQLx cleanup do real I/O.
+    tokio::time::resume();
     drop(frozen);
     assert_eq!(replay.asked().len(), 2);
     let answers: Vec<&LyricsAnswer> = done.iter().map(|(_, a)| a).collect();

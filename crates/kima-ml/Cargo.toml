@@ -6,10 +6,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rubato.workspace = true
+serde.workspace = true
 sha2.workspace = true
+symphonia.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-serde.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

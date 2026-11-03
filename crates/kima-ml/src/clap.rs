@@ -33,10 +33,10 @@ pub fn window_offsets(duration: f64) -> Option<Vec<f64>> {
 
 /// Derive half-open source-frame ranges from a complete decoded frame count.
 ///
-/// Uses exact rational arithmetic for the upstream default offsets and floors
-/// each start, then takes at most ten seconds and caps at the observed end.
-/// This intentionally avoids Python float boundary rounding; it is not a claim
-/// of librosa waveform or compressed-container parity. Empty input is refused.
+/// Uses the upstream binary64 offset, start clamp, and separate truncation of
+/// offset and take at the native sample rate, capped at the observed frame count.
+/// This does not establish librosa waveform or compressed-container parity.
+/// Empty input is refused.
 pub fn source_window_ranges(
     expected: usize,
     rate: u32,
@@ -44,21 +44,21 @@ pub fn source_window_ranges(
     if expected == 0 || rate == 0 || rate > crate::audio::MAX_SAMPLE_RATE {
         return Err(WindowCollectorError::InvalidRanges);
     }
-    let frames = expected as u128;
-    let width = u128::from(rate) * 10;
-    let count = (frames / width).clamp(1, 5) as usize;
-    let tiled = count < 5 || 3 * frames < 200 * u128::from(rate);
-    let mut ranges = Vec::with_capacity(count);
-    for i in 0..count {
-        let start = if count == 1 {
-            0
-        } else if tiled {
-            (frames - width) * i as u128 / (count - 1) as u128
+    let duration = expected as f64 / f64::from(rate);
+    let offsets = window_offsets(duration).ok_or(WindowCollectorError::InvalidRanges)?;
+    let mut ranges = Vec::with_capacity(offsets.len());
+    for offset in offsets {
+        let start_seconds = offset.min((duration - 0.001).max(0.0)).max(0.0);
+        let take = 10.0_f64.min((duration - start_seconds).max(0.0));
+        let start = ((start_seconds * f64::from(rate)) as usize).min(expected);
+        // A zero take is passed to librosa as None (read to EOF).
+        let length = if take > 0.0 {
+            (take * f64::from(rate)) as usize
         } else {
-            ((2 * i + 1) as u128 * frames / 10).min(frames - width)
+            expected - start
         };
-        let end = (start + width).min(frames);
-        ranges.push(start as usize..end as usize);
+        let end = start.saturating_add(length).min(expected);
+        ranges.push(start..end);
     }
     Ok(ranges)
 }

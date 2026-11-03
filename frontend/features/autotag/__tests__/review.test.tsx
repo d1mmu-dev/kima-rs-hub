@@ -74,14 +74,14 @@ const review: Review = {
     },
     userMbidKept: true,
 };
-async function render() {
+async function render(data: Review = { ...review, candidates: review.candidates.map(c => ({ ...c, stale: false })) }) {
     vi.spyOn(api, "getAutotagCapabilities").mockResolvedValue({
         identifyEnabled: true,
         files: { available: true, reason: null },
         copy: { available: true, reason: null, copyRunId: "copy" },
         db: { available: true },
     });
-    vi.spyOn(api, "getAutotagAlbum").mockResolvedValue(review);
+    vi.spyOn(api, "getAutotagAlbum").mockResolvedValue(data);
     qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     el = document.createElement("div");
     document.body.append(el);
@@ -141,7 +141,7 @@ it("searches using literal release reference, manual artist/album, and refresh; 
     const skip = vi
         .spyOn(api, "skipAutotagAlbum")
         .mockResolvedValue({ state: "skipped" });
-    await render();
+    await render(review);
     const input = (label: string, value: string) => {
         const elInput = el.querySelector<HTMLInputElement>(
             `input[aria-label="${label}"]`,
@@ -230,7 +230,6 @@ it("blocks conflicting identity but explicitly applies MBIDs only to db", async 
     expect(el.querySelector('a[href*="other"]')?.textContent).toContain(
         "Collision",
     );
-    expect(el.textContent).toContain("Refresh candidates");
     expect(el.textContent).toContain("user-set MusicBrainz");
     act(() => button("Apply MBIDs only").click());
     await settle();
@@ -242,4 +241,83 @@ it("blocks conflicting identity but explicitly applies MBIDs only to db", async 
     });
     await settle();
     expect(api.getAutotagRun).toHaveBeenCalledWith("r", 0, 200);
+});
+
+it("replaces a selected candidate after a new search without accepting stale review data", async () => {
+    const old = { ...review, conflict: null, candidates: [{ ...review.candidates[0], stale: false }] };
+    const fresh: Review = { ...old, candidates: [{ ...old.candidates[0], id: "new", title: "New release" }], selected: { ...old.selected!, candidateId: "new" } };
+    let replaced = false;
+    let holdOld = false;
+    let finishOld!: (value: Review) => void;
+    const oldRequest = new Promise<Review>((resolve) => { finishOld = resolve; });
+    const search = vi.spyOn(api, "searchAutotag").mockImplementation(async () => { replaced = true; return { queued: 1 }; });
+    const apply = vi.spyOn(api, "applyAutotagAlbum").mockResolvedValue({ runId: "r", jobId: "j" });
+    vi.spyOn(api, "getAutotagRun").mockReturnValue(new Promise(() => {}));
+    await render();
+    vi.mocked(api.getAutotagAlbum).mockImplementation(async (_id, candidate) => {
+        if (candidate === "c" && holdOld) return oldRequest;
+        if (replaced && candidate === "c") throw new Error("Candidate not found");
+        return replaced ? fresh : old;
+    });
+    await act(async () => { await qc.invalidateQueries({ queryKey: ["autotag-album", "a"] }); });
+    await settle();
+    act(() => el.querySelector<HTMLButtonElement>("button[aria-pressed]")!.click());
+    await settle();
+    holdOld = true;
+    act(() => { void qc.invalidateQueries({ queryKey: ["autotag-album", "a"] }); });
+    await settle();
+    expect([...el.querySelectorAll("button")].find(b => b.textContent === "Accept")!.disabled).toBe(true);
+    act(() => [...el.querySelectorAll("button")].find(b => b.textContent === "Search artist / album")!.click());
+    await settle();
+    expect(search).toHaveBeenCalled();
+    await vi.waitFor(() => expect(el.textContent).toContain("New release"));
+    await act(async () => { finishOld(old); await oldRequest; });
+    await settle();
+    expect(el.textContent).toContain("New release");
+    expect(el.textContent).not.toContain("Candidate not found");
+    const accept = [...el.querySelectorAll("button")].find(b => b.textContent === "Accept")!;
+    expect(accept.disabled).toBe(false);
+    act(() => accept.click());
+    await settle();
+    expect(apply).toHaveBeenCalledWith("a", expect.objectContaining({ candidateId: "new" }));
+    expect(apply).not.toHaveBeenCalledWith("a", expect.objectContaining({ candidateId: "c" }));
+});
+
+it("disables both apply paths if a cached review refetch fails", async () => {
+    const apply = vi.spyOn(api, "applyAutotagAlbum");
+    await render();
+    vi.mocked(api.getAutotagAlbum).mockRejectedValue(new Error("review failed"));
+    await act(async () => { await qc.invalidateQueries({ queryKey: ["autotag-album", "a"] }); });
+    await settle();
+    expect(el.textContent).toContain("review failed");
+    const button = [...el.querySelectorAll("button")].find(b => b.textContent === "Apply MBIDs only")!;
+    expect(button.disabled).toBe(true);
+    act(() => button.click());
+    expect(apply).not.toHaveBeenCalled();
+});
+
+it("requires a stale candidate to be refreshed before either apply action", async () => {
+    await render(review);
+    const button = [...el.querySelectorAll("button")].find(b => b.textContent === "Apply MBIDs only")!;
+    expect(button.disabled).toBe(true);
+});
+
+it("recovers when another search removes the selected candidate", async () => {
+    const fresh: Review = {
+        ...review,
+        conflict: null,
+        candidates: [{ ...review.candidates[0], id: "new", title: "Replacement", stale: false }],
+        selected: { ...review.selected!, candidateId: "new" },
+    };
+    await render();
+    act(() => el.querySelector<HTMLButtonElement>("button[aria-pressed]")!.click());
+    await settle();
+    vi.mocked(api.getAutotagAlbum).mockImplementation(async (_id, candidate) => {
+        if (candidate === "c") throw new Error("Candidate not found");
+        return fresh;
+    });
+    await act(async () => { await qc.invalidateQueries({ queryKey: ["autotag-album", "a"] }); });
+    await vi.waitFor(() => expect(el.textContent).toContain("Replacement"));
+    expect(el.textContent).not.toContain("Candidate not found");
+    expect([...el.querySelectorAll("button")].find(b => b.textContent === "Accept")!.disabled).toBe(false);
 });

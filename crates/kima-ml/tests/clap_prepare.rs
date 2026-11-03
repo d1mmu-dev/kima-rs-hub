@@ -115,6 +115,43 @@ fn separate_resamplers_do_not_leak_between_windows() {
 }
 
 #[test]
+fn concurrent_resampling_matches_independent_serial_results() {
+    use std::sync::{Arc, Barrier};
+
+    let cases: Vec<_> = [8_000, 16_000, 44_100, 96_000, 192_000]
+        .into_iter()
+        .enumerate()
+        .map(|(case, rate)| {
+            let input: Vec<f32> = (0..4_411)
+                .map(|i| (((i * (case + 3)) % 113) as f32 - 56.0) / 64.0)
+                .collect();
+            let expected = prepare_window(&input, rate).unwrap();
+            (input, rate, expected)
+        })
+        .collect();
+    let barrier = Arc::new(Barrier::new(cases.len()));
+    let threads: Vec<_> = cases
+        .into_iter()
+        .map(|(input, rate, expected)| {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..3 {
+                    assert_eq!(
+                        prepare_window(&input, rate).unwrap(),
+                        expected,
+                        "rate={rate}"
+                    );
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+}
+
+#[test]
 fn ceiling_output_repeats_then_zero_pads() {
     // 5 samples at 192 kHz produce ceil(5/4) = 2 samples; floor repeat
     // fills 480000 exactly. A nearest-rounded implementation uses one sample.

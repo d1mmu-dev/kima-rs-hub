@@ -206,6 +206,61 @@ not registered with the async job runtime until those adapters and safeguards
 exist. Private asset acquisition is a separate parent-controlled task and does
 not change this slice's synthetic-only acceptance or establish parity.
 
+## Async fenced CLAP publication adapter (2026-11-03, uncommitted review candidate)
+
+The owner authorized continuing the M4 production-integration slice after the
+attempt-orchestration commit. This adds `kima_ml::publish`, feature-gated
+behind `pg-publish` (off by default, so the decode/inference core stays
+DB-free), which is the **asynchronous publication adapter** the prior slice's
+"Remaining integration gates" named and explicitly left undone. It connects
+`attempt::run_attempt`'s existing synchronous `embed_and_publish` callback
+boundary to the existing `kima_db::ml` claim/publication layer, and nothing
+further:
+
+- `publish_clap_embedding(pool, claim, provenance, embedding: &ClapEmbedding)`
+  is a thin async wrapper over `kima_db::ml::complete_embedding`. It maps a
+  storage rejection (`Ok(false)`: stale claim, missing track/generation, or an
+  expired lease) to `PublishError::Rejected`, matching the prior slice's
+  explicit requirement that rejected storage claims become callback failure,
+  never a quiet `Ok(())`. It takes the already-typed `ClapEmbedding` (finite,
+  unit-norm, 512-dim per the existing storage contract), not a raw slice, so
+  an unvalidated vector cannot reach this call.
+- `publish_clap_embedding_blocking(handle, ...)` bridges this async call into
+  `run_attempt`'s plain-sync callback signature. It follows this workspace's
+  existing convention of running sync work from async call sites via
+  `tokio::task::spawn_blocking` (see `kima-library`/`kima-ident`), not the
+  reverse: it must be called from inside a `spawn_blocking` closure, where
+  blocking that dedicated thread on the runtime handle is safe and does not
+  starve the worker pool. It is not safe to call directly on a worker thread.
+- No scheduler/claim-acquisition logic, production worker registration, or
+  musicnn/DSP result type was added or implied. The caller still owns
+  eligibility, the claim, and calling this only after decode/inference finish
+  outside any transaction.
+
+Tests (`cargo test -p kima-ml --features pg-publish --lib publish::`, strict
+red/green): a pure `classify(accepted: bool)` unit test for the
+success/rejection mapping, and a bridging-pattern test that runs a real async
+future to completion from inside `spawn_blocking` on a multi-thread Tokio
+runtime (no database) to validate the exact mechanism
+`publish_clap_embedding_blocking` depends on. `cargo clippy -p kima-ml
+--features pg-publish --all-targets -- -D warnings` is clean; the default
+(no-feature) build and `cargo build --workspace` are unaffected; the one
+pre-existing `kima-ml` test failure (`onnx::tests::panic_wakes_an_observed_condvar_waiter`,
+missing `ORT_DYLIB_PATH` in this environment) reproduces identically on the
+unmodified `219fc0f` baseline and is unrelated to this change.
+
+**Deliberately not tested here, and not claimed:** an end-to-end test of
+`publish_clap_embedding` against a live `kima_db::ml::complete_embedding` call
+needs a real Postgres connection. The prior slice already flagged that its
+`#[sqlx::test]` usage against the isolated `127.0.0.1:55474` server creates
+per-test databases beyond a literal existing-database-only authorization, and
+that this "must be reviewed before further DB execution." This slice does not
+expand that permission or run any further DB-mutating test; the live-DB path
+through this new adapter is an explicit, documented verification blocker for
+the next DB-authorized step, not a claim of integration success. No model
+asset was read, converted, or run; no production scheduler/server wiring is
+claimed; no git commit was made.
+
 ## Decisions required before implementation
 
 1. Approve the stage graph, claim ordering and whether speculative embedding is permitted; define terminal closure/reopen, retry, restart, disabled CLAP, cancellation and missing-file semantics. Do not conflate independent completion with unrestricted eligibility.

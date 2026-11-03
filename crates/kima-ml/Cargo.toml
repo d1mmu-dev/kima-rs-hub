@@ -14,9 +14,18 @@ sha2.workspace = true
 symphonia.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+kima-db = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+[features]
+# Async fenced publication adapter connecting `attempt::run_attempt` to
+# `kima_db::ml`. Off by default: the decode/inference core stays DB-free.
+pg-publish = ["dep:kima-db", "dep:sqlx", "dep:tokio"]
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

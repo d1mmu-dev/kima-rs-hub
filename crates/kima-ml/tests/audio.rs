@@ -188,6 +188,25 @@ fn test_decode_long_track_windowing_rule_last_90_seconds() {
 }
 
 #[test]
+fn long_44100hz_track_keeps_exact_tail_at_both_output_rates() {
+    let rate = 44_100usize;
+    let mut samples = vec![0.0; rate];
+    samples.extend(vec![0.25; rate * 89]);
+    samples.extend(vec![0.75; rate]);
+    let wav = create_pcm_wav(1, rate as u32, &[samples]);
+    let decoded = decode_and_resample_bytes(&wav, Some("wav")).unwrap();
+    assert_eq!(decoded.duration_seconds, 90.0);
+    for (output, output_rate) in [
+        (&decoded.mono_16k, 16_000usize),
+        (&decoded.mono_48k, 48_000),
+    ] {
+        assert_eq!(output.len(), 90 * output_rate);
+        assert!((output[output_rate / 2] - 0.25).abs() < 0.01);
+        assert!((output[output.len() - output_rate / 2] - 0.75).abs() < 0.01);
+    }
+}
+
+#[test]
 fn test_decode_from_file_path() {
     let sample_rate = 16000;
     let duration_sec = 1.0;

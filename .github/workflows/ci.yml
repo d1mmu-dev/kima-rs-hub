@@ -29,6 +29,7 @@ jobs:
     env:
       DATABASE_URL: postgres://kima:kima@localhost:5432/kima
       SQLX_OFFLINE: "true"
+      ORT_DYLIB_PATH: /opt/kima/ort/libonnxruntime.so.1.22.0
       CI: "true"
       # No test reaches the real network: kima-net panics on any host but this machine.
       KIMA_NET_DENY_REAL: "1"
@@ -38,6 +39,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Provision verified CPU ONNX Runtime (linux/amd64)
+        run: |
+          sudo install -d -o root -g root -m 755 /opt/kima
+          sudo sh scripts/acquire-ort.sh /opt/kima/ort
+          python3 scripts/test-ort-packaging.py
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings

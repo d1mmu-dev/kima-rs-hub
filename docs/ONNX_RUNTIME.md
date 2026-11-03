@@ -82,27 +82,62 @@ populated Cargo cache/vendor directory for `--offline`.
   do not silently clear poison and continue inference. Aborting the process or
   leaking a checkout with `mem::forget` is not unwind recovery.
 
-## Clean CI / Docker status and required packaging gate
+## CI / Docker packaging
 
-A fresh target-directory, `--offline --locked` local build and real ORT tests
-were exercised using the separately provisioned library above; this does not
-establish a clean hosted-CI or Docker release. Existing workflow/image runtime
-packaging is **not completed by this fix**. Until provisioned, ONNX tests will
-fail honestly and capability loading reports the missing runtime; do not
-restore Cargo auto-download features to hide that failure.
+CI explicitly acquires the pinned wheel with `scripts/acquire-ort.sh`, then
+runs the network-free `provision-ort.py` integrity checks. The root-owned
+`/opt/kima/ort` directory retains LICENSE and ThirdPartyNotices.txt, removes
+write permissions, and is outside model/data volumes. The Rust job sets
+`ORT_DYLIB_PATH=/opt/kima/ort/libonnxruntime.so.1.22.0` before tests. This is an
+explicit build-time TLS acquisition, not an offline acquisition claim. Hosted
+CI has not been run for this local, unpushed change.
 
-Before release, the CI/image owner must:
+Docker uses the same acquisition/provisioning in a separate stage and copies
+only the library and notices into the final image at that same absolute path.
+Python, curl and the wheel are not copied from that stage. libc and related
+loader libraries come from Debian; libstdc++6 and libgcc-s1 are explicitly
+installed alongside ffmpeg/libsoxr. Only **linux/amd64** is approved: the
+acquisition script rejects other OS/architectures before downloading anything.
+Do not label this image as ARM64-ready without separately approved artifacts.
+No production model is downloaded or packaged.
 
-1. Provision the checksum-pinned runtime from an approved CI artifact or an
-   explicit acquisition stage, retaining license/notices and integrity checks.
-2. Run the Rust stage with network disabled, a clean target directory, the
-   approved Cargo dependency cache/vendor input, and explicit `ORT_DYLIB_PATH`.
-   Confirm the feature tree contains no `download-binaries`/`copy-dylibs`.
-3. Copy the provisioned runtime + notices to a root-owned read-only directory in
-   the final image. Set the absolute path; include its native loader/libc,
-   libstdc++, libgcc, libm, pthread/rt/dl dependencies for the target image.
-4. Exercise real CPU inference and missing/corrupt runtime failures **inside
-   that final image**, including memory/thread limits and non-root permissions.
-   Do not claim hosted/Docker success from this host's `ldd` or Cargo results.
-5. Independently re-review the Important fixes and finish lawful real-model
-   parity/peak-memory work. DB migration remains out of scope and unstarted.
+Local verification built the complete, unchanged frontend pipeline (`npm ci`,
+`npm run build`), Rust server, and final image with the legacy Docker builder
+(`DOCKER_BUILDKIT=0 docker build -t kima-m4-ort:review .`). Buildx was unavailable.
+The server does not yet depend on kima-ml, so server startup alone would not
+exercise ORT. Instead, the matching backend-stage image built the existing
+`onnx_session`, `onnx_runtime`, and `onnx_resources` integration test binaries:
+
+```sh
+# BACKEND_IMAGE is the image ID printed immediately before the final FROM.
+docker run --name kima-m4-ort-test-build --entrypoint sh "$BACKEND_IMAGE" -c '
+  cargo test --locked --release -p kima-ml --test onnx_session --test onnx_runtime --test onnx_resources --no-run &&
+  mkdir /ort-tests &&
+  for name in onnx_session onnx_runtime onnx_resources; do
+    for f in target/release/deps/$name-*; do
+      if [ -x "$f" ] && [ ! -d "$f" ]; then cp "$f" /ort-tests/$name; fi
+    done
+  done'
+docker cp kima-m4-ort-test-build:/ort-tests /approved/test-output/
+sh scripts/check-ort-image.sh kima-m4-ort:review /approved/test-output/ort-tests
+```
+
+The final-image check mounts those test-only binaries read-only into the
+**unmodified final image**, as user kima, with network disabled, read-only root,
+a temporary /tmp, 512 MiB memory, 2 CPUs and 64 PIDs. It verifies native library
+SHA-256, root ownership/non-writability of the runtime path and its parents,
+notices and loader dependencies. All 13 integration tests passed, including
+synthetic Identity inference (42 -> 42), concurrent inference, bounded actual
+thread count and missing/relative/nonexistent/corrupt native-library paths in
+fresh subprocesses. These failures return capability errors, not process exit
+101. Deliberately injected, caught unwind messages in the tests are expected.
+The test binaries are not shipped in the production image.
+
+A clean-target, offline/locked Rust test run checks that cached build products
+cannot conceal runtime acquisition. Cargo dependency caches must already be
+populated; this is not a claim that the Docker build itself is network-free.
+Feature-tree checks must continue to exclude `download-binaries`/`copy-dylibs`.
+Synthetic inference and a 512 MiB smoke limit do **not** establish real-model
+parity or peak-memory requirements. Independent review, lawful real-model
+parity and measured resource work remain open. DB migration is out of scope
+and remains gated/unstarted.

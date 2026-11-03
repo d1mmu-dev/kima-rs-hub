@@ -207,6 +207,58 @@ fn long_44100hz_track_keeps_exact_tail_at_both_output_rates() {
 }
 
 #[test]
+fn fractional_90_second_boundary_keeps_the_exact_nonconstant_tail() {
+    use kima_ml::audio::resample_mono;
+    use std::f64::consts::TAU;
+
+    let rate = 44_100usize;
+    for len in [rate * 90 - 137, rate * 90 + 137] {
+        // Global phase distinguishes a one-input-sample ring shift. The DC
+        // component also makes a discarded/zero-padded endpoint observable.
+        let samples: Vec<f32> = (0..len)
+            .map(|i| (0.5 + 0.2 * (TAU * 997.0 * i as f64 / rate as f64).sin()) as f32)
+            .collect();
+        let wav = create_pcm_wav(1, rate as u32, std::slice::from_ref(&samples));
+        let decoded = decode_and_resample_bytes(&wav, Some("wav")).unwrap();
+        // Reconstruct the quantized PCM independently of the decoder/ring.
+        let tail: Vec<f32> = samples[len.saturating_sub(rate * 90)..]
+            .iter()
+            .map(|s| (s * 32767.0).round() / 32768.0)
+            .collect();
+        assert_eq!(decoded.duration_seconds, tail.len() as f64 / rate as f64);
+        for (output, output_rate) in [(&decoded.mono_16k, 16_000), (&decoded.mono_48k, 48_000)] {
+            let expected = resample_mono(&tail, rate as u32, output_rate).unwrap();
+            let mut missing_end = tail.clone();
+            let end = missing_end.len();
+            missing_end[end - 64..].fill(0.0);
+            let missing = resample_mono(&missing_end, rate as u32, output_rate).unwrap();
+            assert!(
+                (output[output.len() - 1] - missing[missing.len() - 1]).abs() > 0.02,
+                "final input signal did not reach the output endpoint"
+            );
+            assert_eq!(output.len(), expected.len());
+            // Check beginning, interior, and every sample in the final filter tail.
+            for i in (0..2048)
+                .chain(output.len() / 2..output.len() / 2 + 2048)
+                .chain(output.len() - 2048..output.len())
+            {
+                assert!(
+                    (output[i] - expected[i]).abs() < 1e-6,
+                    "len={len} rate={output_rate} index={i}: {} != {}",
+                    output[i],
+                    expected[i]
+                );
+            }
+            assert!(
+                output[output.len() - 1].abs() > 0.02,
+                "endpoint was lost: len={len} rate={output_rate} value={}",
+                output[output.len() - 1]
+            );
+        }
+    }
+}
+
+#[test]
 fn test_decode_from_file_path() {
     let sample_rate = 16000;
     let duration_sec = 1.0;

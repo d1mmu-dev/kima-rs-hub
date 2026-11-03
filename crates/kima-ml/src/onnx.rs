@@ -1,5 +1,10 @@
 //! ONNX runtime session management and model loading.
 
+mod resources;
+#[cfg(test)]
+mod tests;
+use resources::ResourceReservation;
+
 use ort::session::Session;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex};
@@ -269,22 +274,20 @@ impl OnnxModel {
 pub struct SharedSession {
     id: ArtifactId,
     session: Arc<Mutex<Session>>,
+    _reservation: Arc<ResourceReservation>,
 }
 
 impl SharedSession {
-    pub fn new(id: ArtifactId, session: Session) -> Self {
+    fn new(id: ArtifactId, session: Session, reservation: ResourceReservation) -> Self {
         Self {
             id,
             session: Arc::new(Mutex::new(session)),
+            _reservation: Arc::new(reservation),
         }
     }
 
     pub fn id(&self) -> &ArtifactId {
         &self.id
-    }
-
-    pub fn session(&self) -> &Arc<Mutex<Session>> {
-        &self.session
     }
 
     /// Execute an inference closure with exclusive access to the underlying session.
@@ -413,6 +416,28 @@ pub struct BoundedSessionPool {
     sessions: Arc<Mutex<Vec<Session>>>,
     condvar: Arc<Condvar>,
     capacity: usize,
+    _reservation: ResourceReservation,
+    #[cfg(test)]
+    wait_observer: Option<std::sync::mpsc::Sender<()>>,
+}
+
+/// Returns the checkout on success, error, and unwinding. User code never holds
+/// the pool mutex. A poisoned shared-session mutex remains a fail-closed error.
+struct SessionCheckout<'a> {
+    pool: &'a BoundedSessionPool,
+    session: Option<Session>,
+}
+
+impl Drop for SessionCheckout<'_> {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            // Recover only to return ownership and wake waiters; checkout still
+            // reports LockPoisoned rather than using a poisoned pool.
+            let mut sessions = self.pool.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.push(session);
+            self.pool.condvar.notify_all();
+        }
+    }
 }
 
 impl BoundedSessionPool {
@@ -421,21 +446,14 @@ impl BoundedSessionPool {
         pool_size: usize,
         intra_threads: Option<usize>,
     ) -> Result<Self, OnnxError> {
-        if pool_size == 0 {
-            return Err(OnnxError::SessionBuilder(
-                "pool size must be greater than zero".to_string(),
-            ));
-        }
+        let threads = validate_resources(pool_size, intra_threads)?;
+        let reservation =
+            ResourceReservation::acquire(pool_size, threads, artifact.as_bytes().len())?;
 
+        initialize_runtime()?;
         let mut sessions = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            let mut builder =
-                Session::builder().map_err(|e| OnnxError::SessionBuilder(e.to_string()))?;
-            if let Some(threads) = intra_threads {
-                builder = builder
-                    .with_intra_threads(threads)
-                    .map_err(|e| OnnxError::SessionBuilder(e.to_string()))?;
-            }
+            let builder = bounded_session_builder(threads)?;
 
             let session = builder
                 .commit_from_memory(artifact.as_bytes())
@@ -452,6 +470,9 @@ impl BoundedSessionPool {
             sessions: Arc::new(Mutex::new(sessions)),
             condvar: Arc::new(Condvar::new()),
             capacity: pool_size,
+            _reservation: reservation,
+            #[cfg(test)]
+            wait_observer: None,
         })
     }
 
@@ -472,11 +493,15 @@ impl BoundedSessionPool {
     where
         F: FnOnce(&mut Session) -> Result<R, OnnxError>,
     {
-        let mut session = {
+        let session = {
             let mut guard = self.sessions.lock().map_err(|_| OnnxError::LockPoisoned)?;
             loop {
                 if let Some(sess) = guard.pop() {
                     break sess;
+                }
+                #[cfg(test)]
+                if let Some(observer) = &self.wait_observer {
+                    let _ = observer.send(());
                 }
                 guard = self
                     .condvar
@@ -485,16 +510,72 @@ impl BoundedSessionPool {
             }
         };
 
-        let result = f(&mut session);
-
-        // Always return session to pool even if `f` errored
-        if let Ok(mut guard) = self.sessions.lock() {
-            guard.push(session);
-            self.condvar.notify_one();
-        }
-
-        result
+        let mut checkout = SessionCheckout {
+            pool: self,
+            session: Some(session),
+        };
+        // The checkout owns a session until Drop takes it; no user operation
+        // can remove it while this closure is running.
+        f(checkout.session.as_mut().ok_or(OnnxError::LockPoisoned)?)
     }
+}
+
+/// Fixed CPU policy: 1 thread by default, never ORT's machine-sized auto pool.
+fn validate_resources(pool_size: usize, threads: Option<usize>) -> Result<usize, OnnxError> {
+    let threads = threads.unwrap_or(1);
+    if !(1..=4).contains(&pool_size) || !(1..=4).contains(&threads) {
+        return Err(OnnxError::SessionBuilder(
+            "pool size and intra threads must each be in 1..=4".into(),
+        ));
+    }
+    Ok(threads)
+}
+
+fn bounded_session_builder(
+    threads: usize,
+) -> Result<ort::session::builder::SessionBuilder, OnnxError> {
+    Session::builder()
+        .and_then(|builder| builder.with_intra_threads(threads))
+        .and_then(|builder| builder.with_inter_threads(1))
+        .and_then(|builder| builder.with_parallel_execution(false))
+        .and_then(|builder| {
+            builder.with_execution_providers([
+                ort::execution_providers::CPUExecutionProvider::default()
+                    .with_arena_allocator(false)
+                    .build(),
+            ])
+        })
+        .map_err(|e| OnnxError::SessionBuilder(e.to_string()))
+}
+
+/// Initialize only a separately provisioned, administrator-trusted runtime.
+/// Never search the working directory or let ort select/download a library.
+fn initialize_runtime() -> Result<(), OnnxError> {
+    static RUNTIME: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            let path = std::env::var("ORT_DYLIB_PATH").map_err(|_| {
+                "ORT_DYLIB_PATH must name a provisioned absolute runtime path".to_string()
+            })?;
+            if !std::path::Path::new(&path).is_absolute()
+                || !std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file())
+            {
+                return Err(
+                    "ORT_DYLIB_PATH must name an existing absolute runtime file".to_string()
+                );
+            }
+            // ort rc.10 panics on dlopen/API incompatibility instead of returning
+            // an error. Contain that at the capability boundary, never in inference.
+            std::panic::catch_unwind(|| ort::init_from(path).commit())
+                .map_err(|_| {
+                    "ORT_DYLIB_PATH runtime could not be loaded (library/API incompatible)"
+                        .to_string()
+                })?
+                .map(|_| ())
+                .map_err(|e| format!("ORT_DYLIB_PATH runtime initialization: {e}"))
+        })
+        .clone()
+        .map_err(OnnxError::SessionBuilder)
 }
 
 /// A `ModelConsumer` that loads ONNX model sessions from `VerifiedBytes`.
@@ -519,13 +600,10 @@ impl ModelConsumer for OnnxModelConsumer {
     type Error = OnnxError;
 
     fn load(&self, artifact: VerifiedBytes) -> Result<Self::Output, Self::Error> {
-        let mut builder =
-            Session::builder().map_err(|e| OnnxError::SessionBuilder(e.to_string()))?;
-        if let Some(threads) = self.intra_threads {
-            builder = builder
-                .with_intra_threads(threads)
-                .map_err(|e| OnnxError::SessionBuilder(e.to_string()))?;
-        }
+        initialize_runtime()?;
+        let threads = validate_resources(1, self.intra_threads)?;
+        let reservation = ResourceReservation::acquire(1, threads, artifact.as_bytes().len())?;
+        let builder = bounded_session_builder(threads)?;
 
         let session = builder
             .commit_from_memory(artifact.as_bytes())
@@ -534,6 +612,6 @@ impl ModelConsumer for OnnxModelConsumer {
                 message: e.to_string(),
             })?;
 
-        Ok(SharedSession::new(artifact.id(), session))
+        Ok(SharedSession::new(artifact.id(), session, reservation))
     }
 }

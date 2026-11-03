@@ -146,6 +146,66 @@ inference wiring, server readiness/progress, UI, M5 similarity, and M12 transpor
 remain outside this slice. Independent completion is preserved; no dependency
 graph is inferred. See D-142 for the storage/invalidation divergence.
 
+## Bounded attempt-orchestration slice (2026-11-03, uncommitted review candidate)
+
+The owner authorized continuing with synthetic models. `kima_ml::attempt` now
+implements the **per-attempt execution boundary only**, not registration in the
+M3 enrichment coordinator or a production scheduler. This narrows the next step
+to interfaces that actually exist: `CapabilityEvaluationReport`, the bounded
+Symphonia/rubato tail decoder, `decode_clap_auto`'s native-rate whole-track
+windows, and caller-owned computation/publication callbacks returning `Result<(), E>`.
+No musicnn/DSP result type, column or arbitrary JSON result was introduced.
+
+- `Combined` requires caller admission for the two stages. It requires both
+  musicnn and DSP capabilities for a complete analysis callback. Missing or
+  disabled CLAP does not prevent analysis: only the tail decode is needed then.
+  Analysis callback success precedes embedding callback execution; a failed or
+  unavailable analysis blocks this combined attempt's embedding callback.
+  This is a **conservative local execution precondition**, not approval of the
+  unresolved global stage graph, speculative embedding or terminal closure.
+- `EmbeddingAfterAnalysis` requires the caller to have read valid, durably
+  completed analysis for the same current file generation. It never calls
+  analysis again and does not require analysis models to remain available.
+  It opens/decodes a new source for embedding, including after a caller restart.
+  If CLAP is unavailable/disabled it opens nothing and reports blocked, not success.
+- Accurate frame hints share one decode; absent, zero or inaccurate hints use
+  the existing duration-discovery/verified-reopen exception. PCM and attempt
+  state are not persisted. Source factories must return stable, fresh inputs;
+  decoded fingerprints are not an encoded-file snapshot. Bad decode or changed
+  decoded content prevents either callback from running.
+- Analysis receives the 16 kHz tail. Embedding receives native-rate selected
+  windows and rate, not the old 48 kHz tail. The embedding callback still owns
+  per-window preparation, inference, aggregation and publication. No real-model
+  tensor contract is assumed by this runner. A successful callback acknowledges
+  its own atomic fenced publication, **not database verification by this crate**.
+  Storage rejection (`complete_embedding` returning false) must become callback
+  failure. There must be no transaction/connection spanning decode or both callbacks.
+- Outcomes distinguish acknowledged publication, caller-asserted prior completion,
+  callback failure, capability blockage (preserving reasons) and unsatisfied
+  analysis prerequisite. No stage rows or capability statuses are rewritten here;
+  no automatic retry/lease policy or global capability disable was added.
+
+Tests use original synthetic WAV samples and the existing verified tiny identity
+ONNX model through actual ORT. They establish call order, decode counts, retry
+isolation, missing/disabled capabilities, fail-closed decode and verified reopen,
+**not analysis semantics, restart durability in Postgres, real-model parity or
+server startup integration**. Existing database fence tests were also rerun with
+the authorized isolated `127.0.0.1:55474/kima_m4_slice` environment, after checking
+`DATABASE_URL`, `PGDATABASE` and `current_database()` before mutation. These
+existing `#[sqlx::test]` tests use SQLx-managed per-test databases on that isolated
+server, not the named base database itself; this is a deviation from a literal
+existing-database-only boundary and must be reviewed before further DB execution.
+No development database or model assets were targeted. Post-run readback still
+shows SQLx test databases; their ownership was not established, so none were deleted.
+
+Remaining integration gates: approved scheduler graph and claims, asynchronous
+publication adapters, final musicnn/DSP types and atomic storage, enforceable
+stable encoded input, cancellation/admission, server startup/readiness and real
+model tensor/parity validation. The synchronous execution boundary is deliberately
+not registered with the async job runtime until those adapters and safeguards
+exist. Private asset acquisition is a separate parent-controlled task and does
+not change this slice's synthetic-only acceptance or establish parity.
+
 ## Decisions required before implementation
 
 1. Approve the stage graph, claim ordering and whether speculative embedding is permitted; define terminal closure/reopen, retry, restart, disabled CLAP, cancellation and missing-file semantics. Do not conflate independent completion with unrestricted eligibility.

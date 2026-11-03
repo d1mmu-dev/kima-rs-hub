@@ -91,6 +91,61 @@ Missing, mismatched, oversized, unreadable or unparseable inputs and session ini
 
 **First vertical slice:** with a locally generated, redistributable tiny ONNX fixture and actual ORT consumer, TDD one available and one corrupted-model path through startup status and the real memory session; assert that replacing or rewriting the path after verification cannot change the buffer consumed. Add independent capability/multiple-failure and restart-recovery tests, tokenizer-byte loading, malformed/oversized/nonregular inputs and external-data refusal. On platforms supporting FIFOs, place a FIFO at an artifact basename with no writer and use a bounded test deadline to assert startup proceeds, the dependent capability is unavailable, and independent capabilities remain usable; also test final-component symlink refusal. Exercise server startup without an external DB only where the existing server architecture supports it; otherwise an authorized isolated DB is required. This worktree has no ML consumer, ORT dependency or real loading path, so a standalone verifier here would not establish the key security property and is intentionally not delivered. Model rights and lawful exact-byte access still block real-model parity and release certification.
 
+## Implemented database slice (2026-11-03)
+
+This implementation record supersedes the draft's historical no-code/no-migration
+statements for the database scope below only; outstanding design decisions remain open.
+
+The owner ordered PostgreSQL/pgvector persistence after the verified ONNX slice.
+Migration `0024_ml_analysis.sql` and `kima_db::ml` implement **CLAP embedding
+storage only**, using the already implemented `ClapEmbedding` contract: 512 finite
+floats and `|L2 norm - 1| <= 1e-3`, without renormalization. Postgres' vector type
+rejects nonfinite values and wrong dimensions; a CHECK enforces the norm. The
+HNSW index uses `vector_cosine_ops`. No new model assets or pgvector Rust dependency
+are needed: compile-checked SQL casts PostgreSQL `real[]` to/from `vector(512)`.
+
+Pragmatic storage defaults for this slice (not approval of the remaining graph):
+
+- One current embedding per track, cascading on deletion. Each row records the
+  encoder artifact ID, its exact 32-byte SHA-256, a caller-supplied nonempty
+  preprocessing/aggregation pipeline version, database file generation, and
+  publication time. Provenance is a caller assertion; this layer neither hashes
+  model bytes nor chooses an active model. Reads require all provenance fields,
+  a present matching generation, and a `done` embedding stage. Different model or
+  pipeline versions are not silently mixed. A later reanalysis replaces the
+  working stage token before inference and atomically replaces the old row on success;
+  automatic model-rollout scheduling and history retention are not implemented.
+- `embedding_claim` snapshots an **already working** embedding stage and file
+  generation before audio access; it neither acquires work nor establishes
+  eligibility. Publication owns a short transaction, locks track then stage,
+  checks the generation, presence, exact `started_at` token and unexpired lease,
+  and commits output and success together. It checks the database wall clock
+  **after** acquiring the stage lock, including when lock waits cross expiry.
+  Stale/duplicate claims return false without writes; invalid vectors/provenance
+  roll back stage success. No connection is held across decode/inference.
+- Database triggers conservatively invalidate embeddings and reopen any existing
+  analysis/embedding/similarity rows on a change to path, size, mtime, cheap file
+  fingerprint, missing/restored status, or explicit generation bump. This covers
+  scanner, repoint/restore, organizer and autotag writers without duplicating
+  their mutation paths. The scanner's explicit changed-file reopen also bumps
+  generation even with unchanged stored metadata. Renames may require reanalysis;
+  unrelated title/album metadata changes do not. A scan may advance the generation
+  twice (metadata update plus explicit reopen); it is an opaque monotonic fence,
+  not a count of file edits. Missing/restored files do not resurrect old output.
+- This is **database identity**, not an immutable filesystem snapshot. The existing
+  scanner fingerprint hashes size plus head/tail only, not the entire encoded
+  audio. Integration must still enforce the stable-input contract described above;
+  this slice cannot detect an unobserved in-place file mutation by itself.
+
+Final musicnn/DSP output and head aggregation types do not exist in the current
+computation API. Inventing flattened mood/DSP columns or accepting arbitrary JSON
+would freeze an unapproved contract. Their result schema/persistence is therefore
+explicitly deferred until those types and transformations are established.
+Analysis data is not created or claimed successful here. Scheduling, production
+inference wiring, server readiness/progress, UI, M5 similarity, and M12 transport
+remain outside this slice. Independent completion is preserved; no dependency
+graph is inferred. See D-142 for the storage/invalidation divergence.
+
 ## Decisions required before implementation
 
 1. Approve the stage graph, claim ordering and whether speculative embedding is permitted; define terminal closure/reopen, retry, restart, disabled CLAP, cancellation and missing-file semantics. Do not conflate independent completion with unrestricted eligibility.

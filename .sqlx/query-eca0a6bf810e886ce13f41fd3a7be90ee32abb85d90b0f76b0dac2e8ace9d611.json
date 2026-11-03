@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tracks SET ml_generation = ml_generation + 1 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eca0a6bf810e886ce13f41fd3a7be90ee32abb85d90b0f76b0dac2e8ace9d611"
+}

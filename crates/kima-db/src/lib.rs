@@ -15,6 +15,7 @@ pub mod http_cache;
 pub mod identity;
 pub mod library;
 pub mod lyrics;
+pub mod ml;
 pub mod organizer;
 pub mod playback;
 pub mod playlists;

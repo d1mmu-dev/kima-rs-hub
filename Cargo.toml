@@ -17,6 +17,7 @@ kima-jobs = { path = "crates/kima-jobs" }
 kima-library = { path = "crates/kima-library" }
 kima-net = { path = "crates/kima-net" }
 kima-subsonic = { path = "crates/kima-subsonic" }
+kima-ml = { path = "crates/kima-ml" }
 kima-test-support = { path = "crates/kima-test-support" }
 
 anyhow = "1"

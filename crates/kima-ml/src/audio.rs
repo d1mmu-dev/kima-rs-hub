@@ -63,6 +63,9 @@ pub enum AudioError {
 
     #[error("audio exceeds allocation bounds")]
     BufferOverflow,
+
+    #[error("expected {expected} frames but decoded {actual}")]
+    FrameCountMismatch { expected: usize, actual: usize },
 }
 
 /// Decodes an audio file from `path`, windowing to the last 90 seconds (or full track if <= 90s),
@@ -97,6 +100,28 @@ fn decode_and_resample_media_source(
     source: Box<dyn MediaSource>,
     hint: &Hint,
 ) -> Result<DecodedAudio, AudioError> {
+    decode_pass(source, hint, None).map(|(audio, _, _)| audio)
+}
+
+/// Collect source-rate CLAP windows alongside the tail in one decoding pass.
+/// The count must describe the complete decoded stream. On mismatch no windows
+/// are returned; source stability and any retry remain the caller's responsibility.
+pub fn decode_with_clap_windows(
+    source: Box<dyn MediaSource>,
+    hint: &Hint,
+    expected: usize,
+) -> Result<(DecodedAudio, Vec<Vec<f32>>, u32), AudioError> {
+    let (audio, windows, rate) = decode_pass(source, hint, Some(expected))?;
+    Ok((audio, windows.unwrap_or_default(), rate))
+}
+
+type DecodePassOutput = (DecodedAudio, Option<Vec<Vec<f32>>>, u32);
+
+fn decode_pass(
+    source: Box<dyn MediaSource>,
+    hint: &Hint,
+    expected: Option<usize>,
+) -> Result<DecodePassOutput, AudioError> {
     let mss = MediaSourceStream::new(source, Default::default());
 
     let mut format = symphonia::default::get_probe()
@@ -144,6 +169,11 @@ fn decode_and_resample_media_source(
 
     let window_capacity = (MAX_WINDOW_SECONDS * sample_rate as f64).round() as usize;
     let mut ring_buffer = VecDeque::with_capacity(window_capacity);
+    let mut collector = expected
+        .map(|count| crate::clap::WindowCollector::for_clap(count, sample_rate))
+        .transpose()
+        .map_err(|e| AudioError::CorruptAudio(e.to_string()))?;
+    let mut actual = 0usize;
 
     let track_id = track.id;
     let mut interleaved: Vec<f32> = Vec::new();
@@ -225,6 +255,15 @@ fn decode_and_resample_media_source(
                     }
                     mono *= inv_ch;
 
+                    actual = actual.checked_add(1).ok_or(AudioError::BufferOverflow)?;
+                    if let Some(collector) = &mut collector {
+                        if actual <= expected.unwrap_or(0) {
+                            collector
+                                .push(&[mono])
+                                .map_err(|e| AudioError::CorruptAudio(e.to_string()))?;
+                        }
+                    }
+
                     if ring_buffer.len() == window_capacity {
                         ring_buffer.pop_front();
                     }
@@ -244,17 +283,31 @@ fn decode_and_resample_media_source(
         return Err(AudioError::EmptyAudio);
     }
 
+    if let Some(expected) = expected {
+        if expected != actual {
+            return Err(AudioError::FrameCountMismatch { expected, actual });
+        }
+    }
+    let windows = collector
+        .map(|c| c.finish())
+        .transpose()
+        .map_err(|e| AudioError::CorruptAudio(e.to_string()))?;
+
     let mono_raw: Vec<f32> = ring_buffer.into();
     let duration_seconds = mono_raw.len() as f64 / sample_rate as f64;
 
     let mono_16k = resample_mono(&mono_raw, sample_rate, 16_000)?;
     let mono_48k = resample_mono(&mono_raw, sample_rate, 48_000)?;
 
-    Ok(DecodedAudio {
-        mono_16k,
-        mono_48k,
-        duration_seconds,
-    })
+    Ok((
+        DecodedAudio {
+            mono_16k,
+            mono_48k,
+            duration_seconds,
+        },
+        windows,
+        sample_rate,
+    ))
 }
 
 /// Resamples a single-channel (mono) slice of `f32` audio from `in_rate` to `out_rate`.
@@ -337,6 +390,50 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_clap_windows_cover_full_track_and_reject_wrong_count() {
+        let rate = 8_000u32;
+        let frames = rate * 120;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 2).to_le_bytes());
+        for i in 0..frames {
+            wav.extend_from_slice(&((i / rate) as i16 * 100).to_le_bytes());
+        }
+        let mut hint = Hint::new();
+        hint.with_extension("wav");
+        let decode = |expected| {
+            decode_with_clap_windows(Box::new(Cursor::new(wav.clone())), &hint, expected)
+        };
+        let (tail, windows, source_rate) = decode(frames as usize).unwrap();
+        assert_eq!(source_rate, rate);
+        assert_eq!(tail.duration_seconds, 90.0);
+        let ranges = crate::clap::source_window_ranges(frames as usize, rate).unwrap();
+        assert_eq!(windows.len(), ranges.len());
+        for (window, range) in windows.iter().zip(ranges) {
+            assert_eq!(window.len(), range.len());
+            assert_eq!(
+                window[0],
+                (range.start as u32 / rate) as f32 * 100.0 / 32768.0
+            );
+        }
+        for expected in [frames as usize - 1, frames as usize + 1] {
+            assert!(
+                matches!(decode(expected), Err(AudioError::FrameCountMismatch { actual, .. }) if actual == frames as usize)
+            );
+        }
+    }
 
     #[test]
     fn demux_reset_after_valid_packet_fails_closed() {

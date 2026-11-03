@@ -67,7 +67,7 @@ jobs:
       - run: npm run test:unit
       - run: npm run build
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     services:
       postgres:

@@ -123,9 +123,9 @@ itself only fills the database; the separate autotagger can write tags when expl
 
 ## Local development
 
-Requirements: Rust 1.85+, Node.js, Docker (for the dev database), and libsoxr development files (Debian/Ubuntu: `libsoxr-dev`; Arch: `soxr`). The resulting binaries dynamically link libsoxr and need its shared library at runtime (Debian: `libsoxr0`).
+Requirements: Rust 1.85+, Node.js, and Docker (for the dev database). Building or testing `kima-ml` and linking consumers that use its libsoxr-backed CLAP preprocessing requires libsoxr development files (Debian/Ubuntu: `libsoxr-dev`; Arch: `soxr`); dynamically linked consumers also need the shared library at runtime (Debian: `libsoxr0`). The current server does not depend on `kima-ml`; integrating it is future work, so the server is not currently linked to libsoxr through `kima-ml`.
 
-libsoxr is LGPL-2.1-or-later; see [upstream source and license](https://sourceforge.net/projects/soxr/) and the license notices shipped by the OS package. Distributors must provide the applicable notices and corresponding library source and preserve users' ability to replace the shared library, among other LGPL obligations. The Docker image installs Debian's unmodified shared library package. Check the exact distribution and its obligations separately; this is not legal advice.
+libsoxr is LGPL-2.1-or-later; see [upstream source and license](https://sourceforge.net/projects/soxr/) and the license notices shipped by the OS package. Distributors must provide the applicable notices and corresponding library source and preserve users' ability to replace the shared library, among other LGPL obligations. The Dockerfile prepares for this dependency by installing Debian's shared library package; the resulting image has not been verified here. Check the exact distribution and its obligations separately; this is not legal advice.
 
 1. Start the dev Postgres (listens on `localhost:5456`):
    ```bash

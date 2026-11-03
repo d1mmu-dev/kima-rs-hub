@@ -110,7 +110,7 @@ function ReviewAlbum({ id }: { id: string }) {
         s = d?.selected;
     const selectedCandidate = d?.candidates.find((c) => c.id === s?.candidateId);
     const unsafeReview =
-        review.isFetching || review.isError || !s || !selectedCandidate || selectedCandidate.stale;
+        review.isFetching || review.isError || !s || !selectedCandidate;
     const busy =
         apply.isPending ||
         skip.isPending ||
@@ -146,7 +146,7 @@ function ReviewAlbum({ id }: { id: string }) {
                             {!caps.data?.identifyEnabled && (
                                 <p>
                                     Outbound lookups are turned off. Stored
-                                    fresh candidates can still be applied.
+                                    candidates can still be applied.
                                 </p>
                             )}
                             <label>
@@ -225,7 +225,7 @@ function ReviewAlbum({ id }: { id: string }) {
                             </Button>
                         )}
                         {selectedCandidate?.stale && (
-                            <p>Refresh this stale candidate before applying it.</p>
+                            <p>This candidate snapshot is older than 30 days. You can apply it or refresh candidates.</p>
                         )}
                         {d.userMbidKept && (
                             <p>Your user-set MusicBrainz IDs will be kept.</p>

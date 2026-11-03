@@ -3153,7 +3153,8 @@ async fn db_matched_file_renamed_or_moved_keeps_override(pool: PgPool) {
 
 /// Two byte-identical tracks (`Dup/x1.flac`, `Dup/x2.flac`) with the given overrides, if any
 /// (by id order: `first` goes to the smaller id, which the re-point rule takes first), then both
-/// files deleted and marked missing in one run. Answers (smaller id, larger id) and the content.
+/// files deleted and marked missing in one run. Returns (smaller id, larger id, content).
+/// The smaller id is assigned x2's original path to exercise filename-independent selection.
 async fn duplicate_missing(
     pool: &PgPool,
     root: &Path,
@@ -3175,6 +3176,21 @@ async fn duplicate_missing(
         track_id(pool, "Dup/x2.flac").await,
     ];
     ids.sort();
+    // Exercise the mapping that contradicts filename order, regardless of traversal or UUIDs.
+    if track_id(pool, "Dup/x1.flac").await == ids[0] {
+        for (from, to) in [
+            ("Dup/x1.flac", "Dup/swap.flac"),
+            ("Dup/x2.flac", "Dup/x1.flac"),
+            ("Dup/swap.flac", "Dup/x2.flac"),
+        ] {
+            sqlx::query("UPDATE tracks SET path = $1 WHERE path = $2")
+                .bind(to)
+                .bind(from)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
     if let Some(o) = first {
         put_override(pool, ids[0], o).await;
     }
@@ -3297,8 +3313,8 @@ async fn unreadable_override_claims_nothing(pool: PgPool) {
     // Both files would become x (the first to be taken over), whose override is unreadable:
     // neither is stored, and y's override never lands on x.
     assert_eq!(r.failed.len(), 2, "{r:?}");
-    assert_eq!(path_of(&pool, x).await.as_deref(), Some("Dup/x1.flac"));
-    assert_eq!(path_of(&pool, y).await.as_deref(), Some("Dup/x2.flac"));
+    assert_eq!(path_of(&pool, x).await.as_deref(), Some("Dup/x2.flac"));
+    assert_eq!(path_of(&pool, y).await.as_deref(), Some("Dup/x1.flac"));
     assert_eq!(missing_count(&pool).await, 2);
 }
 
@@ -3327,7 +3343,7 @@ async fn locked_track_is_waited_for_not_skipped(pool: PgPool) {
     assert!(r.failed.is_empty(), "{r:?}");
     assert_eq!(track_id(&pool, f1).await, x);
     assert_eq!(album_title_at(&pool, f1).await, "AX");
-    assert_eq!(path_of(&pool, y).await.as_deref(), Some("Dup/x2.flac"));
+    assert_eq!(path_of(&pool, y).await.as_deref(), Some("Dup/x1.flac"));
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -3360,7 +3376,7 @@ async fn failed_store_leaves_next_file_on_its_own_track(pool: PgPool) {
     assert_eq!(r.failed[0].0, f1);
     assert_eq!(track_id(&pool, f2).await, y);
     assert_eq!(album_title_at(&pool, f2).await, "AY");
-    assert_eq!(path_of(&pool, x).await.as_deref(), Some("Dup/x1.flac"));
+    assert_eq!(path_of(&pool, x).await.as_deref(), Some("Dup/x2.flac"));
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -3396,7 +3412,7 @@ async fn exact_repoint_miss_fails_the_file(pool: PgPool) {
     assert_eq!(r.failed[0].0, f1);
     // Not stored at all, and never under y with x's identity.
     assert_eq!(path_of(&pool, x).await, None);
-    assert_eq!(path_of(&pool, y).await.as_deref(), Some("Dup/x2.flac"));
+    assert_eq!(path_of(&pool, y).await.as_deref(), Some("Dup/x1.flac"));
     let at_f1: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks WHERE path = $1")
         .bind(f1)
         .fetch_one(&pool)
@@ -3443,7 +3459,7 @@ async fn failed_store_leaves_next_file_off_the_overridden_track(pool: PgPool) {
     // f2 was given y: it never takes x from its plain tags (dropping x's matched identity).
     assert_eq!(track_id(&pool, f2).await, y);
     assert_eq!(album_title_at(&pool, f2).await, "Dup");
-    assert_eq!(path_of(&pool, x).await.as_deref(), Some("Dup/x1.flac"));
+    assert_eq!(path_of(&pool, x).await.as_deref(), Some("Dup/x2.flac"));
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 rubato.workspace = true
+rustfft = "6.4.1"
 serde.workspace = true
 sha2.workspace = true
 symphonia.workspace = true

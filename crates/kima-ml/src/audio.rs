@@ -15,11 +15,6 @@ use symphonia::core::meta::MetadataOptions;
 /// Maximum duration of the decoded audio window (90 seconds).
 pub const MAX_WINDOW_SECONDS: f64 = 90.0;
 
-/// Absolute work bound, independent of sample rate: 2,764,800,000 decoded frames.
-/// This permits about 17.4 hours at 44.1 kHz and 4 hours at 192 kHz;
-/// longer inputs fail instead of returning a truncated window.
-pub const MAX_TOTAL_DECODE_FRAMES: usize = 192_000 * 3600 * 4;
-
 /// Minimum supported sample rate (8 kHz).
 pub const MIN_SAMPLE_RATE: u32 = 8_000;
 
@@ -152,7 +147,6 @@ fn decode_and_resample_media_source(
 
     let track_id = track.id;
     let mut interleaved: Vec<f32> = Vec::new();
-    let mut total_decoded_frames: usize = 0;
 
     loop {
         let packet_opt = match format.next_packet() {
@@ -177,7 +171,25 @@ fn decode_and_resample_media_source(
             continue;
         }
 
-        match decoder.decode(&packet) {
+        #[cfg(test)]
+        let decoded = if INJECT_DECODE_ERROR.with(|count| {
+            let n = count.get();
+            if n > 0 {
+                count.set(n - 1);
+            }
+            n == 1
+        }) {
+            if INJECT_RESET.with(|flag| flag.get()) {
+                Err(SymphoniaError::ResetRequired)
+            } else {
+                Err(SymphoniaError::DecodeError("injected packet failure"))
+            }
+        } else {
+            decoder.decode(&packet)
+        };
+        #[cfg(not(test))]
+        let decoded = decoder.decode(&packet);
+        match decoded {
             Ok(audio_buf) => {
                 let num_channels = audio_buf.spec().channels().count();
                 if num_channels == 0 || num_channels > MAX_CHANNELS as usize {
@@ -188,11 +200,6 @@ fn decode_and_resample_media_source(
                 audio_buf.copy_to_slice_interleaved(&mut interleaved);
 
                 let frames = interleaved.len() / num_channels;
-                total_decoded_frames += frames;
-
-                if total_decoded_frames > MAX_TOTAL_DECODE_FRAMES {
-                    return Err(AudioError::BufferOverflow);
-                }
 
                 let inv_ch = 1.0 / (num_channels as f32);
                 for f in 0..frames {
@@ -210,12 +217,7 @@ fn decode_and_resample_media_source(
                 }
             }
             Err(SymphoniaError::DecodeError(msg)) => {
-                tracing::warn!("audio decode error in packet: {msg}");
-                continue;
-            }
-            Err(SymphoniaError::ResetRequired) => {
-                decoder.reset();
-                continue;
+                return Err(AudioError::CorruptAudio(msg.to_string()));
             }
             Err(e) => {
                 return Err(AudioError::CorruptAudio(e.to_string()));
@@ -311,8 +313,53 @@ pub fn resample_mono(samples: &[f32], in_rate: u32, out_rate: u32) -> Result<Vec
 }
 
 #[cfg(test)]
+thread_local! {
+    static INJECT_DECODE_ERROR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static INJECT_RESET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_has_no_total_duration_cap() {
+        // Source-level guard: exercising the old >2.7 billion-frame boundary
+        // by decoding real audio would be prohibitively slow and resource-heavy.
+        let source = include_str!("audio.rs");
+        let production = source.split("#[cfg(test)]\nthread_local!").next().unwrap();
+        assert!(!production.contains(concat!("MAX_TOTAL", "_DECODE_FRAMES")));
+    }
+
+    #[test]
+    fn decoder_error_after_valid_packet_fails_closed() {
+        let frames = 100_000u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&16_000u32.to_le_bytes());
+        wav.extend_from_slice(&32_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 2).to_le_bytes());
+        wav.resize(44 + frames as usize * 2, 1);
+        for reset in [false, true] {
+            INJECT_RESET.with(|flag| flag.set(reset));
+            INJECT_DECODE_ERROR.with(|count| count.set(2));
+            let result = decode_and_resample_bytes(&wav, Some("wav"));
+            INJECT_DECODE_ERROR.with(|count| count.set(0));
+            INJECT_RESET.with(|flag| flag.set(false));
+            assert!(
+                matches!(result, Err(AudioError::CorruptAudio(_))),
+                "decoder error must reject the entire input (reset={reset})"
+            );
+        }
+    }
 
     #[test]
     fn read_failure_after_audio_packets_is_not_eof() {

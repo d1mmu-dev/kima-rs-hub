@@ -7,6 +7,7 @@ pub mod musicnn;
 pub mod onnx;
 #[cfg(feature = "pg-publish")]
 pub mod publish;
+pub mod text_tokenizer;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -286,14 +287,7 @@ where
             }
         }
 
-        if errors.is_empty() && cap == Capability::ClapTextEmbedding {
-            capabilities.insert(
-                cap,
-                CapabilityStatus::Disabled {
-                    reason: "CLAP text tokenizer is not implemented".to_string(),
-                },
-            );
-        } else if errors.is_empty() {
+        if errors.is_empty() {
             capabilities.insert(cap, CapabilityStatus::Available);
         } else {
             capabilities.insert(cap, CapabilityStatus::Unavailable { errors });

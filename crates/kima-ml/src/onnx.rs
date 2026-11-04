@@ -274,7 +274,10 @@ impl OnnxModel {
         );
         map.insert(
             Capability::ClapTextEmbedding,
-            vec![Self::ClapText.descriptor()],
+            vec![
+                crate::text_tokenizer::descriptor(),
+                Self::ClapText.descriptor(),
+            ],
         );
         map.insert(Capability::Dsp, vec![]);
 

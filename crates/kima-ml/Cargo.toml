@@ -13,6 +13,7 @@ serde.workspace = true
 sha2.workspace = true
 symphonia.workspace = true
 thiserror.workspace = true
+tokenizers.workspace = true
 tracing.workspace = true
 kima-db = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }

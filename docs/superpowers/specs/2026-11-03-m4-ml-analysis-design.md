@@ -261,6 +261,421 @@ the next DB-authorized step, not a claim of integration success. No model
 asset was read, converted, or run; no production scheduler/server wiring is
 claimed; no git commit was made.
 
+## Live-Postgres publication verification (DB-authorized follow-up)
+
+The owner explicitly authorized SQLx test-database creation/drop exclusively
+on isolated `127.0.0.1:55474`; this supersedes the preceding slice's live-DB
+authorization blocker, not its remaining production-integration gates.
+`crates/kima-ml/tests/pg_publish.rs` adds four `pg-publish`-gated tests using
+`kima_db::MIGRATOR`, real `embedding_claim`/`embedding` APIs and synthetic
+validated 512-dimensional vectors:
+
+- Async publication persists the exact vector, generation, model ID/hash and
+  pipeline version; stage success, lease clearing, finish timestamp and
+  source/evidence are read back. A mismatched pipeline cannot read the result.
+- The real blocking adapter publishes successfully from `spawn_blocking`.
+- A superseded stage token returns `PublishError::Rejected`, writes no vector,
+  preserves the replacement claim, and permits that replacement to publish.
+- An expired lease returns `PublishError::Rejected` through the blocking bridge,
+  with no vector or false stage success.
+
+Because the adapter already exists, RED here is explicitly mutation-based
+regression verification, not a claim of implementing a missing feature:
+a temporary false-ack/no-write adapter failed all four assertions; separately,
+calling real storage but swallowing its rejection failed exactly the two
+rejection tests while both successful-publication tests passed. Restoring the
+original adapter gave 4/4 GREEN. The initial fixture setup attempt omitted
+explicit UUIDs and failed before the assertions; this was corrected and is
+not counted as behavioral RED. No production Rust change remains.
+
+Database scope proof: before execution both `DATABASE_URL` and `PGDATABASE`
+were explicitly set to `kima_m4_slice` on `127.0.0.1:55474` and checked without
+printing credentials. Live TCP readback was
+`kima_m4_slice|172.17.0.2|5432`; Docker container `kima-m4-db-slice`
+(`a85c2dd80aa3`) mapped only `127.0.0.1:55474 -> 5432`. All 19 initial database
+names were inventoried read-only. SQLx 0.8.6 derives deterministic SHA-512
+names and drops its target before setup: expected names were computed and
+checked for collisions with unexplained existing databases before executing;
+only absent/run-owned names were permitted. SQLx metadata uses the isolated
+base database; fixture/schema/publication mutations occur in per-test DBs.
+Final inventory exactly matched the initial 19; no run-owned DB remained.
+No dev `5456` connection/mutation, replacement container, volume or broad
+cleanup was used. A process/CWD scan found no competing worktree writer.
+
+Verification (all Cargo commands `--offline --locked`):
+
+- `cargo test -p kima-ml --features pg-publish --no-fail-fast`: one complete
+  successful run, **123 unit/integration tests plus 1 doctest**; listing counts
+  reconciled with execution. This includes all four new DB tests and the
+  formerly failing `onnx::tests::panic_wakes_an_observed_condvar_waiter`.
+- `cargo test -p kima-db --test ml`: **12 passed**, including lease-lock races,
+  file/generation fences, atomic publication and migration upgrade.
+- `cargo clippy -p kima-ml -p kima-db --features kima-ml/pg-publish --all-targets
+  -- -D warnings`, `cargo fmt --all --check`, and the default/no-feature
+  `cargo check -p kima-ml --no-default-features`: passed.
+- Every runner invocation verifies `ORT_DYLIB_PATH` from a no-follow,
+  nonblocking regular-file descriptor against the repository-pinned SHA-256
+  `7520bc1b4f649ee8fa956442a66ded303e8fd3b465b0159b7e893bdc87df4e38`.
+  Runtime: `/home/dimmu/.hermes/cache/scratch/m4-ort-trusted/libonnxruntime.so.1.22.0`.
+  No model asset was used.
+
+**Unresolved verification blocker:** the first complete ML attempt stopped at
+three `clap_prepare` errors (`synthetic_waveforms_match_pinned_librosa_at_multiple_rates`,
+`short_upsample_matches_librosa_soxr_hq`,
+`concurrent_resampling_matches_independent_serial_results`), each reporting
+`CorruptAudio("non-finite or excessive audio sample")`. A subsequent full run
+passed, but repeating the unchanged feature-enabled `clap_prepare` binary ten
+times produced nine 9/9 passes and one **SIGSEGV**. Twenty default/no-feature
+repetitions passed; this does not establish the cause or dismiss the crash.
+All production ML/DB sources are identical to `1dd7cf3`; the native/resampling
+instability needs separate diagnosis and independent review before claiming a
+reliable ML gate. It was not hidden with ignored tests or a runtime waiver.
+
+Local evidence is retained under
+`/home/dimmu/.hermes/cache/scratch/m4-publish-evidence/` (RED/GREEN logs,
+initial/per-command inventories, run-owned database allowlist, full-suite
+listing and stress logs); the credential-private scope-checking runner is
+`/home/dimmu/.hermes/cache/scratch/m4-publish-db-run.py`.
+These tests establish the adapter-to-Postgres boundary only, not a combined
+real-model/attempt-to-server pipeline, scheduler registration, or model parity.
+No commit/push/merge was performed; independent review remains required.
+
+### Native-resampling investigation (blocker remains open)
+
+At unchanged production HEAD `1dd7cf39dbf6bdb4160aee2667ea996205ae8931`,
+process/CWD discovery found no competing worktree writer. The reviewed
+`pg_publish.rs` and publication documentation were preserved. No database
+operation, real-model asset download/use, system-library replacement, commit or push was
+performed.
+
+A new `crates/kima-ml/tests/clap_cold_start.rs` starts up to eight fresh child
+processes, each with a ten-second deadline and 32 workers synchronized before
+**any** resampler call. Every output sample is checked against the existing
+independent librosa fixture with the unchanged 3e-6 tolerance. This avoids the
+old concurrency test's serial-reference warm-up. Uninstrumented runs reproduce
+incorrect **finite** output, e.g. first sample `-0.0048213415` or `1.1186757`
+instead of `0.89751744`. Existing finite/magnitude validation cannot detect this
+kind of corruption. Both default and `pg-publish` builds fail this regression;
+the feature distinction was not causal evidence.
+
+Concrete native defect: installed `libsoxr 0.1.3-5.1` reaches concurrent
+`omp_init_lock` calls for the **same lock addresses** during independent
+`soxr_oneshot` calls. A diagnostic interposer records this even without its
+optional delay. The public C header matches the Rust quality structure and
+function declarations; each call owns separate slices, counters and quality
+state. The corresponding libsoxr 0.1.3 `src/fft4g_cache.h` initialization checks
+`FFT_LEN` without synchronization, initializes five shared OpenMP locks, then
+publishes `FFT_LEN = 0`. Multiple first callers can initialize/reset the same
+locks while others start using the cache. This is a demonstrated native
+first-use race, not an ORT attribution: both preserved feature/default
+`clap_prepare` executables link libsoxr/libgomp and do not directly link ORT.
+
+Bounded debugger evidence: 12 original-binary and 40 cold-regression GDB runs
+did not reproduce SIGSEGV. A separate supervised run with a diagnostic 1 ms
+preemption at `omp_init_lock` captured all-thread stacks and a core at an
+**intentional SIGTRAP on duplicate initialization**, through libsoxr to
+`clap::soxr_resample`; it is not a stack of the earlier SIGSEGV. A standalone
+C-header-based 32-thread reproducer also timed out once in 100 uninstrumented
+system-library processes. These establish unsafe native initialization and
+reproducible wrong output/hangs, but the exact earlier SIGSEGV instruction is
+still unknown.
+
+A scratch-only native experiment protects initialization with an OpenMP
+critical section and a separate initialized flag (not a whole-resampling
+mutex). With matched `WITH_OPENMP=ON, WITH_PFFFT=OFF` source builds and the
+diagnostic preemption, vanilla has duplicate initialization in 8/8 runs and
+seven three-second timeouts; the patched experiment has neither in 8/8. The
+patched FFT4G build also passes 20/20 fresh-process regression invocations for
+each Rust feature mode, without the diagnostic interposer. This is only a
+private candidate-native-fix check, not a deployed or independently reviewed fix.
+The PFFFT-enabled vanilla build also passes these probes, so build configuration
+matters and a passing alternate library alone does not prove a fix. No native
+patch was installed or wired into repository packaging. A supported native
+source/dependency fix, packaging verification and independent review are still
+required; no application serialization, warm-up waiver, ignored test or relaxed
+numeric check was introduced.
+
+Verification on the installed system library, all Cargo commands offline/locked:
+
+- `cargo fmt --all --check` and `cargo clippy -p kima-ml --features pg-publish
+  --all-targets -- -D warnings`: pass.
+- All ML unit tests, non-DB integration targets and doctests executed separately
+  for default and feature builds. Default: 117 passed including the doctest,
+  one failed (new cold-start regression). Feature: 121 passed including the
+  doctest in that sweep. `pg_publish` is deliberately excluded: no DB operations
+  were needed or performed, so this is not a claim of full DB-feature coverage.
+- Existing `clap_prepare`: 20/20 default and 20/20 feature repetitions pass.
+  New cold-start regression: 7/10 default and 8/10 feature repetitions pass;
+  remaining repetitions fail on waveform mismatch. Passing old stress gates
+  therefore do not clear the blocker.
+- ORT path `/home/dimmu/.hermes/cache/scratch/m4-ort-trusted/libonnxruntime.so.1.22.0`
+  was opened no-follow/nonblocking, required to be regular and bounded, and
+  SHA-256 verified as
+  `7520bc1b4f649ee8fa956442a66ded303e8fd3b465b0159b7e893bdc87df4e38`
+  before the verification runner. Only synthetic test ONNX was exercised.
+
+Private evidence: `/home/dimmu/.hermes/cache/scratch/m4-native-resampling/`:
+`verification-results.json`, `test-counts.json`, failed `*-cold-stress-*.log`,
+`cold-000.log`, preserved executables/linkage/hash manifest, `trace-000.log`,
+`duplicate-init-gdb.log`, `duplicate-init.core`, standalone `native-cold.c`,
+`native-init-experiment.patch`, and matched native build/probe logs. The core
+and native sources are diagnostic private artifacts, not distributable runtime
+or model assets. Production Rust sources remain unchanged; Important remains
+open pending a deployable native fix and review.
+
+### Pinned private dynamic libsoxr integration (review pending)
+
+The owner authorized a project-local CI/Docker dependency replacement, not a
+host system-library install. Initial process and CWD discovery found no competing
+writer; HEAD remains `1dd7cf39dbf6bdb4160aee2667ea996205ae8931`. Existing
+`pg_publish.rs` and its documentation were preserved. No commit/push/merge,
+private model access/download/packaging, development DB mutation or broad
+cleanup was performed.
+
+The read-only review in
+`~/.hermes/cache/delegation/live/deleg_37403aec/task-0.log` supports the
+initialization-only fix for the inspected FFT4G/OpenMP lifetime, not a universal
+configuration claim. `native/soxr/fft-cache-init.patch` now carries that patch;
+`scripts/build-soxr.sh` downloads pinned libsoxr 0.1.3, checks SHA-256, patches
+without fuzz, builds a shared Release library with GCC/OpenMP ON, PFFFT/AVFFT OFF
+and NDEBUG, requires a libgomp dependency, and installs only into a new explicit
+private prefix. No application mutex, warm-up waiver or tolerance change.
+The cold regression additionally asserts exactly 480000 output samples before
+checking every sample. CI selects the private prefix via `GITHUB_ENV`, exercises
+cold/waveform targets in both feature modes, and checks actual `ldd` resolution.
+Docker builds on bookworm for its bookworm runtime, deliberately selecting
+`/opt/kima/soxr/lib`; runtime libgomp is explicit. The LGPL-2.1-or-later notice,
+full license, authors, original source archive, patch, recipe and CMake options
+travel with the modified library, with replacement/rebuild instructions in
+`native/soxr/README.md`. These native-library rights do not license model assets.
+
+Provenance was independently checked against Debian's HTTPS-published
+`libsoxr_0.1.3-4.dsc` (saved under `native/soxr/`), not inferred from the scratch
+archive. A new HTTPS download and the saved archive both match its published
+SHA-256 `b111c15fdc8c029989330ff559184198c161100a59312f5dc19ddeb9b5a15889`
+(94384 bytes). This authenticates the Debian HTTPS publisher/checksum boundary;
+no independent OpenPGP-signature or upstream release-signing claim is made.
+
+Scope caveats remain binding: OpenMP-off builds lack the critical section;
+assert-enabled builds still read FFT_LEN in a pre-reader-lock assertion. Cache
+clear requires complete caller quiescence at process exit, and once-only state
+is not reset: no reuse after clear, concurrent unload, or live unload/reload is
+supported. Prior wrong-waveform/hang evidence remains valid; the exact earlier
+SIGSEGV instruction is still unknown. General native safety, real-model parity,
+production ML/server wiring, or M4 completion is not established.
+
+Actual verification and retained failures (private evidence directory
+`/home/dimmu/.hermes/cache/scratch/m4-soxr-packaging/`):
+
+- One uninstrumented system-library cold run passed; a single deliberately
+  preempted run with duplicate-lock trap failed with **intentional SIGTRAP**
+  (`red-delayed-rust.log`), not a new SIGSEGV. The same diagnostic schedule with
+  the recipe-built private library passed, without duplicate reports
+  (`green-delayed-rust.log`). Historical uninstrumented failures are retained
+  under `m4-native-resampling/`; no retry-until-green reliability claim.
+- Private host recipe: first attempt failed because CMake 4 removed old policy
+  compatibility. Adding explicit policy minimum 3.5 fixed configuration. Native
+  GCC warnings remain upstream warnings; they were not hidden or fixed in this
+  narrow patch. Both Rust feature modes passed cold + nine waveform tests.
+  Full default ML: **118 passed including one doctest**; full `pg-publish` ML:
+  **125 passed including one doctest and four actual migrated-Postgres adapter
+  tests**, using the final-image library extracted into a private prefix for
+  the latter. ORT uses only generated synthetic ONNX graphs.
+- `cargo fmt --all --check`, default full-workspace/all-target Clippy with
+  `-D warnings`, feature ML/all-target Clippy and `git diff --check`: passed.
+- Actual full Docker build initially failed because slim GCC lacked libc6-dev;
+  the Dockerfile now explicitly includes it. Corrected full build passed,
+  including the unchanged frontend build and release server. Final image
+  `kima-m4-soxr:review` is
+  `sha256:ea4c063537fbac5bc79b23580bd0759904d5c24fb4f60ba0c2002e91bfb261b0`.
+  Packaged libsoxr SHA-256 is
+  `6444cf3a36d808a729ab097e7a4c92233fc8c3e3b0ff66098659c0c68f2f7e6d`.
+- Matching backend-stage test compilation used a fresh target and offline/locked
+  Cargo. First attempt lacked cached `extended 0.1.0`; a read-only host Cargo
+  registry mount supplied already cached Rust sources, without network/model
+  access. Both feature probe builds then passed. Read-only-mounted probes in
+  the **unmodified actual final image** passed both cold tests (eight fresh
+  processes each), both nine-test waveform suites, seven ORT session/inference
+  tests and two runtime-policy/error tests (unset, relative, absent and corrupt
+  runtime paths). Runs were non-root, read-only, network-disabled, capability-
+  dropped and CPU/memory/PID-bounded, with tmpfs /tmp and /data, no dev volumes.
+  `ldd` resolves libsoxr to `/opt/kima/soxr/lib` and libgomp to the runtime package.
+  The server does not yet call the ML crate; mounted tests prove image native
+  loading/synthetic inference, not production server inference.
+- Corrected historical workspace audit: discovery lists **1930 tests across
+  141 package-qualified target/doc sections**. The timed-out log currently has
+  **759 observed passing tests and 49 completed sections**, no observed failures.
+  Its SHA-256 is `50de25fbd56433c01fe1077900c80706b5a284566fc4843f4c106a47872f4955`,
+  not the hash in `workspace-checks.json`. The old 758/42 and 1925/125 summaries
+  were stale and also collapsed identically named targets across packages.
+  Original logs/manifests remain preserved, but this hash-mismatched partial
+  invocation is **not reusable final-state verification evidence**.
+  `../m4-ci-continuation/historical-workspace-audit.json` provides the corrected
+  exact-name audit; its new bounded batch evidence supersedes the old
+  `coverage-summary.json`, now corrected and explicitly marked superseded;
+  its original stale bytes are preserved in the continuation evidence.
+  **Full local CI remains incomplete until the continuation's exact-name
+  reconciliation and frontend/E2E/locale/SQLx gates are checked.** Hosted CI is
+  not established by local tests. Independent review of the packaging slice
+  found no Critical/Important findings; the two Minor corrections and fresh
+  verification results require separate independent review.
+
+### Bounded local CI continuation (uncommitted minor corrections)
+
+Evidence root: `~/.hermes/cache/scratch/m4-ci-continuation/`.
+`gate-summary.json`, `reconciliation.json`, `exact-test-records.json`,
+`feature-ml-reconciliation.json` and per-invocation JSON/logs retain HEAD,
+commands, exit/time/log hashes, source-file hashes and DB inventories. No
+single full-workspace execution was retried; every package was bounded.
+
+- Linkage checker now rejects every `=> not found` and requires an absolute
+  resolved libgomp path. Seven shell cases pass, including real ELF positive,
+  wrong prefix, missing gomp and missing transitive dependency cases. The old
+  checker accepts the real missing-gomp case; its failing regression log is
+  retained. CI invokes the new shell suite.
+- Default workspace: **1913 passed, two ignored, 15 deliberately filtered**;
+  all 141 sections finished, but the exact 1930-test inventory is **incomplete**.
+  The 15 exact names are listed in `reconciliation.json`: 11
+  `kima-db/autotag_identity`, four `kima-ident/artist`. SQLx deterministically
+  names its databases and drops a pre-existing same-name DB before each test;
+  those remaining pre-existing databases were preserved by filtering their
+  colliding tests, not by weakening tests or changing production code.
+- Database incident: the first fresh API batch let SQLx automatically remove
+  **11 pre-existing SQLx databases** before this hazard was recognized. All
+  appear in the earlier run's `created-resources.json`; exact removed names
+  are recorded in `tests-kima-api.json` and `gate-summary.json`. No explicit
+  DROP was issued, but this is disclosed as a preservation-boundary issue,
+  not presented as cleanup. Subsequent batches removed no pre-existing DBs.
+- Full native ML: **118 default / 125 pg-publish passed**, including doctests
+  and four actual migrated-Postgres adapter tests. Exact feature inventory
+  reconciles with no missing/extra names. Both runs used the pinned extracted
+  private libsoxr and checksum-verified ORT; no host library was replaced.
+- Frontend: offline `npm ci`, typecheck, **482 unit tests in 44 files**, and
+  static build passed (checks rerun after npm ci). Local Node is v26.7.0, not
+  hosted CI's Node 24. Browser **12/12 passed** against the real export/server
+  and a fresh run-owned DB. The supervisor then failed due to an evidence-only
+  SQL readback typo (`track_overrides` rather than `track_tag_overrides`);
+  failed logs remain. Corrected standalone readback passed: one undone run,
+  14 present tracks, restored `Plain Album`, zero overrides. Server stopped.
+- SQLx metadata check (`prepare --check --workspace -- --all-targets`, online
+  schema on a fresh migrated run-owned DB, offline/locked Cargo) passed.
+  Formatting, default workspace/all-target Clippy, feature ML/all-target
+  Clippy with `-D warnings`, and whitespace check passed.
+- **Still missing:** the 15 preservation-filtered workspace tests; C-locale
+  `login_limit`/`auth`; independent review of these corrections/evidence; hosted
+  CI. A run-owned C/C database was created on 55476, but SQLx creates its test
+  children from en_US.utf8 `template1`, not the connection's base database;
+  claiming the locale gate from that base would be false. Neither template1
+  nor other clusters/dev resources were modified. A separately authorized C
+  cluster and resolution of pre-existing test DB ownership are needed.
+
+No commit, push, merge, private-model bundling or production ML wiring was
+performed. Three explicit run-owned databases (`kima_m4_ci_1dd7cf3_{e2e,meta,locale_c}`)
+and SQLx-created resources are retained in `resource-final.json` for approved
+cleanup; development port 5456 and its volumes were not used.
+
+Resources retained for owner-approved post-M4 cleanup: images
+`kima-m4-soxr:review`, `kima-m4-soxr-backend:review`; exited probe containers
+`kima-m4-soxr-{probe-build,probe-build-cache,probe-build-feature}`,
+`kima-m4-soxr-final-{clap-cold-start,clap-prepare,onnx-runtime,onnx-session}`,
+`kima-m4-soxr-feature-{clap-cold-start,clap-prepare}`; failed native build
+container `efecd6edd0eb` (`nice_keller`); isolated Postgres container
+`kima-m4-soxr-db`, bound only to `127.0.0.1:55476`, named volume
+`kima-m4-soxr-pgdata`, base database `kima_m4_soxr` and SQLx-created databases.
+The new server's fresh identity was checked before tests; existing 55474/55475
+servers were only inspected, and development resources were untouched.
+`resource-inventory.json`, `workspace-checks.json`, `ml-feature-full.json`,
+`docker-{final,feature}-probes.json` and full logs retain commands, exits,
+checksums and partial coverage; scratch targets/source exports are also kept.
+
+### Later isolated-gates run: the previously-missing gates, closed
+
+Evidence root: `~/.hermes/cache/scratch/m4-isolated-gates/` (`summary.json`,
+`combined-workspace-reconciliation.json`, `verification-notes.md`). This run
+closes the gates the bounded continuation above left **"Still missing"**; it
+does not supersede or erase that history (the 15-test filtering, the
+11-database preservation incident and the evidence-only supervisor failure
+above remain the authoritative record of what happened at HEAD `1dd7cf3` on
+first attempt).
+
+- **Exact-name workspace reconciliation is now complete**: 1930 listed,
+  1930 observed, 1928 passed, 2 ignored, 0 missing, 0 extra, all 141
+  sections finished. The 15 tests the earlier continuation had to filter to
+  avoid the SQLx preservation hazard (11 `kima-db/autotag_identity`, 4
+  `kima-ident/artist`) ran and passed, against entirely fresh, run-owned
+  Docker Postgres clusters (not the long-lived shared 55474/55476 servers),
+  so no further pre-existing database was ever at risk.
+- **C-locale gate**: 35 live-child-locale cases observed and passed against
+  a dedicated `C`-locale cluster (`kima-m4-gates-*-c`, port 32777), separate
+  from the earlier inconclusive attempt against `55476`'s base-database
+  locale (SQLx's own test children still come from `template1`, so that
+  base-locale attempt correctly stayed inconclusive and is preserved as-is
+  above).
+- **Frontend**: Node 24.22.0 (hosted CI's version, not the earlier run's
+  local Node 26.7.0), npm ci / typecheck / build all exit 0, **482 unit
+  tests across 44 files** passed.
+- **E2E**: **12/12 Playwright cases green** (0 skipped, 0 unexpected, 0
+  flaky) against a fresh run-owned database and the real static export +
+  server, superseding the earlier evidence-only SQL-readback typo failure
+  only as a *result*, not as a *correction to the record*: that failure's
+  log and the corrected standalone readback remain exactly as documented
+  above ("The supervisor then failed due to an evidence-only SQL readback
+  typo...").
+- Source-hash reconciliation (`historical-source-differences.json`) confirms
+  the only files that differ between the earlier continuation's stamped
+  source and this run's are the three already-disclosed non-Cargo-input
+  files (`docs/DIVERGENCES.md`, this spec, `scripts/test-soxr-linkage.sh`);
+  no Cargo test input changed, so the new pass counts are comparable to the
+  old ones.
+- All Docker resources (two Postgres clusters, one Node 24 container) are
+  run-owned, newly created, retained for owner-approved cleanup, and never
+  touched the pre-existing 55474/55475/55476 servers or development
+  resources (`preexisting_resources_removed: []`).
+- **Still outstanding**: independent review of this evidence and of the two
+  fixes below (CI `TMPDIR` for the soxr-linkage self-test step, and the
+  hardened `m4-ci-continuation/run.py` fail-closed guards); hosted CI on the
+  exact pushed commit. No commit, push or merge has occurred.
+
+### Fixes applied after independent review (uncommitted, same worktree)
+
+- **CI**: `.github/workflows/ci.yml`'s "Native soxr linkage checker
+  self-test" step now sets `TMPDIR: ${{ runner.temp }}` explicitly. Local
+  `TMPDIR` had been masking the step's unguarded dependency on a scratch
+  directory: `env -u TMPDIR sh scripts/test-soxr-linkage.sh` fails fast
+  (`set TMPDIR to a scratch directory`, exit 1) exactly as a hosted runner
+  would if the step forgot to supply `RUNNER_TEMP`-equivalent. With
+  `TMPDIR` set to a fresh scratch directory (the `RUNNER_TEMP`-equivalent),
+  all 7 shell linkage cases pass (positive and missing-dependency negative
+  cases both reproduced locally).
+- **Private CI-continuation runner** (`~/.hermes/cache/scratch/m4-ci-continuation/run.py`,
+  not part of the repository): the previous version (preserved as
+  `run.py.orig-1dd7cf3`) failed open on two points a reviewer flagged as
+  Important: a missing `preexisting-collisions.json` silently became `[]`
+  (no protection) instead of aborting, and any command shape other than a
+  recognized `cargo test ...` ran unprotected because the database
+  inventory happened unconditionally before any shape check. The fix
+  (a) classifies every `args` list against a closed allowlist grammar
+  (`classify_args`) instead of `args.index('-p')`-style scanning, rejecting
+  anything unrecognized before any DB access or subprocess exec; (b) aborts
+  with `SystemExit` if the collision inventory file is missing, before any
+  DB access; (c) requires a separate `cluster-ownership.json` manifest and
+  re-verifies it against a live (read-only) `docker inspect` before
+  touching the database, so a fresh, exclusively-owned cluster — not a
+  command-shape inference — is the actual safety boundary, with the
+  exact-name `--skip` filtering kept only as defense-in-depth for the one
+  long-lived shared cluster. `connect_cluster()`'s real docker/psql calls
+  moved out of module import into an explicit function so importing the
+  module for tests touches nothing live.
+  `~/.hermes/cache/scratch/m4-ci-continuation/test_run_guards.py` exercises
+  this with fake `inventory`/`Popen`/`docker_inspect` sentinels only (11
+  tests, all passing): a missing collision inventory aborts before
+  `inventory()`/`Popen` run; an unrecognized shape (e.g. a bare shell
+  command) aborts the same way even when both guard files are present and
+  valid; a live-container id or port mismatch against the manifest aborts
+  the same way; and a fully-satisfied happy path proves the exact-name
+  `--skip` filtering still fires using only fake sentinels. This script and
+  its tests were never run against the real 55474/55475/55476 servers.
+
 ## Decisions required before implementation
 
 1. Approve the stage graph, claim ordering and whether speculative embedding is permitted; define terminal closure/reopen, retry, restart, disabled CLAP, cancellation and missing-file semantics. Do not conflate independent completion with unrestricted eligibility.

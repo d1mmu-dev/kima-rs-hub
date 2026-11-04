@@ -161,6 +161,19 @@ impl MusiCnnHead {
             max_bytes: 10 * 1024 * 1024, // 10 MB per head model
         }
     }
+
+    /// The exact pinned ONNX output tensor name for this specific head, derived
+    /// from a one-time audit of the real exported graphs (see
+    /// `references/onnx-verification.md`): Deam and Emomusic export a bare
+    /// `Identity` regression output, every other head exports a `Softmax`
+    /// classification output. Re-introspect the actual graph before copying
+    /// this pattern to a newly added head.
+    pub const fn expected_output_name(&self) -> &'static str {
+        match self {
+            Self::Deam | Self::Emomusic => "model/Identity:0",
+            _ => "model/Softmax:0",
+        }
+    }
 }
 
 /// Supported ONNX runtime models for MusiCNN and CLAP.
@@ -605,9 +618,10 @@ impl MusicnnHeadSession {
                 ));
             }
             let output_name = session.outputs[0].name.clone();
-            if output_name != "model/Softmax:0" && output_name != "model/Identity:0" {
+            if output_name != head.expected_output_name() {
                 return Err(OnnxError::Inference(
-                    "invalid pinned MusiCNN head output name".into(),
+                    "MusiCNN head output name does not match the pinned name for this head"
+                        .into(),
                 ));
             }
             Ok(())
@@ -630,11 +644,7 @@ impl MusicnnHeadSession {
                 "non-finite MusiCNN head input value".into(),
             ));
         }
-        let output_name = if matches!(self.head, MusiCnnHead::Deam | MusiCnnHead::Emomusic) {
-            "model/Identity:0"
-        } else {
-            "model/Softmax:0"
-        };
+        let output_name = self.head.expected_output_name();
         self.pool.with_session(|session| {
             let tensor = ort::value::Tensor::from_array(([batch, 200], flat.into_boxed_slice()))
                 .map_err(|e| OnnxError::Inference(e.to_string()))?;

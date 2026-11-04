@@ -126,6 +126,185 @@ fn musicnn_core_rejects_bad_inputs_and_outputs() {
 }
 
 #[test]
+fn musicnn_head_synthetic_identity_executes_batched() {
+    let head = clap_fixture(
+        ArtifactId::from_static("synthetic-head-identity"),
+        include_bytes!("../../tests/fixtures/synthetic_musicnn_head_identity.onnx")
+            .as_slice()
+            .into(),
+    );
+    let head =
+        MusicnnHeadSession::from_trusted_bytes(&head, MusiCnnHead::Deam, 1, Some(1)).unwrap();
+    let embedding = vec![[2.0; 200]; 2];
+    assert_eq!(head.infer(&embedding).unwrap(), vec![[2.0; 2]; 2]);
+}
+
+#[test]
+fn musicnn_head_rejects_bad_inputs_and_outputs() {
+    for (bytes, head) in [
+        (
+            include_bytes!("../../tests/fixtures/synthetic_musicnn_bad.onnx").as_slice(),
+            MusiCnnHead::Danceability,
+        ),
+        (
+            include_bytes!("../../tests/fixtures/synthetic_musicnn_head_identity_bad.onnx")
+                .as_slice(),
+            MusiCnnHead::Deam,
+        ),
+    ] {
+        let artifact = clap_fixture(ArtifactId::from_static("synthetic-head-bad"), bytes.into());
+        // Wrong output width is caught at construction time, not only at infer time.
+        assert!(MusicnnHeadSession::from_trusted_bytes(&artifact, head, 1, Some(1)).is_err());
+    }
+
+    for (bytes, head) in [
+        (
+            include_bytes!("../../tests/fixtures/synthetic_musicnn_nan.onnx").as_slice(),
+            MusiCnnHead::Danceability,
+        ),
+        (
+            include_bytes!("../../tests/fixtures/synthetic_musicnn_head_identity_nan.onnx")
+                .as_slice(),
+            MusiCnnHead::Deam,
+        ),
+    ] {
+        let artifact = clap_fixture(ArtifactId::from_static("synthetic-head-nan"), bytes.into());
+        let head = MusicnnHeadSession::from_trusted_bytes(&artifact, head, 1, Some(1)).unwrap();
+        assert!(head.infer(&[[1.0; 200]]).is_err());
+    }
+
+    let head = clap_fixture(
+        ArtifactId::from_static("synthetic-head"),
+        include_bytes!("../../tests/fixtures/synthetic_musicnn_head.onnx")
+            .as_slice()
+            .into(),
+    );
+    let model =
+        MusicnnHeadSession::from_trusted_bytes(&head, MusiCnnHead::Danceability, 1, Some(1))
+            .unwrap();
+    // Caller-supplied batch size bounds, enforced regardless of fixed-width rows.
+    assert!(model.infer(&[]).is_err());
+    assert!(
+        model
+            .infer(&vec![[1.0; 200]; MAX_MUSICNN_BATCH + 1])
+            .is_err()
+    );
+    let mut row = [0.0; 200];
+    row[0] = f32::NAN;
+    assert!(model.infer(&[row]).is_err());
+}
+
+#[test]
+fn musicnn_head_rejects_output_name_mismatched_to_the_specific_head() {
+    // `synthetic_musicnn_head.onnx` genuinely outputs `model/Softmax:0`; pairing it
+    // with an Identity-expecting head (Deam/Emomusic) must fail closed at
+    // construction time rather than only later selecting the wrong tensor name.
+    let softmax_named = clap_fixture(
+        ArtifactId::from_static("synthetic-head-softmax-named"),
+        include_bytes!("../../tests/fixtures/synthetic_musicnn_head.onnx")
+            .as_slice()
+            .into(),
+    );
+    assert!(
+        MusicnnHeadSession::from_trusted_bytes(&softmax_named, MusiCnnHead::Deam, 1, Some(1))
+            .is_err()
+    );
+    assert!(
+        MusicnnHeadSession::from_trusted_bytes(&softmax_named, MusiCnnHead::Emomusic, 1, Some(1))
+            .is_err()
+    );
+    // Correctly paired with a Softmax-expecting head, construction still succeeds.
+    assert!(
+        MusicnnHeadSession::from_trusted_bytes(
+            &softmax_named,
+            MusiCnnHead::Danceability,
+            1,
+            Some(1)
+        )
+        .is_ok()
+    );
+
+    // `synthetic_musicnn_head_identity.onnx` genuinely outputs `model/Identity:0`;
+    // pairing it with any Softmax-expecting head must also fail closed.
+    let identity_named = clap_fixture(
+        ArtifactId::from_static("synthetic-head-identity-named"),
+        include_bytes!("../../tests/fixtures/synthetic_musicnn_head_identity.onnx")
+            .as_slice()
+            .into(),
+    );
+    assert!(
+        MusicnnHeadSession::from_trusted_bytes(
+            &identity_named,
+            MusiCnnHead::Danceability,
+            1,
+            Some(1)
+        )
+        .is_err()
+    );
+    assert!(
+        MusicnnHeadSession::from_trusted_bytes(
+            &identity_named,
+            MusiCnnHead::MoodAcoustic,
+            1,
+            Some(1)
+        )
+        .is_err()
+    );
+    // Correctly paired with an Identity-expecting head, construction still succeeds.
+    assert!(
+        MusicnnHeadSession::from_trusted_bytes(&identity_named, MusiCnnHead::Deam, 1, Some(1))
+            .is_ok()
+    );
+    assert!(
+        MusicnnHeadSession::from_trusted_bytes(&identity_named, MusiCnnHead::Emomusic, 1, Some(1))
+            .is_ok()
+    );
+}
+
+#[test]
+fn musicnn_head_rejects_wrong_model_id_or_hash() {
+    use sha2::{Digest, Sha256};
+    let bytes: Box<[u8]> = include_bytes!("../../tests/fixtures/synthetic_musicnn_head.onnx")
+        .as_slice()
+        .into();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("synthetic.onnx"), &bytes).unwrap();
+
+    // Wrong artifact id: `from_verified_bytes` must check the pinned id, not trust the caller.
+    let wrong_id = crate::verify_artifact(
+        dir.path(),
+        &ArtifactDescriptor {
+            id: ArtifactId::from_static("not-the-pinned-head"),
+            basename: "synthetic.onnx",
+            expected_sha256: Sha256::digest(&bytes).into(),
+            max_bytes: bytes.len() as u64,
+        },
+    )
+    .unwrap();
+    assert!(
+        MusicnnHeadSession::from_verified_bytes(&wrong_id, MusiCnnHead::Danceability, 1, Some(1))
+            .is_err()
+    );
+
+    // Correct id but tampered bytes must fail the pinned hash check during verification.
+    let mut tampered = bytes.to_vec();
+    tampered[0] ^= 0xFF;
+    std::fs::write(dir.path().join("synthetic.onnx"), &tampered).unwrap();
+    assert!(
+        crate::verify_artifact(
+            dir.path(),
+            &ArtifactDescriptor {
+                id: MusiCnnHead::Danceability.artifact_id(),
+                basename: "synthetic.onnx",
+                expected_sha256: Sha256::digest(&bytes).into(),
+                max_bytes: bytes.len() as u64,
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn musicnn_core_rejects_wrong_model_id_or_hash() {
     use sha2::{Digest, Sha256};
     let bytes: Box<[u8]> = include_bytes!("../../tests/fixtures/synthetic_musicnn_core.onnx")

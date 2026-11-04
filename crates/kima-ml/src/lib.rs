@@ -286,7 +286,14 @@ where
             }
         }
 
-        if errors.is_empty() {
+        if errors.is_empty() && cap == Capability::ClapTextEmbedding {
+            capabilities.insert(
+                cap,
+                CapabilityStatus::Disabled {
+                    reason: "CLAP text tokenizer is not implemented".to_string(),
+                },
+            );
+        } else if errors.is_empty() {
             capabilities.insert(cap, CapabilityStatus::Available);
         } else {
             capabilities.insert(cap, CapabilityStatus::Unavailable { errors });

@@ -12,6 +12,7 @@ Status: `open` (not yet reviewed) · `accepted` (keep, intended) ·
 
 | ID | Area | Upstream | kima-rs | Why | Status |
 |---|---|---|---|---|---|
+| D-145 | ML / CLAP inference | Python ONNX backend uses model input tensors | Typed audio adapter limits batches to five windows and time to 1001 frames, and rejects non-finite values and malformed outputs | Bounded, fail-closed inference for the default frontend | accepted |
 | D-144 | ML / CLAP text | Text embedding includes tokenization | Text capability is disabled even when the model verifies, until a tokenizer is implemented | Avoid reporting a nonfunctional capability as available | to-fix |
 | D-001 | Data | Prisma schema, 57 models, 117 migrations | Fresh sqlx schema; tables redesigned per domain | Clean design, free to diverge | accepted |
 | D-002 | Data | — | No import from an existing Kima install in v1 | Scope; possible later importer | to-decide |

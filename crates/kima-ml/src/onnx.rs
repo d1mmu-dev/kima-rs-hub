@@ -319,6 +319,71 @@ impl SharedSession {
     }
 }
 
+/// Typed CLAP audio inference over a resource-accounted pool of verified sessions.
+/// The caller supplies contiguous [batch, 1, time, 64] log-mel values.
+pub struct ClapAudioSession {
+    pool: BoundedSessionPool,
+}
+
+impl ClapAudioSession {
+    pub fn from_verified_bytes(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+    ) -> Result<Self, OnnxError> {
+        Ok(Self {
+            pool: BoundedSessionPool::from_verified_bytes(artifact, pool_size, threads)?,
+        })
+    }
+
+    /// Accept 1–5 windows and 1–1001 frames, with 64 bands per frame.
+    /// Returns raw finite model vectors; normalization is a separate step.
+    pub fn infer(
+        &self,
+        input: &[f32],
+        batch: usize,
+        time: usize,
+    ) -> Result<Vec<[f32; 512]>, OnnxError> {
+        if !(1..=crate::clap::MAX_CLAP_WINDOWS).contains(&batch)
+            || !(1..=1001).contains(&time)
+            || batch.checked_mul(time).and_then(|n| n.checked_mul(64)) != Some(input.len())
+            || input.iter().any(|x| !x.is_finite())
+        {
+            return Err(OnnxError::Inference(
+                "invalid CLAP input shape or non-finite value".into(),
+            ));
+        }
+        self.pool.with_session(|session| {
+            let tensor = ort::value::Tensor::from_array((
+                [batch, 1, time, 64],
+                input.to_vec().into_boxed_slice(),
+            ))
+            .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let outputs = session
+                .run(ort::inputs!["input" => tensor])
+                .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let output = outputs
+                .get("output")
+                .ok_or_else(|| OnnxError::Inference("missing CLAP output".into()))?;
+            let (shape, values) = output
+                .try_extract_tensor::<f32>()
+                .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            if shape.as_ref() != [batch as i64, 512] || values.iter().any(|x| !x.is_finite()) {
+                return Err(OnnxError::Inference(
+                    "invalid CLAP output shape or non-finite value".into(),
+                ));
+            }
+            values
+                .chunks_exact(512)
+                .map(|v| {
+                    v.try_into()
+                        .map_err(|_| OnnxError::Inference("invalid CLAP output length".into()))
+                })
+                .collect()
+        })
+    }
+}
+
 /// Shared container holding all 11 verified MusiCNN sessions (core + 10 heads).
 #[derive(Clone, Debug)]
 pub struct MusiCnnSessions {

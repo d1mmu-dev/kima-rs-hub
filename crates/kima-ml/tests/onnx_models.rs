@@ -40,7 +40,7 @@ fn test_onnx_model_inventory_coverage() {
     let reqs = OnnxModel::requirements_by_capability();
     assert_eq!(reqs.get(&Capability::MusicnnAnalysis).unwrap().len(), 11);
     assert_eq!(reqs.get(&Capability::ClapAudioEmbedding).unwrap().len(), 1);
-    assert_eq!(reqs.get(&Capability::ClapTextEmbedding).unwrap().len(), 1);
+    assert_eq!(reqs.get(&Capability::ClapTextEmbedding).unwrap().len(), 2);
 }
 
 #[test]

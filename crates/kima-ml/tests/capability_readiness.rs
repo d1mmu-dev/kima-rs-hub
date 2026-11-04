@@ -26,7 +26,7 @@ fn create_synthetic_artifact(
 }
 
 #[test]
-fn test_valid_synthetic_artifacts_leave_text_disabled_without_tokenizer() {
+fn test_valid_synthetic_artifacts_leave_text_available_like_any_other_capability() {
     let dir = tempdir().unwrap();
 
     let musicnn_desc = create_synthetic_artifact(
@@ -67,10 +67,14 @@ fn test_valid_synthetic_artifacts_leave_text_disabled_without_tokenizer() {
         report.status(Capability::ClapAudioEmbedding),
         &CapabilityStatus::Available
     );
-    assert!(matches!(
+    // ClapTextEmbedding is now a generic capability like any other: ready
+    // once every descriptor the caller registered for it verifies (the
+    // real tokenizer.json + text_model.onnx pair is enforced in
+    // `OnnxModel::requirements_by_capability`, not here).
+    assert_eq!(
         report.status(Capability::ClapTextEmbedding),
-        CapabilityStatus::Disabled { reason } if reason.contains("tokenizer")
-    ));
+        &CapabilityStatus::Available
+    );
     assert_eq!(report.status(Capability::Dsp), &CapabilityStatus::Available);
 }
 
@@ -124,15 +128,15 @@ fn test_missing_musicnn_model_disables_only_musicnn_analysis() {
         ),
     }
 
-    // Other independent implemented capabilities remain available; text needs a tokenizer.
+    // Other independent implemented capabilities remain available.
     assert_eq!(
         report.status(Capability::ClapAudioEmbedding),
         &CapabilityStatus::Available
     );
-    assert!(matches!(
+    assert_eq!(
         report.status(Capability::ClapTextEmbedding),
-        CapabilityStatus::Disabled { reason } if reason.contains("tokenizer")
-    ));
+        &CapabilityStatus::Available
+    );
     assert_eq!(report.status(Capability::Dsp), &CapabilityStatus::Available);
 }
 
@@ -218,10 +222,12 @@ fn test_independent_audio_and_text_clap_failure() {
         }
         other => panic!("expected Unavailable, got {:?}", other),
     }
-    assert!(matches!(
+    // ClapTextEmbedding's own artifact verifies fine; it is independent of
+    // the audio capability's failure.
+    assert_eq!(
         report.status(Capability::ClapTextEmbedding),
-        CapabilityStatus::Disabled { reason } if reason.contains("tokenizer")
-    ));
+        &CapabilityStatus::Available
+    );
 }
 
 #[test]

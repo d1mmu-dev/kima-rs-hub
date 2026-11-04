@@ -1,0 +1,30 @@
+--- a/src/fft4g_cache.h
++++ b/src/fft4g_cache.h
+@@ -8,13 +8,20 @@
+ 
+ void LSX_INIT_FFT_CACHE(void)
+ {
+-  if (FFT_LEN >= 0)
+-    return;
+-  assert(LSX_FFT_BR == NULL);
+-  assert(LSX_FFT_SC == NULL);
+-  assert(FFT_LEN == -1);
+-  ccrw2_init(FFT_CACHE_CCRW);
+-  FFT_LEN = 0;
++  static bool initialized = false;
++#if defined _OPENMP
++#pragma omp critical (soxr_fft_cache_init)
++#endif
++  {
++    if (!initialized) {
++      assert(LSX_FFT_BR == NULL);
++      assert(LSX_FFT_SC == NULL);
++      assert(FFT_LEN == -1);
++      ccrw2_init(FFT_CACHE_CCRW);
++      FFT_LEN = 0;
++      initialized = true;
++    }
++  }
+ }
+ 
+ void LSX_CLEAR_FFT_CACHE(void)

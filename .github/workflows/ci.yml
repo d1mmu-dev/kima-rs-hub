@@ -35,10 +35,15 @@ jobs:
       KIMA_NET_DENY_REAL: "1"
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libsoxr-dev
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Build pinned patched dynamic libsoxr (private prefix)
+        run: |
+          sudo apt-get install -y gcc make cmake patch curl xz-utils binutils libgomp1
+          sh scripts/build-soxr.sh "$RUNNER_TEMP/kima-soxr"
+          printf 'LIBRARY_PATH=%s/lib\nLD_LIBRARY_PATH=%s/lib\n' "$RUNNER_TEMP/kima-soxr" "$RUNNER_TEMP/kima-soxr" >> "$GITHUB_ENV"
       - name: Provision verified CPU ONNX Runtime (linux/amd64)
         run: |
           sudo install -d -o root -g root -m 755 /opt/kima
@@ -46,7 +51,23 @@ jobs:
           python3 scripts/test-ort-packaging.py
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+      - name: Native soxr linkage checker self-test
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: sh scripts/test-soxr-linkage.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Native cold-process and independent waveform regressions, both feature sets
+        run: |
+          cargo test --locked -p kima-ml --test clap_cold_start --test clap_prepare
+          cargo test --locked -p kima-ml --features pg-publish --test clap_cold_start --test clap_prepare
+          python3 - <<'PY'
+          import os, pathlib, subprocess
+          for target in ('clap_cold_start', 'clap_prepare'):
+              binaries = [p for p in pathlib.Path('target/debug/deps').glob(target + '-*') if p.is_file() and os.access(p, os.X_OK)]
+              assert binaries, target
+              for binary in binaries:
+                  subprocess.run(['sh', 'scripts/check-soxr-linkage.sh', str(binary), os.environ['RUNNER_TEMP'] + '/kima-soxr'], check=True)
+          PY
       # Failing test lines also go out as annotations, readable without log access.
       - run: |
           set -o pipefail
@@ -94,9 +115,14 @@ jobs:
       KIMA_NET_DENY_REAL: "1"
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libsoxr-dev
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Build pinned patched dynamic libsoxr (private prefix)
+        run: |
+          sudo apt-get install -y gcc make cmake patch curl xz-utils binutils libgomp1
+          sh scripts/build-soxr.sh "$RUNNER_TEMP/kima-soxr"
+          printf 'LIBRARY_PATH=%s/lib\nLD_LIBRARY_PATH=%s/lib\n' "$RUNNER_TEMP/kima-soxr" "$RUNNER_TEMP/kima-soxr" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: 24

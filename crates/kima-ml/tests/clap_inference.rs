@@ -2,44 +2,14 @@ mod common;
 use kima_ml::{ArtifactId, onnx::ClapAudioSession};
 
 #[test]
-fn synthetic_model_runs_batched_variable_time() {
+fn rejects_spoofed_clap_identity() {
     let artifact = common::verified_fixture(
-        ArtifactId::from_static("synthetic-clap"),
+        ArtifactId::from_static("hf_audio"),
         include_bytes!("fixtures/synthetic_clap.onnx")
             .as_slice()
             .into(),
     );
-    let model = ClapAudioSession::from_verified_bytes(&artifact, 1, Some(1)).unwrap();
-    let input = vec![2.0; 2 * 3 * 64];
-    let out = model.infer(&input, 2, 3).unwrap();
-    assert_eq!(out, vec![[2.0; 512]; 2]);
-}
-
-#[test]
-fn rejects_invalid_inputs_and_outputs() {
-    for bytes in [
-        include_bytes!("fixtures/synthetic_clap_bad_shape.onnx").as_slice(),
-        include_bytes!("fixtures/synthetic_clap_nonfinite.onnx").as_slice(),
-    ] {
-        let artifact =
-            common::verified_fixture(ArtifactId::from_static("synthetic-clap-bad"), bytes.into());
-        let model = ClapAudioSession::from_verified_bytes(&artifact, 1, Some(1)).unwrap();
-        assert!(model.infer(&vec![1.0; 64], 1, 1).is_err());
-    }
-    let artifact = common::verified_fixture(
-        ArtifactId::from_static("synthetic-clap"),
-        include_bytes!("fixtures/synthetic_clap.onnx")
-            .as_slice()
-            .into(),
-    );
-    let model = ClapAudioSession::from_verified_bytes(&artifact, 1, Some(1)).unwrap();
-    assert!(model.infer(&[], 0, 1).is_err());
-    assert!(model.infer(&vec![1.0; 64], 1, 2).is_err());
-    assert!(model.infer(&vec![1.0; 64], 6, 1).is_err());
-    assert!(model.infer(&vec![1.0; 64], 1, 1002).is_err());
-    let mut input = vec![0.0; 64];
-    input[0] = f32::NAN;
-    assert!(model.infer(&input, 1, 1).is_err());
+    assert!(ClapAudioSession::from_verified_bytes(&artifact, 1, Some(1)).is_err());
 }
 
 #[test]

@@ -452,6 +452,135 @@ impl ClapAudioSession {
     }
 }
 
+/// Maximum prompts accepted per CLAP text inference call, matching the bounded
+/// resource policy used elsewhere for ONNX batch sizes.
+pub const MAX_CLAP_TEXT_BATCH: usize = 8;
+
+/// Typed CLAP text inference over a resource-accounted pool of verified
+/// sessions. The caller supplies contiguous int64 `input_ids` already encoded
+/// by [`crate::text_tokenizer::ClapTextTokenizer`]: `[batch, sequence]`, no
+/// `attention_mask` (the pinned real graph accepts none), `sequence` bounded
+/// by [`crate::text_tokenizer::CLAP_TEXT_MAX_TOKENS`].
+pub struct ClapTextSession {
+    pool: BoundedSessionPool,
+}
+
+impl ClapTextSession {
+    pub fn from_verified_bytes(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+    ) -> Result<Self, OnnxError> {
+        use sha2::{Digest, Sha256};
+        let expected = OnnxModel::ClapText.descriptor();
+        if artifact.id() != expected.id
+            || artifact.as_bytes().len() as u64 > expected.max_bytes
+            || <[u8; 32]>::from(Sha256::digest(artifact.as_bytes())) != expected.expected_sha256
+        {
+            return Err(OnnxError::SessionInit {
+                id: artifact.id(),
+                message: "CLAP text artifact does not match the pinned model".into(),
+            });
+        }
+        let model = Self::from_trusted_bytes(artifact, pool_size, threads)?;
+        model.pool.with_session(|session| {
+            use ort::{tensor::TensorElementType, value::ValueType};
+            let matches_tensor = |value: &ValueType, ty: TensorElementType, dims: &[i64]| {
+                matches!(value, ValueType::Tensor { ty: t, shape, .. } if *t == ty && shape.as_ref() == dims)
+            };
+            // No `attention_mask` input: the pinned real graph takes only
+            // `input_ids`, matching upstream's unpadded, single-prompt encoding.
+            if session.inputs.len() != 1
+                || session.inputs[0].name != "input_ids"
+                || !matches_tensor(&session.inputs[0].input_type, TensorElementType::Int64, &[-1, -1])
+                || session.outputs.len() != 1
+                || session.outputs[0].name != "text_embeds"
+                || !matches_tensor(&session.outputs[0].output_type, TensorElementType::Float32, &[-1, 512])
+            {
+                return Err(OnnxError::Inference(
+                    "invalid pinned CLAP text graph signature".into(),
+                ));
+            }
+            Ok(())
+        })?;
+        Ok(model)
+    }
+
+    fn from_trusted_bytes(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+    ) -> Result<Self, OnnxError> {
+        Ok(Self {
+            pool: BoundedSessionPool::from_verified_bytes(artifact, pool_size, threads)?,
+        })
+    }
+
+    /// Accept `1..=MAX_CLAP_TEXT_BATCH` prompts, each already tokenized to
+    /// exactly `sequence` int64 ids (`1..=CLAP_TEXT_MAX_TOKENS`), with every
+    /// id a valid RoBERTa vocabulary index. Returns bounded, finite
+    /// `[batch, 512]` text embeddings (unnormalized; normalize separately as
+    /// with the audio path).
+    pub fn infer(
+        &self,
+        input_ids: &[i64],
+        batch: usize,
+        sequence: usize,
+    ) -> Result<Vec<[f32; 512]>, OnnxError> {
+        if !(1..=MAX_CLAP_TEXT_BATCH).contains(&batch)
+            || !(1..=crate::text_tokenizer::CLAP_TEXT_MAX_TOKENS).contains(&sequence)
+            || batch.checked_mul(sequence) != Some(input_ids.len())
+            || input_ids
+                .iter()
+                .any(|&id| !(0..crate::text_tokenizer::CLAP_TEXT_VOCAB_SIZE as i64).contains(&id))
+        {
+            return Err(OnnxError::Inference(
+                "invalid CLAP text input shape or out-of-vocabulary id".into(),
+            ));
+        }
+        self.pool.with_session(|session| {
+            let tensor = ort::value::Tensor::from_array((
+                [batch, sequence],
+                input_ids.to_vec().into_boxed_slice(),
+            ))
+            .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let output_buffer = ort::value::Tensor::from_array((
+                [batch, 512],
+                vec![0.0_f32; batch * 512].into_boxed_slice(),
+            ))
+            .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let options = ort::session::run_options::RunOptions::new()
+                .map_err(|e| OnnxError::Inference(e.to_string()))?
+                .with_outputs(
+                    ort::session::run_options::OutputSelector::no_default()
+                        .with("text_embeds")
+                        .preallocate("text_embeds", output_buffer),
+                );
+            let outputs = session
+                .run_with_options(ort::inputs!["input_ids" => tensor], &options)
+                .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let output = outputs
+                .get("text_embeds")
+                .ok_or_else(|| OnnxError::Inference("missing CLAP text output".into()))?;
+            let (shape, values) = output
+                .try_extract_tensor::<f32>()
+                .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            if shape.as_ref() != [batch as i64, 512] || values.iter().any(|x| !x.is_finite()) {
+                return Err(OnnxError::Inference(
+                    "invalid CLAP text output shape or non-finite value".into(),
+                ));
+            }
+            values
+                .chunks_exact(512)
+                .map(|v| {
+                    v.try_into()
+                        .map_err(|_| OnnxError::Inference("invalid CLAP text output length".into()))
+                })
+                .collect()
+        })
+    }
+}
+
 /// Typed MusiCNN core backbone inference over a bounded pool of verified sessions.
 /// Accepts contiguous `[batch, 187, 96]` f32 log-mel patches and returns bounded,
 /// finite `[batch, 200]` embeddings, checking the exact trusted graph signature.

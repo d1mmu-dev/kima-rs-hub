@@ -359,6 +359,60 @@ fn synthetic_model_runs_batched_variable_time() {
 }
 
 #[test]
+fn text_synthetic_model_runs_batched_variable_sequence() {
+    let artifact = clap_fixture(
+        ArtifactId::from_static("synthetic-clap-text"),
+        include_bytes!("../../tests/fixtures/synthetic_clap_text.onnx")
+            .as_slice()
+            .into(),
+    );
+    let model = ClapTextSession::from_trusted_bytes(&artifact, 1, Some(1)).unwrap();
+    let ids: Vec<i64> = vec![2, 2, 2, 2, 2, 2];
+    let out = model.infer(&ids, 2, 3).unwrap();
+    assert_eq!(out, vec![[2.0; 512]; 2]);
+}
+
+#[test]
+fn text_rejects_invalid_inputs_and_outputs() {
+    for bytes in [
+        include_bytes!("../../tests/fixtures/synthetic_clap_text_bad_shape.onnx").as_slice(),
+        include_bytes!("../../tests/fixtures/synthetic_clap_text_nonfinite.onnx").as_slice(),
+    ] {
+        let artifact = clap_fixture(
+            ArtifactId::from_static("synthetic-clap-text-bad"),
+            bytes.into(),
+        );
+        let model = ClapTextSession::from_trusted_bytes(&artifact, 1, Some(1)).unwrap();
+        assert!(model.infer(&[1], 1, 1).is_err());
+    }
+    let artifact = clap_fixture(
+        ArtifactId::from_static("synthetic-clap-text"),
+        include_bytes!("../../tests/fixtures/synthetic_clap_text.onnx")
+            .as_slice()
+            .into(),
+    );
+    let model = ClapTextSession::from_trusted_bytes(&artifact, 1, Some(1)).unwrap();
+    assert!(model.infer(&[], 0, 1).is_err());
+    assert!(model.infer(&[1], 1, 2).is_err());
+    assert!(
+        model
+            .infer(
+                &vec![1; 77 * (MAX_CLAP_TEXT_BATCH + 1)],
+                MAX_CLAP_TEXT_BATCH + 1,
+                77
+            )
+            .is_err()
+    );
+    assert!(model.infer(&vec![1; 78], 1, 78).is_err());
+    assert!(model.infer(&[-1], 1, 1).is_err());
+    assert!(
+        model
+            .infer(&[crate::text_tokenizer::CLAP_TEXT_VOCAB_SIZE as i64], 1, 1)
+            .is_err()
+    );
+}
+
+#[test]
 fn rejects_invalid_inputs_and_outputs() {
     for bytes in [
         include_bytes!("../../tests/fixtures/synthetic_clap_bad_shape.onnx").as_slice(),

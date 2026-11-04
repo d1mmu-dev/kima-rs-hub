@@ -331,6 +331,44 @@ impl ClapAudioSession {
         pool_size: usize,
         threads: Option<usize>,
     ) -> Result<Self, OnnxError> {
+        use sha2::{Digest, Sha256};
+        let expected = OnnxModel::ClapAudio.descriptor();
+        if artifact.id() != expected.id
+            || artifact.as_bytes().len() as u64 > expected.max_bytes
+            || <[u8; 32]>::from(Sha256::digest(artifact.as_bytes())) != expected.expected_sha256
+        {
+            return Err(OnnxError::SessionInit {
+                id: artifact.id(),
+                message: "CLAP audio artifact does not match the pinned model".into(),
+            });
+        }
+        let model = Self::from_trusted_bytes(artifact, pool_size, threads)?;
+        model.pool.with_session(|session| {
+            use ort::{tensor::TensorElementType, value::ValueType};
+            let matches_tensor = |value: &ValueType, dims: &[i64]| {
+                matches!(value, ValueType::Tensor { ty: TensorElementType::Float32, shape, .. } if shape.as_ref() == dims)
+            };
+            if session.inputs.len() != 1
+                || session.inputs[0].name != "input"
+                || !matches_tensor(&session.inputs[0].input_type, &[-1, 1, -1, 64])
+                || session.outputs.len() != 2
+                || session.outputs[0].name != "output"
+                || !matches_tensor(&session.outputs[0].output_type, &[-1, 512])
+                || session.outputs[1].name != "onnx::Shape_9884"
+                || !matches_tensor(&session.outputs[1].output_type, &[-1, -1, -1, -1])
+            {
+                return Err(OnnxError::Inference("invalid pinned CLAP graph signature".into()));
+            }
+            Ok(())
+        })?;
+        Ok(model)
+    }
+
+    fn from_trusted_bytes(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+    ) -> Result<Self, OnnxError> {
         Ok(Self {
             pool: BoundedSessionPool::from_verified_bytes(artifact, pool_size, threads)?,
         })
@@ -359,8 +397,22 @@ impl ClapAudioSession {
                 input.to_vec().into_boxed_slice(),
             ))
             .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let output_buffer = ort::value::Tensor::from_array((
+                [batch, 512],
+                vec![0.0_f32; batch * 512].into_boxed_slice(),
+            ))
+            .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            // Selecting a fetch does not guarantee ORT prunes unrelated graph
+            // nodes; the pinned graph and bounded inputs remain essential.
+            let options = ort::session::run_options::RunOptions::new()
+                .map_err(|e| OnnxError::Inference(e.to_string()))?
+                .with_outputs(
+                    ort::session::run_options::OutputSelector::no_default()
+                        .with("output")
+                        .preallocate("output", output_buffer),
+                );
             let outputs = session
-                .run(ort::inputs!["input" => tensor])
+                .run_with_options(ort::inputs!["input" => tensor], &options)
                 .map_err(|e| OnnxError::Inference(e.to_string()))?;
             let output = outputs
                 .get("output")

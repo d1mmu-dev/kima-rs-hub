@@ -684,6 +684,91 @@ first attempt).
 4. Decide schema, model/version provenance, reanalysis and DSP-versus-musicnn atomicity; preserve a future M12 push-style remote inference boundary without implementing transport now.
 5. Clear rights and immutable, independently verified artifact identities, notices, fixture generation, intended audience and offline CI provisioning; inspect exact model inputs/outputs, preprocessing, head transformations and edge handling. Freeze licensed DSP data, labels, denominator, and silent/short/invalid/nonfinite behavior before scoring.
 
+## Owner decisions (2026-11-04): Stage::Embedding scheduling
+
+Recorded before implementation, per the owner's explicit direction:
+
+1. **Scheduling shape.** CLAP embedding scheduling is a new phase inside the
+   *existing* coordinator enrich cycle
+   (`crates/kima-ident/src/coordinator/mod.rs`'s `cycle` function/`run_cycle`), not a
+   separate queue or worker loop. An `embedding_phase` runs alongside the existing
+   `fingerprint_phase`/`network_phases`, independent of the MusicBrainz on/off switch:
+   it must keep running even when the MusicBrainz network phases are paused or
+   disabled. Implementation: `embedding_phase` is joined together with
+   `fingerprint_phase` and `network_phases` inside `run_cycle`'s `phases` future,
+   exactly like `fingerprint_phase` already is — neither depends on
+   `network_may_run`/`ctx.net`.
+2. **Eligibility.** CLAP eligibility is independent of any future Analysis/MusicNN/DSP
+   stage: a track becomes eligible for the new `Stage::Embedding` as soon as it
+   exists/is scanned — the same due-ness trigger as the existing unconditional stage
+   (`Stage::Fingerprint`), not gated on `Recording` or `Fingerprint` success. Verified
+   against `kima_db::stages::claim`'s SQL contract: its only stage-specific gating
+   clause is `$1 <> 'recording' OR ...`, so any stage other than `'recording'`
+   (`'fingerprint'`, now `'embedding'`) is claimed unconditionally — "a row in
+   `tracks`" (missing_since IS NULL) is the entire eligibility test, mirroring
+   `Stage::Fingerprint` exactly. No SQL change to `claim` was needed for this.
+3. **Retry/lease policy.** Exactly the same constants/backoff/lease-duration already
+   used for `Stage::Recording` in `crates/kima-db/src/stages.rs`: no new constants were
+   introduced. The lease (`claim`'s `next_attempt_at = now() + interval '15 minutes'`)
+   is written identically for every stage in one SQL statement; the redelivery cap
+   (`REDELIVERY_CAP = 3`), retry cap (`RETRY_CAP = 4`), retry delays (`RETRY_DELAYS`)
+   and `record_for`/`lost_worker` helpers in `crates/kima-ident/src/stages/mod.rs` are
+   shared, generic-over-stage code already used by `Stage::Recording`'s
+   `kima_ident::stages::recording` module; `kima_ident::stages::embedding` reuses them
+   unchanged rather than copying or reinventing values.
+
+Implementation record: `Stage::Embedding` added to `crates/kima-db/src/stages.rs`;
+`Phase::Embedding` added to `crates/kima-db/src/enrichment.rs` (and
+`enrichment_state.current_phase`'s CHECK constraint, migration `0025`) purely so the
+new phase can use the existing `mark()`/`Announcer` progress-announcement plumbing —
+no change to the M4 progress-readout numbers (`ClapProgress` etc.) is made here; that
+remains a separate, not-yet-scoped task. `kima_ident::stages::embedding::run_claim`
+calls the already-reviewed `kima_ml::attempt::run_attempt` with
+`AttemptKind::EmbeddingAfterAnalysis` (CLAP-only: analysis is never invoked, matching
+the "independent of Analysis" decision above) and, on success, publishes through
+`kima_ml::publish::publish_clap_embedding_blocking`. A missing or hash-mismatched CLAP
+model surfaces as `CapabilityStatus::Unavailable`/`Blocked`, which the stage reports as
+a stage failure (`StageFailure::Transient`, classified `INCONCLUSIVE`) so the existing
+retry/backoff applies — it never crashes the coordinator and never fabricates a
+published embedding.
+
+## Upstream drift note (2026-11-04): CLAP checkpoint migration and MusiCNN mood-head removal deferred
+
+This design and the current M4 implementation are evidence-grounded against upstream
+`Chevron7Locked/kima-hub` commit
+[`12faf1cd34ff53054221818b0ccde58b8e9b0020`](https://github.com/Chevron7Locked/kima-hub/tree/12faf1cd34ff53054221818b0ccde58b8e9b0020)
+(§ "Source grounding" above), which remains kima-rs's pinned reference. As of this
+note, upstream `main` has moved to `166b7184` (583 commits ahead of the pin). Of
+particular relevance to this document's §6 model inventory and MusiCNN head table:
+
+- Upstream commit `14aaa9f7` ("refactor(analysis): drop raw MusiCNN moods and run CLAP
+  on ONNX only") removes the seven MusiCNN mood_* head models (`acoustic`,
+  `aggressive`, `electronic`, `happy`, `party`, `relaxed`, `sad`), keeping only
+  `danceability`, `deam` and `emomusic`.
+- The same commit swaps the CLAP checkpoint from `laion/clap-htsat-unfused` (the
+  pinned `hf_audio.onnx`, SHA-256 `37df17af...`, referenced in §6.4 above) to
+  `lukewys/laion_clap`'s `music_audioset_epoch_15_esc_90.14.pt` checkpoint, exporting
+  new `music_audio.onnx` (SHA-256
+  `ab1bf5eba067b246198c630f153f774e8f1c3169b3924d4d6a4dc247bd73de97`) and
+  `music_text.onnx` (SHA-256
+  `6dbba074b27f8973d84c5c7ae9acd0b9139a6cd9dd82bea6e87954dc3b835956`) in their place.
+- The `musicnn-answers.npz` parity fixture (§6.4 above, independently hashed as
+  `05107f43...`) also changed upstream to match the reduced head set.
+
+**Owner decision:** stay pinned to `12faf1cd34ff53054221818b0ccde58b8e9b0020` for now.
+All M4 work to date (model inventory, MusiCNN head regression tests, CLAP audio/text
+adapters, the `hf_audio.onnx`/`text_model.onnx` pins) is already verified and working
+against that pin, and re-pinning now would invalidate that verification mid-milestone.
+The CLAP music-checkpoint migration and MusiCNN mood-head removal are **deferred to a
+separate future task**, not undertaken here. See `docs/DIVERGENCES.md` D-148 for the
+tracked divergence entry. A future upgrade task must: re-export and re-verify
+`music_audio.onnx`/`music_text.onnx` against the new upstream checkpoint and hashes
+above (replacing `hf_audio.onnx`/`text_model.onnx` in the §6.4 table), and drop or
+explicitly ignore the seven removed `mood_*` MusiCNN heads (replacing the eleven-file
+MANIFEST.sha256 inventory referenced in §6.4 with upstream's reduced set), re-running
+the full MusiCNN head regression suite and CLAP parity fixtures against the new
+pinned bytes before enabling the upgraded capability.
+
 ## Review and verification checklist
 
 - Independently review this clarification against parent §6 and owner decision, and the candidate graph against the pinned source; owner approval is needed for outstanding decisions, not inferred from this draft.

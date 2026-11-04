@@ -26,7 +26,7 @@ fn create_synthetic_artifact(
 }
 
 #[test]
-fn test_all_synthetic_artifacts_valid_evaluates_all_capabilities_available() {
+fn test_valid_synthetic_artifacts_leave_text_disabled_without_tokenizer() {
     let dir = tempdir().unwrap();
 
     let musicnn_desc = create_synthetic_artifact(
@@ -67,10 +67,10 @@ fn test_all_synthetic_artifacts_valid_evaluates_all_capabilities_available() {
         report.status(Capability::ClapAudioEmbedding),
         &CapabilityStatus::Available
     );
-    assert_eq!(
+    assert!(matches!(
         report.status(Capability::ClapTextEmbedding),
-        &CapabilityStatus::Available
-    );
+        CapabilityStatus::Disabled { reason } if reason.contains("tokenizer")
+    ));
     assert_eq!(report.status(Capability::Dsp), &CapabilityStatus::Available);
 }
 
@@ -124,15 +124,15 @@ fn test_missing_musicnn_model_disables_only_musicnn_analysis() {
         ),
     }
 
-    // Other independent capabilities remain Available!
+    // Other independent implemented capabilities remain available; text needs a tokenizer.
     assert_eq!(
         report.status(Capability::ClapAudioEmbedding),
         &CapabilityStatus::Available
     );
-    assert_eq!(
+    assert!(matches!(
         report.status(Capability::ClapTextEmbedding),
-        &CapabilityStatus::Available
-    );
+        CapabilityStatus::Disabled { reason } if reason.contains("tokenizer")
+    ));
     assert_eq!(report.status(Capability::Dsp), &CapabilityStatus::Available);
 }
 
@@ -218,10 +218,10 @@ fn test_independent_audio_and_text_clap_failure() {
         }
         other => panic!("expected Unavailable, got {:?}", other),
     }
-    assert_eq!(
+    assert!(matches!(
         report.status(Capability::ClapTextEmbedding),
-        &CapabilityStatus::Available
-    );
+        CapabilityStatus::Disabled { reason } if reason.contains("tokenizer")
+    ));
 }
 
 #[test]

@@ -436,6 +436,246 @@ impl ClapAudioSession {
     }
 }
 
+/// Typed MusiCNN core backbone inference over a bounded pool of verified sessions.
+/// Accepts contiguous `[batch, 187, 96]` f32 log-mel patches and returns bounded,
+/// finite `[batch, 200]` embeddings, checking the exact trusted graph signature.
+pub struct MusicnnCoreSession {
+    pool: BoundedSessionPool,
+}
+
+/// Maximum MusiCNN patches accepted per inference call, matching the bounded
+/// resource policy used elsewhere for ONNX batch sizes.
+pub const MAX_MUSICNN_BATCH: usize = 64;
+
+impl MusicnnCoreSession {
+    pub fn from_verified_bytes(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+    ) -> Result<Self, OnnxError> {
+        use sha2::{Digest, Sha256};
+        let expected = OnnxModel::MusiCnnCore.descriptor();
+        if artifact.id() != expected.id
+            || artifact.as_bytes().len() as u64 > expected.max_bytes
+            || <[u8; 32]>::from(Sha256::digest(artifact.as_bytes())) != expected.expected_sha256
+        {
+            return Err(OnnxError::SessionInit {
+                id: artifact.id(),
+                message: "MusiCNN core artifact does not match the pinned model".into(),
+            });
+        }
+        let model = Self::from_trusted_bytes(artifact, pool_size, threads)?;
+        model.pool.with_session(|session| {
+            use ort::{tensor::TensorElementType, value::ValueType};
+            let matches_tensor = |value: &ValueType, dims: &[i64]| {
+                matches!(value, ValueType::Tensor { ty: TensorElementType::Float32, shape, .. } if shape.as_ref() == dims)
+            };
+            if session.inputs.len() != 1
+                || session.inputs[0].name != "model/Placeholder:0"
+                || !matches_tensor(&session.inputs[0].input_type, &[-1, 187, 96])
+                || session.outputs.len() != 1
+                || session.outputs[0].name != "model/dense/BiasAdd:0"
+                || !matches_tensor(&session.outputs[0].output_type, &[-1, 200])
+            {
+                return Err(OnnxError::Inference(
+                    "invalid pinned MusiCNN core graph signature".into(),
+                ));
+            }
+            Ok(())
+        })?;
+        Ok(model)
+    }
+
+    fn from_trusted_bytes(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+    ) -> Result<Self, OnnxError> {
+        Ok(Self {
+            pool: BoundedSessionPool::from_verified_bytes(artifact, pool_size, threads)?,
+        })
+    }
+
+    /// Accept `1..=MAX_MUSICNN_BATCH` contiguous `[187, 96]` log-mel patches.
+    /// Returns bounded, finite `[batch, 200]` embeddings.
+    pub fn infer(&self, input: &[f32], batch: usize) -> Result<Vec<[f32; 200]>, OnnxError> {
+        if !(1..=MAX_MUSICNN_BATCH).contains(&batch)
+            || batch.checked_mul(187).and_then(|n| n.checked_mul(96)) != Some(input.len())
+            || input.iter().any(|x| !x.is_finite())
+        {
+            return Err(OnnxError::Inference(
+                "invalid MusiCNN core input shape or non-finite value".into(),
+            ));
+        }
+        self.pool.with_session(|session| {
+            let tensor = ort::value::Tensor::from_array((
+                [batch, 187, 96],
+                input.to_vec().into_boxed_slice(),
+            ))
+            .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let output_buffer = ort::value::Tensor::from_array((
+                [batch, 200],
+                vec![0.0_f32; batch * 200].into_boxed_slice(),
+            ))
+            .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let options = ort::session::run_options::RunOptions::new()
+                .map_err(|e| OnnxError::Inference(e.to_string()))?
+                .with_outputs(
+                    ort::session::run_options::OutputSelector::no_default()
+                        .with("model/dense/BiasAdd:0")
+                        .preallocate("model/dense/BiasAdd:0", output_buffer),
+                );
+            let outputs = session
+                .run_with_options(ort::inputs!["model/Placeholder:0" => tensor], &options)
+                .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let output = outputs
+                .get("model/dense/BiasAdd:0")
+                .ok_or_else(|| OnnxError::Inference("missing MusiCNN core output".into()))?;
+            let (shape, values) = output
+                .try_extract_tensor::<f32>()
+                .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            if shape.as_ref() != [batch as i64, 200] || values.iter().any(|x| !x.is_finite()) {
+                return Err(OnnxError::Inference(
+                    "invalid MusiCNN core output shape or non-finite value".into(),
+                ));
+            }
+            values
+                .chunks_exact(200)
+                .map(|v| {
+                    v.try_into().map_err(|_| {
+                        OnnxError::Inference("invalid MusiCNN core output length".into())
+                    })
+                })
+                .collect()
+        })
+    }
+}
+
+/// Typed MusiCNN classification/regression head inference over a bounded pool
+/// of verified sessions. Accepts `[batch, 200]` f32 core embeddings and returns
+/// bounded, finite `[batch, 2]` outputs, checking the exact trusted graph for
+/// the specific head.
+pub struct MusicnnHeadSession {
+    head: MusiCnnHead,
+    pool: BoundedSessionPool,
+}
+
+impl MusicnnHeadSession {
+    pub fn from_verified_bytes(
+        artifact: &VerifiedBytes,
+        head: MusiCnnHead,
+        pool_size: usize,
+        threads: Option<usize>,
+    ) -> Result<Self, OnnxError> {
+        use sha2::{Digest, Sha256};
+        let expected = head.descriptor();
+        if artifact.id() != expected.id
+            || artifact.as_bytes().len() as u64 > expected.max_bytes
+            || <[u8; 32]>::from(Sha256::digest(artifact.as_bytes())) != expected.expected_sha256
+        {
+            return Err(OnnxError::SessionInit {
+                id: artifact.id(),
+                message: "MusiCNN head artifact does not match the pinned model".into(),
+            });
+        }
+        Self::from_trusted_bytes(artifact, head, pool_size, threads)
+    }
+
+    fn from_trusted_bytes(
+        artifact: &VerifiedBytes,
+        head: MusiCnnHead,
+        pool_size: usize,
+        threads: Option<usize>,
+    ) -> Result<Self, OnnxError> {
+        let pool = BoundedSessionPool::from_verified_bytes(artifact, pool_size, threads)?;
+        let model = Self { head, pool };
+        model.pool.with_session(|session| {
+            use ort::{tensor::TensorElementType, value::ValueType};
+            let matches_tensor = |value: &ValueType, dims: &[i64]| {
+                matches!(value, ValueType::Tensor { ty: TensorElementType::Float32, shape, .. } if shape.as_ref() == dims)
+            };
+            if session.inputs.len() != 1
+                || session.inputs[0].name != "model/Placeholder:0"
+                || !matches_tensor(&session.inputs[0].input_type, &[-1, 200])
+                || session.outputs.len() != 1
+                || !matches_tensor(&session.outputs[0].output_type, &[-1, 2])
+            {
+                return Err(OnnxError::Inference(
+                    "invalid pinned MusiCNN head graph signature".into(),
+                ));
+            }
+            let output_name = session.outputs[0].name.clone();
+            if output_name != "model/Softmax:0" && output_name != "model/Identity:0" {
+                return Err(OnnxError::Inference(
+                    "invalid pinned MusiCNN head output name".into(),
+                ));
+            }
+            Ok(())
+        })?;
+        Ok(model)
+    }
+
+    /// Accept `1..=MAX_MUSICNN_BATCH` `[200]` core embeddings. Returns bounded,
+    /// finite `[batch, 2]` head outputs.
+    pub fn infer(&self, embeddings: &[[f32; 200]]) -> Result<Vec<[f32; 2]>, OnnxError> {
+        let batch = embeddings.len();
+        if !(1..=MAX_MUSICNN_BATCH).contains(&batch) {
+            return Err(OnnxError::Inference(
+                "invalid MusiCNN head batch size".into(),
+            ));
+        }
+        let flat: Vec<f32> = embeddings.iter().flatten().copied().collect();
+        if flat.iter().any(|x| !x.is_finite()) {
+            return Err(OnnxError::Inference(
+                "non-finite MusiCNN head input value".into(),
+            ));
+        }
+        let output_name = if matches!(self.head, MusiCnnHead::Deam | MusiCnnHead::Emomusic) {
+            "model/Identity:0"
+        } else {
+            "model/Softmax:0"
+        };
+        self.pool.with_session(|session| {
+            let tensor = ort::value::Tensor::from_array(([batch, 200], flat.into_boxed_slice()))
+                .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let output_buffer = ort::value::Tensor::from_array((
+                [batch, 2],
+                vec![0.0_f32; batch * 2].into_boxed_slice(),
+            ))
+            .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let options = ort::session::run_options::RunOptions::new()
+                .map_err(|e| OnnxError::Inference(e.to_string()))?
+                .with_outputs(
+                    ort::session::run_options::OutputSelector::no_default()
+                        .with(output_name)
+                        .preallocate(output_name, output_buffer),
+                );
+            let outputs = session
+                .run_with_options(ort::inputs!["model/Placeholder:0" => tensor], &options)
+                .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let output = outputs
+                .get(output_name)
+                .ok_or_else(|| OnnxError::Inference("missing MusiCNN head output".into()))?;
+            let (shape, values) = output
+                .try_extract_tensor::<f32>()
+                .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            if shape.as_ref() != [batch as i64, 2] || values.iter().any(|x| !x.is_finite()) {
+                return Err(OnnxError::Inference(
+                    "invalid MusiCNN head output shape or non-finite value".into(),
+                ));
+            }
+            values
+                .chunks_exact(2)
+                .map(|v| {
+                    v.try_into().map_err(|_| {
+                        OnnxError::Inference("invalid MusiCNN head output length".into())
+                    })
+                })
+                .collect()
+        })
+    }
+}
+
 /// Shared container holding all 11 verified MusiCNN sessions (core + 10 heads).
 #[derive(Clone, Debug)]
 pub struct MusiCnnSessions {

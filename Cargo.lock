@@ -1713,6 +1713,8 @@ name = "kima-web"
 version = "0.1.0"
 dependencies = [
  "kima-api-types",
+ "serde",
+ "serde_json",
  "vertigo",
 ]
 

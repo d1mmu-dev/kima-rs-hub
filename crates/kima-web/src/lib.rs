@@ -6,6 +6,7 @@ mod auth;
 mod pages;
 mod player;
 mod route;
+mod tracklist;
 mod ui;
 
 use vertigo::{DomNode, main};

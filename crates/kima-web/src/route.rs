@@ -1,8 +1,7 @@
 //! The route table. Hand-written enum with a `From<String>` / `Display` pair (vertigo's router pattern).
 //!
-//! Scope of this slice: login, setup (onboarding) and the library browse root with its albums / tracks
-//! drill-downs. Search, playlists and settings from the plan's table arrive with their pages; until then
-//! they fall under `NotFound`.
+//! Login, setup (onboarding), the library browse root with its albums / tracks drill-downs, and search.
+//! Playlists and settings arrive with their pages; until then they fall under `NotFound`.
 
 use std::fmt;
 
@@ -20,15 +19,14 @@ pub enum Route {
     Tracks {
         album: Option<String>,
     },
+    /// `/search`; the query lives in the page, not in the URL.
+    Search,
     NotFound,
 }
 
 impl Route {
     pub fn requires_auth(&self) -> bool {
-        matches!(
-            self,
-            Route::Artists | Route::Albums { .. } | Route::Tracks { .. }
-        )
+        !matches!(self, Route::Login | Route::Setup | Route::NotFound)
     }
 
     pub fn new(url: &str) -> Route {
@@ -60,6 +58,7 @@ impl Route {
             "/collection/tracks" => {
                 param("album").map_or(Route::NotFound, |album| Route::Tracks { album })
             }
+            "/search" => Route::Search,
             _ => Route::NotFound,
         }
     }
@@ -80,6 +79,7 @@ impl fmt::Display for Route {
             Route::Albums { artist: Some(id) } => write!(f, "/collection/albums?artist={id}"),
             Route::Tracks { album: None } => f.write_str("/collection/tracks"),
             Route::Tracks { album: Some(id) } => write!(f, "/collection/tracks?album={id}"),
+            Route::Search => f.write_str("/search"),
             Route::NotFound => f.write_str("/404"),
         }
     }
@@ -104,6 +104,7 @@ mod tests {
             ("/collection", Route::Artists),
             ("/collection/albums", Route::Albums { artist: None }),
             ("/collection/tracks", Route::Tracks { album: None }),
+            ("/search", Route::Search),
         ]
     }
 
@@ -144,7 +145,6 @@ mod tests {
     fn anything_else_is_not_found() {
         for url in [
             "/podcasts",
-            "/search",
             "/collection/nope",
             "/collection/albums?artist=<script>",
             "/404",
@@ -154,7 +154,8 @@ mod tests {
     }
 
     #[test]
-    fn only_browse_routes_are_guarded() {
+    fn everything_but_login_setup_and_404_is_guarded() {
+        assert!(Route::Search.requires_auth());
         assert!(Route::Artists.requires_auth());
         assert!(!Route::Login.requires_auth());
         assert!(!Route::Setup.requires_auth());

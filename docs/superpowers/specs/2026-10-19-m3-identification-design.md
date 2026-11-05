@@ -7,7 +7,7 @@ Parent spec: `docs/superpowers/specs/2026-10-16-kima-rust-design.md` (§2 `kima-
 Roadmap: `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` (row M3, "Notes carried forward")
 Builds on: M0, M1 and M2 as merged on `main` (HEAD `a0b2959`): crates kima-core, kima-db, kima-jobs, kima-library,
 kima-api, kima-subsonic, kima-server; migrations `0001`–`0014`; the forked Next.js frontend as a static export.
-Upstream reference: kima-hub @ `12faf1cd` (`backend/src/services/{musicbrainz,acoustidService,acoustidIdentification,
+Upstream reference: kima-hub @ `c7527577` (v1.12.3; re-pinned by M-SYNC — written against v1.11.0; §8.3 AcoustID order and the album vote differ now, see M-SYNC plan Tasks 12–13) (`backend/src/services/{musicbrainz,acoustidService,acoustidIdentification,
 recordingMatch,albumIdentity,artistIdentity,artistCorrection,wikidata,fanart,artwork,artistSimilarity,listenBrainz,
 lrclib,fpcalc,enrichmentErrorCodeClassifier}.ts`, `backend/src/workers/{unifiedEnrichment,artistEnrichment,
 stageRetry}.ts`, `backend/src/routes/{enrichment,systemSettings,library/tracks,library/artists}.ts`,

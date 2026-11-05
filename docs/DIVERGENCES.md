@@ -1,8 +1,10 @@
 # Divergences from upstream Kima
 
 Every place where kima-rs behaves, stores or exposes something differently from
-upstream kima-hub (reference: v1.11.0) is recorded here, so it can be revisited
+upstream kima-hub (reference: v1.12.3, `c7527577d925b20f5adf410c7fd4e0c8ac250f69`; moved from v1.11.0 by M-SYNC on 2026-11-05) is recorded here, so it can be revisited
 later: fixed to match, kept on purpose, or rethought.
+
+**Re-pin note (2026-11-05):** rows written before the re-pin state "upstream does X" as of v1.11.0 (`12faf1cd…`) unless the row itself says otherwise; the M-SYNC audit (D-160) re-checked them against v1.12.3 and annotates each affected row with `[v1.12.3: …]` in place. Original text is kept.
 
 **Rule:** any change that makes kima-rs differ from upstream adds an entry in the
 same commit. Entries are never deleted, only given a new status.

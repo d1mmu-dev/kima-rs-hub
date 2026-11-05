@@ -7,7 +7,7 @@ Parent spec: `docs/superpowers/specs/2026-10-16-kima-rust-design.md` (§2 `kima-
 Roadmap: `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` (rows M1 and M2, "Notes carried forward")
 Builds on: M0 and M1 as merged on `main` (crates kima-core, kima-db, kima-jobs, kima-library, kima-api,
 kima-server; forked frontend as a static export).
-Upstream reference: kima-hub @ `12faf1cd` (`backend/src/routes/subsonic/*`, `middleware/subsonicAuth.ts`,
+Upstream reference: kima-hub @ `c7527577` (v1.12.3; re-pinned by M-SYNC — written against v1.11.0) (`backend/src/routes/subsonic/*`, `middleware/subsonicAuth.ts`,
 `utils/subsonicResponse.ts`, `docs/subsonic.md`, `frontend/features/settings/components/sections/SubsonicSection.tsx`).
 
 ## 1. Intent

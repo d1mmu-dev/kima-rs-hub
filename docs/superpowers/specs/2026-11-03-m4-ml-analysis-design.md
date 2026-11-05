@@ -994,7 +994,9 @@ particular relevance to this document's §6 model inventory and MusiCNN head tab
 - The `musicnn-answers.npz` parity fixture (§6.4 above, independently hashed as
   `05107f43...`) also changed upstream to match the reduced head set.
 
-**Owner decision:** stay pinned to `12faf1cd34ff53054221818b0ccde58b8e9b0020` for now.
+**Superseded (2026-11-05, owner):** the decision below is void. M4 merged first (CLAP scope, D-159), and the upstream reference moved to v1.12.3 (`c7527577`) in M-SYNC; D-148 is `resolved`. The rebuild of CLAP/MusiCNN on the new upstream checkpoint is M4 follow-up work (M-SYNC plan Appendix B). The text below is the historical record.
+
+**Owner decision (void, see above):** stay pinned to `12faf1cd34ff53054221818b0ccde58b8e9b0020` for now.
 All M4 work to date (model inventory, MusiCNN head regression tests, CLAP audio/text
 adapters, the `hf_audio.onnx`/`text_model.onnx` pins) is already verified and working
 against that pin, and re-pinning now would invalidate that verification mid-milestone.

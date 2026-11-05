@@ -18,6 +18,8 @@ fn config() -> Config {
         music_path: "/tmp".into(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         frontend_dir: None,
+        web_build_dir: None,
+        web_ssr_port: kima_core::config::DEFAULT_WEB_SSR_PORT,
         allowed_origins: vec![],
         log_level: "info".into(),
         session_secret: None,

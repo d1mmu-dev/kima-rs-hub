@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use kima_api_types::error::ApiErrorBody;
 use serde_json::json;
 
 #[derive(Debug, thiserror::Error)]
@@ -118,7 +119,10 @@ impl ApiError {
                 body.insert("error".into(), json!(message));
                 serde_json::Value::Object(body)
             }
-            _ => json!({ "error": self.to_string() }),
+            _ => json!(ApiErrorBody {
+                error: self.to_string(),
+                details: None,
+            }),
         };
         let mut response = (status, Json(body)).into_response();
         if let Self::RateLimited { retry_after_secs } = &self {

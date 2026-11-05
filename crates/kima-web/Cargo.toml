@@ -1,0 +1,17 @@
+[package]
+name = "kima-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Not rust-version.workspace: this crate targets wasm32-unknown-unknown (see README.md).
+description = "Kima's Rust/WASM frontend (vertigo)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Keep vertigo and the installed `vertigo-cli` on the same version.
+vertigo = "=0.13.4"
+kima-api-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true

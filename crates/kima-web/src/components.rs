@@ -322,7 +322,7 @@ pub fn mosaic_covers(covers: impl IntoIterator<Item = String>) -> Vec<String> {
         }
     }
     // `sort_by` is stable, like the legacy `Array.prototype.sort`: ties keep their first-seen order.
-    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    counts.sort_by_key(|c| std::cmp::Reverse(c.1));
     let ranked: Vec<String> = counts.into_iter().map(|(c, _)| c).collect();
     match ranked.len() {
         2 => vec![

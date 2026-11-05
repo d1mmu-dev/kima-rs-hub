@@ -144,6 +144,11 @@ impl Drop for SlotInner {
 
 /// Takes a slot with a compare-and-swap loop, so the counter never exceeds `max` (not even
 /// transiently).
+///
+/// `fetch_update` is deprecated in favor of `try_update` on newer toolchains, but `try_update`
+/// postdates this crate's pinned MSRV (`rust-version = "1.85"` at the workspace root); keep
+/// `fetch_update` and silence the lint rather than raise the MSRV for a rename-only change.
+#[allow(deprecated)]
 fn reserve(active: &Arc<AtomicUsize>, max: usize) -> Option<Arc<SlotInner>> {
     active
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {

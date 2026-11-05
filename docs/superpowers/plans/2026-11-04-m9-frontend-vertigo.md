@@ -100,11 +100,10 @@ in-flight milestone claimed it first).
    does not cover.** Every route outside §5 of the spec must get `kima-server`'s normal 404/existing routes, not an
    accidental proxy-through to the loopback SSR task; checked by a dedicated test (Task 3) before any page work
    starts, so later tasks cannot accidentally depend on a proxy allow-list that swallows unrelated routes.
-3. **The embedded SSR task's liveness (Task 3).** If the loopback-bound `vertigo_cli::serve::run()` task dies after
-   `kima-server` is already serving traffic, every `kima-web` page breaks (no CSR/static fallback exists under the
-   new design) — Task 3's tests must cover at least one "the embedded task is down" case and assert `kima-server`
-   degrades predictably (a clear 5xx for `kima-web` routes, `/api` and health checks unaffected), not silently
-   hangs or panics the whole process.
+3. **The embedded SSR task's liveness (Task 3).** Owner decision (2026-11-05): crash-and-restart. If the
+   loopback-bound `vertigo_cli::serve::run()` task panics or fails to bind after `kima-server` has reported ready,
+   `kima-server` must exit non-zero (so the container restart policy recovers it), never hang or keep serving
+   `kima-web` routes from a dead backend. Task 3's tests must cover that exit path.
 4. **The player's `<audio>` element and playback-state persistence (Task 14) under the existing stream endpoint's
    range/transcode behaviour.** `kima-web` must not assume a different streaming contract than the Next.js player
    already relies on; Task 14's tests reuse the same stream endpoint behaviour M1 already established, not a new
@@ -182,18 +181,14 @@ in-flight milestone claimed it first).
     fail, no embedding exists yet): (a) a request to one of `kima-web`'s routes (e.g. `/login`) returns HTML whose
     body was produced by the embedded wasmtime SSR task (assert on real rendered markup, not an empty shell —
     this is the test that actually distinguishes SSR from a CSR stub); (b) a request to a path outside §5 of the
-    spec (e.g. `/podcasts`) gets `kima-server`'s normal 404/existing routing, never proxied to the SSR task; (c)
-    with the embedded SSR task deliberately not started (simulated for the test), a request to a `kima-web` route
-    returns a clear 5xx, while `/api/health` (or equivalent) still responds normally — proving the failure mode is
-    contained, per Review Focus #3.
+    spec (e.g. `/podcasts`) gets `kima-server`'s normal 404/existing routing, never proxied to the SSR task; (c) when the embedded SSR task fails (bind failure or panic, simulated for the test), the `kima-server` process
+    exits non-zero instead of continuing to serve, per Review Focus #3.
   - **Step 2:** add a `kima_web_ssr` module to `kima-server` that, at startup, constructs `vertigo_cli::serve::
     ServeOpts { common: CommonOpts { dest_dir: <kima-web's build/> }, inner: ServeOptsInner { host:
     "127.0.0.1".into(), port: <internal, configurable>, proxy: vec![], env: vec![] } }` by hand (no CLI parsing —
     confirmed constructible, spec §3) and spawns `vertigo_cli::serve::run(opts, None)` as a `tokio::task`, logging
-    and (per spec §12 Q3-equivalent, now the embedded-SSR liveness question) deciding here whether a task panic
-    crashes the whole process or is caught and surfaced as the contained 5xx from Step 1(c) — pick the contained
-    failure mode unless this task finds a concrete reason the orchestrator-restart approach is simpler, and record
-    which was chosen in the commit body.
+    and, per the owner's crash-and-restart decision (spec §12), makes a task panic or bind failure terminate the
+    whole process with a non-zero exit (e.g. join the task handle and exit on completion); no contained-5xx mode.
   - **Step 3:** add a reverse-proxy layer to `kima_server::frontend` (or a new `kima_server::web_proxy` module) —
     for exactly the path allow-list §5 covers (a small named constant, extended page by page by Tasks 8–16, same
     shape the original switch design used for its allow-list), forward the incoming request's method/headers/body

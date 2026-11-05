@@ -1,0 +1,20 @@
+[package]
+name = "kima-vibe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Pure arithmetic of the vibe engine: matching formula, exact maths, UMAP layout, moods, song path"
+
+[dependencies]
+rayon = { version = "1", optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[features]
+# Row-parallel neighbour sweep; results are bit-identical to the serial code. Off here, enabled by kima-ident.
+parallel = ["dep:rayon"]
+
+[dev-dependencies]
+serde_json.workspace = true

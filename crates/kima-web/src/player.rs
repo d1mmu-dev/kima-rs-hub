@@ -667,14 +667,14 @@ impl Player {
             .0
             .playing
             .map(|p| if p { "pause" } else { "play" }.to_owned());
-        let play_icon = self.0.playing.render_value(|playing| {
-            if playing {
-                icon("pause", "w-5 h-5")
-            } else {
-                icon("play", "w-5 h-5 ml-0.5")
-            }
-        });
-        self.current().render_value(bind!(me, progress, play_label, play_title, play_icon, |item: Option<QueueItem>| {
+        self.current().render_value(bind!(me, progress, play_label, play_title, |item: Option<QueueItem>| {
+            let play_icon = me.0.playing.render_value(|playing| {
+                if playing {
+                    icon("pause", "w-5 h-5")
+                } else {
+                    icon("play", "w-5 h-5 ml-0.5")
+                }
+            });
             let Some(item) = item else {
                 return dom! { <span /> };
             };
@@ -705,7 +705,7 @@ impl Player {
                                     <div class="flex items-center gap-1.5 flex-shrink-0" role="group" aria-label="Playback controls">
                                         <button class="w-10 h-10 rounded-full flex items-center justify-center transition bg-brand text-black hover:scale-105"
                                             aria-label={play_label.clone()} title={play_title.clone()} on_click={bind!(me, |_| me.toggle())}>
-                                            {play_icon.clone()}
+                                            {play_icon}
                                         </button>
                                     </div>
                                 </div>

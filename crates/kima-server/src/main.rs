@@ -36,6 +36,23 @@ async fn main() -> anyhow::Result<()> {
         })
         .transpose()?;
 
+    let stop = CancellationToken::new();
+    // First, so a bad build or a busy port fails the start with nothing else running. The
+    // server and the SSR task are one unit: see `web_ssr` for the crash-and-restart policy.
+    let mut web_ssr = match &config.web_build_dir {
+        Some(dir) => Some(
+            kima_server::web_ssr::WebSsr::start(
+                dir,
+                config.web_ssr_port,
+                format!("http://127.0.0.1:{}", config.bind_addr.port()),
+                stop.clone(),
+            )
+            .await
+            .context("starting the embedded kima-web SSR server")?,
+        ),
+        None => None,
+    };
+
     let secrets = secrets::load_or_generate(
         &config.data_dir,
         config.session_secret.clone(),
@@ -53,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("reading the library root from system settings")?;
     info!(root = %library_root.display(), "library root");
-    let shutdown = CancellationToken::new();
+    let shutdown = stop;
     // One handle for the HTTP side, the job worker and the watcher: switching the library to
     // an organized copy changes it for all three.
     let library_root = kima_library::scan::LibraryRoot::new(library_root);
@@ -166,7 +183,11 @@ async fn main() -> anyhow::Result<()> {
             |s, (name, cron, f)| s.add(name, cron, f),
         )
         .spawn(pool.clone(), shutdown.clone());
-    let app = kima_server::app(state, &config);
+    let app = kima_server::app_with_web(
+        state,
+        &config,
+        web_ssr.as_ref().map(|ssr| ssr.proxy.clone()),
+    );
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("binding {}", config.bind_addr))?;
@@ -183,19 +204,8 @@ async fn main() -> anyhow::Result<()> {
     })
     .into_future();
     tokio::pin!(server);
-    let served = tokio::select! {
-        res = &mut server => res,
-        () = shutdown.cancelled() => {
-            // Backstop: a connection that ignores shutdown must not keep the process alive.
-            match tokio::time::timeout(SHUTDOWN_GRACE, &mut server).await {
-                Ok(res) => res,
-                Err(_) => {
-                    warn!(grace = ?SHUTDOWN_GRACE, "connections still open; exiting anyway");
-                    Ok(())
-                }
-            }
-        }
-    };
+    let served =
+        kima_server::web_ssr::serve(&mut server, web_ssr.as_mut(), &shutdown, SHUTDOWN_GRACE).await;
     // Runs whether serving ended by signal or by error, before the error is returned.
     shutdown.cancel();
     watcher.join().await;

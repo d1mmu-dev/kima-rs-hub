@@ -2,6 +2,10 @@
 // Needs the dev stack running (tools/run-kima-web-dev.sh) with an admin account ALREADY created and a
 // scanned library containing the "Disc Band / Double Album" tracks of tools/make-fixture-library.sh.
 //   CHROME=/path/to/chrome ADMIN_USER=admin ADMIN_PASS=... [BASE=http://127.0.0.1:4444]
+//   --ssr (or SSR=1)  target the kima-server origin that serves kima-web through the embedded SSR
+//                     (tools/run-kima-web-dev.sh --ssr): BASE defaults to http://127.0.0.1:$KIMA_PORT (3030), and
+//                     extra checks first fetch pages WITHOUT running JavaScript to prove they are server-rendered
+//                     and that the proxy only serves kima-web's routes.
 //   [MUSIC=<music dir> FFMPEG=<ffmpeg>]   (the last two enable the scan-picks-up-a-new-file check)
 //   [DEBUG_PORT=9333]   Chromium's remote-debugging port
 // The run changes the admin password to NEW_PASS (default secret34) through the Settings page and changes it
@@ -17,7 +21,8 @@ const PASS = process.env.ADMIN_PASS || 'secret12';
 const NEW_PASS = process.env.NEW_PASS || 'secret34';
 const PORT = process.env.DEBUG_PORT || '9333';
 import os from 'node:os';
-const BASE = process.env.BASE || 'http://127.0.0.1:4444';
+const SSR = process.argv.includes('--ssr') || process.env.SSR === '1';
+const BASE = process.env.BASE || (SSR ? 'http://127.0.0.1:' + (process.env.KIMA_PORT || '3030') : 'http://127.0.0.1:4444');
 const MUSIC = process.env.MUSIC;
 const chrome = spawn(CHROME, ['--headless=new', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=' + PORT,
   '--autoplay-policy=no-user-gesture-required', '--mute-audio', '--window-size=1100,800',
@@ -52,6 +57,26 @@ const typeInto = (name, v) => ev(`(()=>{const i=document.querySelector('input[na
 const login = async (pass) => { await setInput('username', USER); await setInput('password', pass); await ev(`document.querySelector('button[type=submit]').click()`); await sleep(2500); };
 const audio = () => ev(`(()=>{const a=document.querySelector('audio');return a?{src:a.currentSrc.replace(/token=.*/,'token=…'),paused:a.paused,t:a.currentTime,d:a.duration,rs:a.readyState,err:a.error&&a.error.code}:null})()`);
 const results = []; const check = (name, ok, detail = '') => { results.push([ok, name, detail]); console.log(ok ? 'PASS' : 'FAIL', name, detail); };
+
+if (SSR) {
+  // Plain HTTP fetches: no JavaScript runs, so this is what the server itself rendered.
+  const page = async (path) => { const r = await fetch(BASE + path, { redirect: 'manual' }); return { status: r.status, type: r.headers.get('content-type') || '', body: await r.text() }; };
+  const login = await page('/login');
+  check('SSR: GET /login is 200 HTML with the sign-in form already in the markup',
+    login.status === 200 && login.type.startsWith('text/html') && login.body.includes('<h2>Sign in to Kima</h2>') && login.body.includes('<form') && login.body.includes('name="username"'));
+  const root = await page('/collection');
+  check('SSR: GET /collection is server-rendered by the wasm (bootstrap script + styles present)',
+    root.status === 200 && root.body.includes('data-vertigo-run-wasm') && root.body.includes('autocss_'));
+  const wasmPath = (login.body.match(/data-vertigo-run-wasm="([^"]+)"/) || [])[1] || '';
+  const wasm = await fetch(BASE + wasmPath);
+  check('SSR: the wasm named by the page is served through the proxy', wasm.status === 200 && Buffer.from(await wasm.arrayBuffer()).subarray(0, 4).toString('latin1') === '\0asm', wasmPath);
+  const manifest = await page(wasmPath.replace(/\/[^/]*$/, '/index.json'));
+  check('SSR: other files of the build directory are not served (index.json -> 404)', manifest.status === 404, String(manifest.status));
+  const foreign = await page('/podcasts/');
+  check('SSR: a path outside the kima-web routes is not proxied to the SSR server', !foreign.body.includes('data-vertigo-run-wasm'), String(foreign.status));
+  const health = await page('/api/health');
+  check('SSR: /api is kima-server\'s own (health answers JSON)', health.status === 200 && health.type.includes('json'));
+}
 
 await goto(BASE + '/');
 await ev('localStorage.clear()'); await goto(BASE + '/collection');

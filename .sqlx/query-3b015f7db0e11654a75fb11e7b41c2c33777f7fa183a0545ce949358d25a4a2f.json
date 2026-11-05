@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id, t.path, t.size, t.mtime,\n                  t.missing_since IS NOT NULL AS \"missing!\",\n                  t.year AS track_year, b.year AS album_year,\n                  b.title_key AS album_key, a.name_key AS artist_key,\n                  COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS \"year_conflict!\",\n                  COALESCE((t.guessed ->> 'viaSymlink')::boolean, false) AS \"via_symlink!\",\n                  COALESCE(b.identity_source = 'autotag'\n                           AND b.applied_identity ->> 'artistKey' = a.name_key\n                           AND b.applied_identity ->> 'titleKey' = b.title_key\n                           AND COALESCE(b.applied_identity -> 'year', 'null'::jsonb)\n                               = COALESCE(to_jsonb(b.year), 'null'::jsonb),\n                           false) AS \"album_autotag!\",\n                  a.name AS artist_name,\n                  t.guessed -> 'credit' AS \"credit: Json<StoredCredit>\"\n           FROM tracks t\n           JOIN albums b ON b.id = t.album_id\n           JOIN artists a ON a.id = b.artist_id\n           WHERE starts_with(t.path, $1)\n             AND (strpos(substr(t.path, length($1) + 1), '/') = 0\n                  OR substr(t.path, length($1) + 1) ~* '^(cd|dis[ck]|digital media|vinyl|side)[^/]*/[^/]+$')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "mtime",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "missing!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "track_year",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "album_year",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "album_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "artist_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "year_conflict!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "via_symlink!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "album_autotag!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 12,
+        "name": "artist_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "credit: Json<StoredCredit>",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      false,
+      false,
+      null,
+      null,
+      null,
+      false,
+      null
+    ]
+  },
+  "hash": "3b015f7db0e11654a75fb11e7b41c2c33777f7fa183a0545ce949358d25a4a2f"
+}

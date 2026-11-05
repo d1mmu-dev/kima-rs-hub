@@ -20,6 +20,11 @@ pub struct Resolved {
     pub guessed: Guessed,
     /// Where the album artist came from (before a compilation turns it into Various Artists).
     pub album_artist_from: ArtistFrom,
+    /// The artist this file names for its album, before a compilation turns it into Various
+    /// Artists (the file's candidate in the album vote, [`crate::vote`]).
+    pub own_artist: String,
+    /// The tags call the file part of a compilation.
+    pub compilation_tag: bool,
 }
 
 /// The source of a resolved album artist.
@@ -371,6 +376,7 @@ pub fn resolve(raw: &RawTags, rel_path: &Path) -> Resolved {
         .map(|a| canonical_various(a).unwrap_or(a).to_string())
         .unwrap_or_else(|| album_artist.clone());
 
+    let own_artist = album_artist.clone();
     let artist_keys = [crate::names::key(&album_artist)];
     let is_compilation = raw.compilation || canonical_various(&album_artist).is_some();
     let album_artist = if is_compilation {
@@ -443,6 +449,8 @@ pub fn resolve(raw: &RawTags, rel_path: &Path) -> Resolved {
         is_compilation,
         guessed: g,
         album_artist_from,
+        own_artist,
+        compilation_tag: raw.compilation,
     }
 }
 

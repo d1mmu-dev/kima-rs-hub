@@ -8,3 +8,6 @@ pub mod error;
 pub mod library;
 pub mod onboarding;
 pub mod playback_state;
+pub mod playlists;
+pub mod search;
+pub mod settings;

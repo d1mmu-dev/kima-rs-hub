@@ -151,7 +151,9 @@ struct RecentParams {
     limit: Option<String>,
 }
 
-/// Artists of the most recently added albums, newest first.
+/// Artists by their newest album, one row each, newest first; Various Artists and Unknown
+/// Artist name no one and are left out. Upstream `parseLimit(raw, 10, 100)`: `0` and junk take
+/// 10, a negative number 1, more than 100 is 100.
 async fn recently_added(
     State(state): State<AppState>,
     _user: AuthUser,
@@ -160,21 +162,11 @@ async fn recently_added(
     let wanted = params
         .limit
         .as_deref()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .filter(|n| *n > 0)
+        .and_then(super::parse_int)
+        .filter(|n| *n != 0)
         .unwrap_or(10)
-        .min(100) as usize;
-    // Upstream looks at the 20 newest albums and keeps `limit` distinct artists.
-    let albums = browse::recent_albums(&state.pool, 20).await?;
-    let mut seen = Vec::new();
-    for a in &albums {
-        if !seen.contains(&a.artist_id) {
-            seen.push(a.artist_id);
-        }
-        if seen.len() >= wanted {
-            break;
-        }
-    }
+        .clamp(1, 100);
+    let seen = browse::recent_artists(&state.pool, wanted).await?;
     let mut artists = Vec::new();
     for id in seen {
         if let Some(a) = browse::artist(&state.pool, id).await? {

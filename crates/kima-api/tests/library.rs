@@ -981,3 +981,104 @@ async fn removals_paging_clamps(pool: PgPool) {
     assert_eq!(page("?limit=0").await, (3, 3));
     assert_eq!(page("?limit=999999999999999999999").await, (3, 3));
 }
+
+/// Backdates an album: its `created_at` is how recently it was added.
+async fn added_minutes_ago(pool: &PgPool, album: Uuid, minutes: i32) {
+    sqlx::query("UPDATE albums SET created_at = now() - make_interval(mins => $2) WHERE id = $1")
+        .bind(album)
+        .bind(minutes)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn recent_names(e: &Env, query: &str) -> Vec<String> {
+    let v = get(e, &format!("/api/library/recently-added{query}")).await;
+    v["artists"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn recent_added_each_artist_carries_its_library_album_count(pool: PgPool) {
+    let a1 = seed(&pool, Seed::new("Many", "M1", Some(2001), "s1")).await;
+    let a2 = seed(&pool, Seed::new("Many", "M2", Some(2002), "s2")).await;
+    let b = seed(&pool, Seed::new("One", "O1", Some(2003), "s3")).await;
+    added_minutes_ago(&pool, a1.album, 5).await;
+    added_minutes_ago(&pool, a2.album, 1).await;
+    added_minutes_ago(&pool, b.album, 10).await;
+    let e = env(pool).await;
+    let v = get(&e, "/api/library/recently-added?limit=2").await;
+    let counts: Vec<_> = v["artists"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["name"].as_str().unwrap(),
+                a["albumCount"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(counts, [("Many", 2), ("One", 1)]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn recent_added_leaves_out_various_artists_and_unknown_artist(pool: PgPool) {
+    let real = seed(&pool, Seed::new("Real", "R1", Some(2000), "s1")).await;
+    let va = seed(&pool, Seed::new("Various Artists", "V1", Some(2000), "s2")).await;
+    let unknown = seed(&pool, Seed::new("Unknown Artist", "U1", None, "s3")).await;
+    // The placeholders' albums are the newest of all, yet name no one.
+    added_minutes_ago(&pool, real.album, 30).await;
+    added_minutes_ago(&pool, va.album, 2).await;
+    added_minutes_ago(&pool, unknown.album, 1).await;
+    let e = env(pool).await;
+    assert_eq!(recent_names(&e, "?limit=10").await, ["Real"]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn recent_added_fills_its_row_past_one_artists_albums(pool: PgPool) {
+    // One artist added 25 albums most recently; four others one each, older.
+    for n in 0..25 {
+        let title = format!("P{n:02}");
+        let s = seed(
+            &pool,
+            Seed::new("Prolific", &title, Some(2000), &format!("t{n}")),
+        )
+        .await;
+        added_minutes_ago(&pool, s.album, n).await;
+    }
+    for (i, name) in ["B", "C", "D", "E"].iter().enumerate() {
+        let s = seed(&pool, Seed::new(name, "Solo", Some(2000), "t")).await;
+        added_minutes_ago(&pool, s.album, 100 + i as i32).await;
+    }
+    let e = env(pool).await;
+    assert_eq!(
+        recent_names(&e, "?limit=5").await,
+        ["Prolific", "B", "C", "D", "E"]
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn recent_added_clamps_limit(pool: PgPool) {
+    for n in 0..12 {
+        let s = seed(
+            &pool,
+            Seed::new(&format!("Artist {n:02}"), "A", Some(2000), "t"),
+        )
+        .await;
+        added_minutes_ago(&pool, s.album, n).await;
+    }
+    let e = env(pool).await;
+    // As upstream's `parseLimit(raw, 10, 100)`: 0 and junk take the default of 10, a negative
+    // number the smallest page, a huge one the largest.
+    assert_eq!(recent_names(&e, "").await.len(), 10);
+    assert_eq!(recent_names(&e, "?limit=0").await.len(), 10);
+    assert_eq!(recent_names(&e, "?limit=abc").await.len(), 10);
+    assert_eq!(recent_names(&e, "?limit=-3").await, ["Artist 00"]);
+    assert_eq!(recent_names(&e, "?limit=3x").await.len(), 3);
+    assert_eq!(recent_names(&e, "?limit=500").await.len(), 12);
+}

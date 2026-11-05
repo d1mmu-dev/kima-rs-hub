@@ -291,3 +291,33 @@ async fn api_plays_returns_stored_source(pool: PgPool) {
         .collect();
     assert_eq!(sources, ["LIBRARY", "SUBSONIC"]);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn recently_listened_leaves_out_various_artists_and_unknown_artist(pool: PgPool) {
+    let real = seed(&pool, Seed::new("Real", "R1", None, "r1")).await;
+    let va = seed(&pool, Seed::new("Various Artists", "V1", None, "v1")).await;
+    let unknown = seed(&pool, Seed::new("Unknown Artist", "U1", None, "u1")).await;
+    let e = env(pool.clone()).await;
+    // The compilation and the untagged album were played after the real artist's album.
+    for (track, mins) in [(real.track, 30), (va.track, 10), (unknown.track, 20)] {
+        sqlx::query(
+            "INSERT INTO plays (id, user_id, track_id, played_at, heard)
+             VALUES ($1, $2, $3, now() - make_interval(mins => $4), true)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(e.ana_id)
+        .bind(track)
+        .bind(mins)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let v = get(&e, &e.ana, "/api/library/recently-listened?limit=10").await;
+    let names: Vec<_> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Real"]);
+}

@@ -34,7 +34,7 @@ pub fn render(ctx: &Ctx) -> DomNode {
         let role = me.role.clone();
         dom! {
             <div>
-                <p>"Signed in as " <strong>{username}</strong></p>
+                <p>"Signed in as " <strong id="account-username">{username}</strong></p>
                 <p class="text-xs tabular-nums text-[var(--text-secondary)]">"Role: " {role}</p>
             </div>
         }

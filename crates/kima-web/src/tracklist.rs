@@ -187,8 +187,6 @@ pub fn library_rows(ctx: &Ctx, tracks: Vec<Track>) -> DomNode {
             let len = format_time(t.duration as f64);
             let queue = queue_button(ctx, t, ROW_ACTION);
             let add = add_to_playlist(ctx, t.id.to_string(), ROW_ACTION);
-            let extra = dom! { <span /> };
-            let _ = extra;
             let cover = cover_box(ctx, t, 80, "relative w-11 h-11 bg-[#181818] rounded border border-white/10 flex items-center justify-center overflow-hidden shrink-0");
             let style = format!("--i: {};", i.min(20));
             dom! {

@@ -51,9 +51,12 @@ pub fn render(ctx: &Ctx) -> DomNode {
                 .post::<_, Playlist>("/api/playlists", &body)
                 .await
             {
-                Ok(created) => ctx.router.set(Route::Playlist {
-                    id: created.id.to_string(),
-                }),
+                Ok(created) => {
+                    ctx.playlists_rev.change(|n| *n += 1);
+                    ctx.router.set(Route::Playlist {
+                        id: created.id.to_string(),
+                    });
+                }
                 Err(err) => error.set(Some(err.message)),
             }
             busy.set(false);

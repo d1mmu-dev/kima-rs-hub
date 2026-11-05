@@ -16,7 +16,9 @@ use crate::api::client::load;
 use crate::player::queue_item;
 use crate::route::Route;
 use crate::tracklist::{RowExtra, playlist_rows};
-use crate::ui::{BTN_BRAND_SM, BTN_OUTLINE, Ctx, INPUT, PAGE_TITLE, flag_now, resource_view};
+use crate::ui::{
+    BTN_BRAND_SM, BTN_OUTLINE, Ctx, INPUT, PAGE_TITLE, flag_now, plural, resource_view,
+};
 
 pub fn render(ctx: &Ctx, id: String) -> DomNode {
     let reload = Value::new(0_u32);
@@ -65,7 +67,10 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
                 .put::<_, Playlist>(&format!("/api/playlists/{id}"), &body)
                 .await
             {
-                Ok(_) => reload.change(|n| *n += 1),
+                Ok(_) => {
+                    ctx.playlists_rev.change(|n| *n += 1);
+                    reload.change(|n| *n += 1);
+                }
                 Err(err) => message.set(Some(err.message)),
             }
         }));
@@ -78,7 +83,10 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
                 .delete::<MessageResponse>(&format!("/api/playlists/{id}"))
                 .await
             {
-                Ok(_) => ctx.router.set(Route::Playlists),
+                Ok(_) => {
+                    ctx.playlists_rev.change(|n| *n += 1);
+                    ctx.router.set(Route::Playlists);
+                }
                 Err(err) => message.set(Some(err.message)),
             }
         }));
@@ -111,7 +119,10 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
                         ))
                         .await
                     {
-                        Ok(_) => reload.change(|n| *n += 1),
+                        Ok(_) => {
+                            ctx.playlists_rev.change(|n| *n += 1);
+                            reload.change(|n| *n += 1);
+                        }
                         Err(err) => message.set(Some(err.message)),
                     }
                 }));
@@ -131,7 +142,7 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
     };
     let input_class = format!("{INPUT} max-w-xs");
     let title = detail.summary.playlist.name.clone();
-    let count = format!("{} tracks", detail.summary.track_count);
+    let count = plural(detail.summary.track_count, "track", "tracks");
     dom! {
         <div class="min-h-screen">
             <div class="px-4 md:px-8 pt-8 pb-6">

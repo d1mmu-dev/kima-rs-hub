@@ -111,7 +111,7 @@ token: `localStorage` key `kima-web.token` (the legacy Next.js app uses `auth_to
   play all, rename, two-step delete and per-track remove. Every change refetches the playlist (no optimistic
   edits). Every track list (tracks, search, playlist) has a "＋ Playlist" picker (`tracklist.rs`); adding a
   track that is already there answers 200 with `duplicated`, shown as "Already in <name>". Reordering and
-  public/hidden playlists are not in the UI.
+  hidden playlists are not in the UI (the detail page can toggle public/private).
 - **Settings** (`pages/settings.rs`, spec §5.7 account slice only): username and role from `GET /auth/me`, and
   a password change (`POST /auth/change-password`). The backend revokes the old tokens on a change and returns
   a new access token, which replaces the stored session; the audio element of a track that is already playing
@@ -151,37 +151,80 @@ Settings page and changes it back, so it can be repeated.
 
 ## Visual parity: compromises and assets
 
-`tools/run-kima-web-visual.sh compare` screenshots kima-web and the legacy Next.js frontend (same backend, same
-seeded library) at 1440x900, 1024x768 and 390x844 and prints the share of pixels whose channel delta exceeds
-24. **No page is within the 1% threshold**; measured on 2026-11-05 (percent of differing pixels):
+Reference: the legacy Next.js frontend **v1.11.0** (`frontend/`, used only by the compare tooling in a scratch copy; Next.js is
+not part of any product, Docker or CI path). The pinned upstream moves to v1.12.3, so the target changes: treat the numbers
+below as a snapshot against v1.11.0, not as a goal for the next round.
+
+`tools/run-kima-web-visual.sh compare` runs `node tools/gen-kima-web-css.mjs --check`, a real `vertigo build` and a
+server restart, then screenshots kima-web and the legacy app (same backend, same seeded library) at 1440x900, 1024x768 and
+390x844 and writes `<page>-<viewport>-{legacy,web,diff}.png` under `target/kima-web-visual/`.
+
+**Why the old numbers were wrong.** The previous tool reported the share of pixels with a channel delta above 24. A
+dark UI is mostly flat background, so a page without any utility class scored 2-5% (measured: unstyled login 2.5% against
+2.3% for the styled one). The tool now also reports, per page and viewport: **ink** (share of *foreground* pixels, i.e. not
+the page's dominant colour in either image, that differ), **SSIM** (mean over non-flat 8x8 luminance blocks), and a DOM
+**style probe** (web font actually loaded, at least 100 class rules, no default-styled buttons/links/inputs, body
+background set). A page fails on any of: diff > 1%, ink > 8%, SSIM < 0.93, a probe problem. `--negative-control` strips
+all class-selector rules from kima-web and requires every page to be detected (done for login, albums, tracks, settings:
+all detected, the unstyled albums page looked unstyled in the screenshot). The probe found a real bug on the way: the
+server's CSP had `font-src 'self'`, which silently dropped kima-web's embedded Montserrat (data: URI), so every page
+used a fallback font; fixed (`font-src 'self' data:`, tested). The e2e now also runs `--check` and asserts the login page
+is styled with the font loaded. A second real bug: Tailwind's `max-[1024px]` is false at exactly 1024px, so the desktop
+sidebar and player bar appeared on 1024px tablets; replaced by the `tablet` variant.
+
+**Measured table** (diff% / ink% / SSIM; legacy v1.11.0; images inspected by eye for every row):
 
 | page | 1440x900 | 1024x768 | 390x844 |
 |---|---|---|---|
-| login | 2.81 | 4.53 | 9.25 |
-| setup | 5.52 | 8.90 | 12.10 |
-| artists | 4.43 | 4.97 | 10.46 |
-| albums | 25.05 | 23.05 | 39.04 |
-| tracks | 5.21 | 6.16 | 12.34 |
-| search | 2.60 | 2.37 | 5.93 |
-| playlists | 6.81 | 5.65 | 14.97 |
-| playlist | 5.93 | 6.68 | 12.27 |
-| settings | 4.15 | 4.19 | 6.18 |
-| player | 5.21 | 6.16 | 12.34 |
+| login | 0.00 / 0.0 / 1.00 | 0.00 / 0.0 / 1.00 | 0.00 / 0.0 / 1.00 |
+| setup (status mocked to a fresh install) | 8.38 / 32.4 / 0.14 | 13.87 / 39.8 / 0.16 | 16.59 / 51.5 / 0.16 |
+| artists | 0.67 / 8.6 / 0.78 | 0.52 / 4.2 / 0.90 | 1.03 / 6.2 / 0.89 |
+| albums | 1.19 / 4.9 / 0.84 | 1.36 / 4.0 / 0.92 | 0.81 / 1.7 / 0.96 |
+| tracks | 0.80 / 9.0 / 0.86 | 0.64 / 4.7 / 0.94 | 1.74 / 9.2 / 0.88 |
+| search (query "blues") | 1.64 / 30.6 / 0.52 | 1.94 / 23.5 / 0.56 | 3.93 / 41.9 / 0.46 |
+| playlists | 0.67 / 9.3 / 0.77 | 0.48 / 4.3 / 0.89 | 0.89 / 5.9 / 0.90 |
+| playlist | 0.66 / 9.1 / 0.80 | 0.40 / 3.4 / 0.94 | 1.31 / 9.0 / 0.87 |
+| settings | 1.40 / 23.6 / 0.59 | 1.43 / 16.5 / 0.64 | 3.35 / 43.5 / 0.53 |
+| player (first track loaded) | 1.12 / 7.8 / 0.83 | 0.57 / 1.8 / 0.94 | 1.59 / 4.8 / 0.90 |
 
-So the work is "close in structure", not pixel-identical. Known reasons for the gaps:
+Before this round (same tool, new metrics, 1440x900): playlists 6.1 diff / 60 ink, playlist 6.0 / 60, settings 3.6 / 20,
+login 2.8 / 35; the 1024px column was 5-28% (the breakpoint bug). **Only login is under every bound; the rest are not
+under 1%/8%/0.93 everywhere.** What remains is explained by the exclusions below, and by nothing else that I found in the
+diff images. `ssr->hydrated` in the compare output compares JavaScript-disabled output of an *anonymous* request (the
+login shell for guarded pages) with the hydrated page, so it is not a layout-shift measure for authenticated pages
+(e.g. albums shows 17-34% for that reason); no authenticated SSR comparison exists.
 
-- The legacy sidebar lists queue / vibe / browse / stats and its album cards carry delete buttons plus a "refine"
-  filter; kima-web has no such pages or actions (seen in the diff images, not audited feature by feature), so shell regions differ.
-  `/collection/albums` is the worst page for this (25-39%).
-- Cover art, generated gradients and font anti-aliasing differ by a few pixels; text is lowercase through the
-  copied `body { text-transform: lowercase }`.
-- Styles are a precompiled Tailwind v4 sheet (`assets/kima-base.css`, regenerated by `tools/gen-kima-web-css.mjs`),
-  not `css!` macros; classes unused by the legacy build are not available.
-- Icons are a fixed subset of lucide (`src/icons_data.rs`); add a name to `tools/gen-kima-web-icons.mjs` and rerun.
-- The player queue is persisted through `/api/playback-state` as before; the in-track position is stored in
-  `localStorage` (`kima-web.position`).
-- Pages are server-rendered as a shell plus what needs no fetch; "ssr->hydrated" in the report is the share of
-  pixels that change when hydration finishes.
+### Deferred to M10 (not a styling gap)
+
+The owner placed these outside M9; they are omitted, not stubbed:
+
+- Sidebar entries queue, vibe, browse, stats (kima-web has collection / search / playlists instead; the playlist stack
+  below is therefore ~94px higher). This is the largest block of diff in every desktop table row.
+- Player bar: "match this vibe" and "show lyrics" buttons (the transport group is ~32px narrower), keyboard-shortcut
+  info button, expand-to-fullscreen button (the volume slider is longer: 150px against 40px).
+- Header: bell (notifications) and the version badge shows kima-web's `v0.1.0`, legacy shows its own `v1.11.0`.
+- Settings: every section except Account (native apps, playback, scrobbling, admin sections), two-factor, the mobile
+  "jump to section" select; setup: the second wizard step "integrations" and the step indicator (about 46px
+  shift of everything below the heading); search: the "all results / library / discover" tabs and the soulseek tip.
+- Playlists: Import URL, Import File, Browse, share links, hide, reordering (move up/down/drag), pending/failed
+  tracks. Albums/tracks/artists: delete buttons and the "Recommended" filter of Refine (the backend has no delete
+  routes for library items and no discovery source in kima-rs).
+
+### Differences that are M9 choices
+
+- Create-playlist is an inline panel without the public/private toggle; the playlist detail has a public/private
+  toggle instead. Delete uses a dialog (two-step, as before). The password form does not close itself after a
+  success and its button is not disabled while the fields are incomplete (so the validation messages can show).
+- Refine's sort value is kept across tabs; a sort a tab does not offer (e.g. "year" on tracks) falls back to name on the
+  server and no option is highlighted.
+- Cover art, generated gradients and font anti-aliasing differ by a few pixels; text is lowercase through the copied
+  `body { text-transform: lowercase }`.
+- Styles are a precompiled Tailwind v4 sheet (`assets/kima-base.css` -> `assets/kima.css`, regenerated by
+  `tools/gen-kima-web-css.mjs`; **run it whenever classes in `src/` change; `--check` runs in the compare script and the
+  e2e**), not `css!` macros. Icons are a fixed subset of lucide (`src/icons_data.rs`; add a name to
+  `tools/gen-kima-web-icons.mjs`).
+- The player queue is persisted through `/api/playback-state` (now including shuffle); repeat and the sleep timer are
+  client-side only; the in-track position is stored in `localStorage` (`kima-web.position`).
 
 Licences of the copied assets are in `assets/NOTICE.md` (Montserrat: OFL 1.1; icons: lucide ISC; logo: project GPL-3.0).
 

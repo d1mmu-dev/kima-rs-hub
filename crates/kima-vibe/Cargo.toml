@@ -9,7 +9,9 @@ description = "Pure arithmetic of the vibe engine: matching formula, exact maths
 [dependencies]
 rayon = { version = "1", optional = true }
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
+# float_roundtrip: the default parser can be 1 ulp off, and the goldens and asset files are compared bit for bit.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+sha2.workspace = true
 thiserror.workspace = true
 
 [features]

@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Starts a local kima-web dev stack: kima-server (API) + the vertigo dev server, which serves kima-web
-# and proxies /api/* to kima-server so the browser sees ONE origin (http://127.0.0.1:$WEB_PORT).
+# Starts a local kima-web stack in one of two shapes:
+#   dev (default / --watch): kima-server (API) + the vertigo dev server, which serves kima-web and
+#       proxies /api/* to kima-server, so the browser sees ONE origin (http://127.0.0.1:$WEB_PORT).
+#   --ssr: the production shape. `vertigo build`, then kima-server alone with the SSR server embedded
+#       in-process (KIMA_WEB_BUILD_DIR): ONE origin, http://127.0.0.1:$KIMA_PORT/, pages server-rendered
+#       by kima-server's wasmtime and proxied to a loopback-only port ($SSR_PORT). No vertigo dev server.
 #
-# Usage:  MUSIC_PATH=/path/to/music tools/run-kima-web-dev.sh [--watch] [--no-build]
+# Usage:  MUSIC_PATH=/path/to/music tools/run-kima-web-dev.sh [--watch | --ssr] [--no-build]
 #   (default)   `vertigo build` once, then `vertigo serve` (release wasm, needs wasm-opt on PATH)
 #   --watch     `vertigo watch` instead: debug wasm, rebuilds on source changes
-#   --no-build  reuse crates/kima-web/build/ as it is (serve mode only)
+#   --ssr       build, then run kima-server with the embedded SSR (see above); no WEB_PORT is used
+#   --no-build  reuse crates/kima-web/build/ as it is (serve and --ssr modes)
 #
 # Environment:
 #   MUSIC_PATH         REQUIRED. Directory kima-server scans. First-run flow: open the UI, create the admin
@@ -16,6 +21,7 @@
 #                      It never defaults to the dev DB on 5456.
 #   KIMA_DATA_DIR      kima-server state (secrets, caches). Default: $HOME/.local/share/kima-web-dev
 #   KIMA_PORT          kima-server port (default 3030)        WEB_PORT   dev server port (default 4444)
+#   SSR_PORT           loopback port of the embedded SSR server in --ssr mode (default 3031)
 #   VERTIGO            vertigo CLI (0.13.4, default: `vertigo` on PATH)
 set -euo pipefail
 
@@ -26,11 +32,13 @@ kima_port="${KIMA_PORT:-3030}"
 web_port="${WEB_PORT:-4444}"
 mode=serve
 build=1
+ssr_port="${SSR_PORT:-3031}"
 for arg in "$@"; do
   case "$arg" in
     --watch) mode=watch ;;
+    --ssr) mode=ssr ;;
     --no-build) build=0 ;;
-    -h | --help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,29p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -75,6 +83,34 @@ trap cleanup EXIT INT TERM
 
 echo "building kima-server..."
 (cd "$root" && SQLX_OFFLINE=true cargo build -p kima-server)
+
+if [ "$mode" = ssr ]; then
+  if [ "$build" = 1 ]; then (cd "$web" && "$vertigo" build); fi
+  [ -f "$web/build/index.json" ] || { echo "no vertigo build output in $web/build (run without --no-build)" >&2; exit 1; }
+  # KIMA_WEB_BUILD_DIR turns the embedded SSR on; kima exits non-zero if that server cannot start or dies.
+  (
+    cd "$root"
+    PORT="$kima_port" KIMA_BIND_HOST=127.0.0.1 KIMA_IDENTIFY="${KIMA_IDENTIFY:-off}" \
+      KIMA_WEB_BUILD_DIR=crates/kima-web/build KIMA_WEB_SSR_PORT="$ssr_port" \
+      exec target/debug/kima
+  ) &
+  kima_pid=$!
+  pids+=("$kima_pid")
+  # The first start compiles the wasm with wasmtime before the port opens: allow it time.
+  for _ in $(seq 1 180); do
+    curl -fsS "http://127.0.0.1:${kima_port}/api/health" >/dev/null 2>&1 && break
+    kill -0 "$kima_pid" 2>/dev/null || { wait "$kima_pid" || true; echo "kima-server exited during start" >&2; exit 1; }
+    sleep 1
+  done
+  curl -fsS "http://127.0.0.1:${kima_port}/api/health" >/dev/null || { echo "kima-server did not come up on :$kima_port" >&2; exit 1; }
+  echo
+  echo "kima-web (embedded SSR): http://127.0.0.1:${kima_port}/   (SSR server on loopback :${ssr_port})"
+  echo "music dir: $MUSIC_PATH"
+  # Stay in the foreground for as long as kima-server runs; its exit status is the script's.
+  wait "$kima_pid"
+  exit $?
+fi
+
 # KIMA_IDENTIFY=off: no outbound MusicBrainz/AcoustID lookups in dev.
 (
   cd "$root"

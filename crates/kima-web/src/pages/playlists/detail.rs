@@ -255,7 +255,7 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
         }
     };
 
-    let total: i64 = tracks.iter().map(|t| t.duration as i64).sum();
+    let total: i64 = tracks.iter().map(|t| t.duration).sum();
     let songs = plural(detail.summary.track_count, "song", "songs");
     let counts = if total > 0 {
         dom! {

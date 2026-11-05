@@ -172,8 +172,12 @@ async fn reconcile_indexes_messy_tree(pool: PgPool) {
         (artist.as_str(), album.as_str(), year, title.as_str(), no),
         ("Artist", "Album", Some(1999), "x", 1)
     );
+    // No fallback was used (the stored album-artist vote, D-164, is not a guess).
     assert_eq!(
-        guessed(&pool, "Radiohead/OK Computer/01.flac").await,
+        Guessed {
+            credit: None,
+            ..guessed(&pool, "Radiohead/OK Computer/01.flac").await
+        },
         Guessed::default()
     );
 
@@ -1780,17 +1784,21 @@ async fn va_artist_created_with_mbid(pool: PgPool) {
     }
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    make_audio(
-        root,
-        "Comp/Now/01.flac",
-        Tags {
-            artist: Some("Singer".into()),
-            album: Some("Now".into()),
-            title: Some("t".into()),
-            compilation: true,
-            ..Default::default()
-        },
-    );
+    // Two artists: a compilation is Various Artists only when its songs name more than one
+    // (a lone artist's stray flag is ignored, D-164).
+    for (n, artist) in [(1, "Singer A"), (2, "Singer B")] {
+        make_audio(
+            root,
+            &format!("Comp/Now/0{n}.flac"),
+            Tags {
+                artist: Some(artist.into()),
+                album: Some("Now".into()),
+                title: Some("t".into()),
+                compilation: true,
+                ..Default::default()
+            },
+        );
+    }
     rescan(&pool, root).await;
     let row: (Option<Uuid>, String) = sqlx::query_as(
         "SELECT mbid, enrichment_status FROM artists WHERE name_key = 'various artists'",

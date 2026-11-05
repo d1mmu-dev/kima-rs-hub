@@ -7,3 +7,4 @@
 /frontend/test-results
 /frontend/playwright-report
 /.idea
+/crates/kima-web/build

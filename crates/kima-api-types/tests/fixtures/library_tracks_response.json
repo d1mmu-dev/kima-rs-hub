@@ -1,0 +1,253 @@
+{
+  "limit": 100,
+  "offset": 0,
+  "total": 6,
+  "tracks": [
+    {
+      "album": {
+        "artist": {
+          "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+          "mbid": null,
+          "name": "Disc Band"
+        },
+        "artistId": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "coverArt": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "coverUrl": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "id": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "title": "Double Album",
+        "year": 2004
+      },
+      "albumId": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+      "artist": {
+        "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "name": "Disc Band"
+      },
+      "audioFeatures": null,
+      "bitrate": 64,
+      "codec": "mp3",
+      "discNumber": 1,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "displayTrackNo": null,
+      "duration": 20,
+      "hasUserOverrides": false,
+      "id": "01a1aad3-f0c7-714a-8ed1-244bb71e9da4",
+      "isMissing": false,
+      "isrc": null,
+      "listeners": 0,
+      "playCount": 0,
+      "previewUrl": null,
+      "recordingMbid": null,
+      "title": "Song 1-1",
+      "trackNo": 1,
+      "trackNumber": 1,
+      "userPlayCount": 0,
+      "year": 2004
+    },
+    {
+      "album": {
+        "artist": {
+          "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+          "mbid": null,
+          "name": "Disc Band"
+        },
+        "artistId": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "coverArt": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "coverUrl": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "id": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "title": "Double Album",
+        "year": 2004
+      },
+      "albumId": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+      "artist": {
+        "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "name": "Disc Band"
+      },
+      "audioFeatures": null,
+      "bitrate": 64,
+      "codec": "mp3",
+      "discNumber": 1,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "displayTrackNo": null,
+      "duration": 20,
+      "hasUserOverrides": false,
+      "id": "01a1aad3-f0d5-7373-bfae-49f164284ae0",
+      "isMissing": false,
+      "isrc": null,
+      "listeners": 0,
+      "playCount": 0,
+      "previewUrl": null,
+      "recordingMbid": null,
+      "title": "Song 1-2",
+      "trackNo": 2,
+      "trackNumber": 2,
+      "userPlayCount": 0,
+      "year": 2004
+    },
+    {
+      "album": {
+        "artist": {
+          "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+          "mbid": null,
+          "name": "Disc Band"
+        },
+        "artistId": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "coverArt": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "coverUrl": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "id": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "title": "Double Album",
+        "year": 2004
+      },
+      "albumId": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+      "artist": {
+        "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "name": "Disc Band"
+      },
+      "audioFeatures": null,
+      "bitrate": 64,
+      "codec": "mp3",
+      "discNumber": 1,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "displayTrackNo": null,
+      "duration": 20,
+      "hasUserOverrides": false,
+      "id": "01a1aad3-f0e2-713c-914f-2ffe5113cb12",
+      "isMissing": false,
+      "isrc": null,
+      "listeners": 0,
+      "playCount": 0,
+      "previewUrl": null,
+      "recordingMbid": null,
+      "title": "Song 1-3",
+      "trackNo": 3,
+      "trackNumber": 3,
+      "userPlayCount": 0,
+      "year": 2004
+    },
+    {
+      "album": {
+        "artist": {
+          "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+          "mbid": null,
+          "name": "Disc Band"
+        },
+        "artistId": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "coverArt": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "coverUrl": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "id": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "title": "Double Album",
+        "year": 2004
+      },
+      "albumId": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+      "artist": {
+        "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "name": "Disc Band"
+      },
+      "audioFeatures": null,
+      "bitrate": 64,
+      "codec": "mp3",
+      "discNumber": 2,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "displayTrackNo": null,
+      "duration": 20,
+      "hasUserOverrides": false,
+      "id": "01a1aad3-f114-710d-8589-98f29d1f8d81",
+      "isMissing": false,
+      "isrc": null,
+      "listeners": 0,
+      "playCount": 0,
+      "previewUrl": null,
+      "recordingMbid": null,
+      "title": "Song 2-1",
+      "trackNo": 1,
+      "trackNumber": 1,
+      "userPlayCount": 0,
+      "year": 2004
+    },
+    {
+      "album": {
+        "artist": {
+          "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+          "mbid": null,
+          "name": "Disc Band"
+        },
+        "artistId": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "coverArt": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "coverUrl": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "id": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "title": "Double Album",
+        "year": 2004
+      },
+      "albumId": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+      "artist": {
+        "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "name": "Disc Band"
+      },
+      "audioFeatures": null,
+      "bitrate": 64,
+      "codec": "mp3",
+      "discNumber": 2,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "displayTrackNo": null,
+      "duration": 20,
+      "hasUserOverrides": false,
+      "id": "01a1aad3-f123-72d8-90b0-87529afcc051",
+      "isMissing": false,
+      "isrc": null,
+      "listeners": 0,
+      "playCount": 0,
+      "previewUrl": null,
+      "recordingMbid": null,
+      "title": "Song 2-2",
+      "trackNo": 2,
+      "trackNumber": 2,
+      "userPlayCount": 0,
+      "year": 2004
+    },
+    {
+      "album": {
+        "artist": {
+          "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+          "mbid": null,
+          "name": "Disc Band"
+        },
+        "artistId": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "coverArt": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "coverUrl": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "id": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "title": "Double Album",
+        "year": 2004
+      },
+      "albumId": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+      "artist": {
+        "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "name": "Disc Band"
+      },
+      "audioFeatures": null,
+      "bitrate": 64,
+      "codec": "mp3",
+      "discNumber": 2,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "displayTrackNo": null,
+      "duration": 20,
+      "hasUserOverrides": false,
+      "id": "01a1aad3-f131-75c6-86da-1626d34cc891",
+      "isMissing": false,
+      "isrc": null,
+      "listeners": 0,
+      "playCount": 0,
+      "previewUrl": null,
+      "recordingMbid": null,
+      "title": "Song 2-3",
+      "trackNo": 3,
+      "trackNumber": 3,
+      "userPlayCount": 0,
+      "year": 2004
+    }
+  ]
+}

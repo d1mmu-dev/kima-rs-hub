@@ -1,0 +1,29 @@
+{
+  "audiobookId": null,
+  "changedBy": null,
+  "createdAt": "2026-11-05T08:30:06.077913Z",
+  "currentIndex": 0,
+  "isShuffle": false,
+  "playbackType": "track",
+  "podcastId": null,
+  "position": 0,
+  "queue": [
+    {
+      "album": {
+        "coverArt": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "id": "01a1aad3-f0c5-7497-b4eb-7e286abae363",
+        "title": "Double Album"
+      },
+      "artist": {
+        "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+        "name": "Disc Band"
+      },
+      "duration": 20.0,
+      "id": "01a1aad3-f0c7-714a-8ed1-244bb71e9da4",
+      "title": "x"
+    }
+  ],
+  "trackId": "01a1aad3-f0c7-714a-8ed1-244bb71e9da4",
+  "updatedAt": "2026-11-05T08:30:06.077913Z",
+  "userId": "01a1aad4-0a98-76a8-9fba-5be47e6699b8"
+}

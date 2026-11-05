@@ -10,6 +10,7 @@ anyhow.workspace = true
 axum.workspace = true
 futures.workspace = true
 httpdate.workspace = true
+kima-api-types.workspace = true
 kima-core.workspace = true
 kima-db.workspace = true
 kima-ident.workspace = true

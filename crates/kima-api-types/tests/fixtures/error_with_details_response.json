@@ -1,0 +1,1 @@
+{"details":"Failed to deserialize the JSON body into the target type: username: invalid type: integer `1`, expected a string at line 1 column 13","error":"Invalid request"}

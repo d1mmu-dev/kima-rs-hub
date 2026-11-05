@@ -3,6 +3,7 @@ use std::time::Instant;
 use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use kima_api_types::auth::{Credentials, LoginResponse, MeResponse, UserSummary};
 use kima_core::auth::{TokenKind, hash_password, verify_dummy, verify_password};
 use kima_db::users::{self, Deletion, MAX_USERNAME_CHARS};
 use serde::Deserialize;
@@ -10,7 +11,6 @@ use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-use super::onboarding::Credentials;
 use crate::auth::{AdminUser, AuthUser, ClientIp};
 use crate::error::ApiError;
 use crate::extract::ApiJson;
@@ -40,7 +40,7 @@ async fn login(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
     ApiJson(body): ApiJson<Credentials>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<LoginResponse>, ApiError> {
     let username = body.username.trim().to_string();
     if username.is_empty() || body.password.is_empty() {
         return Err(ApiError::Invalid(
@@ -97,16 +97,18 @@ async fn login(
     for attempt in attempts {
         attempt.success();
     }
-    Ok(Json(json!({
-        "token": state.jwt.issue_access(user.id, &user.username, &user.role, user.token_version),
-        "refreshToken": state.jwt.issue_refresh(user.id, user.token_version),
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "role": user.role,
-            "onboardingComplete": user.onboarding_complete,
+    Ok(Json(LoginResponse {
+        token: state
+            .jwt
+            .issue_access(user.id, &user.username, &user.role, user.token_version),
+        refresh_token: state.jwt.issue_refresh(user.id, user.token_version),
+        user: UserSummary {
+            id: user.id,
+            username: user.username,
+            role: user.role,
+            onboarding_complete: user.onboarding_complete,
         },
-    })))
+    }))
 }
 
 #[derive(Deserialize)]
@@ -146,7 +148,7 @@ async fn logout() -> Json<Value> {
     Json(json!({ "message": "Logged out" }))
 }
 
-async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<Value>, ApiError> {
+async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<MeResponse>, ApiError> {
     let user = users::find_by_id(&state.pool, auth.id)
         .await?
         .ok_or(ApiError::NotFound("User not found"))?;
@@ -154,14 +156,14 @@ async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<Value>
         .created_at
         .format(&Rfc3339)
         .map_err(anyhow::Error::from)?;
-    Ok(Json(json!({
-        "id": user.id,
-        "username": user.username,
-        "role": user.role,
-        "onboardingComplete": user.onboarding_complete,
-        "enrichmentSettings": null,
-        "createdAt": created_at,
-    })))
+    Ok(Json(MeResponse {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        onboarding_complete: user.onboarding_complete,
+        enrichment_settings: None,
+        created_at,
+    }))
 }
 
 /// A 4 h stream-scoped token for `<audio src>` URLs. `ticket` is upstream's key; `token` is what

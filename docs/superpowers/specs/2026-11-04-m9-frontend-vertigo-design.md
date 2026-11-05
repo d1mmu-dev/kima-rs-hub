@@ -1,7 +1,13 @@
 # M9: Rust/WASM Frontend, Part 1 — Design
 
-Date: 2026-11-04
-Status: Draft, pending owner approval (open questions in §12)
+Date: 2026-11-04 (revised 2026-11-05 per owner decisions below)
+Status: Revised — scope changed by explicit owner decision after the initial draft. Superseded: the original draft
+assumed dual-serve (Next.js + `kima-web` side by side behind a runtime switch) and CSR-only production for
+`kima-web`. The owner has since decided: (1) production SSR for `kima-web` via embedded wasmtime (§3, §6), not
+CSR-only; (2) Next.js is fully retired from production — no dual-serve, no user-visible switch; (3) Next.js stays
+available only as an opt-in dev-time build (`Dockerfile` `ARG`) for migration comparison, never shipped in the
+production image by default; (4) Settings stays the minimal M9 placeholder (§5.7), unchanged, full page in M10.
+Remaining open questions are in §12.
 Parent spec: `docs/superpowers/specs/2026-10-16-kima-rust-design.md`
 Roadmap: `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` (row M9, "Notes carried forward")
 Builds on: M0–M8 as merged on `main` (HEAD `2014543`): crates `kima-core`, `kima-db`, `kima-jobs`, `kima-library`,
@@ -9,7 +15,10 @@ Builds on: M0–M8 as merged on `main` (HEAD `2014543`): crates `kima-core`, `ki
 static export by `kima-server::frontend` (`tower_http::ServeDir` + legacy-route redirects, D-011).
 Researched directly (read-only, this repo and `/home/dimmu/projects/vertigo` checked out locally, **not modified**):
 `vertigo` 0.6.3 (`crates/vertigo/src/{router.rs, fetch/*, driver_module/*, lib.rs}`, `tutorial.md`) and `vertigo-cli`
-0.6.3 (`crates/vertigo-cli/{README.md, Cargo.toml}`), plus the `examples/router` and `examples/counter` crates.
+0.6.3 (`crates/vertigo-cli/{README.md, Cargo.toml, src/main.rs, src/serve/{mod.rs, serve_run.rs, serve_opts.rs,
+server_state.rs}, src/commons/models.rs}`), plus the `examples/router` and `examples/counter` crates. The second
+round (2026-11-05) specifically re-read `vertigo-cli`'s `serve` module to answer whether its wasmtime-based SSR
+server can run in-process inside `kima-server` (§3's new finding) rather than being assumed one way or the other.
 
 Upstream kima-hub has no Rust/WASM frontend; this whole milestone is a kima-rs addition (D-134, §10).
 
@@ -19,34 +28,48 @@ M1–M8 gave kima-rs a complete backend and a working Next.js frontend (a fork o
 served by `kima-server`). The owner wants the long-term frontend to be Rust compiled to WebAssembly, built on the
 `vertigo` crate, so the project's UI layer matches its backend's language and toolchain and stops carrying a Node
 build step. M9 is **part 1**: a new `kima-web` crate covers the pages a new user needs to get in and listen —
-login, onboarding, library browse, search, player, playlists, settings — while the Next.js frontend keeps serving
-every other page and stays the default until M10 (which ports the rest, flips the default, and deletes `frontend/`).
+login, onboarding, library browse, search, player, playlists, settings.
 
-Both frontends must run side by side without the owner choosing one at build time: a runtime switch (§6) picks
-which one a request gets, so the owner (or CI) can flip it back if `kima-web` regresses, and so M9's pages can be
-reviewed against the Next.js pages they replace while the rest of the app still works.
+**Revised scope (owner decision, 2026-11-05): `kima-web` is production's *only* frontend from the moment M9 ships
+it, served with real server-side rendering through an embedded wasmtime runtime (§3, §6) — not a CSR-only static
+export, and not side by side with Next.js.** There is no runtime switch, no user-visible toggle, and no dual-serve
+in production: Next.js is dropped from the production image entirely. The only place Next.js still exists after
+M9 is an **opt-in developer build** behind a `Dockerfile` `ARG` (`KIMA_BUILD_LEGACY_FRONTEND`, §6.2), used purely to
+run the old frontend side by side *locally* for comparison while the remaining ~20 pages are ported in M10 — it is
+never built into, or served from, the production image, and CI's production-defining build never sets the ARG.
+
+A direct, owner-accepted consequence: in production, any page `kima-web` does not yet cover (§2's non-goals —
+podcasts, autotag UI, organizer UI, sharing, stats, vibe search, etc.) is simply **not served** between M9 and M10,
+since there is no fallback to Next.js in production anymore. This is called out again in §11 (Risks) as an accepted
+interim gap, not an oversight.
 
 Why this matters:
-- Dropping Node from the build and the container image is the owner's stated goal (roadmap M10 note); M9 is the
-  first real milestone of that path, and the one that proves the architecture (type sharing, routing, the switch,
-  the build) before the remaining ~20 pages are ported in M10.
+- Dropping Node from the *production* build and container image is now true as of M9, not deferred to M10 — the
+  owner's stated end goal (roadmap M10 note) is reached for production immediately; the dev-only legacy build ARG
+  exists solely to de-risk the M10 porting work, not to soften the production cut.
 - M11 (casting) is built straight into `kima-web`'s player and gets no Next.js equivalent (roadmap M11 note), so
   the player page built here is load-bearing for a milestone after this one.
-- Nothing in M9 may regress the Next.js frontend or the pages it still serves: the switch is additive, and the
-  existing Playwright suite against Next.js must keep passing untouched.
+- Because there is no fallback frontend in production, `kima-web`'s SSR path and its seven pages are the only
+  thing standing between a deployed M9 build and a broken UI for those pages — correctness and the embedded-SSR
+  integration (§3, §6) carry more weight than they would under the old side-by-side plan.
 
-Success: with the switch on, a fresh user can open `kima-web`, create the first admin account (onboarding), sign
-in, browse the library (artists/albums/tracks), search, play a track with working transport controls, see and edit
-a playlist, and change the settings this milestone covers — using only data shapes shared with the backend, with
-no duplicated hand-maintained TypeScript-equivalent-in-Rust guessing of the API. The Next.js frontend keeps serving
-every other route unchanged. The Playwright suite runs twice (once per frontend) in CI and both are green.
+Success: a fresh production deployment serves `kima-web` for `/`, login, onboarding, library browse, search,
+player, playlists and the minimal Settings slice, each page's initial HTML coming from wasmtime-executed SSR (not
+an empty CSR shell), using only data shapes shared with the backend, with no duplicated hand-maintained
+TypeScript-equivalent-in-Rust guessing of the API. A developer who sets `KIMA_BUILD_LEGACY_FRONTEND=1` at image
+build time can still reach the old Next.js pages locally for side-by-side comparison. The `kima-web` Playwright
+suite (§7) is the production-defining suite and is green in CI; the legacy Next.js suite still exists and still
+passes, but only under the dev-flag build, and is no longer what CI gates production correctness on.
 
 ## 2. Goals
 
-From the roadmap M9 row: a new `kima-web` crate on `vertigo` + `vertigo-cli`, sharing API types with the backend;
-pages for login, onboarding, library browse, search, player, playlists, settings; the Next.js export stays served
-until M10; a switch so both run side by side; Playwright ported to run against both; a `DIVERGENCES.md` entry when
-the switch lands.
+From the roadmap M9 row, as revised by the owner's 2026-11-05 decisions: a new `kima-web` crate on `vertigo` +
+`vertigo-cli`, sharing API types with the backend; pages for login, onboarding, library browse, search, player,
+playlists, settings; **production serves `kima-web` exclusively, with SSR via an embedded wasmtime runtime (§3,
+§6) — the Next.js export is not served in production at all**; a `Dockerfile` `ARG` optionally builds the legacy
+Next.js frontend for local dev-time comparison only (§6.2); the `kima-web` Playwright suite is the production
+regression net, the legacy suite runs only under the dev-flag build (§7); a `DIVERGENCES.md` entry when this
+lands (§8).
 
 Non-goals (left to M10 or later, explicitly out of scope here):
 - Every other page (artist/album detail beyond what browse needs, podcasts, audiobooks, radio, mixes, discover,
@@ -94,16 +117,56 @@ used only to ground this design):
   server that, for each request, **runs the same compiled `.wasm` inside wasmtime server-side** to produce the
   initial HTML (so a crawler or a no-JS browser gets real markup), then ships the same `.wasm` to the browser to
   hydrate and take over reactively (tutorial §3: "Vertigo uses a built-in web server which supports
-  server-side rendering... simple pages work even if the browser have JavaScript turned off"). This means
-  **production SSR requires running `vertigo serve` as the HTTP server for that content** (or embedding wasmtime
-  yourself) — a vertigo app is not "build once, serve with any static file server" if SSR is wanted; a plain static
-  host only gets the CSR path (empty shell + wasm boot). §6 below treats this as the central integration decision:
-  kima-rs's deployment goal (one binary, one process, no sidecar — D-006) pulls toward **CSR-only in production**
-  (serve `vertigo build`'s static output through the existing `kima-server::frontend::routes`-style `ServeDir`,
-  the same way the Next.js export is served today) and **SSR is a dev-only nicety** reached by running
-  `vertigo watch`/`vertigo serve` locally, never in the shipped container. This is flagged as an open question
-  (§12, Q1) because it trades vertigo's main selling point (real SSR) for operational simplicity; the owner may
-  prefer a second lightweight process instead.
+  server-side rendering... simple pages work even if the browser have JavaScript turned off"). **Owner decision,
+  2026-11-05: production must use real SSR, not CSR-only.** §6 below is the integration design for that.
+
+- **Can `vertigo serve`'s wasmtime SSR run in-process inside `kima-server`, or does it need a sidecar?**
+  Investigated directly against the real `vertigo-cli` 0.6.3 source (not assumed), because this is the question
+  that decides whether real production SSR is compatible with D-006 ("one `kima` binary", `docs/DIVERGENCES.md`):
+  - `vertigo-cli` *is* built as a library as well as a binary (`[lib] name = "vertigo_cli" path = "src/main.rs"`,
+    `crates/vertigo-cli/Cargo.toml`), and its public surface re-exports a genuinely callable, non-CLI entry point:
+    `vertigo_cli::serve::run(opts: ServeOpts, port_watch: Option<u16>) -> Result<(), ErrorCode>`
+    (`src/serve/mod.rs`: `pub use serve_run::run;`). `ServeOpts`/`ServeOptsInner`/`CommonOpts` are plain `pub`
+    structs with `pub` fields (`src/serve/serve_opts.rs`, `src/commons/models.rs`) — they derive `clap::Args` for
+    CLI parsing but nothing stops constructing them by hand in Rust code, so `run()` can genuinely be called as a
+    library function from inside another binary's `#[tokio::main]`, without shelling out to the `vertigo` CLI.
+  - **But `run()` does not return a `Router` or a request handler — it owns the whole HTTP server lifecycle
+    itself**, down to the socket: `src/serve/serve_run.rs` builds its own `axum::Router`, calls
+    `axum::Server::bind(&addr).serve(...)` (old pre-`axum::serve` 0.6-era API) and blocks on that future until the
+    process exits or the bind fails. There is no way to get a `Router`/`tower::Service` out of it to `.merge()` or
+    `.nest()` into `kima-server`'s own axum app — the only public API is "run a complete standalone server on
+    `host:port`".
+  - **The actual SSR rendering logic is not exposed at all.** The wasmtime `Engine`/`Module` setup and the
+    per-request render loop live in `ServerState` (`src/serve/server_state.rs`) and `WasmInstance`/`HtmlResponse`
+    (`src/serve/wasm/*`, `src/serve/html/*`) — all declared with plain `mod` (not `pub mod`) inside `serve/mod.rs`,
+    so they are private to the `vertigo-cli` crate and unreachable from `kima-server` even though `vertigo-cli` is
+    a dependency. Getting a bare "render this URL to an HTML string" function would require **vendoring/forking**
+    roughly ten private files with no semver/API stability guarantee across `vertigo-cli` upgrades.
+  - **Dependency-stack mismatch:** `vertigo-cli` 0.6.3 pins `axum = "0.6.20"`, `poem = "1.3.59"`, `reqwest`,
+    `tokio` with the `full` feature — a materially older/heavier HTTP stack than `kima-server`'s `axum` 0.8 +
+    `tokio`. Two different `axum` major versions compile fine side by side in one binary (they're separate crates
+    under the hood), but their `Router`/middleware types cannot interoperate, which independently rules out a
+    literal single-`Router` merge even if the private internals were exposed.
+  - **Conclusion — chosen design (§6): embed `vertigo_cli::serve::run()` as a background `tokio::task` inside
+    `kima-server`'s own process, bound to a loopback-only port (e.g. `127.0.0.1:<internal-port>`, never exposed
+    externally), and have `kima-server`'s real axum app reverse-proxy the `kima-web` page routes to it over that
+    loopback hop.** This is **one binary, one OS process, one supervised unit, no sidecar container, no
+    supervisord, no second deployed artifact** — the parts of D-006 ("Postgres + one `kima` binary", footprint)
+    that actually matter operationally are satisfied. It is *not* a literal single `Router`/single listening
+    socket (there are two sockets: the external one `kima-server` already has, and an internal loopback-only one
+    for the embedded wasmtime SSR server), and it does carry `vertigo-cli`'s older axum/tokio/poem/reqwest stack as
+    an extra, non-trivial dependency subtree. The rejected alternative — vendoring the private `ServerState`/
+    `WasmInstance`/`HtmlResponse` internals to get a true single-`Router` embed — is **not** chosen for M9: it
+    would mean maintaining a fork of unstable private API surface with every `vertigo-cli` upgrade, for a benefit
+    (one fewer loopback hop, no duplicate HTTP-stack dependency) that does not outweigh that maintenance cost at
+    this milestone's size. Revisit only if the loopback-hop design proves inadequate in practice (§11, §12 Q1 is
+    now resolved by this finding, not left open).
+  - This is **not** a classic sidecar (no second container, no second process to supervise, no external reverse
+    proxy/infra change, no separate lifecycle/healthcheck) and is the design actually implemented — it does not by
+    itself need a new `DIVERGENCES.md` row distinct from D-134 (§8), since D-006's own wording is about
+    footprint/process count, which this preserves. If implementation reveals the loopback coupling is tighter than
+    expected (e.g. startup-ordering fragility between `kima-server` and the embedded `run()` task), that gets its
+    own `DIVERGENCES.md` row when it actually lands (Task-level decision, not speculative here).
 - **No OpenAPI / codegen tooling in `vertigo`.** Nothing in the crate generates types from a schema; everything is
   hand-written Rust structs with the `AutoJsJson` derive (vertigo's own (de)serialization) or, when going through
   plain JSON text, `serde`. This matches `kima-api`, which also has no OpenAPI (`rg utoipa|openapi` in
@@ -229,56 +292,99 @@ require it to be minimally usable; polling is an acceptable M9 fallback where th
 per-page in the plan) and a shared `Resource<T>`-based loading/error presentation (one component, `§4.2`'s client
 feeding it).
 
-## 6. The Next.js ↔ `kima-web` switch
+## 6. Production serving (SSR, embedded) and the dev-only legacy frontend
 
-**Chosen: a server-side switch in `kima-server`, keyed on a request header/cookie plus an env-var default, serving
-each frontend from its own path prefix behind one router — not a path split by convention, not a separate
-subdomain.**
+**Owner decision, 2026-11-05 — supersedes the original "switch" design below.** There is no runtime switch, no
+dual-serve, and no user-visible toggle in production. `kima-web` is the only frontend `kima-server` serves to real
+users, with the pages it covers rendered server-side via an embedded wasmtime runtime. Next.js exists only as an
+opt-in local developer build (§6.2), never in the production image.
+
+### 6.1 Production: `kima-web` only, served via embedded SSR
+
+**Chosen (per §3's research): `kima-server` spawns `vertigo_cli::serve::run()` as a background `tokio::task` at
+startup, bound to a loopback-only address (e.g. `127.0.0.1:<internal-port>`, configurable, never exposed on the
+public listener), and its own axum app reverse-proxies requests for the paths `kima-web` covers (§5's allow-list —
+login, onboarding, browse, search, player, playlists, the Settings slice) to that loopback address, returning the
+wasmtime-rendered HTML (and, on the client, the same `.wasm`/`wasm_run.js` the embedded server serves) to the real
+caller.**
+
+Mechanics (detailed in the plan):
+- `kima-web` builds (via `vertigo build`, §3) to a `build/` directory at image-build time, same as before.
+- At `kima-server` startup, a background task calls `vertigo_cli::serve::run(ServeOpts { ... }, None)` pointed at
+  that `build/` directory, bound to loopback only. This is real, unmodified `vertigo-cli` code — no fork, no
+  vendoring (§3's conclusion).
+- `kima-server`'s own axum router gets a reverse-proxy layer (a thin HTTP client forwarding method/headers/body,
+  not unlike the `--proxy` flag `vertigo serve` already has for its own API calls, mirrored here in the other
+  direction) for exactly the path set §5 covers; everything else is `kima-server`'s existing routes/404 — **no
+  fallback to Next.js exists in production** (§1).
+- `/api/*` is unaffected: `kima-web` calls the same backend either way, which is the entire point of §4.
+- Startup ordering matters now in a way it did not under the old switch design: the embedded SSR task needs the
+  `build/` output to exist before it binds, and `kima-server`'s readiness/healthcheck should not report ready
+  until the embedded task has successfully bound its loopback port (plan Task-level detail, not decided here).
+
+Rejected alternatives (updated for the new mandate):
+- **CSR-only static `ServeDir`** (the original plan): rejected by the owner — production must have real SSR.
+- **Vendoring vertigo-cli's private SSR internals for a literal single-`Router` embed**: rejected for M9 per §3's
+  finding — unstable private API, high fork-maintenance cost, not worth it yet.
+- **Sidecar as a second OS process/container**: rejected — the loopback-task design (§3, above) gets real SSR
+  without paying that cost; a true external sidecar would need its own lifecycle/healthcheck and would be a
+  starker break from D-006 than the chosen design.
+- **Separate subdomain**: rejected — irrelevant now that there is only one frontend in production; no same-origin
+  concern to solve.
+
+### 6.2 Dev-only: optional legacy Next.js build via a `Dockerfile` `ARG`
+
+**Chosen: a build-time `Dockerfile` `ARG` (`KIMA_BUILD_LEGACY_FRONTEND`, default unset/`0`) that, when set,
+additionally runs the Next.js static export and bakes it into the image at a distinct, non-production path, purely
+so a developer migrating the remaining M10 pages can run the old and new frontends side by side locally for visual
+comparison.** This is *not* a runtime feature and is *not* wired into `kima-server`'s production routing:
+- When the `ARG` is unset (the default, and always the case for any image CI builds as "production"), the
+  Next.js build step is skipped entirely — no Node toolchain run, no `frontend/` assets baked in, matching the
+  owner's goal of a Node-free production image starting at M9, not M10.
+- When the `ARG` is set (local `docker build --build-arg KIMA_BUILD_LEGACY_FRONTEND=1 ...`), the image additionally
+  contains the Next.js export, and `kima-server` serves it only when a corresponding runtime env var confirms the
+  assets are present (e.g. `KIMA_LEGACY_FRONTEND_PATH` pointing at the baked-in directory) at a clearly separate,
+  non-colliding mount point (e.g. `/__legacy/`) — never at `/`, never overlapping any `kima-web` route, and never
+  reachable unless both the build-time `ARG` and the runtime env var line up (belt-and-suspenders against it ever
+  leaking into a production deployment by accident).
+- No runtime switch, no cookie/header override, no "flip back without a redeploy" mechanic — if the dev build
+  wants to compare, it loads `/__legacy/...` and the real `kima-web` pages side by side in two browser tabs. This
+  is deliberately simpler than the original §6 switch design because there is no production audience for it.
 
 Rejected alternatives:
-- **Separate subdomain** (e.g. `new.kima.local`): rejected — needs its own TLS/reverse-proxy config the owner would
-  have to maintain just to try the new frontend, and breaks same-origin cookies/tokens between the two UIs during
-  the side-by-side period, which would force a second login flow just to compare pages.
-- **Build-time feature flag** (compile one frontend or the other into the binary): rejected — the roadmap
-  explicitly wants both running side by side at runtime (so the owner can flip back without a redeploy, and so CI
-  runs both suites against one running server), which a compile-time flag cannot give.
-- **Client-side redirect from one app to the other**: rejected — would require the Next.js export to ship
-  JavaScript that knows about `kima-web`'s existence, coupling the frontend being retired to the one replacing it.
+- **Keeping the full request-scoped runtime switch** (the original design): rejected — it solved a dual-serve
+  production problem that no longer exists; keeping it would be unneeded complexity for a dev-only comparison
+  need.
+- **A separate `docker-compose` service for the legacy frontend**: rejected for the same reason the embedded-SSR
+  design was chosen over a sidecar (§6.1) — a single image with an opt-in build flag is simpler to reason about
+  and keeps the "one binary" property intact even for the dev-comparison build (the legacy assets are static files
+  served by the same `kima-server` binary, not a second process).
 
-Mechanics (detailed in the plan, Tasks 2–3):
-- `kima-web` builds (via `vertigo build`, §3) to a static `build/` directory, same shape as the Next.js export
-  (`index.html` + hashed assets). `kima-server` serves it the same way `kima-server::frontend::routes` already
-  serves the Next.js export — a second `ServeDir`, mounted at a config-chosen prefix, not the wasmtime-based SSR
-  server (§3's production decision).
-- A new config value (`KIMA_WEB_FRONTEND`, env-gated like every other switch in this codebase — `off` default
-  until the owner opts in, matching `KIMA_IDENTIFY`'s pattern) picks which `ServeDir` answers `/` and the page
-  routes `kima-web` covers; routes `kima-web` does not cover (everything in §2's non-goals) always fall through to
-  the Next.js export regardless of the switch, so turning the switch on never 404s a page that only exists in
-  Next.js today. A request-scoped override (query param or cookie, exact mechanism decided in Task 3) lets the
-  owner or a Playwright run force one frontend without changing the server-wide env var, which is what makes
-  running both Playwright suites against one running `kima-server` instance (§7) possible without two deployments.
-- `/api/*` is unaffected: both frontends call the same backend, which is the entire point of §4.
+## 7. Playwright: `kima-web` is the production suite; the legacy suite moves to the dev-flag build
 
-## 7. Playwright across both frontends
-
-**Chosen: keep one Playwright spec tree per behaviour, parameterised by a `frontend` fixture/base-URL set by the
-switch's request-scoped override (§6), rather than forking the spec files.**
+**Chosen: the `kima-web` spec tree is the one CI treats as defining production correctness; the existing Next.js
+suite keeps running, but only against a `KIMA_BUILD_LEGACY_FRONTEND`-enabled build, and is no longer what gates a
+production release.**
 
 - `frontend/tests/e2e/kima-rs/*.spec.ts` (the existing suite: `smoke`, `library`, `autotag`, `enrichment`,
-  `subsonic`) stays exactly as it is and keeps running against the Next.js frontend (default) — it must not change
-  because of this milestone, since none of the pages it exercises are in M9's scope yet, and it is the regression
-  net for the frontend this milestone does not touch.
-- A new config, `frontend/playwright.kima-web.config.ts` (sibling to the existing `playwright.kima-rs.config.ts`),
-  runs against the same `kima-server` instance with the switch override set so requests hit `kima-web`'s pages.
-  Only the specs that exercise pages M9 actually ports get a `kima-web` run: a new `frontend/tests/e2e/kima-web/`
-  tree holding the login/onboarding/browse/search/player/playlists/settings specs, written against `kima-web`'s
-  markup (vertigo's DOM output will not have the same class names/structure as the React components, so these
-  cannot be byte-identical copies — they port the same user-visible assertions, not the same selectors).
-  `smoke.spec.ts`'s kima-web counterpart is the first one written (Task 17) and is the template the rest follow.
-- CI (`.github/workflows/ci.yml`) gains a second Playwright job (or a second step in the existing one) that builds
-  `kima-web`, starts `kima-server` once with `KIMA_WEB_FRONTEND` available, and runs both configs against it in
-  turn. Both must stay green; a `kima-web` spec that cannot yet pass because its page isn't ported stays absent
-  from the suite rather than skipped-and-ignored (no `test.skip` debt).
+  `subsonic`) is unchanged in content, but its CI job now builds the image with `KIMA_BUILD_LEGACY_FRONTEND=1` and
+  points at the `/__legacy/` mount (§6.2) — it is a **dev-build regression net for pages not yet ported**, not a
+  production gate. If `KIMA_BUILD_LEGACY_FRONTEND` is ever dropped from the dev build entirely (post-M10), this
+  suite is deleted along with `frontend/`, same as the roadmap always intended.
+- `frontend/playwright.kima-web.config.ts` (sibling to the existing `playwright.kima-rs.config.ts`) runs against a
+  normal **production-shaped** `kima-server` build (no legacy ARG set), exercising `kima-web`'s pages exactly as a
+  real deployment serves them — through the embedded-SSR reverse proxy (§6.1), not a CSR-only shortcut, so the
+  suite actually exercises the SSR path it is meant to guard. `frontend/tests/e2e/kima-web/` holds the login/
+  onboarding/browse/search/player/playlists/settings specs, written against `kima-web`'s markup (vertigo's DOM
+  output will not have the same class names/structure as the React components, so these cannot be byte-identical
+  copies — they port the same user-visible assertions, not the same selectors). `smoke.spec.ts`'s kima-web
+  counterpart is the first one written (plan Task, template for the rest).
+- CI (`.github/workflows/ci.yml`) gains two separate jobs with two separate image builds: one without the legacy
+  ARG (runs `playwright.kima-web.config.ts` — the production gate) and one with it (runs the existing `kima-rs`
+  suite against `/__legacy/` — the dev-build regression net). They do not share a running `kima-server` instance
+  the way the original side-by-side design assumed, because production and dev-flag builds are now different
+  images by design (§6.2). A `kima-web` spec that cannot yet pass because its page isn't ported stays absent from
+  the suite rather than skipped-and-ignored (no `test.skip` debt).
 
 ## 8. Divergence log
 
@@ -288,11 +394,14 @@ frontend at all, so this is a kima-rs-only addition, not a behavioural differenc
 earlier, so the row describes what actually landed instead of what was planned):
 
 - **D-134** | Frontend | No Rust/WASM frontend; the Next.js app is the only UI | A second frontend, `kima-web`
-  (vertigo + vertigo-cli, compiled to WASM, CSR-only in production — §3), covers login/onboarding/library
-  browse/search/player/playlists/settings behind a server-side switch (`KIMA_WEB_FRONTEND`, default off); the
-  Next.js export keeps serving every other page until M10 replaces it entirely | Owner request: replace the
-  forked Next.js frontend with Rust/WASM (roadmap M9); both frontends call the same `/api` so there is no backend
-  behaviour change to log separately | open
+  (vertigo + vertigo-cli, compiled to WASM, server-side rendered in production via an embedded wasmtime runtime
+  inside `kima-server` — §3, §6.1), covers login/onboarding/library browse/search/player/playlists/settings and
+  is the **only** frontend served in production; Next.js is fully retired from production (no dual-serve, no
+  switch) and survives only as an opt-in `Dockerfile` `ARG` (`KIMA_BUILD_LEGACY_FRONTEND`, §6.2) for local
+  dev-time comparison during the M10 porting work; any page `kima-web` does not yet cover is not served in
+  production until M10 ports it | Owner request, revised 2026-11-05: replace the forked Next.js frontend with
+  Rust/WASM outright for the pages M9 covers, not side-by-side (roadmap M9); both frontends call the same `/api`
+  so there is no backend behaviour change to log separately | open
 
 This ID and row text are a draft for the plan's final task to confirm/adjust against whatever actually shipped
 (the same convention M3a/M3b used — see `docs/superpowers/plans/2026-10-27-m3b-autotagger.md`'s rule: "a difference
@@ -336,30 +445,47 @@ trailers, Conventional Commits style. `docs/DIVERGENCES.md` row added in the sam
   later pages (M10) should be expected to be slower than it looks from M9's seven pages, which were picked to be
   the simplest complete slice (no SSE, minimal nested routing, no complex forms-with-many-fields yet).
   Settings is deliberately the shallowest possible slice (§5.7) to avoid importing that risk into M9 itself.
-- **wasmtime-based SSR foregone in production (§3)** means `kima-web`'s pages are JS-required (CSR) in production
-  even though vertigo supports SSR; this is a real capability regression versus what the library offers, traded
-  for staying a one-process deployment. Flagged as Q1 for the owner.
+- **Embedded SSR via a loopback-proxied `vertigo_cli::serve::run()` task (§3, §6.1) is new integration surface**:
+  it pulls `vertigo-cli`'s own axum 0.6/poem/reqwest/tokio-full dependency stack into `kima-server`'s binary
+  alongside its axum 0.8 stack (bigger binary, longer build, two independent HTTP stacks in one process); the
+  loopback hop adds a request-scoped dependency on an internal task's liveness that the original CSR-only design
+  did not have (if the embedded task dies, every `kima-web` page in production breaks, not just degrades to a
+  CSR shell) — the plan's SSR-embedding task needs its own liveness/health check and restart-on-crash story, not
+  just a happy-path "spawn it once".
+- **No Next.js fallback in production for unported pages (§1)** means every page outside M9's seven
+  (podcasts, autotag UI, organizer UI, sharing, stats, vibe search, etc.) is simply unavailable in a deployed M9
+  build until M10 ports it — an explicit, owner-accepted trade for dropping dual-serve complexity, but a real
+  user-facing regression for the interim period that should be called out plainly in any release notes, not just
+  in this spec.
 - **DTO relocation (§4.1) touches many backend route files** even though it changes no behaviour; the plan isolates
   this into its own early, narrowly-reviewable task (Task 1) with the round-trip fixture tests as the safety net,
   specifically so it can be reviewed and landed independently of anything about vertigo.
 
 ## 12. Open questions for the owner
 
-1. **Production SSR for `kima-web`.** §3/§6 chose CSR-only (static `build/` output served by the existing
-   `ServeDir` mechanism) to avoid a second process/wasmtime-in-production. Accept that trade, or would the owner
-   rather run `vertigo serve` as a small sidecar (or embed wasmtime inside `kima-server` directly) to keep real SSR
-   even in M9? This changes Task 3's shape materially, so it should be settled before that task starts.
-2. **Switch mechanism exposure.** §6 proposes an env var (`KIMA_WEB_FRONTEND`, server-wide default) plus a
-   request-scoped override (query param or cookie) for testing. Does the owner want the override visible/usable in
-   production too (e.g. a Settings toggle a signed-in admin can flip for themselves), or should it exist only for
-   CI/Playwright and never be user-facing until M10 flips the default?
-3. **Token/session storage in `kima-web`.** §5.1 defers the exact mechanism to Task 7, matching whatever
-   `auth-context.tsx` does today (likely `localStorage` or a cookie) — confirm that reusing the same storage key
-   name/shape is wanted (so a user mid-session can be redirected between the two frontends by the switch without
-   being logged out), versus an intentionally separate session so the two frontends never share a token.
-4. **OpenAPI, for real, later.** §4 rejected OpenAPI generation for M9 as premature. Once `kima-web` covers more of
+Resolved by the owner's 2026-11-05 decisions (kept here for the record, not left open):
+- ~~Production SSR for `kima-web`~~ — **resolved: real SSR, embedded wasmtime in-process via a loopback-proxied
+  background task (§3, §6.1)**, not CSR-only and not an external sidecar.
+- ~~Switch mechanism exposure~~ — **resolved: no switch exists.** Next.js is dev-only behind a `Dockerfile` `ARG`
+  (§6.2); nothing related is ever user-facing in production.
+- ~~Settings scope~~ — **resolved: minimal placeholder (account/password only) for M9, confirmed as-is; full
+  Settings page is M10's job, unchanged from the original plan.**
+
+Still open:
+1. **Token/session storage in `kima-web`.** §5.1 defers the exact mechanism to the plan's auth-guard task, matching
+   whatever `auth-context.tsx` does today (likely `localStorage` or a cookie). With Next.js no longer running
+   concurrently in production, the original "does flipping the switch mid-session log the user out" concern (old
+   §12 Q3) is moot for production; it still applies narrowly to the dev-flag build (§6.2) where a developer might
+   have both `kima-web` and the legacy `/__legacy/` Next.js open in adjacent tabs — confirm whether an isolated
+   `kima-web`-only storage key (recommended default, since the two are genuinely separate apps now, not a single
+   switchable session) is acceptable, or whether sharing the storage key/shape is still wanted for that dev
+   comparison workflow.
+2. **OpenAPI, for real, later.** §4 rejected OpenAPI generation for M9 as premature. Once `kima-web` covers more of
    the surface in M10, is generating `kima-api-types` from a `utoipa` spec (rather than hand-writing it) worth
    doing as a cleanup pass, or does the owner prefer hand-written DTOs to stay the house style indefinitely?
-5. **Settings scope (§5.7).** Confirm the minimum Settings slice is acceptable (account/password only) versus
-   pulling in one or two more sections (e.g. the "Auto enrich metadata" toggle, D-111) if the owner wants a
-   `kima-web`-only demo to look more complete during the side-by-side period.
+3. **Embedded-SSR liveness/restart policy (new, raised by §11's risk).** If the loopback-bound `vertigo_cli::
+   serve::run()` task panics or its bind fails after `kima-server` has already reported ready, should
+   `kima-server` crash-and-restart itself (simplest, relies on the container orchestrator's restart policy),
+   retry the embedded task in place, or serve a plain error page for `kima-web`'s routes while keeping `/api`
+   healthy? This changes the SSR-embedding task's shape materially and should be settled before that task starts
+   implementation.

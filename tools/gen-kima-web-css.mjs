@@ -4,7 +4,9 @@
 //   node tools/gen-kima-web-css.mjs          write assets/kima.css
 //   node tools/gen-kima-web-css.mjs --check  exit 1 if the checked-in file is stale
 // Needs node_modules with tailwindcss, @tailwindcss/postcss and postcss (the legacy frontend's install:
-// LEGACY_COPY, default ~/.hermes/cache/scratch/m9-legacy-ref, i.e. `npm ci` in a scratch copy of frontend/).
+// LEGACY_COPY, default ~/.hermes/cache/scratch/m9-legacy-ref, i.e. `npm ci` in a scratch copy of frontend/). Any
+// directory with those three packages works (CI: a scratch `npm install` of tailwindcss@4.2.1 @tailwindcss/postcss@4.2.1
+// postcss@8.5.23, the versions frontend/package-lock.json pins; see the kima-web job in .github/workflows/ci.yml).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

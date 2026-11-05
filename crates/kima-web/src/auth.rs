@@ -127,6 +127,7 @@ mod tests {
             Route::Tracks { album: None },
             Route::Search,
             Route::Playlists,
+            Route::Settings,
         ] {
             assert_eq!(effective_route(&r, false), Route::Login);
             assert_eq!(effective_route(&r, true), r);

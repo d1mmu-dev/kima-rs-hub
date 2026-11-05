@@ -1,7 +1,7 @@
 //! The route table. Hand-written enum with a `From<String>` / `Display` pair (vertigo's router pattern).
 //!
 //! Login, setup (onboarding), the library browse root with its albums / tracks drill-downs, search,
-//! and playlists (list and detail). Settings arrives with its page.
+//! playlists (list and detail) and settings.
 
 use std::fmt;
 
@@ -27,6 +27,8 @@ pub enum Route {
     Playlist {
         id: String,
     },
+    /// `/settings` (account slice).
+    Settings,
     NotFound,
 }
 
@@ -66,6 +68,7 @@ impl Route {
             }
             "/search" => Route::Search,
             "/playlists" => Route::Playlists,
+            "/settings" => Route::Settings,
             _ => match path.strip_prefix("/playlists/") {
                 Some(id) if is_id(id) => Route::Playlist { id: id.to_owned() },
                 _ => Route::NotFound,
@@ -92,6 +95,7 @@ impl fmt::Display for Route {
             Route::Search => f.write_str("/search"),
             Route::Playlists => f.write_str("/playlists"),
             Route::Playlist { id } => write!(f, "/playlists/{id}"),
+            Route::Settings => f.write_str("/settings"),
             Route::NotFound => f.write_str("/404"),
         }
     }
@@ -118,6 +122,7 @@ mod tests {
             ("/collection/tracks", Route::Tracks { album: None }),
             ("/search", Route::Search),
             ("/playlists", Route::Playlists),
+            ("/settings", Route::Settings),
         ]
     }
 
@@ -176,6 +181,7 @@ mod tests {
             Route::Search,
             Route::Playlists,
             Route::Playlist { id: ID.into() },
+            Route::Settings,
         ] {
             assert!(r.requires_auth(), "{r}");
         }

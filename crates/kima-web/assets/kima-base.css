@@ -14,6 +14,10 @@
     }
 }
 
+/* Up to and INCLUDING 1024px: the legacy bottom-nav chrome (`useIsMobile || useIsTablet`). Tailwind's own
+ * `max-[1024px]` compiles to `not all and (min-width:1024px)`, which is false at exactly 1024px. */
+@custom-variant tablet (@media (max-width: 1024px));
+
 /* Screens where every row of height counts, such as a phone browser with its toolbars showing. */
 @custom-variant short (@media (max-height: 720px));
 

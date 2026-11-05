@@ -9,7 +9,7 @@ use crate::api::client::load;
 use crate::components::{Card, Kind, Tab, library_page, media_card, media_grid};
 use crate::player::queue_item;
 use crate::route::Route;
-use crate::ui::{Ctx, PAGE_SIZE, cover_url, empty_state, pager, plural};
+use crate::ui::{Ctx, Refine, cover_url, empty_state, pager, plural};
 
 /// Queues and plays an album from its first track.
 pub fn play_album(ctx: &Ctx, album_id: String) {
@@ -30,6 +30,16 @@ pub fn play_album(ctx: &Ctx, album_id: String) {
 }
 
 pub fn render(ctx: &Ctx, artist: Option<String>) -> DomNode {
+    // A new Refine choice rebuilds the page, so it starts at page 1 again.
+    ctx.refine
+        .render_value(bind!(ctx, artist, |refine: Refine| page(
+            &ctx,
+            artist.clone(),
+            refine
+        )))
+}
+
+fn page(ctx: &Ctx, artist: Option<String>, refine: Refine) -> DomNode {
     let offset = Value::new(0_i64);
     let refresh = ctx.refresh.clone();
     let key = computed_tuple!(offset, refresh);
@@ -41,7 +51,9 @@ pub fn render(ctx: &Ctx, artist: Option<String>) -> DomNode {
         let resource = load(bind!(ctx, async move {
             ctx.client
                 .get::<AlbumsResponse>(&format!(
-                    "/api/library/albums?limit={PAGE_SIZE}&offset={off}&sortBy=name{filter}"
+                    "/api/library/albums?limit={}&offset={off}&sortBy={}{filter}",
+                    refine.per_page,
+                    refine.sort
                 ))
                 .await
         }));
@@ -91,7 +103,7 @@ pub fn render(ctx: &Ctx, artist: Option<String>) -> DomNode {
                         dom! {
                             <div>
                                 {media_grid(cards)}
-                                {pager(offset.clone(), page.offset, page.albums.len(), page.total)}
+                                {pager(offset.clone(), page.offset, page.albums.len(), page.total, refine.per_page)}
                             </div>
                         }
                     };

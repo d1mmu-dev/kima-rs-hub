@@ -8,9 +8,15 @@ use vertigo::{DomNode, Resource, Value, bind, computed_tuple, dom};
 use crate::api::client::load;
 use crate::components::{Card, Kind, Tab, library_page, media_card, media_grid};
 use crate::route::Route;
-use crate::ui::{Ctx, PAGE_SIZE, cover_url, empty_state, pager, plural};
+use crate::ui::{Ctx, Refine, cover_url, empty_state, pager, plural};
 
 pub fn render(ctx: &Ctx) -> DomNode {
+    // A new Refine choice rebuilds the page, so it starts at page 1 again.
+    ctx.refine
+        .render_value(bind!(ctx, |refine: Refine| page(&ctx, refine)))
+}
+
+fn page(ctx: &Ctx, refine: Refine) -> DomNode {
     let offset = Value::new(0_i64);
     let refresh = ctx.refresh.clone();
     let key = computed_tuple!(offset, refresh);
@@ -18,7 +24,9 @@ pub fn render(ctx: &Ctx) -> DomNode {
         let resource = load(bind!(ctx, async move {
             ctx.client
                 .get::<ArtistsResponse>(&format!(
-                    "/api/library/artists?limit={PAGE_SIZE}&offset={off}&sortBy=name"
+                    "/api/library/artists?limit={}&offset={off}&sortBy={}",
+                    refine.per_page,
+                    refine.sort
                 ))
                 .await
         }));
@@ -73,7 +81,7 @@ pub fn render(ctx: &Ctx) -> DomNode {
                         dom! {
                             <div>
                                 {media_grid(cards)}
-                                {pager(offset.clone(), page.offset, page.artists.len(), page.total)}
+                                {pager(offset.clone(), page.offset, page.artists.len(), page.total, refine.per_page)}
                             </div>
                         }
                     };

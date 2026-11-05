@@ -2,7 +2,7 @@
 //! built from the legacy `AuthenticatedLayout` markup. One DOM serves every viewport: desktop (above 1024px)
 //! shows the top bar, sidebar, side-panel rail and the player bar; tablet and phone (1024px and below) show
 //! the compact top bar, the drawer, the bottom navigation and the floating mini player. The switch is pure
-//! CSS (`max-[1024px]:` / `min-[1025px]:`), so the server-rendered markup is the final layout.
+//! CSS (`tablet:` / `min-[1025px]:`), so the server-rendered markup is the final layout.
 
 use std::rc::Rc;
 
@@ -56,21 +56,21 @@ pub fn frame(ctx: &Ctx, page: DomNode) -> DomNode {
         None => dom! { <span /> },
     });
     dom! {
-        <div class="h-screen bg-black overflow-hidden flex flex-col pt-16 max-[1024px]:pt-0">
+        <div class="h-screen bg-black overflow-hidden flex flex-col pt-16 tablet:pt-0">
             <a href="#main-content" class="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-(--z-panel) focus:px-4 focus:py-2 focus:bg-white focus:text-black focus:rounded-lg focus:font-medium">"Skip to main content"</a>
             {ctx.player.audio_view()}
             {top_bar_desktop(ctx, route.clone())}
             {top_bar_mobile(ctx)}
             {drawer(ctx)}
-            <div class="flex-1 flex gap-2 p-2 pt-0 overflow-hidden max-[1024px]:contents">
+            <div class="flex-1 flex gap-2 p-2 pt-0 overflow-hidden tablet:contents">
                 {sidebar(ctx, route.clone())}
                 <main id="main-content" tabindex="-1"
-                    class="flex-1 bg-gradient-to-b from-[#1a1a1a] via-black to-black rounded-lg overflow-y-auto relative focus:outline-none max-[1024px]:mx-2 max-[1024px]:mt-[var(--topbar-h)] max-[1024px]:mb-[var(--nav-h)]">
+                    class="flex-1 bg-gradient-to-b from-[#1a1a1a] via-black to-black rounded-lg overflow-y-auto relative focus:outline-none tablet:mx-2 tablet:mt-[var(--topbar-h)] tablet:mb-[var(--nav-h)]">
                     <div class="fixed inset-0 pointer-events-none z-0 overflow-hidden" style="will-change: auto; transform: translateZ(0px);">
                         <div class="absolute inset-0 bg-gradient-to-t from-purple-950/15 via-purple-950/5 to-transparent"></div>
                         <div class="absolute inset-0 bg-gradient-to-t from-black/40 via-black/10 to-transparent"></div>
                     </div>
-                    <div class="max-[1024px]:h-full">{page}</div>
+                    <div class="tablet:h-full">{page}</div>
                 </main>
                 {side_panel(ctx, panel_open)}
             </div>
@@ -180,7 +180,7 @@ fn top_bar_desktop(ctx: &Ctx, route: Computed<Route>) -> DomNode {
         .to_owned()
     });
     dom! {
-        <header class="fixed top-0 left-0 right-0 bg-black flex items-center px-3 z-(--z-header) h-16 max-[1024px]:hidden">
+        <header class="fixed top-0 left-0 right-0 bg-black flex items-center px-3 z-(--z-header) h-16 tablet:hidden">
             <div class="w-72 flex items-center px-2">
                 <a class="flex items-center gap-2 group" href={Route::Artists.to_string()}>
                     {kima_mark(32, "kima-mark inline-block shrink-0 group-hover:scale-105 transition-transform")}
@@ -310,7 +310,7 @@ fn sidebar(ctx: &Ctx, route: Computed<Route>) -> DomNode {
     );
     let stack = playlist_stack(ctx, route);
     dom! {
-        <aside class="w-64 bg-[var(--bg-primary)] flex flex-col overflow-hidden relative z-(--z-raised) rounded-lg max-[1024px]:hidden">
+        <aside class="w-64 bg-[var(--bg-primary)] flex flex-col overflow-hidden relative z-(--z-raised) rounded-lg tablet:hidden">
             <nav class="pt-6 px-3" role="navigation" aria-label="Main navigation">
                 <div class="mb-3 flex items-center gap-2 px-2">
                     <div class="w-1.5 h-1.5 bg-brand rounded-full"></div>
@@ -460,7 +460,7 @@ fn side_panel(ctx: &Ctx, open: Value<bool>) -> DomNode {
             dom! { <div class="flex-1 overflow-y-auto">{..rows}</div> }
         }));
     dom! {
-        <div class="shrink-0 h-full relative z-(--z-raised) max-[1024px]:hidden" style={wrapper_style}>
+        <div class="shrink-0 h-full relative z-(--z-raised) tablet:hidden" style={wrapper_style}>
             <div id="activity-panel" class="absolute inset-y-0 right-0 w-[380px] bg-[var(--bg-primary)] flex flex-col overflow-hidden transition-transform duration-300 ease-[cubic-bezier(0.25,1,0.5,1)] rounded-lg" style={panel_style}>
                 <button class="absolute left-0 top-0 bottom-0 w-12 flex items-center justify-center cursor-pointer hover:bg-[var(--bg-tertiary)] transition-colors duration-200 z-(--z-raised)"
                     title="open panel" aria-label="Toggle queue panel" on_click={toggle.clone()}>

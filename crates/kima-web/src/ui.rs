@@ -13,8 +13,25 @@ use crate::icons::icon;
 use crate::player::Player;
 use crate::route::Route;
 
-/// Page size of every list (the legacy library shows 40 per page).
-pub const PAGE_SIZE: i64 = 40;
+/// Items per page the collection offers in the Refine panel (legacy `PER_PAGE_OPTIONS`).
+pub const PER_PAGE_OPTIONS: [i64; 4] = [24, 40, 80, 200];
+
+/// The collection's Refine choices: sort order (`sortBy` of the library endpoints) and items per page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Refine {
+    pub sort: &'static str,
+    pub per_page: i64,
+}
+
+impl Default for Refine {
+    /// What the collection shows when nothing was refined (the legacy default: name A-Z, 40 per page).
+    fn default() -> Self {
+        Refine {
+            sort: "name",
+            per_page: 40,
+        }
+    }
+}
 
 /// What every page needs. Cheap to clone (all handles).
 #[derive(Clone)]
@@ -29,6 +46,9 @@ pub struct Ctx {
     pub playlists_rev: Value<u32>,
     /// The search box of the top bar; the search page shows the results for it.
     pub query: Value<String>,
+    /// Sort and page size of the collection tabs, and whether the Refine panel is open.
+    pub refine: Value<Refine>,
+    pub refine_open: Value<bool>,
     /// The phone / tablet menu drawer.
     pub menu_open: Value<bool>,
     /// A transient message `(id, text)` shown by the shell for a few seconds.
@@ -55,18 +75,9 @@ impl Ctx {
 
 /// `Button` primary, size md.
 pub const BTN_PRIMARY: &str = "inline-flex items-center justify-center gap-2 rounded-lg font-semibold transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-brand hover:bg-brand-hover text-black min-h-12 px-6 text-sm";
-/// Secondary outline button (page toolbars, "Rename", "Cancel").
-pub const BTN_OUTLINE: &str = "flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-all text-[var(--text-secondary)] hover:bg-white/5 border border-white/10 hover:text-white/70 hover:border-white/20 disabled:opacity-50 disabled:cursor-not-allowed";
-/// The brand-filled toolbar button of the playlists header.
-pub const BTN_BRAND_SM: &str = "flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-all bg-brand text-black hover:bg-brand-hover disabled:opacity-50 disabled:cursor-not-allowed";
 /// Text input of the forms.
 pub const INPUT: &str = "w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-transparent transition-all duration-200";
 pub const LABEL: &str = "block text-sm font-medium text-[var(--text-primary)] mb-1.5";
-/// The glass card of login / setup / settings sections.
-pub const CARD: &str = "bg-[#111]/90 rounded-lg p-6 md:p-8 border border-white/10";
-/// `<h1>` of a page (collection, playlists).
-pub const PAGE_TITLE: &str =
-    "text-4xl md:text-5xl font-bold tracking-tight text-white leading-none";
 
 /// An empty state: big icon, heading, one line of help.
 pub fn empty_state(icon_name: &'static str, heading: &str, text: &str) -> DomNode {
@@ -113,8 +124,8 @@ pub fn rows_box(rows: Vec<DomNode>) -> DomNode {
 }
 
 /// Number of pages for `total` items.
-pub fn total_pages(total: i64) -> i64 {
-    ((total + PAGE_SIZE - 1) / PAGE_SIZE).max(1)
+pub fn total_pages(total: i64, per_page: i64) -> i64 {
+    ((total + per_page - 1) / per_page).max(1)
 }
 
 /// `1–40 of 120` (or `0 of 0`).
@@ -133,15 +144,15 @@ const PAGER_BUTTON: &str = "flex items-center justify-center min-h-[44px] min-w-
 
 /// Previous / next controls under a list (the legacy `Pagination`; nothing when there is one page).
 /// `offset` is the page the list is showing.
-pub fn pager(offset: Value<i64>, current: i64, shown: usize, total: i64) -> DomNode {
-    let pages = total_pages(total);
+pub fn pager(offset: Value<i64>, current: i64, shown: usize, total: i64, per_page: i64) -> DomNode {
+    let pages = total_pages(total, per_page);
     if pages <= 1 {
         return dom! { <span /> };
     }
-    let page = current / PAGE_SIZE + 1;
+    let page = current / per_page + 1;
     let go = |target: i64| {
         let offset = offset.clone();
-        move |_| offset.set((target - 1).max(0) * PAGE_SIZE)
+        move |_| offset.set((target - 1).max(0) * per_page)
     };
     let (first, prev, next, last) = (go(1), go(page - 1), go(page + 1), go(pages));
     let at_first = current <= 0;
@@ -208,9 +219,11 @@ mod tests {
         assert_eq!(page_label(0, 0, 0), "0 of 0");
         assert!(has_next(0, 40, 120));
         assert!(!has_next(80, 40, 120));
-        assert_eq!(total_pages(0), 1);
-        assert_eq!(total_pages(40), 1);
-        assert_eq!(total_pages(41), 2);
+        assert_eq!(total_pages(0, 40), 1);
+        assert_eq!(total_pages(40, 40), 1);
+        assert_eq!(total_pages(41, 40), 2);
+        assert_eq!(total_pages(41, 24), 2);
+        assert_eq!(total_pages(200, 200), 1);
     }
 
     #[test]

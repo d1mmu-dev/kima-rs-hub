@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE subsonic_bookmarks b SET track_id = $2 WHERE b.track_id = $1\n           AND NOT EXISTS (SELECT 1 FROM subsonic_bookmarks o WHERE o.user_id = b.user_id AND o.track_id = $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "51325ce5356a82822ef91b27ff4747cecdb93256e4212257c8aad7c958106803"
+}

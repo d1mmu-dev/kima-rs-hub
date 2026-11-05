@@ -23,6 +23,7 @@ pub mod playback;
 pub mod playlists;
 pub mod plays;
 pub mod ratings;
+pub mod removal_log;
 pub mod search;
 pub mod settings;
 pub mod settings_kv;

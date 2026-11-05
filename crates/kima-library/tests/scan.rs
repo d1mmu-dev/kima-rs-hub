@@ -415,6 +415,93 @@ async fn missing_tracks_purged_after_grace(pool: PgPool) {
     assert_eq!(count(&pool, "artists").await, 1);
 }
 
+/// D-161: a purge leaves a `removal_log` row and unlinks the track's transcode-cache files.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn purge_logs_the_removal_and_unlinks_transcodes(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let p = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "C/D/01.flac",
+        tags("C", "D", "two", "2001", "1"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    let gone = track_id(&pool, "A/B/01.flac").await;
+    let cache = c.data_dir.join("transcode");
+    std::fs::create_dir_all(&cache).unwrap();
+    let mine = cache.join(format!("{gone}-high-100-5.mp3"));
+    let theirs = cache.join(format!("{}-high-100-5.mp3", Uuid::now_v7()));
+    std::fs::write(&mine, b"x").unwrap();
+    std::fs::write(&theirs, b"x").unwrap();
+
+    std::fs::remove_file(p).unwrap();
+    scan::reconcile(&c).await.unwrap();
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '8 days' WHERE id = $1")
+        .bind(gone)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.purged, 1, "{report:?}");
+    let log: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT file_path, title, artist_name, album_title, reason FROM removal_log",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        log,
+        vec![(
+            "A/B/01.flac".into(),
+            "one".into(),
+            "A".into(),
+            "B".into(),
+            "file-missing-grace".into()
+        )]
+    );
+    assert!(!mine.exists(), "the retired track's transcode is unlinked");
+    assert!(theirs.exists(), "another track's transcode stays");
+}
+
+/// D-161 (upstream `43e2be99`): a track flagged missing whose file is on disk when the scan
+/// walks is un-flagged before the sweep runs, so it is never retired, however old the flag.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn file_on_disk_is_never_retired(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    make_audio(
+        dir.path(),
+        "C/D/01.flac",
+        tags("C", "D", "two", "2001", "1"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '30 days'")
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    // Both flagged and old; the files are there.
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!((report.restored, report.purged), (2, 0), "{report:?}");
+    assert_eq!(count(&pool, "tracks").await, 2);
+    assert_eq!(count(&pool, "removal_log").await, 0);
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn purge_removes_artwork_folder(pool: PgPool) {
     if !require_ffmpeg() {

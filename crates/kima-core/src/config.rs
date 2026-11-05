@@ -8,6 +8,11 @@ pub struct Config {
     pub music_path: PathBuf,
     pub bind_addr: SocketAddr,
     pub frontend_dir: Option<PathBuf>,
+    /// `KIMA_WEB_BUILD_DIR`: the `vertigo build` output of `kima-web`. Set means the embedded SSR
+    /// server runs and `kima-web`'s routes are proxied to it; unset (the default) means neither.
+    pub web_build_dir: Option<PathBuf>,
+    /// `KIMA_WEB_SSR_PORT`: the loopback port of the embedded SSR server.
+    pub web_ssr_port: u16,
     pub allowed_origins: Vec<String>,
     pub log_level: String,
     pub session_secret: Option<String>,
@@ -51,6 +56,8 @@ impl std::fmt::Debug for Config {
             .field("music_path", &self.music_path)
             .field("bind_addr", &self.bind_addr)
             .field("frontend_dir", &self.frontend_dir)
+            .field("web_build_dir", &self.web_build_dir)
+            .field("web_ssr_port", &self.web_ssr_port)
             .field("allowed_origins", &self.allowed_origins)
             .field("log_level", &self.log_level)
             .field("session_secret", &hidden(&self.session_secret))
@@ -77,6 +84,9 @@ impl std::fmt::Debug for Config {
 }
 
 /// `KIMA_CONTACT` when unset.
+/// Loopback port of the embedded `kima-web` SSR server when `KIMA_WEB_SSR_PORT` is unset.
+pub const DEFAULT_WEB_SSR_PORT: u16 = 3031;
+
 pub const DEFAULT_CONTACT: &str = "https://github.com/d1mmu-dev/kima-rs-hub";
 /// `MUSICBRAINZ_BASE_URL` when unset.
 pub const DEFAULT_MUSICBRAINZ_BASE_URL: &str = "https://musicbrainz.org/ws/2";
@@ -234,6 +244,19 @@ impl Config {
             },
         };
 
+        let web_ssr_port = match value("KIMA_WEB_SSR_PORT") {
+            None => DEFAULT_WEB_SSR_PORT,
+            Some(raw) => match raw.parse::<u16>() {
+                Ok(n) if n > 0 => n,
+                _ => {
+                    return Err(ConfigError::Invalid {
+                        name: "KIMA_WEB_SSR_PORT",
+                        value: raw,
+                    });
+                }
+            },
+        };
+
         let fingerprint_workers = match value("KIMA_FINGERPRINT_WORKERS") {
             None => std::thread::available_parallelism()
                 .map_or(1, |n| n.get() / 2)
@@ -262,6 +285,8 @@ impl Config {
                 .into(),
             bind_addr: SocketAddr::new(host, port),
             frontend_dir: value("KIMA_FRONTEND_DIR").map(PathBuf::from),
+            web_build_dir: value("KIMA_WEB_BUILD_DIR").map(PathBuf::from),
+            web_ssr_port,
             allowed_origins,
             log_level: value("LOG_LEVEL").unwrap_or_else(|| "info".into()),
             session_secret: value("SESSION_SECRET"),
@@ -675,5 +700,41 @@ mod tests {
         assert_eq!(config.data_dir, PathBuf::from("/srv/kima"));
         assert_eq!(config.frontend_dir, Some(PathBuf::from("/srv/web")));
         assert_eq!(config.session_secret.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn web_ssr_is_off_unless_a_build_dir_is_set() {
+        let config = Config::from_lookup(lookup(&[("DATABASE_URL", "postgres://x")])).unwrap();
+        assert_eq!(config.web_build_dir, None);
+        assert_eq!(config.web_ssr_port, DEFAULT_WEB_SSR_PORT);
+
+        let config = Config::from_lookup(lookup(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("KIMA_WEB_BUILD_DIR", "/srv/kima/web-ssr/build"),
+            ("KIMA_WEB_SSR_PORT", "4555"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.web_build_dir,
+            Some(PathBuf::from("/srv/kima/web-ssr/build"))
+        );
+        assert_eq!(config.web_ssr_port, 4555);
+    }
+
+    #[test]
+    fn web_ssr_port_must_be_a_real_port() {
+        for bad in ["0", "70000", "x", "-1"] {
+            assert_eq!(
+                Config::from_lookup(lookup(&[
+                    ("DATABASE_URL", "postgres://x"),
+                    ("KIMA_WEB_SSR_PORT", bad),
+                ])),
+                Err(ConfigError::Invalid {
+                    name: "KIMA_WEB_SSR_PORT",
+                    value: bad.into()
+                }),
+                "{bad}"
+            );
+        }
     }
 }

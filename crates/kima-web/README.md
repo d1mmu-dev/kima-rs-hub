@@ -47,6 +47,55 @@ MUSIC_PATH=$HOME/Music VERTIGO=~/.local/opt/vertigo-cli-0.13.4/bin/vertigo tools
 - First run: open the page; with no account yet `/login` sends you to `/setup` (create the admin, you are
   signed in and onboarding is marked complete); the library is then browsable and playable.
 
+## Embedded SSR (the production shape, M9 Task 3)
+
+`kima-server` links `vertigo-cli` as a library and runs `vertigo_cli::serve::run` in-process (wasmtime executes
+the `kima-web` wasm for every server-rendered page). That server binds **`127.0.0.1` only**; `kima-server`
+reverse-proxies the `kima-web` routes to it, so the browser sees one origin: `kima-server`'s.
+
+| Env | Meaning |
+|---|---|
+| `KIMA_WEB_BUILD_DIR` | The `vertigo build` output (`index.json`, `kima_web.<hash>.wasm`, `wasm_run.<hash>.js`). **Setting it turns the embedded SSR and the proxy on; unset (the default) means neither**, and `kima-server` starts without any kima-web build output, exactly as before. |
+| `KIMA_WEB_SSR_PORT` | Loopback port of the embedded server (default `3031`; 1-65535). |
+
+vertigo serves the build directory under the path it is given, so the public asset URLs contain
+`KIMA_WEB_BUILD_DIR` as written (an absolute directory shows up in the page's `<script src>`; harmless, but
+the URL layout follows the setting). Relative fetches made while rendering resolve against `kima-server`
+itself (`http://127.0.0.1:$PORT`), so `/api/...` reaches the real API.
+
+**Proxy allow-list** (`kima_server::web_proxy`): `GET`/`HEAD` of `/` (exactly), `/login`, `/setup`,
+`/collection`, `/search`, `/playlists`, `/settings` and anything below those (whole path segments:
+`/collection/albums` yes, `/loginx` no), plus the exact public paths of the two build files `index.json`
+names. Everything else (`/api`, `/rest`, `/podcasts`, other files of the build directory, non-`GET` methods,
+unknown paths) goes to `kima-server`'s normal routing and 404 and never reaches the SSR server; this is
+tested (`crates/kima-server/tests/web_ssr_embed.rs`). A page task adds its route to the one constant
+`WEB_ROUTES`. When the embedded SSR is on, a kima-web route wins over the legacy export (`KIMA_FRONTEND_DIR`)
+for the same path (`/`, `/setup`, ...); the rest of that export keeps being served.
+
+**Liveness: crash and restart.** `kima-server` starts the SSR server first and waits until it accepts
+connections (the first start compiles the wasm: seconds) before it opens its own port; a bad build
+directory or a busy SSR port fails the start. Afterwards, if the SSR task panics, returns an error (a failed
+bind included) or just returns without a shutdown having been requested, `kima-server` stops serving, drains
+(at most 10 s) and **exits non-zero**, so a container restart policy recovers it. There is no mode that keeps
+the API up while `kima-web` answers 5xx. Tests: `a_panicking_ssr_task_...`, `a_failing_ssr_task_...`,
+`an_ssr_task_that_just_returns_...`, `the_process_exits_non_zero_when_the_ssr_server_cannot_start` (real binary).
+
+**Try it.** `MUSIC_PATH=$HOME/Music VERTIGO=~/.local/opt/vertigo-cli-0.13.4/bin/vertigo
+tools/run-kima-web-dev.sh --ssr` builds kima-web, starts `kima-server` with the embedded SSR and serves
+<http://127.0.0.1:3030/> (single origin; no vertigo dev server; `SSR_PORT` picks the loopback port). Check it
+with `curl -s http://127.0.0.1:3030/login` (the sign-in form is in the markup) and
+`tools/verify-kima-web-e2e.mjs --ssr`, which targets that origin and adds checks that pages are server-rendered
+and that only kima-web's routes are proxied. The dev flow below (`vertigo serve` + `/api` proxy) is unchanged.
+
+**Cost.** `vertigo-cli` pulls wasmtime/cranelift and actix (it is an actix-web server, not axum 0.6/poem as
+the plan assumed; kima-server's axum 0.8 stack is independent of it): +169 crates in `Cargo.lock`, about one
+extra minute of cold build time, a much larger binary (release `kima`: 41.8 MB to 71.9 MB). Licences: vertigo,
+vertigo-cli and vertigo-macro are `MIT OR Apache-2.0`; wasmtime/cranelift are `Apache-2.0 WITH
+LLVM-exception`; the new crates are otherwise MIT/Apache/BSD/Unlicense/Zlib/CDLA-Permissive-2.0 (the two
+`ittapi` crates are `GPL-2.0-only OR BSD-3-Clause`: the BSD-3-Clause option applies). All can be combined into a
+GPL-3.0-only binary (Apache-2.0 is GPLv3-compatible). `actix-proxy`/`actix-tls` link the system OpenSSL
+(`libssl.so.3`), so the runtime image needs `libssl3` (the pgvector/Debian bookworm image has it).
+
 ## What kima-web contains (M9 Tasks 4-15)
 
 Routes: `/login`, `/setup`, `/collection` (artists), `/collection/albums[?artist=]`,

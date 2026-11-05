@@ -14,7 +14,7 @@ Builds on: M0–M8 as merged on `main` (HEAD `2014543`): crates `kima-core`, `ki
 `kima-ident`, `kima-net`, `kima-api`, `kima-subsonic`, `kima-server`; the forked Next.js 16 frontend served as a
 static export by `kima-server::frontend` (`tower_http::ServeDir` + legacy-route redirects, D-011).
 Researched directly (read-only, this repo and `/home/dimmu/projects/vertigo` checked out locally, **not modified**):
-`vertigo` 0.6.3 (`crates/vertigo/src/{router.rs, fetch/*, driver_module/*, lib.rs}`, `tutorial.md`) and `vertigo-cli`
+`vertigo` 0.6.3 at the time (pinned to `=0.13.4` since Task 2; see the version note below) (`crates/vertigo/src/{router.rs, fetch/*, driver_module/*, lib.rs}`, `tutorial.md`) and `vertigo-cli`
 0.6.3 (`crates/vertigo-cli/{README.md, Cargo.toml, src/main.rs, src/serve/{mod.rs, serve_run.rs, serve_opts.rs,
 server_state.rs}, src/commons/models.rs}`), plus the `examples/router` and `examples/counter` crates. The second
 round (2026-11-05) specifically re-read `vertigo-cli`'s `serve` module to answer whether its wasmtime-based SSR
@@ -83,6 +83,12 @@ Non-goals (left to M10 or later, explicitly out of scope here):
   `DIVERGENCES.md`/spec treatment and is explicitly deferred.
 
 ## 3. What was verified in `vertigo`/`vertigo-cli` (not assumed)
+
+> **Version note (M9 Tasks 0-2).** The implementation pins `vertigo`/`vertigo-macro` `=0.13.4` and uses `vertigo-cli`
+> 0.13.4; the reading below was done against 0.6.3 and describes that version. Known 0.13 differences: fetch
+> bodies are `JsJson` (not text), `vertigo build` emits `index.json` + hashed assets (no `index.html`), `serve` has
+> `--proxy`, `--ssr-fetch-base` and hydration options. The in-process `serve::run` embedding claims below are
+> re-checked against 0.13.4 in Task 3, not assumed.
 
 Read directly from the checked-out `vertigo` repo (`/home/dimmu/projects/vertigo`, version 0.6.3; **read-only**,
 used only to ground this design):
@@ -427,7 +433,7 @@ claimed it; check the file's tail before use in case another in-flight milestone
 
 GPL-3.0-only; edition 2024 for every native crate (`kima-api-types` included); `kima-web` targets
 `wasm32-unknown-unknown` and therefore cannot use `rust-version`-gated native-only features — confirm the toolchain
-`vertigo` 0.6.3 requires (tutorial.md §1: **nightly**, for trait aliases) does not regress kima-rs's pinned stable
+`vertigo` required at 0.6.3 (tutorial.md §1: **nightly**, for trait aliases; resolved in Task 0: 0.13.4 builds on stable and nightly) does not regress kima-rs's pinned stable
 toolchain for the native crates; `kima-web` may need its own `rust-toolchain.toml` override scoped to that crate's
 directory if `vertigo` still requires nightly (confirmed in Task 0 against the installed `vertigo` version, not
 assumed from the tutorial alone — the tutorial is marked "up to date with version 0.6.3", matching the vendored

@@ -25,9 +25,12 @@ from an isolated `/__legacy/` mount for local dev comparison. Playwright gets a 
 `kima-web`'s pages, which is the production-defining suite; the existing suite moves to running against the
 legacy-flag build only.
 
-**Tech stack:** Rust 2024 for every native crate; `kima-web` on `vertigo`/`vertigo-macro` 0.6.3, built with
-`vertigo-cli` 0.6.3, target `wasm32-unknown-unknown` (toolchain requirement confirmed in Task 0, not assumed —
-`vertigo`'s tutorial states nightly is required for trait aliases, current as of 0.6.3). Backend unchanged: axum
+**Tech stack:** Rust 2024 for every native crate; `kima-web` on `vertigo`/`vertigo-macro` `=0.13.4`, built with
+`vertigo-cli` 0.13.4, target `wasm32-unknown-unknown` (toolchain requirement confirmed in Task 0, not assumed:
+0.13.4 builds on stable and nightly; 0.6.x no longer builds on current nightly — see `crates/kima-web/README.md`).
+0.13 API differences from the 0.6.3 the task text was written against: request/response bodies are `JsJson` (no
+`RequestBody::Text`; `kima-web::api::codec` bridges `serde_json`), `vertigo build` writes `index.json` plus hashed
+`.wasm`/`wasm_run.<hash>.js` (no `index.html`), vertigo's fetch mock is `#[cfg(test)]`-private. Backend unchanged: axum
 0.8, sqlx 0.8, tokio, Postgres 17. Frontend tooling unchanged for the existing suite: Next.js 16 static export,
 vitest, Playwright; `wasm-opt` (binaryen) required for `vertigo-cli` production builds.
 
@@ -112,7 +115,7 @@ in-flight milestone claimed it first).
 ## Tasks
 
 - [ ] **Task 0: Toolchain and CI groundwork for a wasm32 crate**
-  - Confirm the Rust toolchain `vertigo` 0.6.3 actually needs to build `wasm32-unknown-unknown` (nightly per the
+  - Confirm the Rust toolchain `vertigo` 0.13.4 actually needs to build `wasm32-unknown-unknown` (nightly per the
     tutorial, or stable — test with the pinned workspace toolchain first, record the actual error if it fails,
     do not assume the tutorial is still accurate for every claim). Add `wasm32-unknown-unknown` to whatever
     `rustup target add` the dev environment and CI need. Install `wasm-opt` (binaryen) in the CI image.

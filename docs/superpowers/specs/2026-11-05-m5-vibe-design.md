@@ -437,3 +437,23 @@ The highest used on `main` is **D-180** (Next.js UI, `docs/DIVERGENCES.md`); `fe
 7. **Q7 Layout cost:** if Task 8 shows > 10 min at 100k, accept (a) a longer background layout, (b) f32 accumulation (D-row), or (c) approximate neighbour candidates (breaks exactness)?
 8. **Q8 `getSimilarSongs`:** upstream's artist-based behaviour (recommended, parity) or a vibe-based improvement (a divergence the frontend would not notice)?
 9. **Q9 Map cache key** (§5.1): accept a version key instead of hashing the JSON (identical bytes in practice, [?] for rare title/cover edits)?
+
+### 16.1 Owner decisions (2026-11-05) and assumptions made while building Phases A-B
+
+Owner: **Q1** build now on synthetic vectors; real-model acceptance waits for M4's checkpoint swap (`kima_db::vibe::MATCHING_SOUND` is the single constant to change). **Q2** M5 = plan phases A-D; Phase E (public vibe feed) is later. **Q3** `feelProbe.json` and `moodHeads.json` stay private outside Git, SHA-256 pinned, loaded from `KIMA_VIBE_ASSET_DIR`; the mood heads are not used or generated before their training-data licences are checked, so moods sit behind the `vibe_mood_heads` capability (unavailable when the file is absent) and are tested with synthetic heads.
+
+Assumptions (everything else follows the plan's recommendation):
+
+1. **`shipped-reference.json` is not copied.** Its four 512-d vectors have the statistics of real embeddings and its scores come from the unlicensed heads; the plan's `moods-reference.json` does not exist and `shipped_reference_scores_to_1e-4` is `#[ignore]` behind `KIMA_VIBE_ASSET_DIR` (Task 11).
+2. **Goldens use Node's type stripping, not `tsx`** (Node 26.7; the pure modules are copied with `.ts` import suffixes, `./worker` stubbed, `gaussian` exported). The pure modules import without Prisma: the spec's [?] is resolved. An extra `ts-golden-library.json` carries the golden inputs.
+3. **Capabilities:** `vibe_assets` = the feel probe (no probe, no formula); `vibe_mood_heads` = the 22 heads. The spec's single `vibe_assets` entry could not express "moods off, similarity on" (section 4.4).
+4. **Migration number 0040** (M-SYNC holds 0029+). The phase check lists all seven phases including `analysis` (0027).
+5. **`MATCHING_SOUND`** uses the spec's expected music-checkpoint strings (`music_audio`, `clap-music-audio-v1`, sha `ab1bf5eb...`); they are unconfirmed until the M4 follow-up. Until then a library embedded by today's M4 has zero eligible tracks.
+6. **`ELIGIBLE` inlines the identity as SQL literals** (checked to `[A-Za-z0-9._-]`), so it has no bind parameters.
+7. **Ids in `kima-vibe` are strings**; lowercase hyphenated UUID text sorts like the uuid bytes Postgres sorts by.
+8. **The SQL two-window cap equals the walk only when each album belongs to one artist** (true here: a track's artist is its album's artist). `two_window_differs_for_shared_albums` documents the counter-example.
+9. **`pow` is held to 8 ulp only on upstream's domain** (x in [0,60), exponent 0.895...), not on arbitrary exponents.
+10. **serde_json `float_roundtrip`** is required: the default parser was 1 ulp off on a synthetic weight.
+11. **`KIMA_VIBE_EXACT_MAX=0` is valid** and forces the index path; non-numbers are a config error.
+12. **Asset cache lives in `EmbeddingRuntimeState`** (loaded-once model state) so no `IdentCtx` constructor changes.
+13. Task 3 step 3 (EXPLAIN on 10k rows) moves to Task 5, where the feel-join and map-count queries first exist.

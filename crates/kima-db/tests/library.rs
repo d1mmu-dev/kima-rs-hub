@@ -157,7 +157,13 @@ async fn purge_respects_grace(pool: PgPool) {
         .await
         .unwrap();
     let week = Duration::from_secs(7 * 86400);
-    assert_eq!(library::purge_missing(&pool, week).await.unwrap(), 1);
+    assert_eq!(
+        library::retire_missing(&pool, week, None)
+            .await
+            .unwrap()
+            .tracks,
+        1
+    );
     assert!(
         library::find_by_path(&pool, "/m/6")
             .await
@@ -498,4 +504,414 @@ async fn prune_waits_for_a_concurrent_genre_reference(pool: PgPool) {
     assert_eq!(prune.await.unwrap().unwrap(), 0);
     assert_eq!(count(&pool, "track_genres").await, 1);
     assert_eq!(count(&pool, "genres").await, 1);
+}
+
+// ---- M-SYNC Task 5: removal log, mass-missing guard, history hand-off (D-040, D-161) ----
+
+const WEEK: Duration = Duration::from_secs(7 * 86400);
+
+async fn make_missing(pool: &PgPool, id: uuid::Uuid, days: i32) {
+    sqlx::query(
+        "UPDATE tracks SET missing_since = now() - make_interval(days => $2) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(days)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn user(pool: &PgPool, name: &str) -> uuid::Uuid {
+    let id = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO users (id, username, password_hash) VALUES ($1, $2, 'x')")
+        .bind(id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn playlist(pool: &PgPool, owner: uuid::Uuid, tracks: &[uuid::Uuid]) -> uuid::Uuid {
+    let id = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO playlists (id, user_id, name) VALUES ($1, $2, 'P')")
+        .bind(id)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .unwrap();
+    for (i, t) in tracks.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO playlist_items (id, playlist_id, track_id, sort) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(id)
+        .bind(t)
+        .bind(i as i32)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    id
+}
+
+async fn star(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid) {
+    sqlx::query("INSERT INTO stars (id, user_id, track_id) VALUES ($1, $2, $3)")
+        .bind(uuid::Uuid::now_v7())
+        .bind(u)
+        .bind(t)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn rate(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, r: i16) {
+    sqlx::query("INSERT INTO ratings (id, user_id, track_id, rating) VALUES ($1, $2, $3, $4)")
+        .bind(uuid::Uuid::now_v7())
+        .bind(u)
+        .bind(t)
+        .bind(r)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn bookmark(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, ms: i64) {
+    sqlx::query(
+        "INSERT INTO subsonic_bookmarks (user_id, track_id, position_ms) VALUES ($1, $2, $3)",
+    )
+    .bind(u)
+    .bind(t)
+    .bind(ms)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn play(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, heard: bool) {
+    sqlx::query("INSERT INTO plays (id, user_id, track_id, heard) VALUES ($1, $2, $3, $4)")
+        .bind(uuid::Uuid::now_v7())
+        .bind(u)
+        .bind(t)
+        .bind(heard)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn count_for(pool: &PgPool, table: &str, t: uuid::Uuid) -> i64 {
+    sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE track_id = $1"))
+        .bind(t)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn log_rows(pool: &PgPool) -> Vec<(String, String, String, String, String)> {
+    sqlx::query_as(
+        "SELECT file_path, title, artist_name, album_title, reason FROM removal_log ORDER BY file_path",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn purge_writes_removal_log_row(pool: PgPool) {
+    let old = upsert(&pool, &track("A", "X", None, "Eight", "/m/8")).await;
+    let young = upsert(&pool, &track("A", "X", None, "Six", "/m/6")).await;
+    upsert(&pool, &track("A", "X", None, "Here", "/m/ok")).await;
+    make_missing(&pool, old, 8).await;
+    make_missing(&pool, young, 6).await;
+    let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!(r.tracks, 1);
+    assert_eq!(r.albums.len(), 1);
+    assert_eq!(
+        log_rows(&pool).await,
+        vec![(
+            "/m/8".to_string(),
+            "Eight".to_string(),
+            "A".to_string(),
+            "X".to_string(),
+            "file-missing-grace".to_string()
+        )]
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn mass_missing_stands_down(pool: PgPool) {
+    // 20 tracks, 3 missing past the grace: small, purged.
+    let mut ids = Vec::new();
+    for i in 0..20 {
+        ids.push(
+            upsert(
+                &pool,
+                &track("A", "X", None, &format!("t{i}"), &format!("/m/{i}")),
+            )
+            .await,
+        );
+    }
+    for id in &ids[..3] {
+        make_missing(&pool, *id, 8).await;
+    }
+    let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!((r.tracks, r.stood_down), (3, false));
+    assert_eq!(count(&pool, "tracks").await, 17);
+
+    // 12 of 20 missing (>= 10 and > 10 %): nothing goes.
+    for id in &ids[3..15] {
+        make_missing(&pool, *id, 8).await;
+    }
+    let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!((r.tracks, r.stood_down), (0, true));
+    assert_eq!(count(&pool, "tracks").await, 17);
+    assert!(log_rows(&pool).await.len() == 3);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn mass_missing_floor_lets_a_few_go_in_a_big_library(pool: PgPool) {
+    let mut ids = Vec::new();
+    for i in 0..200 {
+        ids.push(
+            upsert(
+                &pool,
+                &track("A", "X", None, &format!("t{i}"), &format!("/m/{i}")),
+            )
+            .await,
+        );
+    }
+    for id in &ids[..9] {
+        make_missing(&pool, *id, 8).await;
+    }
+    let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!((r.tracks, r.stood_down), (9, false));
+    assert_eq!(count(&pool, "tracks").await, 191);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn guard_counts_young_flags_too(pool: PgPool) {
+    let mut ids = Vec::new();
+    for i in 0..20 {
+        ids.push(
+            upsert(
+                &pool,
+                &track("A", "X", None, &format!("t{i}"), &format!("/m/{i}")),
+            )
+            .await,
+        );
+    }
+    make_missing(&pool, ids[0], 8).await;
+    for id in &ids[1..11] {
+        make_missing(&pool, *id, 1).await;
+    }
+    let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!((r.tracks, r.stood_down), (0, true));
+}
+
+struct Upgrade {
+    u: uuid::Uuid,
+    mp3: uuid::Uuid,
+    flac: uuid::Uuid,
+}
+
+async fn upgrade_fixture(pool: &PgPool) -> Upgrade {
+    let mut a = track("A", "X", None, "Song", "/m/01 Song.mp3");
+    a.codec = "mp3".into();
+    let mp3 = upsert(pool, &a).await;
+    let b = track("A", "X", None, "song", "/m/01 song.flac");
+    let flac = upsert(pool, &b).await;
+    for i in 0..9 {
+        upsert(
+            pool,
+            &track("A", "X", None, &format!("o{i}"), &format!("/m/o{i}")),
+        )
+        .await;
+    }
+    // A different slot, so the album keeps tracks and the guard has a big enough library.
+    let mut t = track("B", "Y", None, "z", "/m/z");
+    t.track_no = 5;
+    upsert(pool, &t).await;
+    let u = user(pool, "ana").await;
+    Upgrade { u, mp3, flac }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn replaced_file_hands_history_to_copy(pool: PgPool) {
+    let Upgrade { u, mp3, flac } = upgrade_fixture(&pool).await;
+    play(&pool, u, mp3, true).await;
+    star(&pool, u, mp3).await;
+    rate(&pool, u, mp3, 4).await;
+    bookmark(&pool, u, mp3, 1234).await;
+    let p = playlist(&pool, u, &[mp3]).await;
+    make_missing(&pool, mp3, 8).await;
+
+    let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!(r.tracks, 1);
+    assert_eq!(r.playlists, vec![(u, p)]);
+
+    let heard: Vec<bool> = sqlx::query_scalar("SELECT heard FROM plays WHERE track_id = $1")
+        .bind(flac)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(heard, vec![true]);
+    assert_eq!(count_for(&pool, "stars", flac).await, 1);
+    assert_eq!(count_for(&pool, "ratings", flac).await, 1);
+    assert_eq!(count_for(&pool, "subsonic_bookmarks", flac).await, 1);
+    let place: Vec<uuid::Uuid> =
+        sqlx::query_scalar("SELECT track_id FROM playlist_items WHERE playlist_id = $1")
+            .bind(p)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(place, vec![flac]);
+    let log = log_rows(&pool).await;
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].4, "replaced-by-another-file");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn history_on_the_copy_wins(pool: PgPool) {
+    let Upgrade { u, mp3, flac } = upgrade_fixture(&pool).await;
+    star(&pool, u, mp3).await;
+    star(&pool, u, flac).await;
+    rate(&pool, u, mp3, 2).await;
+    rate(&pool, u, flac, 5).await;
+    bookmark(&pool, u, mp3, 1).await;
+    bookmark(&pool, u, flac, 2).await;
+    let p = playlist(&pool, u, &[mp3, flac]).await;
+    make_missing(&pool, mp3, 8).await;
+
+    library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!(count_for(&pool, "stars", flac).await, 1);
+    let rating: i16 = sqlx::query_scalar("SELECT rating FROM ratings WHERE track_id = $1")
+        .bind(flac)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rating, 5);
+    let ms: i64 =
+        sqlx::query_scalar("SELECT position_ms FROM subsonic_bookmarks WHERE track_id = $1")
+            .bind(flac)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ms, 2);
+    // The playlist held both: it keeps the copy once, in its own place, and is dense again.
+    let items: Vec<(uuid::Uuid, i32)> = sqlx::query_as(
+        "SELECT track_id, sort FROM playlist_items WHERE playlist_id = $1 ORDER BY sort",
+    )
+    .bind(p)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(items, vec![(flac, 0)]);
+    assert_eq!(count(&pool, "stars").await, 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn no_copy_no_handoff(pool: PgPool) {
+    let Upgrade { u, mp3, flac } = upgrade_fixture(&pool).await;
+    // The "copy" has another title: not the same song.
+    sqlx::query("UPDATE tracks SET title = 'Other' WHERE id = $1")
+        .bind(flac)
+        .execute(&pool)
+        .await
+        .unwrap();
+    star(&pool, u, mp3).await;
+    make_missing(&pool, mp3, 8).await;
+    library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!(count_for(&pool, "stars", flac).await, 0);
+    assert_eq!(count(&pool, "stars").await, 0);
+    assert_eq!(log_rows(&pool).await[0].4, "file-missing-grace");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_missing_copy_is_no_copy(pool: PgPool) {
+    let Upgrade { u, mp3, flac } = upgrade_fixture(&pool).await;
+    star(&pool, u, mp3).await;
+    make_missing(&pool, mp3, 8).await;
+    make_missing(&pool, flac, 1).await;
+    library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!(count(&pool, "stars").await, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn purged_track_reports_playlists_holding_it(pool: PgPool) {
+    let Upgrade { u, mp3, .. } = upgrade_fixture(&pool).await;
+    let other = user(&pool, "bo").await;
+    let p1 = playlist(&pool, u, &[mp3]).await;
+    let p2 = playlist(&pool, other, &[mp3]).await;
+    playlist(&pool, other, &[]).await;
+    make_missing(&pool, mp3, 8).await;
+    let mut r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    r.playlists.sort();
+    let mut want = vec![(u, p1), (other, p2)];
+    want.sort();
+    assert_eq!(r.playlists, want);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn purge_nulls_playback_state_and_lists_transcode_artifacts(pool: PgPool) {
+    let Upgrade { u, mp3, .. } = upgrade_fixture(&pool).await;
+    sqlx::query(
+        "INSERT INTO playback_state (user_id, playback_type, track_id) VALUES ($1, 'track', $2)",
+    )
+    .bind(u)
+    .bind(mp3.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let dir = std::env::temp_dir().join(format!("kima-removal-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mine = dir.join(format!("{mp3}-high-100-5.mp3"));
+    let other = dir.join(format!("{}-high-100-5.mp3", uuid::Uuid::now_v7()));
+    std::fs::write(&mine, b"x").unwrap();
+    std::fs::write(&other, b"x").unwrap();
+    make_missing(&pool, mp3, 8).await;
+
+    let r = library::retire_missing(&pool, WEEK, Some(&dir))
+        .await
+        .unwrap();
+    assert_eq!(r.artifacts, vec![mine.clone()]);
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT track_id FROM playback_state WHERE user_id = $1")
+            .bind(u)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, None);
+    let art: serde_json::Value = sqlx::query_scalar("SELECT artifacts FROM removal_log")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        art,
+        serde_json::json!([{"table": "transcodes", "path": mine.to_string_lossy()}])
+    );
+    // The rows' job is the database; unlinking after the commit is the caller's.
+    assert!(mine.exists() && other.exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn removal_log_lists_newest_first_with_paging(pool: PgPool) {
+    for (i, name) in ["a", "b", "c"].into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO removal_log (id, file_path, title, artist_name, album_title, removed_at)
+             VALUES ($1, $2, 't', 'a', 'b', now() - make_interval(mins => $3))",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(name)
+        .bind(i as i32)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let all = kima_db::removal_log::list(&pool, 100, 0).await.unwrap();
+    let paths: Vec<&str> = all.iter().map(|r| r.file_path.as_str()).collect();
+    assert_eq!(paths, ["a", "b", "c"]);
+    assert_eq!(kima_db::removal_log::count(&pool).await.unwrap(), 3);
+    let page = kima_db::removal_log::list(&pool, 1, 1).await.unwrap();
+    assert_eq!(page[0].file_path, "b");
 }

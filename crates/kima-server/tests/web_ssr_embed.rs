@@ -301,16 +301,16 @@ async fn login_is_server_rendered_markup(pool: PgPool) {
     assert_eq!(res.headers()["x-content-type-options"], "nosniff");
     let html = res.text().await.unwrap();
     // Markup that exists only because `kima-web`'s login view ran on the server:
-    assert!(html.contains("<h2>Sign in to Kima</h2>"), "{html}");
-    assert!(html.contains(r#"<form class="autocss_"#), "{html}");
-    assert!(html.contains(r#"placeholder="Username""#), "{html}");
+    assert!(html.contains("Welcome back"), "{html}");
+    assert!(html.contains("<form"), "{html}");
     assert!(
-        html.contains(r#"<button type="submit">Sign in</button>"#),
+        html.contains(r#"placeholder="Enter your username""#),
         "{html}"
     );
-    // ... plus the generated styles and the bootstrap vertigo adds around it. Not a bare shell:
+    assert!(html.contains(">Sign In</button>"), "{html}");
+    // ... plus the precompiled stylesheet and the bootstrap vertigo adds around it. Not a bare shell:
     assert!(
-        html.contains("autocss_1") && html.contains("data-vertigo-run-wasm"),
+        html.contains("<style>") && html.contains("data-vertigo-run-wasm"),
         "{html}"
     );
     assert!(!html.contains("<body></body>"), "{html}");
@@ -322,7 +322,7 @@ async fn login_is_server_rendered_markup(pool: PgPool) {
         .text()
         .await
         .unwrap();
-    assert!(!setup.contains("<h2>Sign in to Kima</h2>"), "{setup}");
+    assert!(!setup.contains("Welcome back"), "{setup}");
     assert!(setup.contains(">Loading…</p>"), "{setup}");
     // ... and `/` and `/playlists/<id>` render too (the legacy export would say "legacy home").
     let home = reqwest::get(format!("{base}/"))

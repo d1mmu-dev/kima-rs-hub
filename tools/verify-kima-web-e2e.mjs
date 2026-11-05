@@ -46,16 +46,20 @@ ws.onmessage = (m) => {
 const send = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
 const ev = async (expr) => { const r = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }); if (r.result.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails)); return r.result.result.value; };
 await send('Runtime.enable'); await send('Page.enable');
+// kima-web copies the legacy `body { text-transform: lowercase }`, which makes innerText lowercase. The checks
+// below compare the real text, so switch the transform off in every document this run opens.
+await send('Page.addScriptToEvaluateOnNewDocument', { source: `setInterval(()=>{if(document.documentElement&&!document.getElementById('e2e-no-transform')){const s=document.createElement('style');s.id='e2e-no-transform';s.textContent='*{text-transform:none!important}';document.documentElement.appendChild(s)}},20)` });
 const goto = async (url) => { await send('Page.navigate', { url }); await sleep(2500); };
 const text = () => ev('document.body.innerText');
 const setInput = (name, v) => ev(`(()=>{const i=document.querySelector('input[name=${name}]');i.value=${JSON.stringify(v)};i.dispatchEvent(new Event('input',{bubbles:true}));return i.value})()`);
-const clickText = (sel, t) => ev(`(()=>{const e=[...document.querySelectorAll(${JSON.stringify(sel)})].find(e=>e.innerText.trim()==${JSON.stringify(t)});if(!e)return false;e.click();return true})()`);
-const rowClick = (rowText, btnSel) => ev(`(()=>{const row=[...document.querySelectorAll('button[title=Play]')].map((b)=>b.parentElement).find((r)=>r.innerText.includes(${JSON.stringify(rowText)}));const b=row&&row.querySelector(${JSON.stringify(btnSel)});if(!b)return false;b.click();return true})()`);
+const clickText = (sel, t) => ev(`(()=>{const e=[...document.querySelectorAll(${JSON.stringify(sel)})].find(e=>e.getClientRects().length>0&&(e.getAttribute('aria-label')===${JSON.stringify(t)}||e.innerText.split('\\n').map((l)=>l.trim()).includes(${JSON.stringify(t)})));if(!e)return false;e.click();return true})()`);
+const rowClick = (rowText, btnSel) => ev(`(()=>{const row=[...document.querySelectorAll('button[title=Play]')].map((b)=>b.closest('[data-track-row]')).find((r)=>r.innerText.includes(${JSON.stringify(rowText)}));const b=row&&row.querySelector(${JSON.stringify(btnSel)});if(!b)return false;b.click();return true})()`);
 const apiCalls = (part) => ev(`performance.getEntriesByType('resource').filter((r)=>r.name.includes(${JSON.stringify(part)})).length`);
 const button = (name) => ev(`(()=>{const b=document.querySelector('button[name=${name}]');if(!b)return false;b.click();return true})()`);
 const typeInto = (name, v) => ev(`(()=>{const i=document.querySelector('input[name=${name}]');i.value=${JSON.stringify(v)};i.dispatchEvent(new Event('input',{bubbles:true}))})()`);
 const login = async (pass) => { await setInput('username', USER); await setInput('password', pass); await ev(`document.querySelector('button[type=submit]').click()`); await sleep(2500); };
 const audio = () => ev(`(()=>{const a=document.querySelector('audio');return a?{src:a.currentSrc.replace(/token=.*/,'token=…'),paused:a.paused,t:a.currentTime,d:a.duration,rs:a.readyState,err:a.error&&a.error.code}:null})()`);
+const ctl = (label) => ev(`(()=>{const b=[...document.querySelectorAll('[role=group][aria-label="Playback controls"] button[aria-label=${JSON.stringify(label)}]')].find((b)=>b.offsetParent!==null);if(!b)return false;b.click();return true})()`);
 const results = []; const check = (name, ok, detail = '') => { results.push([ok, name, detail]); console.log(ok ? 'PASS' : 'FAIL', name, detail); };
 
 if (SSR) {
@@ -63,10 +67,10 @@ if (SSR) {
   const page = async (path) => { const r = await fetch(BASE + path, { redirect: 'manual' }); return { status: r.status, type: r.headers.get('content-type') || '', body: await r.text() }; };
   const login = await page('/login');
   check('SSR: GET /login is 200 HTML with the sign-in form already in the markup',
-    login.status === 200 && login.type.startsWith('text/html') && login.body.includes('<h2>Sign in to Kima</h2>') && login.body.includes('<form') && login.body.includes('name="username"'));
+    login.status === 200 && login.type.startsWith('text/html') && login.body.includes('Welcome back') && login.body.includes('<form') && login.body.includes('name="username"'));
   const root = await page('/collection');
-  check('SSR: GET /collection is server-rendered by the wasm (bootstrap script + styles present)',
-    root.status === 200 && root.body.includes('data-vertigo-run-wasm') && root.body.includes('autocss_'));
+  check('SSR: GET /collection is server-rendered by the wasm (bootstrap script + inlined stylesheet present)',
+    root.status === 200 && root.body.includes('data-vertigo-run-wasm') && root.body.includes('tailwindcss'));
   const wasmPath = (login.body.match(/data-vertigo-run-wasm="([^"]+)"/) || [])[1] || '';
   const wasm = await fetch(BASE + wasmPath);
   check('SSR: the wasm named by the page is served through the proxy', wasm.status === 200 && Buffer.from(await wasm.arrayBuffer()).subarray(0, 4).toString('latin1') === '\0asm', wasmPath);
@@ -80,7 +84,7 @@ if (SSR) {
 
 await goto(BASE + '/');
 await ev('localStorage.clear()'); await goto(BASE + '/collection');
-check('unauthenticated /collection shows login and rewrites the URL', (await ev('location.pathname')) === '/login' && (await text()).includes('Sign in to Kima'));
+check('unauthenticated /collection shows login and rewrites the URL', (await ev('location.pathname')) === '/login' && (await text()).includes('Sign in to continue to Kima'));
 
 await setInput('username', USER); await setInput('password', 'nope-wrong');
 await ev(`document.querySelector('button[type=submit]').click()`); await sleep(1500);
@@ -95,7 +99,7 @@ check('artists listed', (await text()).includes('Disc Band'));
 
 await clickText('a', 'Disc Band'); await sleep(1500);
 check('artist -> albums route', (await ev('location.pathname + location.search')).startsWith('/collection/albums?artist='));
-await ev(`document.querySelector('main a').click()`); await sleep(1500);
+await ev(`document.querySelector('main .grid-media a').click()`); await sleep(1500);
 check('album -> tracks route', (await ev('location.pathname + location.search')).startsWith('/collection/tracks?album='));
 const tracksText = await text();
 check('tracks listed', tracksText.includes('Song 1-1') && tracksText.includes('Song 2-3'));
@@ -110,22 +114,22 @@ check('audio is really playing (readyState>=3, not paused, currentTime advancing
 check('player shows the title and elapsed time', /Song 1-2/.test(await text()) && !/0:00 \/ 0:00/.test(await text()));
 
 // pause / resume
-await ev(`[...document.querySelectorAll('button')].find(b=>b.innerText==='⏸').click()`); await sleep(1200);
+check('pause control exists', await ctl('Pause')); await sleep(1200);
 check('pause button pauses the audio', (await audio()).paused === true);
-await ev(`[...document.querySelectorAll('button')].find(b=>b.innerText==='▶' && b.closest('[class]')?.querySelector('audio')).click()`); await sleep(1200);
+check('play control exists', await ctl('Play')); await sleep(1200);
 check('play button resumes', (await audio()).paused === false);
 
 // seek via slider
-await ev(`(()=>{const s=document.querySelector('input[type=range]');s.value='10';s.dispatchEvent(new Event('input',{bubbles:true}))})()`); await sleep(1200);
+await ev(`(()=>{const s=document.querySelector('input[aria-label=Seek]');s.value='10';s.dispatchEvent(new Event('input',{bubbles:true}))})()`); await sleep(1200);
 const seeked = await audio();
 check('seek slider moves currentTime (served by HTTP range)', seeked.t >= 9.5, JSON.stringify(seeked));
 
 // next
-await ev(`[...document.querySelectorAll('button')].find(b=>b.innerText==='⏭').click()`); await sleep(2500);
+check('next control exists', await ctl('Next track')); await sleep(2500);
 check('next plays the following track', /Song 1-3/.test(await text()) && (await audio()).t < 5);
 
 // the backend keeps no in-track position for web saves: it is stored client-side (kima-web.position)
-await ev(`(()=>{const s=document.querySelector('input[type=range]');s.value='8';s.dispatchEvent(new Event('input',{bubbles:true}))})()`); await sleep(2000);
+await ev(`(()=>{const s=document.querySelector('input[aria-label=Seek]');s.value='8';s.dispatchEvent(new Event('input',{bubbles:true}))})()`); await sleep(2000);
 const savedPos = await ev(`localStorage.getItem('kima-web.position')`);
 check('position is stored client-side under kima-web.position, scoped to the track id', /"id":"[0-9a-f-]+"/.test(savedPos || '') && /"t":(7|8|9)\./.test(savedPos || ''), savedPos);
 
@@ -134,7 +138,7 @@ await goto(BASE + '/collection'); await sleep(1500);
 const restored = await audio();
 check('reload restores queue + current track from /api/playback-state, paused', /Song 1-3/.test(await text()) && restored && restored.paused === true, JSON.stringify(restored));
 check('reload restores the in-track position (about 8s), still paused', restored && restored.t >= 7 && restored.t < 12, JSON.stringify(restored));
-await ev(`[...document.querySelectorAll('button')].find(b=>b.innerText==='▶' && b.closest('[class]')?.querySelector('audio')).click()`); await sleep(2500);
+check('play control exists', await ctl('Play')); await sleep(2500);
 check('restored track plays on demand', (await audio()).t > 0.5);
 
 // ended -> auto advance
@@ -147,9 +151,9 @@ if (MUSIC) {
   const { execFileSync } = await import('node:child_process');
   execFileSync(process.env.FFMPEG, ['-nostdin', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=700:duration=5', '-metadata', 'artist=Brand New Artist', '-metadata', 'album=Fresh Album', '-metadata', 'title=Fresh One', MUSIC + '/Brand New Artist/2024 - Fresh Album/01 - Fresh One.mp3']);
   await goto(BASE + '/collection');
-  await clickText('button', 'Scan library'); await sleep(6000);
+  await clickText('button', 'Sync library'); await sleep(6000);
   const t = await text();
-  check('Scan library button: new artist appears after the scan', t.includes('Brand New Artist'), JSON.stringify(t.split('\n').filter((l) => /Scan|Brand/.test(l))));
+  check('Sync library button: new artist appears after the scan', t.includes('Brand New Artist'), JSON.stringify(t.split('\n').filter((l) => /Scan|Brand/.test(l))));
 }
 
 // ---- search ----
@@ -168,16 +172,17 @@ await typeInto('q', 'disc'); await sleep(1500);
 const grouped = await text();
 check('search groups artists and albums', grouped.includes('Artists') && grouped.includes('Disc Band') && grouped.includes('Albums') && grouped.includes('Double Album'));
 await typeInto('q', 'zzzzqq'); await sleep(1500);
-check('no match says so', (await text()).includes('Nothing found'));
+check('no match says so', (await text()).includes('No matches found'));
 
 // ---- playlists ----
 await clickText('a', 'Playlists'); await sleep(1500);
 check('Playlists page lists nothing yet', (await ev('location.pathname')) === '/playlists' && (await text()).includes('No playlists yet'));
+const plBefore = await apiCalls('/api/playlists');
 await typeInto('name', '   '); await clickText('button', 'Create playlist'); await sleep(500);
-check('blank name is refused before any request', (await text()).includes('Enter a playlist name') && (await apiCalls('/api/playlists')) === 1);
+check('blank name is refused before any request', (await text()).includes('Enter a playlist name') && (await apiCalls('/api/playlists')) === plBefore, String(plBefore));
 await typeInto('name', 'E2E Playlist'); await clickText('button', 'Create playlist'); await sleep(2000);
 check('creating a playlist opens its detail page', /^\/playlists\/[0-9a-f-]{36}$/.test(await ev('location.pathname')) && (await text()).includes('E2E Playlist') && (await text()).includes('This playlist is empty'));
-await clickText('a', 'Tracks'); await sleep(1500);
+await clickText('a', 'Collection'); await sleep(1000); await clickText('a', 'Tracks'); await sleep(1500);
 check('track row has an add-to-playlist button', await rowClick('Song 1-1', 'button[name=add-to-playlist]'));
 await sleep(1000);
 check('picker lists the playlist and adds the track', (await rowClick('Song 1-1', 'button[name=pick-playlist]')) && (await sleep(1200), (await text()).includes('Added to E2E Playlist')));
@@ -196,7 +201,7 @@ check('the playlist plays through the player (first track)', pa && !pa.paused &&
 await setInput('rename', 'E2E Renamed'); await clickText('button', 'Rename'); await sleep(1500);
 check('rename shows the new name', (await ev(`document.querySelector('main h2').innerText`)) === 'E2E Renamed');
 check('remove a track', await button('remove-track')); await sleep(1500);
-check('removing refetches the list (1 track left)', (await text()).includes('1 tracks') && !(await text()).includes('Song 1-1\n'), JSON.stringify((await text()).split('\n').slice(0, 12)));
+check('removing refetches the list (1 track left)', (await text()).includes('1 track') && !(await ev("document.querySelector('main').innerText")).includes('Song 1-1'), JSON.stringify((await text()).split('\n').slice(0, 12)));
 await button('delete-playlist'); await sleep(300);
 check('delete asks for confirmation first', (await text()).includes('Confirm delete') && (await ev('location.pathname')).startsWith('/playlists/'));
 await button('confirm-delete'); await sleep(1500);
@@ -214,7 +219,7 @@ await typeInto('current', PASS); await clickText('button', 'Change password'); a
 check('password change succeeds and the session token is replaced', (await text()).includes('Password changed successfully') && (await ev(`localStorage.getItem('kima-web.token')`)) !== tokenBefore);
 await goto(BASE + '/collection'); await sleep(1500);
 check('the replaced token keeps the session across a reload', (await ev('location.pathname')) === '/collection');
-await clickText('button', 'Sign out'); await sleep(1000);
+await clickText('button', 'Logout'); await sleep(1000);
 await login(PASS);
 check('the old password no longer signs in', (await ev('location.pathname')) === '/login');
 await login(NEW_PASS);
@@ -224,7 +229,7 @@ await clickText('a', 'Settings'); await sleep(1200);
 await typeInto('current', NEW_PASS); await typeInto('new', PASS); await typeInto('confirm', PASS); await clickText('button', 'Change password'); await sleep(2500);
 check('password restored to the original', (await text()).includes('Password changed successfully'));
 
-await clickText('button', 'Sign out'); await sleep(1500);
+await clickText('button', 'Logout'); await sleep(1500);
 check('sign out clears the token and shows login', (await ev('location.pathname')) === '/login' && (await ev(`localStorage.getItem('kima-web.token')`)) === null);
 
 // 401 handling: plant a bogus token

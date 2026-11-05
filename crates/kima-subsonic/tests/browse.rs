@@ -681,3 +681,28 @@ fixture_test!(scan_status_counts_present_tracks, |server, pool| {
     let res = alice(&server, "getScanStatus", &[]).await;
     assert_eq!(res["scanStatus"]["count"], 18);
 });
+
+// M-SYNC Task 9 (D-166): the `genre` a song or album takes from its artist is the first of a
+// person's own genres when they set any (upstream `firstArtistGenre(genres, userGenres)`).
+fixture_test!(
+    artist_genre_attribute_follows_the_users_list,
+    |server, pool| {
+        // Track 11 has no genre of its own and takes its artist's first: Pop.
+        let res = alice(&server, "getSong", &[("id", &track_id(11).to_string())]).await;
+        assert_eq!(res["song"]["genre"], "Pop");
+        sqlx::query(
+            "UPDATE artists SET user_genres = ARRAY['Jazz', 'Pop']
+         WHERE id = (SELECT al.artist_id FROM tracks t JOIN albums al ON al.id = t.album_id
+                     WHERE t.id = $1)",
+        )
+        .bind(track_id(11))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let res = alice(&server, "getSong", &[("id", &track_id(11).to_string())]).await;
+        assert_eq!(res["song"]["genre"], "Jazz");
+        // Track 1 has its own genre: a person's list for the artist does not touch it.
+        let res = alice(&server, "getSong", &[("id", &track_id(1).to_string())]).await;
+        assert_eq!(res["song"]["genre"], "Rock");
+    }
+);

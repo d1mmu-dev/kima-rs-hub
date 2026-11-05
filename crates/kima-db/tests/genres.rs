@@ -165,12 +165,24 @@ async fn underscore_genres_never_stored(pool: PgPool) {
 }
 
 #[test]
-fn merged_puts_user_first_unique() {
+fn merged_for_display_user_list_replaces_the_enriched_one() {
+    // A person's list is the result: deduplicated by key, in their order, blanks dropped.
     assert_eq!(
-        genres::merged(&s(&["Jazz", "rock"]), &s(&["Rock", "Pop", "jazz", "Pop"])),
-        s(&["Jazz", "rock", "Pop"])
+        genres::merged_for_display(
+            &s(&["Jazz", "rock", "JAZZ", " "]),
+            &s(&["Rock", "Pop", "jazz", "Pop"])
+        ),
+        s(&["Jazz", "rock"])
     );
-    assert_eq!(genres::merged(&[], &s(&["A", "", "a"])), s(&["A"]));
+    // No list of their own (or only blanks): the enriched genres, deduplicated.
+    assert_eq!(
+        genres::merged_for_display(&[], &s(&["A", "", "a", "B"])),
+        s(&["A", "B"])
+    );
+    assert_eq!(
+        genres::merged_for_display(&s(&["", "  "]), &s(&["Rock"])),
+        s(&["Rock"])
+    );
 }
 
 /// An artist with one album of `n` tracks (`missing` of them missing), file genres `names`.

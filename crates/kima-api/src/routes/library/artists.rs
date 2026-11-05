@@ -134,7 +134,7 @@ pub(in crate::routes) async fn artist_page(
     v["summary"] = json!(artist.bio);
     v["url"] = Value::Null;
     v["listeners"] = json!(0);
-    v["genres"] = json!(genres::merged(&artist.user_genres, &effective));
+    v["genres"] = json!(genres::merged_for_display(&artist.user_genres, &effective));
     v["tags"] = json!(tags);
     v["topTracks"] = json!([]);
     v["similarArtists"] = json!(similar_artists);

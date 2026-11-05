@@ -1176,7 +1176,7 @@ async fn frontend_round_trip_changes_nothing(pool: PgPool) {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(al["hasUserOverrides"], false);
 
-    // With user genres, the shown (merged) list sent back keeps them as they are.
+    // With user genres, the shown list (theirs alone, D-166) sent back keeps them as they are.
     exec(
         &pool,
         "WITH g AS (INSERT INTO genres (id, name, key) VALUES (gen_random_uuid(), 'Rock', 'rock')
@@ -1188,11 +1188,52 @@ async fn frontend_round_trip_changes_nothing(pool: PgPool) {
     .await;
     put(&e, &album_path(s.album), json!({"genres": ["Mine"]})).await;
     let shown = get(&e, &format!("/api/library/albums/{}", s.album)).await["genres"].clone();
-    assert_eq!(shown, json!(["Mine", "Rock"]));
+    assert_eq!(shown, json!(["Mine"]));
     put(&e, &album_path(s.album), json!({"genres": shown})).await;
     assert_eq!(
         album_col(&pool, s.album, "user_genres").await.as_deref(),
         Some("{Mine}")
     );
     assert!(e.replay.asked().is_empty());
+}
+
+/// D-129 with D-166: the page shows a person's genres alone when they set any. Posting that list
+/// back changes nothing; posting the enriched list (what the page showed before they edited)
+/// clears their list.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn editor_genres_round_trip_with_replace(pool: PgPool) {
+    let s = one(&pool).await;
+    exec(
+        &pool,
+        "WITH g AS (INSERT INTO genres (id, name, key) VALUES
+                      (gen_random_uuid(), 'Rock', 'rock'), (gen_random_uuid(), 'Indie', 'indie')
+                    RETURNING id)
+         INSERT INTO artist_genres (artist_id, genre_id, source, rank)
+         SELECT $1, g.id, 'musicbrainz', 0 FROM g",
+        s.artist,
+    )
+    .await;
+    let e = env(pool.clone()).await;
+    let page = || async { get(&e, &format!("/api/library/artists/{}", s.artist)).await };
+
+    let (status, _) = put(&e, &artist_path(s.artist), json!({"genres": ["Jazz"]})).await;
+    assert_eq!(status, StatusCode::OK);
+    let shown = page().await["genres"].clone();
+    assert_eq!(shown, json!(["Jazz"]));
+
+    // The page's value posted back leaves the list as it is.
+    let (status, _) = put(&e, &artist_path(s.artist), json!({"genres": shown})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        artist_overrides(&pool, s.artist).await.2,
+        Some(vec!["Jazz".to_string()])
+    );
+
+    // The effective list posted back clears theirs; the page shows the enriched genres again.
+    let effective = page().await["tags"].clone();
+    assert_eq!(effective.as_array().unwrap().len(), 2);
+    let (status, _) = put(&e, &artist_path(s.artist), json!({"genres": effective})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(artist_overrides(&pool, s.artist).await.2, Some(Vec::new()));
+    assert_eq!(page().await["genres"], effective);
 }

@@ -2,7 +2,7 @@
 
 Date: 2026-10-16
 Status: Approved design, pending spec review
-Upstream reference: https://github.com/Chevron7Locked/kima-hub (v1.11.0)
+Upstream reference: https://github.com/Chevron7Locked/kima-hub (v1.12.3, `c7527577`; re-pinned by M-SYNC, 2026-11-05 — this design was written against v1.11.0)
 License: GPL-3.0 (derivative of kima-hub)
 
 ## 1. Intent

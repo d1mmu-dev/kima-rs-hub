@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-16-m1-library-playback-design.md` (binding). Parent spec: `docs/superpowers/specs/2026-10-16-kima-rust-design.md`. Roadmap: `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md`. Divergence log: `docs/DIVERGENCES.md` (next free ID: D-032).
 
-**Upstream reference:** kima-hub @ `12faf1cd34ff53054221818b0ccde58b8e9b0020`, cloned read-only at `/tmp/kima-hub`. If it is missing, re-clone it: `git clone https://github.com/Chevron7Locked/kima-hub /tmp/kima-hub`, then `git -C /tmp/kima-hub checkout 12faf1cd34ff53054221818b0ccde58b8e9b0020`. "Shape as upstream X" means: read that upstream file and return the same JSON keys and types that the frontend reads (`frontend/lib/api.ts` and `frontend/features/*/types.ts`). Fields the frontend never reads may be omitted. Each omitted field the frontend *does* read is a bug.
+**Upstream reference:** kima-hub @ `c7527577d925b20f5adf410c7fd4e0c8ac250f69` (v1.12.3; re-pinned by M-SYNC, this plan was written against v1.11.0), cloned read-only at `/tmp/kima-hub`. If it is missing, re-clone it: `git clone https://github.com/Chevron7Locked/kima-hub /tmp/kima-hub`, then `git -C /tmp/kima-hub checkout c7527577d925b20f5adf410c7fd4e0c8ac250f69`. "Shape as upstream X" means: read that upstream file and return the same JSON keys and types that the frontend reads (`frontend/lib/api.ts` and `frontend/features/*/types.ts`). Fields the frontend never reads may be omitted. Each omitted field the frontend *does* read is a bug.
 
 ## Global Constraints
 

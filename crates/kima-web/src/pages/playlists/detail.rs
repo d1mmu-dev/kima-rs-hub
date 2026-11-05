@@ -1,8 +1,13 @@
-//! `/playlists/<id>`: the track table (number, title, artist, duration, remove), rename, delete.
+//! `/playlists/<id>`: tracks (play, remove), rename, delete.
+//!
+//! Every change is followed by a refetch (not an optimistic edit): the page then always shows what the
+//! backend has, including its error when a call is refused.
+
+use std::rc::Rc;
 
 use kima_api_types::library::Track;
 use kima_api_types::playlists::{
-    MessageResponse, PlaylistDetail, RemoveItemResponse, UpdatePlaylist,
+    MessageResponse, Playlist, PlaylistDetail, RemoveItemResponse, UpdatePlaylist,
 };
 use vertigo::{DomNode, Value, bind, dom, get_driver};
 
@@ -10,8 +15,8 @@ use super::validate_name;
 use crate::api::client::load;
 use crate::player::queue_item;
 use crate::route::Route;
-use crate::tracklist::{RowExtra, track_rows};
-use crate::ui::{Ctx, error_css, flag_now, muted_css, resource_view};
+use crate::tracklist::{RowExtra, playlist_rows};
+use crate::ui::{BTN_BRAND_SM, BTN_OUTLINE, Ctx, INPUT, PAGE_TITLE, flag_now, resource_view};
 
 pub fn render(ctx: &Ctx, id: String) -> DomNode {
     let reload = Value::new(0_u32);
@@ -23,7 +28,7 @@ pub fn render(ctx: &Ctx, id: String) -> DomNode {
         }));
         resource_view(
             resource,
-            bind!(ctx, id, reload, |detail: std::rc::Rc<PlaylistDetail>| body(
+            bind!(ctx, id, reload, |detail: Rc<PlaylistDetail>| body(
                 &ctx, &id, &reload, &detail
             )),
         )
@@ -83,13 +88,13 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
     let delete_view = confirming.render_value(bind!(delete, ask, cancel, |sure: bool| {
         if sure {
             dom! {
-                <span>
-                    <button name="confirm-delete" on_click={delete.clone()}>"Confirm delete"</button>
-                    <button on_click={cancel.clone()}>"Cancel"</button>
+                <span class="flex items-center gap-3">
+                    <button class={BTN_BRAND_SM} type="button" name="confirm-delete" on_click={delete.clone()}>"Confirm delete"</button>
+                    <button class={BTN_OUTLINE} type="button" on_click={cancel.clone()}>"Cancel"</button>
                 </span>
             }
         } else {
-            dom! { <button name="delete-playlist" on_click={ask.clone()}>"Delete"</button> }
+            dom! { <button class={BTN_OUTLINE} type="button" name="delete-playlist" on_click={ask.clone()}>"Delete playlist"</button> }
         }
     }));
 
@@ -97,11 +102,8 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
         let (ctx, id, message, reload) = (ctx.clone(), id.clone(), message.clone(), reload.clone());
         Rc::new(move |track: &Track| {
             let track_id = track.id.to_string();
-            let click = move |_| {
-                let ctx = ctx.clone();
-                let message = message.clone();
-                let reload = reload.clone();
-                let _ = get_driver().spawn(async move {
+            let click = bind!(ctx, id, message, reload, |_| {
+                get_driver().spawn(bind!(ctx, id, message, reload, track_id, async move {
                     match ctx
                         .client
                         .delete::<RemoveItemResponse>(&format!(
@@ -112,41 +114,40 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
                         Ok(_) => reload.change(|n| *n += 1),
                         Err(err) => message.set(Some(err.message)),
                     }
-                });
-            };
+                }));
+            });
             dom! { <button name="remove-track" on_click={click} title="Remove from playlist">"✕"</button> }
         })
     };
 
     let message_view = message.render_value(|m| match m {
-        Some(text) => dom! { <p css={error_css()}>{text}</p> },
+        Some(text) => dom! { <p class="mt-3 text-sm text-danger-light">{text}</p> },
         None => dom! { <span /> },
     });
     let list = if tracks.is_empty() {
-        dom! { <p css={muted_css()}>"This playlist is empty. Use “＋ Playlist” on any track list to add tracks."</p> }
+        dom! { <p class="py-8 text-sm text-[var(--text-muted)]">"This playlist is empty. Use “＋ Playlist” on any track list to add tracks."</p> }
     } else {
-        track_rows(ctx, tracks.clone(), Some(remove))
+        playlist_rows(ctx, tracks.clone(), remove)
     };
+    let input_class = format!("{INPUT} max-w-xs");
     let title = detail.summary.playlist.name.clone();
+    let count = format!("{} tracks", detail.summary.track_count);
     dom! {
-        <div>
-            <h1 class="text-2xl font-bold text-white mb-1">{title}</h1>
-            <p class="text-[var(--text-secondary)] mb-4">"{detail.summary.track_count} tracks"</p>
-            <div class="flex flex-wrap items-center gap-3 mb-4">
-                <form css={row_css()} on_submit={rename}>
-                    <input type="text" name="rename" value={name.clone()}
+        <div class="min-h-screen">
+            <div class="px-4 md:px-8 pt-8 pb-6">
+                <p class="t-meta mb-2">"Playlist"</p>
+                <h2 class={PAGE_TITLE}>{title}</h2>
+                <p class="t-meta mt-3">{count}</p>
+                <form class="mt-6 flex flex-wrap items-center gap-3" on_submit={rename}>
+                    <input class={input_class} type="text" name="rename" value={name.clone()}
                         on_input={bind!(name, |v: String| name.set(v))} />
-                    <button type="submit">"Rename"</button>
+                    <button class={BTN_OUTLINE} type="submit">"Rename"</button>
+                    <button class={BTN_BRAND_SM} type="button" name="play-all" on_click={play_all} disabled={flag_now(tracks.is_empty())}>"▶ Play all"</button>
+                    {delete_view}
                 </form>
-                <button class={crate::ui::BUTTON_TEMPLATE_FORMAT} on_click={play_all}>
-                    <div class="px-5 py-3 rounded-lg bg-[var(--bg-primary)] border border-white/10">"▶ Play all"</div>
-                </button>
-                <button class={crate::ui::BUTTON_TEMPLATE_FORMAT} on_click={ask.clone()}>
-                    <div class="px-5 py-3 rounded-lg bg-white/10 text-white font-semibold hover:bg-white/20 transition-colors">"Delete"</div>
-                </button>
+                {message_view}
             </div>
-            {message_view}
-            {list}
+            <div class="px-4 md:px-8 pb-8">{list}</div>
         </div>
     }
 }

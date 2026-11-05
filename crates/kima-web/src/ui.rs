@@ -68,20 +68,6 @@ pub const CARD: &str = "bg-[#111]/90 rounded-lg p-6 md:p-8 border border-white/1
 pub const PAGE_TITLE: &str =
     "text-4xl md:text-5xl font-bold tracking-tight text-white leading-none";
 
-/// The coloured bar + title + count + rule that opens a section (`SectionHeader`).
-pub fn section_header(title: &str, count: Option<String>) -> DomNode {
-    let title = title.to_owned();
-    let count = count.unwrap_or_default();
-    dom! {
-        <div class="flex items-center gap-3 mb-6">
-            <span class="w-1 rounded-full shrink-0 h-8 bg-type-track"></span>
-            <h2 class="font-bold tracking-tight text-white text-2xl">{title}</h2>
-            <span class="t-meta">{count}</span>
-            <span class="flex-1 border-t border-white/10"></span>
-        </div>
-    }
-}
-
 /// An empty state: big icon, heading, one line of help.
 pub fn empty_state(icon_name: &'static str, heading: &str, text: &str) -> DomNode {
     let (heading, text) = (heading.to_owned(), text.to_owned());
@@ -211,16 +197,6 @@ pub fn plural(n: i64, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// `4 min` / `1 hr 5 min` for a total length in seconds (the playlist header).
-pub fn total_length(secs: i64) -> String {
-    let mins = (secs.max(0) + 30) / 60;
-    if mins >= 60 {
-        format!("{} hr {} min", mins / 60, mins % 60)
-    } else {
-        format!("{mins} min")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,8 +218,6 @@ mod tests {
         assert_eq!(format_time(0.0), "0:00");
         assert_eq!(format_time(125.9), "2:05");
         assert_eq!(format_time(f64::NAN), "0:00");
-        assert_eq!(total_length(240), "4 min");
-        assert_eq!(total_length(3900), "1 hr 5 min");
     }
 
     #[test]

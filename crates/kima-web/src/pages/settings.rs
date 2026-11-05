@@ -35,7 +35,7 @@ pub fn render(ctx: &Ctx) -> DomNode {
         dom! {
             <div>
                 <p>"Signed in as " <strong>{username}</strong></p>
-                <p class="text-xs tabular-nums text-[var(--text-secondary)]">"Role: {role}"</p>
+                <p class="text-xs tabular-nums text-[var(--text-secondary)]">"Role: " {role}</p>
             </div>
         }
     });

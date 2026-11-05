@@ -1,7 +1,7 @@
 //! The route table. Hand-written enum with a `From<String>` / `Display` pair (vertigo's router pattern).
 //!
-//! Login, setup (onboarding), the library browse root with its albums / tracks drill-downs, and search.
-//! Playlists and settings arrive with their pages; until then they fall under `NotFound`.
+//! Login, setup (onboarding), the library browse root with its albums / tracks drill-downs, search,
+//! and playlists (list and detail). Settings arrives with its page.
 
 use std::fmt;
 
@@ -21,6 +21,12 @@ pub enum Route {
     },
     /// `/search`; the query lives in the page, not in the URL.
     Search,
+    /// `/playlists`.
+    Playlists,
+    /// `/playlists/<uuid>`.
+    Playlist {
+        id: String,
+    },
     NotFound,
 }
 
@@ -59,7 +65,11 @@ impl Route {
                 param("album").map_or(Route::NotFound, |album| Route::Tracks { album })
             }
             "/search" => Route::Search,
-            _ => Route::NotFound,
+            "/playlists" => Route::Playlists,
+            _ => match path.strip_prefix("/playlists/") {
+                Some(id) if is_id(id) => Route::Playlist { id: id.to_owned() },
+                _ => Route::NotFound,
+            },
         }
     }
 }
@@ -80,6 +90,8 @@ impl fmt::Display for Route {
             Route::Tracks { album: None } => f.write_str("/collection/tracks"),
             Route::Tracks { album: Some(id) } => write!(f, "/collection/tracks?album={id}"),
             Route::Search => f.write_str("/search"),
+            Route::Playlists => f.write_str("/playlists"),
+            Route::Playlist { id } => write!(f, "/playlists/{id}"),
             Route::NotFound => f.write_str("/404"),
         }
     }
@@ -105,6 +117,7 @@ mod tests {
             ("/collection/albums", Route::Albums { artist: None }),
             ("/collection/tracks", Route::Tracks { album: None }),
             ("/search", Route::Search),
+            ("/playlists", Route::Playlists),
         ]
     }
 
@@ -121,6 +134,7 @@ mod tests {
             Route::Tracks {
                 album: Some(ID.into()),
             },
+            Route::Playlist { id: ID.into() },
         ] {
             assert_eq!(Route::from(route.to_string()), route);
         }
@@ -146,6 +160,8 @@ mod tests {
         for url in [
             "/podcasts",
             "/collection/nope",
+            "/playlists/not-an-id!",
+            "/playlists/x/y",
             "/collection/albums?artist=<script>",
             "/404",
         ] {
@@ -155,7 +171,14 @@ mod tests {
 
     #[test]
     fn everything_but_login_setup_and_404_is_guarded() {
-        assert!(Route::Search.requires_auth());
+        for r in [
+            Route::Artists,
+            Route::Search,
+            Route::Playlists,
+            Route::Playlist { id: ID.into() },
+        ] {
+            assert!(r.requires_auth(), "{r}");
+        }
         assert!(Route::Artists.requires_auth());
         assert!(!Route::Login.requires_auth());
         assert!(!Route::Setup.requires_auth());

@@ -13,3 +13,5 @@ crate-type = ["cdylib", "rlib"]
 # Keep vertigo and the installed `vertigo-cli` on the same version.
 vertigo = "=0.13.4"
 kima-api-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true

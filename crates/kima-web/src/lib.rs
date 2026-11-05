@@ -1,20 +1,16 @@
-//! kima-web: Kima's Rust/WASM frontend. This is the build-pipeline scaffold; pages arrive in later tasks.
+//! kima-web: Kima's Rust/WASM frontend (vertigo). See README.md.
 
-use vertigo::{DomNode, dom, main};
+mod api;
+mod app;
+mod auth;
+mod pages;
+mod player;
+mod route;
+mod ui;
 
-// Proves the shared DTO crate links into the wasm build.
-use kima_api_types as _;
+use vertigo::{DomNode, main};
 
 #[main]
 fn app() -> DomNode {
-    dom! {
-        <html>
-            <head>
-                <title>"kima-web"</title>
-            </head>
-            <body>
-                <h1>"kima-web"</h1>
-            </body>
-        </html>
-    }
+    app::render()
 }

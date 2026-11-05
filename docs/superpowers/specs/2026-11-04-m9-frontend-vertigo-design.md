@@ -471,21 +471,11 @@ Resolved by the owner's 2026-11-05 decisions (kept here for the record, not left
 - ~~Settings scope~~ — **resolved: minimal placeholder (account/password only) for M9, confirmed as-is; full
   Settings page is M10's job, unchanged from the original plan.**
 
-Still open:
-1. **Token/session storage in `kima-web`.** §5.1 defers the exact mechanism to the plan's auth-guard task, matching
-   whatever `auth-context.tsx` does today (likely `localStorage` or a cookie). With Next.js no longer running
-   concurrently in production, the original "does flipping the switch mid-session log the user out" concern (old
-   §12 Q3) is moot for production; it still applies narrowly to the dev-flag build (§6.2) where a developer might
-   have both `kima-web` and the legacy `/__legacy/` Next.js open in adjacent tabs — confirm whether an isolated
-   `kima-web`-only storage key (recommended default, since the two are genuinely separate apps now, not a single
-   switchable session) is acceptable, or whether sharing the storage key/shape is still wanted for that dev
-   comparison workflow.
-2. **OpenAPI, for real, later.** §4 rejected OpenAPI generation for M9 as premature. Once `kima-web` covers more of
-   the surface in M10, is generating `kima-api-types` from a `utoipa` spec (rather than hand-writing it) worth
-   doing as a cleanup pass, or does the owner prefer hand-written DTOs to stay the house style indefinitely?
-3. **Embedded-SSR liveness/restart policy (new, raised by §11's risk).** If the loopback-bound `vertigo_cli::
-   serve::run()` task panics or its bind fails after `kima-server` has already reported ready, should
-   `kima-server` crash-and-restart itself (simplest, relies on the container orchestrator's restart policy),
-   retry the embedded task in place, or serve a plain error page for `kima-web`'s routes while keeping `/api`
-   healthy? This changes the SSR-embedding task's shape materially and should be settled before that task starts
-   implementation.
+Resolved by the owner's 2026-11-05 follow-up:
+- ~~Token/session storage~~ — **resolved: `kima-web` uses its own isolated `localStorage` key (Bearer token, no cookie;
+  the API authenticates via `Authorization: Bearer`). It is not shared with the dev-only legacy Next.js app, so in the
+  dev build the two apps log in separately. SSR renders public shells (login, onboarding); authenticated views load
+  their data client-side after hydration.**
+- ~~Embedded-SSR liveness/restart policy~~ — **resolved: crash-and-restart.** If the loopback SSR task panics or its
+  bind fails after readiness, `kima-server` exits and the container restart policy brings it back.
+- ~~OpenAPI generation~~ — **deferred until after M10; hand-written `kima-api-types` DTOs stay until then.**

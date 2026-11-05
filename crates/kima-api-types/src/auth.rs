@@ -53,3 +53,22 @@ pub struct MeResponse {
     /// RFC 3339 timestamp.
     pub created_at: String,
 }
+
+/// Body of `POST /auth/change-password`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangePassword {
+    #[serde(default)]
+    pub current_password: String,
+    #[serde(default)]
+    pub new_password: String,
+}
+
+/// Answer of `POST /auth/change-password`: the old tokens are revoked, these replace them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangePasswordResponse {
+    pub message: String,
+    pub token: String,
+    pub refresh_token: String,
+}

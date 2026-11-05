@@ -1,0 +1,91 @@
+{
+  "albums": [],
+  "artists": [],
+  "audiobooks": [],
+  "episodes": [],
+  "podcasts": [],
+  "tracks": [
+    {
+      "album": {
+        "artist": {
+          "id": "01a1aaf9-5430-72f8-932b-f38d391fca66",
+          "mbid": null,
+          "name": "Disc Band"
+        },
+        "artistId": "01a1aaf9-5430-72f8-932b-f38d391fca66",
+        "coverArt": "01a1aaf9-5431-7073-8405-07c0473f7e46",
+        "coverUrl": "01a1aaf9-5431-7073-8405-07c0473f7e46",
+        "id": "01a1aaf9-5431-7073-8405-07c0473f7e46",
+        "title": "Double Album",
+        "year": 2004
+      },
+      "albumId": "01a1aaf9-5431-7073-8405-07c0473f7e46",
+      "artist": {
+        "id": "01a1aaf9-5430-72f8-932b-f38d391fca66",
+        "name": "Disc Band"
+      },
+      "audioFeatures": null,
+      "bitrate": 64,
+      "codec": "mp3",
+      "discNumber": 1,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "displayTrackNo": null,
+      "duration": 20,
+      "hasUserOverrides": false,
+      "id": "01a1aaf9-5432-76fe-93ec-e18e0e48678c",
+      "isMissing": false,
+      "isrc": null,
+      "listeners": 0,
+      "playCount": 0,
+      "previewUrl": null,
+      "recordingMbid": null,
+      "title": "Song 1-1",
+      "trackNo": 1,
+      "trackNumber": 1,
+      "userPlayCount": 0,
+      "year": 2004
+    },
+    {
+      "album": {
+        "artist": {
+          "id": "01a1aaf9-5430-72f8-932b-f38d391fca66",
+          "mbid": null,
+          "name": "Disc Band"
+        },
+        "artistId": "01a1aaf9-5430-72f8-932b-f38d391fca66",
+        "coverArt": "01a1aaf9-5431-7073-8405-07c0473f7e46",
+        "coverUrl": "01a1aaf9-5431-7073-8405-07c0473f7e46",
+        "id": "01a1aaf9-5431-7073-8405-07c0473f7e46",
+        "title": "Double Album",
+        "year": 2004
+      },
+      "albumId": "01a1aaf9-5431-7073-8405-07c0473f7e46",
+      "artist": {
+        "id": "01a1aaf9-5430-72f8-932b-f38d391fca66",
+        "name": "Disc Band"
+      },
+      "audioFeatures": null,
+      "bitrate": 64,
+      "codec": "mp3",
+      "discNumber": 1,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "displayTrackNo": null,
+      "duration": 20,
+      "hasUserOverrides": false,
+      "id": "01a1aaf9-5441-756c-8ac8-5a98305d4ffc",
+      "isMissing": false,
+      "isrc": null,
+      "listeners": 0,
+      "playCount": 0,
+      "previewUrl": null,
+      "recordingMbid": null,
+      "title": "Song 1-2",
+      "trackNo": 2,
+      "trackNumber": 2,
+      "userPlayCount": 0,
+      "year": 2004
+    }
+  ]
+}

@@ -149,3 +149,27 @@ jobs:
           name: playwright-test-results
           path: frontend/test-results
           if-no-files-found: ignore
+  # PLACEHOLDER (M9 Task 0): `crates/kima-web` does not exist until Task 2, which flips `if: false`
+  # to `if: true` (deletes the line) and makes this job real. Written now so the toolchain groundwork
+  # and its activation are reviewable separately.
+  web-wasm:
+    if: false
+    runs-on: ubuntu-latest
+    env:
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@v4
+      # kima-web builds on stable and nightly (see crates/kima-web/README.md); nightly keeps parity with dev.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # wasm-opt (binaryen) is required by `vertigo build`; apt's binaryen is too old, use the release.
+      - name: Install wasm-opt
+        run: |
+          curl -sL https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
+      - run: tools/verify-wasm-toolchain.sh
+      # Proves kima-api-types stays wasm-buildable (Task 1 creates it).
+      - run: cargo build -p kima-api-types --target wasm32-unknown-unknown

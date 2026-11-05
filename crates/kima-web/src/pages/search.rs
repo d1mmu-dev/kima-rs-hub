@@ -41,20 +41,20 @@ pub fn render(ctx: &Ctx) -> DomNode {
     // The query the results are for: the top bar's text, once typing paused.
     let settled = Value::new(vertigo::transaction(|c| ctx.query.get(c)));
     let generation = Rc::new(Cell::new(0_u32));
-    let watcher = ctx
-        .query
-        .to_computed()
-        .render_value(bind!(settled, generation, |typed: String| {
-            let this = generation.get() + 1;
-            generation.set(this);
-            get_driver().spawn(bind!(settled, generation, async move {
-                get_driver().sleep(DEBOUNCE_MS).await;
-                if generation.get() == this {
-                    settled.set(typed);
-                }
+    let watcher =
+        ctx.query
+            .to_computed()
+            .render_value(bind!(settled, generation, |typed: String| {
+                let this = generation.get() + 1;
+                generation.set(this);
+                get_driver().spawn(bind!(settled, generation, async move {
+                    get_driver().sleep(DEBOUNCE_MS).await;
+                    if generation.get() == this {
+                        settled.set(typed);
+                    }
+                }));
+                dom! { <span /> }
             }));
-            dom! { <span /> }
-        }));
 
     let body = settled.to_computed().render_value(bind!(ctx, |q: String| {
         let Some(q) = normalize(&q) else {
@@ -70,10 +70,7 @@ pub fn render(ctx: &Ctx) -> DomNode {
         let heading = q.clone();
         let resource = load(bind!(ctx, async move {
             ctx.client
-                .get::<SearchResponse>(&format!(
-                    "/api/search?q={}&limit={LIMIT}",
-                    encode_query(&q)
-                ))
+                .get::<SearchResponse>(&format!("/api/search?q={}&limit={LIMIT}", encode_query(&q)))
                 .await
         }));
         page(

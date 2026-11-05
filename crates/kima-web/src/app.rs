@@ -56,7 +56,8 @@ pub fn render() -> DomNode {
         })
     };
     // The shell is rebuilt only when switching between a bare page and an app page, not on every navigation.
-    let bare: Computed<bool> = routes.map(|(_, effective)| matches!(effective, Route::Login | Route::Setup));
+    let bare: Computed<bool> =
+        routes.map(|(_, effective)| matches!(effective, Route::Login | Route::Setup));
 
     let page = bind!(ctx, routes, || -> DomNode {
         routes.render_value(bind!(ctx, |(requested, effective): (Route, Route)| {

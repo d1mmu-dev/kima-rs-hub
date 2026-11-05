@@ -105,11 +105,15 @@ fn password_form(ctx: &Ctx) -> DomNode {
     });
 
     let error_view = error.render_value(|e| match e {
-        Some(message) => dom! { <p class="text-sm text-danger-light" id="password-error">{message}</p> },
+        Some(message) => {
+            dom! { <p class="text-sm text-danger-light" id="password-error">{message}</p> }
+        }
         None => dom! { <span /> },
     });
     let done_view = done.render_value(|d| match d {
-        Some(message) => dom! { <p class="text-sm text-success-light" id="password-done">{message}</p> },
+        Some(message) => {
+            dom! { <p class="text-sm text-success-light" id="password-done">{message}</p> }
+        }
         None => dom! { <span /> },
     });
 

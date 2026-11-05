@@ -1,7 +1,9 @@
 //! `/playlists/<id>`: the track table (number, title, artist, duration, remove), rename, delete.
 
 use kima_api_types::library::Track;
-use kima_api_types::playlists::{MessageResponse, PlaylistDetail, RemoveItemResponse, UpdatePlaylist};
+use kima_api_types::playlists::{
+    MessageResponse, PlaylistDetail, RemoveItemResponse, UpdatePlaylist,
+};
 use vertigo::{DomNode, Value, bind, dom, get_driver};
 
 use super::validate_name;

@@ -102,9 +102,15 @@ pub enum Kind {
 impl Kind {
     fn bar(self) -> &'static str {
         match self {
-            Kind::Artist => "h-0.5 mt-1 scale-x-0 group-hover:scale-x-100 transition-transform duration-150 bg-type-artist",
-            Kind::Album => "h-0.5 mt-1 scale-x-0 group-hover:scale-x-100 transition-transform duration-150 bg-type-album",
-            Kind::Playlist => "h-0.5 mt-1 scale-x-0 group-hover:scale-x-100 transition-transform duration-150 bg-type-track",
+            Kind::Artist => {
+                "h-0.5 mt-1 scale-x-0 group-hover:scale-x-100 transition-transform duration-150 bg-type-artist"
+            }
+            Kind::Album => {
+                "h-0.5 mt-1 scale-x-0 group-hover:scale-x-100 transition-transform duration-150 bg-type-album"
+            }
+            Kind::Playlist => {
+                "h-0.5 mt-1 scale-x-0 group-hover:scale-x-100 transition-transform duration-150 bg-type-track"
+            }
         }
     }
 }

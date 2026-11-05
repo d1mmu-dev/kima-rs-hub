@@ -3,19 +3,27 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** a new user can open `kima-web` (behind the `KIMA_WEB_FRONTEND` switch), create the first admin account,
-sign in, browse the library, search, play a track, see/edit a playlist, and change account settings — all through
-types shared with the backend via `kima-api-types`, while the Next.js frontend keeps serving every other route
-unchanged and the existing Playwright suite against it stays green.
+**Goal:** `kima-web` is served in production via server-side rendering, through a wasmtime runtime embedded
+in-process inside `kima-server` (not a sidecar, not CSR-only) — a new user can open it, create the first admin
+account, sign in, browse the library, search, play a track, see/edit a playlist, and change account settings —
+all through types shared with the backend via `kima-api-types`. Next.js is fully retired from production; it
+exists only as an opt-in `Dockerfile` `ARG`-gated developer build for local comparison during the M10 porting
+work. There is no runtime switch and no dual-serve in production (revised 2026-11-05 per owner decision; see the
+spec's header and §1/§6 for the full rationale).
 
 **Architecture:** `crates/kima-api-types` (new, dependency-light, native + `wasm32-unknown-unknown`) holds the DTOs
 for login/onboarding/library/search/playback-state/playlists/settings; `kima-api` route modules are migrated to use
 it in place of locally-defined structs (no wire-format change). `crates/kima-web` (new) is a `vertigo`/`vertigo-cli`
 crate: a hand-written route enum (`vertigo::router::Router`), one page module per §5 page, a thin fetch client
 (`kima-web::api::client`) that bridges `serde_json` and vertigo's `RequestBuilder`/`RequestBody::Text`. `kima-web`
-builds via `vertigo build` to a static `build/` directory; `kima-server::frontend` gains a second `ServeDir` for it,
-selected per-request by the switch. Playwright gets a second config/spec-tree for `kima-web`'s pages; the existing
-suite is untouched.
+builds via `vertigo build` to a static `build/` directory. In production, `kima-server` spawns `vertigo_cli::
+serve::run()` (verified callable as a library function, not just a CLI — spec §3) as a background `tokio::task`
+bound to a loopback-only address, and reverse-proxies the `kima-web` page routes to it so every page's initial HTML
+comes from real wasmtime-executed SSR; `/api/*` is untouched. Next.js is not part of production routing at all;
+it is included in the image only behind the `KIMA_BUILD_LEGACY_FRONTEND` `Dockerfile` `ARG` and served, if present,
+from an isolated `/__legacy/` mount for local dev comparison. Playwright gets a second config/spec-tree for
+`kima-web`'s pages, which is the production-defining suite; the existing suite moves to running against the
+legacy-flag build only.
 
 **Tech stack:** Rust 2024 for every native crate; `kima-web` on `vertigo`/`vertigo-macro` 0.6.3, built with
 `vertigo-cli` 0.6.3, target `wasm32-unknown-unknown` (toolchain requirement confirmed in Task 0, not assumed —
@@ -34,13 +42,18 @@ in-flight milestone claimed it first).
 1. Type sharing: new `kima-api-types` crate, plain `serde`, no OpenAPI (spec §4).
 2. `kima-web` talks to vertigo's fetch layer via raw JSON text (`RequestBody::Text` + `serde_json`), not
    `AutoJsJson` (spec §4.2).
-3. Production serving is CSR-only (`vertigo build`'s static output through a `ServeDir`), not vertigo's
-   wasmtime-based SSR server (spec §3, §6; owner question Q1 in spec §12 — if the owner answers "keep SSR", Task 3
-   changes shape; do not start Task 3 before that answer exists in the spec's open-questions log or a recorded
-   owner decision).
-4. Switch: server-side, env var `KIMA_WEB_FRONTEND` plus a request-scoped override, both frontends served by
-   `kima-server` at once (spec §6).
-5. Playwright: a second config + spec tree for `kima-web`, existing suite untouched (spec §7).
+3. **Production serving is real SSR via an embedded wasmtime runtime (spec §3, §6.1)**: `kima-server` runs
+   `vertigo_cli::serve::run()` in-process as a background `tokio::task` bound to a loopback-only address, and
+   reverse-proxies the `kima-web` page routes to it. This supersedes the original CSR-only/`ServeDir` design;
+   there was never a sidecar/separate-process in the shipped design, and vendoring vertigo-cli's private SSR
+   internals for a literal single-`Router` embed was investigated and explicitly rejected for M9 (spec §3).
+4. **No runtime switch.** Next.js is not served in production at all (no dual-serve). It is available only as an
+   opt-in `Dockerfile` `ARG` (`KIMA_BUILD_LEGACY_FRONTEND`) for a local dev-time comparison build, served from an
+   isolated `/__legacy/` mount, never overlapping `kima-web`'s routes and never present unless both the build
+   `ARG` and a runtime env var are explicitly set (spec §6.2).
+5. Playwright: `playwright.kima-web.config.ts` against a normal production-shaped build is the suite CI treats as
+   gating production; the existing `kima-rs` suite keeps running but only against a `KIMA_BUILD_LEGACY_FRONTEND`
+   build (spec §7).
 
 ## Global Constraints
 
@@ -61,8 +74,9 @@ in-flight milestone claimed it first).
 - **Commits:** `dimmu <3417783+d1mmu-dev@users.noreply.github.com>`. **No `Co-Authored-By`, no AI or Claude
   attribution line of any kind.** Conventional Commits style. Do not push without the owner's explicit go-ahead
   (this plan's authoring task does not push either — see Task 0's note).
-- **Divergence rows:** D-134 is written **once**, in Task 18 (the last task), after the switch and at least one
-  page are verified working end to end — not speculatively earlier. If any task discovers an incidental backend
+- **Divergence rows:** D-134 is written **once**, in Task 19 (the last task), after the embedded-SSR production
+  path and at least one page are verified working end to end — not speculatively earlier. If any task discovers an
+  incidental backend
   behaviour difference while relocating DTOs (Task 1) or while writing a page against the real API (Tasks 8–16),
   that gets its own new row (next free ID at the time, D-135 onward) in the commit that finds it; do not fold it
   into D-134.
@@ -82,15 +96,15 @@ in-flight milestone claimed it first).
    `#[serde(rename_all = "camelCase")]`, an `Option<T>` becoming required, or a `skip_serializing_if` being dropped
    would be a silent breaking change no existing test catches if the fixture tests (Task 1) are shallow. The
    round-trip fixtures must use real captured responses, not hand-typed "looks about right" JSON.
-2. **The switch (Task 3) serving the wrong frontend for a route `kima-web` does not cover.** Every route outside
-   §5 of the spec must fall through to the Next.js export regardless of `KIMA_WEB_FRONTEND`, checked by a
-   dedicated fallback test (Task 3) before any page work starts, so later tasks cannot accidentally depend on a
-   switch that 404s half the app.
-3. **Auth/session boundary between the two frontends during the side-by-side period (Task 7).** A user signed in
-   on one frontend hitting a `kima-web` page (or vice versa) must not see a confusing half-logged-in state; the
-   spec defers the exact storage mechanism to the owner (§12 Q3) but whichever answer lands, the test in Task 7
-   must cover "signed in on Next.js, switch flips mid-session" at least at the level of "does not crash / shows
-   the login page", since that is the realistic owner workflow while comparing the two frontends.
+2. **The embedded-SSR reverse proxy (Task 3) serving the wrong thing, or serving nothing, for a route `kima-web`
+   does not cover.** Every route outside §5 of the spec must get `kima-server`'s normal 404/existing routes, not an
+   accidental proxy-through to the loopback SSR task; checked by a dedicated test (Task 3) before any page work
+   starts, so later tasks cannot accidentally depend on a proxy allow-list that swallows unrelated routes.
+3. **The embedded SSR task's liveness (Task 3).** If the loopback-bound `vertigo_cli::serve::run()` task dies after
+   `kima-server` is already serving traffic, every `kima-web` page breaks (no CSR/static fallback exists under the
+   new design) — Task 3's tests must cover at least one "the embedded task is down" case and assert `kima-server`
+   degrades predictably (a clear 5xx for `kima-web` routes, `/api` and health checks unaffected), not silently
+   hangs or panics the whole process.
 4. **The player's `<audio>` element and playback-state persistence (Task 14) under the existing stream endpoint's
    range/transcode behaviour.** `kima-web` must not assume a different streaming contract than the Next.js player
    already relies on; Task 14's tests reuse the same stream endpoint behaviour M1 already established, not a new
@@ -163,30 +177,43 @@ in-flight milestone claimed it first).
   - Divergences: none.
   - [ ] **Step 4: Commit** `feat(web): scaffold kima-web crate, verify vertigo build output`.
 
-- [ ] **Task 3: Serve `kima-web`'s build from `kima-server`, behind the `KIMA_WEB_FRONTEND` switch**
-  - **Step 1 (test first):** `crates/kima-server/tests/web_frontend_switch.rs` — with the switch off (default), a
-    request to `/` and to a path outside §5 of the spec is served by the Next.js `ServeDir` (assert on a
-    Next.js-export-only marker file/response, not on page content); with the switch on (env var set, or the
-    request-scoped override set for the specific request only), a request to `/login` (one of `kima-web`'s routes)
-    is served by `kima-web`'s `build/` output, while a path outside §5 (e.g. `/podcasts`) is **still** served by
-    Next.js even with the switch on. Write these three assertions first; they fail (no switch exists yet).
-  - **Step 2:** add `KIMA_WEB_FRONTEND` to `kima_core::config::Config` (default `off`, matching `KIMA_IDENTIFY`'s
-    pattern — same file, same style); add the request-scoped override (decided here: a `?kima_web=1` query param
-    checked before falling back to the env default — simplest to implement and to drive from Playwright per spec
-    §6; revisit if the owner answers §12 Q2 with a stronger requirement). Add the `kima-web` `ServeDir` to
-    `kima_server::frontend::routes`, routed only for the path set §5 actually covers (a small allow-list constant,
-    mirroring `LEGACY_ROUTES`'s style in the same file), falling through to the existing Next.js `ServeDir` for
-    everything else and for the switch-off case.
-  - **Step 3:** run the Task's own tests; fix until green. Run the full existing `kima-server` test suite to
-    confirm nothing about the Next.js serving path regressed.
-  - **Acceptance criteria:** all three assertions from Step 1 pass; every pre-existing `kima-server` test still
-    passes unchanged; the allow-list of `kima-web`-served paths is a single named constant a later task can extend
-    page by page (Tasks 8–16 each add one entry, not re-architect the switch).
-  - Files: create `crates/kima-server/tests/web_frontend_switch.rs`; modify `crates/kima-core/src/config.rs`,
-    `crates/kima-server/src/frontend.rs`, `crates/kima-server/src/lib.rs` (config wiring), `docker-compose*.yml`/
-    `Dockerfile` only if the build needs the `kima-web` `build/` output copied in (confirm during this task).
-  - Divergences: none yet (the switch existing is not itself a divergence; D-134 waits for Task 18).
-  - [ ] **Step 4: Commit** `feat(web): serve kima-web behind KIMA_WEB_FRONTEND switch, Next.js unaffected elsewhere`.
+- [ ] **Task 3: Embed wasmtime SSR for `kima-web` in-process in `kima-server`, reverse-proxied over loopback**
+  - **Step 1 (test first):** `crates/kima-server/tests/web_ssr_embed.rs` — three assertions written first (they
+    fail, no embedding exists yet): (a) a request to one of `kima-web`'s routes (e.g. `/login`) returns HTML whose
+    body was produced by the embedded wasmtime SSR task (assert on real rendered markup, not an empty shell —
+    this is the test that actually distinguishes SSR from a CSR stub); (b) a request to a path outside §5 of the
+    spec (e.g. `/podcasts`) gets `kima-server`'s normal 404/existing routing, never proxied to the SSR task; (c)
+    with the embedded SSR task deliberately not started (simulated for the test), a request to a `kima-web` route
+    returns a clear 5xx, while `/api/health` (or equivalent) still responds normally — proving the failure mode is
+    contained, per Review Focus #3.
+  - **Step 2:** add a `kima_web_ssr` module to `kima-server` that, at startup, constructs `vertigo_cli::serve::
+    ServeOpts { common: CommonOpts { dest_dir: <kima-web's build/> }, inner: ServeOptsInner { host:
+    "127.0.0.1".into(), port: <internal, configurable>, proxy: vec![], env: vec![] } }` by hand (no CLI parsing —
+    confirmed constructible, spec §3) and spawns `vertigo_cli::serve::run(opts, None)` as a `tokio::task`, logging
+    and (per spec §12 Q3-equivalent, now the embedded-SSR liveness question) deciding here whether a task panic
+    crashes the whole process or is caught and surfaced as the contained 5xx from Step 1(c) — pick the contained
+    failure mode unless this task finds a concrete reason the orchestrator-restart approach is simpler, and record
+    which was chosen in the commit body.
+  - **Step 3:** add a reverse-proxy layer to `kima_server::frontend` (or a new `kima_server::web_proxy` module) —
+    for exactly the path allow-list §5 covers (a small named constant, extended page by page by Tasks 8–16, same
+    shape the original switch design used for its allow-list), forward the incoming request's method/headers/body
+    to the loopback address and stream the response back; everything else keeps `kima-server`'s existing routing
+    unchanged.
+  - **Step 4:** run the Task's own tests; fix until green. Run the full existing `kima-server` test suite to
+    confirm nothing regressed. Confirm `cargo tree -p kima-server` shows `vertigo-cli`'s axum 0.6/poem/reqwest
+    stack pulled in alongside `kima-server`'s axum 0.8 stack as two independent dependency subtrees (expected per
+    spec §3 — note this in the commit body, do not treat a larger `Cargo.lock`/longer build as a bug to "fix").
+  - **Acceptance criteria:** all Step 1 assertions pass; every pre-existing `kima-server` test still passes
+    unchanged; the allow-list of `kima-web`-served paths is a single named constant a later task can extend page
+    by page (Tasks 8–16 each add one entry, not re-architect the proxy); the embedded task's failure mode is
+    explicit and tested, not assumed.
+  - Files: create `crates/kima-server/tests/web_ssr_embed.rs`, `crates/kima-server/src/web_ssr.rs` (embedded task
+    spawn), `crates/kima-server/src/web_proxy.rs` (reverse-proxy layer + allow-list constant); modify
+    `crates/kima-core/src/config.rs` (internal SSR port + `build/` dir config), `crates/kima-server/src/lib.rs`
+    (startup wiring), `crates/kima-server/Cargo.toml` (new `vertigo-cli` dependency), `docker-compose*.yml`/
+    `Dockerfile` (copy `kima-web`'s `build/` output into the image; confirm exact path during this task).
+  - Divergences: none yet (the embedded SSR path existing is not itself a divergence; D-134 waits for Task 19).
+  - [ ] **Step 5: Commit** `feat(web): embed wasmtime SSR for kima-web in-process, reverse-proxied over loopback`.
 
 - [ ] **Task 4: Routing skeleton in `kima-web`**
   - **Step 1 (test first):** `crates/kima-web/src/route.rs` tests (native `cargo test -p kima-web`, following
@@ -343,8 +370,8 @@ in-flight milestone claimed it first).
   - **Step 1 (test first):** component test — the page shows the signed-in user's username; submitting a password
     change calls `auth::change_password` and shows success/failure from the backend's `ApiErrorBody` verbatim.
   - **Step 2:** implement `crates/kima-web/src/pages/settings.rs` covering only the account slice decided in spec
-    §5.7/§12 Q5 (confirm the owner's answer to Q5 before adding anything beyond account/password — if unanswered,
-    ship account-only and note the deferral in this task's commit body).
+    §5.7 (minimal placeholder, confirmed by the owner as the settled scope for M9 — not reopened; the full
+    Settings page is M10's job).
   - **Acceptance criteria:** component tests pass; manual password change against the dev backend succeeds and a
     re-login with the new password works.
   - Files: create `crates/kima-web/src/pages/settings.rs`; modify route/allow-list.
@@ -356,46 +383,82 @@ in-flight milestone claimed it first).
     (no browser): onboarding → login → browse → search → create a playlist → add a track → play (assert the
     stream endpoint is reachable with the session token) → change the account password — using `kima-api-types`
     directly to build/parse requests, proving the shared types work end to end against the real running server,
-    independent of whether `kima-web`'s actual WASM renders correctly (that is Playwright's job, Task 17).
+    independent of whether `kima-web`'s actual WASM renders correctly (that is Playwright's job, Task 18).
   - **Acceptance criteria:** the full flow passes against a fresh test database every time (no shared state
     between runs); this is the first test that exercises every DTO from Tasks 1 and 6 in one sequence.
   - Files: create `crates/kima-server/tests/web_flow_end_to_end.rs`.
   - Divergences: none.
   - [ ] **Step 2: Commit** `test(server): end-to-end flow test across kima-api-types' full M9 surface`.
 
-- [ ] **Task 17: Playwright for `kima-web`**
+- [ ] **Task 17: `Dockerfile` `ARG` for an optional dev-only legacy Next.js frontend build**
+  - **Step 1 (test first):** `tools/verify-legacy-frontend-arg.sh` — asserts that `docker build .` (no `ARG` set)
+    produces an image with no Node toolchain and no `frontend/` build artifacts baked in (verified by `docker run
+    --rm <image> sh -c '! command -v node && ! test -d /app/legacy-frontend'` or equivalent), and that
+    `docker build --build-arg KIMA_BUILD_LEGACY_FRONTEND=1 .` produces an image that *does* contain the Next.js
+    static export at the path `kima-server` expects for `/__legacy/`. Run it against the current `Dockerfile`
+    first to confirm it fails for the right reason (no `ARG` wired yet), then implement.
+  - **Step 2:** add `ARG KIMA_BUILD_LEGACY_FRONTEND=0` to the `Dockerfile`; gate the existing Next.js build stage
+    (`npm ci && npm run build` or equivalent) behind that `ARG` so it is skipped entirely by default (no Node
+    invoked, no `frontend/` stage run) and only executed when the `ARG` is set to a truthy value; when skipped,
+    the final image stage must not `COPY` anything from the skipped build stage (confirm the multi-stage Dockerfile
+    doesn't unconditionally reference it elsewhere).
+  - **Step 3:** add a runtime env var (e.g. `KIMA_LEGACY_FRONTEND_PATH`) to `kima_core::config::Config` (unset by
+    default) that, only when both the build-time baked assets exist *and* the env var is set, makes `kima-server`
+    serve them from `/__legacy/` via a `ServeDir` — never at `/`, never overlapping any path in the Task 3
+    allow-list; add a `kima-server` test asserting `/__legacy/` 404s when the env var is unset even if assets
+    happen to be present (belt-and-suspenders against accidental production exposure, per spec §6.2).
+  - **Acceptance criteria:** `tools/verify-legacy-frontend-arg.sh` passes for both the default and `ARG`-set
+    builds; a `kima-server` test confirms `/__legacy/` is inert unless explicitly enabled at both build and run
+    time; no change to any existing route under the Task 3 allow-list or to `/api/*`.
+  - Files: create `tools/verify-legacy-frontend-arg.sh`; modify `Dockerfile`, `crates/kima-core/src/config.rs`,
+    `crates/kima-server/src/frontend.rs` (or `web_proxy.rs`) for the `/__legacy/` mount, and a new
+    `crates/kima-server/tests/legacy_frontend_dev_flag.rs`.
+  - Divergences: none (this is strictly additive dev tooling; it does not change production behaviour).
+  - [ ] **Step 4: Commit** `chore(docker): add KIMA_BUILD_LEGACY_FRONTEND ARG for optional dev-only Next.js build`.
+
+- [ ] **Task 18: Playwright for `kima-web`, the production-gating suite**
   - **Step 1 (test first, in the sense that the spec is the "test"):** write `frontend/playwright.kima-web.
-    config.ts` (sibling to the existing `playwright.kima-rs.config.ts`) pointed at the request-scoped switch
-    override from Task 3, and `frontend/tests/e2e/kima-web/smoke.spec.ts` asserting the login page renders and a
-    login with a seeded test account succeeds — written and run against the Task 8 login page first, confirming
-    the harness itself works before the remaining specs are added.
+    config.ts` (sibling to the existing `playwright.kima-rs.config.ts`) pointed at a normal production-shaped
+    `kima-server` build (no `KIMA_BUILD_LEGACY_FRONTEND`, exercising the Task 3 embedded-SSR proxy for real), and
+    `frontend/tests/e2e/kima-web/smoke.spec.ts` asserting the login page renders (with real SSR-produced markup
+    present before any JS runs, not just after hydration — the assertion that actually tells SSR apart from CSR)
+    and a login with a seeded test account succeeds — written and run against the Task 8 login page first,
+    confirming the harness itself works before the remaining specs are added.
   - **Step 2:** add `frontend/tests/e2e/kima-web/{onboarding,browse,search,playlists,player,settings}.spec.ts`,
     one per page, porting the same user-visible assertions the existing Next.js specs make for the overlapping
     behaviour (not copying selectors — vertigo's DOM output has different markup, per spec §7).
-  - **Step 3:** add/extend the CI job so both `playwright.kima-rs.config.ts` and `playwright.kima-web.config.ts`
-    run against one `kima-server` instance with `KIMA_WEB_FRONTEND` available, per spec §7; confirm the existing
-    suite's job is untouched in behaviour (same specs, same config, same pass/fail criteria as before this plan).
-  - **Acceptance criteria:** both Playwright configs green in CI; the pre-existing `kima-rs` suite's run time and
-    assertions are unchanged (a diff of that job's config/specs should be empty).
+  - **Step 3:** repoint the existing `frontend/tests/e2e/kima-rs/*.spec.ts` CI job to build the image with
+    `KIMA_BUILD_LEGACY_FRONTEND=1` (Task 17) and run against `/__legacy/` instead of `/` — this job becomes the
+    dev-build regression net for pages not yet ported, not a production gate (spec §7); add a second, separate CI
+    job that builds the image without the `ARG` and runs `playwright.kima-web.config.ts` against it — this is the
+    one CI treats as defining production correctness. The two jobs use two different image builds and do not
+    share a running `kima-server` instance.
+  - **Acceptance criteria:** both Playwright jobs green in CI; the pre-existing `kima-rs` suite's specs are
+    unchanged in content (only its CI job's build/target changed); the `kima-web` job demonstrably exercises SSR,
+    not a CSR shortcut (Step 1's markup-before-hydration assertion is the proof).
   - Files: create `frontend/playwright.kima-web.config.ts`, `frontend/tests/e2e/kima-web/*.spec.ts`; modify
-    `.github/workflows/ci.yml`.
+    `.github/workflows/ci.yml` (two jobs: production-gate and legacy-dev-build).
   - Divergences: none.
-  - [ ] **Step 4: Commit** `test(e2e): Playwright suite for kima-web's seven M9 pages`.
+  - [ ] **Step 4: Commit** `test(e2e): Playwright suite for kima-web's seven M9 pages, production-gating`.
 
-- [ ] **Task 18: Flip the switch on in dev/CI defaults where appropriate, and log the divergence**
-  - Confirm with the owner (or per their earlier answer to spec §12 Q2) whether `KIMA_WEB_FRONTEND`'s **default**
-    changes from `off` to something else anywhere (e.g. CI always exercises it via the override regardless of the
-    default, which is likely sufficient — changing the production default is explicitly an M10 decision per the
-    roadmap, not this plan's to make unilaterally).
+- [ ] **Task 19: Confirm the production SSR path end to end, and log the divergence**
+  - Re-verify, in one sitting, that a production-shaped build (no `KIMA_BUILD_LEGACY_FRONTEND`) serves every one
+    of the seven M9 pages through the Task 3 embedded-SSR proxy with no Next.js involvement anywhere in that
+    build — this is the acceptance bar for the whole milestone's revised scope (owner decisions, spec header), not
+    just this task's own diff.
   - Write `docs/DIVERGENCES.md` row **D-134** per spec §8, using the final, actually-shipped wording (not the
-    spec's draft wording, if anything changed during implementation — e.g. if Q1/Q2/Q3 were answered differently
-    than the spec's default assumption, the row must say what shipped).
+    spec's draft wording, if anything changed during implementation — e.g. if the embedded-SSR liveness policy
+    from Task 3 or the §12 open questions were answered differently than the spec's default assumption, the row
+    must say what shipped).
   - Update `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` row M9 to point at this plan file and mark it
-    done, following the exact pattern M1–M3's rows use (✅ marker, plan filename).
+    done, following the exact pattern M1–M3's rows use (✅ marker, plan filename); note explicitly that Next.js is
+    retired from production as of M9 (not M10 as the original roadmap note implied), so M10's own note can be
+    updated to reflect "finish porting the remaining pages" rather than "flip the default".
   - **Acceptance criteria:** `docs/DIVERGENCES.md` D-134 reads correctly against what actually shipped (re-read it
-    once after Tasks 1–17 land, not drafted blind from the spec); the roadmap row is updated; every acceptance
+    once after Tasks 1–18 land, not drafted blind from the spec); the roadmap row is updated; every acceptance
     criterion of every earlier task in this plan is independently re-verified once more in one sitting (a final
-    `cargo test --workspace`, the Task 0 verify script, both Playwright configs) before this commit.
+    `cargo test --workspace`, the Task 0 verify script, both Playwright jobs, both `Dockerfile` `ARG` states from
+    Task 17) before this commit.
   - Files: modify `docs/DIVERGENCES.md`, `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md`.
   - Divergences: D-134 (written here).
-  - [ ] **Step 1: Commit** `docs(web): log the kima-web frontend switch as D-134; mark M9 done in the roadmap`.
+  - [ ] **Step 1: Commit** `docs(web): log kima-web as the sole production frontend as D-134; mark M9 done`.

@@ -25,7 +25,7 @@ use crate::auth::Session;
 use crate::icons::icon;
 use crate::position;
 use crate::route::Route;
-use crate::ui::{cover_url, flag, format_time};
+use crate::ui::{cover_url, flag, format_time, rows_box};
 
 /// How often the `<audio>` element is sampled (position, paused, ended).
 const POLL_MS: u32 = 500;
@@ -66,6 +66,59 @@ pub fn prev_index(index: usize, position_secs: f64) -> Option<usize> {
     }
 }
 
+/// The queue index `next` goes to: a random other track when shuffling, else the following one; past the
+/// end only `repeat_all` wraps to the start. `random(max)` returns a number in `0..=max`.
+pub fn next_target(
+    len: usize,
+    index: usize,
+    shuffle: bool,
+    repeat_all: bool,
+    random: impl FnOnce(u32) -> u32,
+) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    if shuffle && len > 1 {
+        let r = random((len - 2) as u32) as usize;
+        return Some(if r >= index { r + 1 } else { r });
+    }
+    match next_index(len, index) {
+        Some(i) => Some(i),
+        None if repeat_all => Some(0),
+        None => None,
+    }
+}
+
+/// Sleep timer presets in minutes (as the legacy popover).
+pub const SLEEP_PRESETS: [u32; 6] = [15, 30, 45, 60, 90, 120];
+
+/// `1h 05m`, `12:05` style countdown: `m:ss` under an hour, `h:mm:ss` above.
+pub fn format_countdown(secs: u64) -> String {
+    if secs >= 3600 {
+        format!("{}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60)
+    } else {
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
+}
+
+/// Repeat modes of the player bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Repeat {
+    Off,
+    All,
+    One,
+}
+
+impl Repeat {
+    pub fn cycle(self) -> Self {
+        match self {
+            Repeat::Off => Repeat::All,
+            Repeat::All => Repeat::One,
+            Repeat::One => Repeat::Off,
+        }
+    }
+}
+
 struct Inner {
     client: ApiClient,
     session: Session,
@@ -90,6 +143,13 @@ struct Inner {
     /// Output volume, 0-100.
     volume: Value<f64>,
     volume_before_mute: Cell<f64>,
+    shuffle: Value<bool>,
+    repeat: Value<Repeat>,
+    /// When the sleep timer stops playback (milliseconds since the epoch), if one is set.
+    sleep_deadline: Cell<Option<u64>>,
+    /// Whole seconds left on the sleep timer, for the bar.
+    sleep_left: Value<Option<u64>>,
+    sleep_open: Value<bool>,
 }
 
 #[derive(Clone)]
@@ -115,6 +175,11 @@ impl Player {
             last_saved: Cell::new(NOT_SAVED),
             volume: Value::new(50.0),
             volume_before_mute: Cell::new(50.0),
+            shuffle: Value::new(false),
+            repeat: Value::new(Repeat::Off),
+            sleep_deadline: Cell::new(None),
+            sleep_left: Value::new(None),
+            sleep_open: Value::new(false),
         }))
     }
 
@@ -174,8 +239,63 @@ impl Player {
 
     pub fn next(&self) {
         let len = Self::read(&self.0.queue).len();
-        if let Some(i) = next_index(len, Self::read(&self.0.index)) {
+        let target = next_target(
+            len,
+            Self::read(&self.0.index),
+            Self::read(&self.0.shuffle),
+            Self::read(&self.0.repeat) == Repeat::All,
+            |max| get_driver().get_random(0, max),
+        );
+        if let Some(i) = target {
             self.go_to(i);
+        }
+    }
+
+    pub fn toggle_shuffle(&self) {
+        let on = !Self::read(&self.0.shuffle);
+        self.0.shuffle.set(on);
+        self.persist();
+    }
+
+    pub fn cycle_repeat(&self) {
+        let next = Self::read(&self.0.repeat).cycle();
+        self.0.repeat.set(next);
+    }
+
+    /// Pauses playback after `minutes` (a new call replaces the running timer).
+    pub fn set_sleep_timer(&self, minutes: u32) {
+        let now = get_driver().utc_now();
+        self.0
+            .sleep_deadline
+            .set(Some(now + u64::from(minutes) * 60_000));
+        self.0.sleep_left.set(Some(u64::from(minutes) * 60));
+        self.0.sleep_open.set(false);
+    }
+
+    pub fn clear_sleep_timer(&self) {
+        self.0.sleep_deadline.set(None);
+        self.0.sleep_left.set(None);
+        self.0.sleep_open.set(false);
+    }
+
+    /// Counts the sleep timer down; stops playback when it is over.
+    fn sleep_tick(&self) {
+        let Some(deadline) = self.0.sleep_deadline.get() else {
+            return;
+        };
+        let now = get_driver().utc_now();
+        if now >= deadline {
+            self.0.sleep_deadline.set(None);
+            self.0.sleep_left.set(None);
+            if let Some(audio) = self.0.audio.borrow().clone() {
+                js! { #audio.pause() };
+            }
+            self.0.playing.set(false);
+        } else {
+            let left = (deadline - now).div_ceil(1000);
+            if Self::read(&self.0.sleep_left) != Some(left) {
+                self.0.sleep_left.set(Some(left));
+            }
         }
     }
 
@@ -221,7 +341,7 @@ impl Player {
             track_id: Some(current.id.clone()),
             queue: Some(queue.clone()),
             current_index: Some(index as i32),
-            is_shuffle: Some(false),
+            is_shuffle: Some(Self::read(&self.0.shuffle)),
         };
         let client = self.0.client.clone();
         get_driver().spawn(async move {
@@ -271,6 +391,7 @@ impl Player {
                 vertigo::transaction(|_| {
                     me.0.queue.set(queue);
                     me.0.index.set(index);
+                    me.0.shuffle.set(state.is_shuffle);
                     if let Some(secs) = resume {
                         me.0.position.set(secs);
                     }
@@ -297,6 +418,7 @@ impl Player {
     }
 
     fn tick(&self) {
+        self.sleep_tick();
         let Some(audio) = self.0.audio.borrow().clone() else {
             return;
         };
@@ -326,7 +448,12 @@ impl Player {
         });
         self.save_position(position);
         let index = Self::read(&self.0.index);
-        if ended && self.0.ended_handled.get() != Some(index) {
+        if ended && Self::read(&self.0.repeat) == Repeat::One {
+            // Loop this track: back to the start, play again.
+            self.seek(0.0);
+            js! { #audio.play() };
+            self.0.playing.set(true);
+        } else if ended && self.0.ended_handled.get() != Some(index) {
             self.0.ended_handled.set(Some(index));
             self.next();
         }
@@ -462,6 +589,86 @@ impl Player {
         cover_url(&art, size, self.0.session.current_token().as_deref())
     }
 
+    /// The sleep-timer button with its preset popover (legacy `SleepTimer`).
+    fn sleep_timer(&self) -> DomNode {
+        let me = self.clone();
+        let (left, open) = (self.0.sleep_left.clone(), self.0.sleep_open.clone());
+        let state = Computed::from({
+            let (left, open) = (left.clone(), open.clone());
+            move |ctx| (left.get(ctx), open.get(ctx))
+        });
+        state.render_value(bind!(me, |(left, open): (Option<u64>, bool)| {
+            let label = match left {
+                Some(secs) => format!("Sleep timer: {} remaining", format_countdown(secs)),
+                None => "Sleep timer".to_owned(),
+            };
+            let class = if left.is_some() {
+                "transition-all duration-200 hover:scale-110 flex items-center gap-1 text-brand hover:text-brand-hover"
+            } else {
+                "transition-all duration-200 hover:scale-110 flex items-center gap-1 text-[var(--text-secondary)] hover:text-white"
+            };
+            let countdown = match left {
+                Some(secs) => dom! { <span class="text-micro tabular-nums font-medium text-brand">{format_countdown(secs)}</span> },
+                None => dom! { <span /> },
+            };
+            let toggle = bind!(me, |_| {
+                let now = Self::read(&me.0.sleep_open);
+                me.0.sleep_open.set(!now);
+            });
+            let popover = if open {
+                let presets: Vec<DomNode> = SLEEP_PRESETS
+                    .iter()
+                    .map(|&mins| {
+                        let text = if mins >= 60 {
+                            format!("{} hour{}", mins / 60, if mins > 60 { "s" } else { "" })
+                        } else {
+                            format!("{mins} minutes")
+                        };
+                        let pick = bind!(me, |_| me.set_sleep_timer(mins));
+                        dom! { <button class="w-full text-left px-3 py-1.5 rounded text-sm transition-colors text-[var(--text-primary)] hover:bg-white/[0.06] hover:text-white" on_click={pick}>{text}</button> }
+                    })
+                    .collect();
+                let cancel = if left.is_some() {
+                    dom! {
+                        <div class="px-3 py-2 border-t border-white/[0.06]">
+                            <button class="w-full text-center text-sm text-danger-light hover:brightness-125 py-1 transition-colors"
+                                on_click={bind!(me, |_| me.clear_sleep_timer())}>"Cancel Timer"</button>
+                        </div>
+                    }
+                } else {
+                    dom! { <span /> }
+                };
+                let close = bind!(me, |_| me.0.sleep_open.set(false));
+                dom! {
+                    <div>
+                        <div class="fixed inset-0 z-(--z-dropdown)" on_click={close}></div>
+                        <div role="dialog" aria-label="Sleep timer options"
+                            class="animate-panel-up absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 bg-[var(--bg-hover)] border border-white/10 rounded-lg overflow-hidden z-(--z-dropdown)">
+                            <div class="px-3 py-2 border-b border-white/[0.06]">
+                                <span class="text-xs text-[var(--text-secondary)] font-medium">"Sleep Timer"</span>
+                            </div>
+                            <div class="p-1.5">{rows_box(presets)}</div>
+                            {cancel}
+                        </div>
+                    </div>
+                }
+            } else {
+                dom! { <span /> }
+            };
+            let expanded = open.to_string();
+            let title = label.to_lowercase();
+            dom! {
+                <div class="relative">
+                    <button class={class} aria-label={label} aria-expanded={expanded} aria-haspopup="dialog" title={title} on_click={toggle}>
+                        {icon("timer", "w-4 h-4")}
+                        {countdown}
+                    </button>
+                    {popover}
+                </div>
+            }
+        }))
+    }
+
     /// The desktop player bar (`UniversalPlayer` at its widest: cover + title, transport, seek, volume).
     pub fn desktop_bar(&self) -> DomNode {
         let me = self.clone();
@@ -561,8 +768,53 @@ impl Player {
             }
         });
 
+        let shuffle_on = self.0.shuffle.clone();
+        let shuffle_class = shuffle_on.map(|on| {
+            if on {
+                "transition-all duration-200 hover:scale-110 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100 text-brand hover:text-brand-light"
+            } else {
+                "transition-all duration-200 hover:scale-110 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100 text-[var(--text-secondary)] hover:text-white"
+            }
+            .to_owned()
+        });
+        let shuffle_pressed = shuffle_on.map(|on| on.to_string());
+        let repeat_value = self.0.repeat.clone();
+        let repeat_class = repeat_value.map(|r| {
+            if r != Repeat::Off {
+                "transition-all duration-200 hover:scale-110 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100 text-brand hover:text-brand-light"
+            } else {
+                "transition-all duration-200 hover:scale-110 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100 text-[var(--text-secondary)] hover:text-white"
+            }
+            .to_owned()
+        });
+        let repeat_label = repeat_value.map(|r| {
+            match r {
+                Repeat::Off => "Repeat off",
+                Repeat::All => "Repeat all",
+                Repeat::One => "Repeat one",
+            }
+            .to_owned()
+        });
+        let repeat_title = repeat_value.map(|r| {
+            match r {
+                Repeat::Off => "repeat: off",
+                Repeat::All => "repeat: all (loop queue)",
+                Repeat::One => "repeat: one (loop this track)",
+            }
+            .to_owned()
+        });
+        let repeat_pressed = repeat_value.map(|r| (r != Repeat::Off).to_string());
+        let repeat_icon = repeat_value.render_value(|r| {
+            if r == Repeat::One {
+                icon("repeat-1", "w-4 h-4")
+            } else {
+                icon("repeat", "w-4 h-4")
+            }
+        });
+        let sleep = self.sleep_timer();
+
         dom! {
-            <div class="relative flex-shrink-0 max-[1024px]:hidden">
+            <div class="relative flex-shrink-0 tablet:hidden">
                 <div class="bg-black border-t border-white/[0.08] h-24">
                     <div class="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand/40 to-transparent"></div>
                     <div class="flex items-center h-full px-6 gap-6">
@@ -572,9 +824,14 @@ impl Player {
                                 <h4 class="text-white font-semibold truncate text-sm" data-testid="player-title">{title}</h4>
                                 <p class="text-xs text-[var(--text-secondary)] truncate">{artist}</p>
                             </div>
+                            {sleep}
                         </div>
                         <div class="flex-1 flex flex-col items-center gap-2">
                             <div class="flex items-center gap-5" role="group" aria-label="Playback controls">
+                                <button class={shuffle_class} aria-label="Shuffle" title="shuffle" aria-pressed={shuffle_pressed}
+                                    disabled={no_track.clone()} on_click={bind!(me, |_| me.toggle_shuffle())}>
+                                    {icon("shuffle", "w-4 h-4")}
+                                </button>
                                 <button class="transition-all duration-200 hover:scale-110 relative disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100 text-[var(--text-secondary)] hover:text-white"
                                     aria-label="Rewind 30 seconds" title="rewind 30 seconds" disabled={no_track.clone()}
                                     on_click={bind!(me, |_| me.skip_by(-30.0))}>
@@ -602,6 +859,10 @@ impl Player {
                                     on_click={bind!(me, |_| me.skip_by(30.0))}>
                                     {icon("rotate-cw", "w-4 h-4")}
                                     <span class="absolute text-micro font-semibold top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">"30"</span>
+                                </button>
+                                <button class={repeat_class} aria-label={repeat_label} title={repeat_title} aria-pressed={repeat_pressed}
+                                    disabled={no_track.clone()} on_click={bind!(me, |_| me.cycle_repeat())}>
+                                    {repeat_icon}
                                 </button>
                             </div>
                             <div class="w-full flex items-center gap-3">
@@ -728,6 +989,34 @@ mod tests {
             stream_url("abc", "tok"),
             "/api/library/tracks/abc/stream?token=tok"
         );
+    }
+
+    #[test]
+    fn next_target_follows_shuffle_and_repeat_all() {
+        assert_eq!(next_target(3, 0, false, false, |_| 0), Some(1));
+        assert_eq!(next_target(3, 2, false, false, |_| 0), None);
+        assert_eq!(next_target(3, 2, false, true, |_| 0), Some(0));
+        assert_eq!(next_target(0, 0, true, true, |_| 0), None);
+        // shuffle never picks the current track: random 0..=len-2 skips over `index`
+        for index in 0..4 {
+            for r in 0..3 {
+                let t = next_target(4, index, true, false, |_| r).unwrap();
+                assert_ne!(t, index);
+                assert!(t < 4);
+            }
+        }
+        // a single track cannot shuffle: falls through to the normal rules
+        assert_eq!(next_target(1, 0, true, false, |_| 0), None);
+        assert_eq!(next_target(1, 0, true, true, |_| 0), Some(0));
+    }
+
+    #[test]
+    fn repeat_cycles_and_countdowns_format() {
+        assert_eq!(Repeat::Off.cycle(), Repeat::All);
+        assert_eq!(Repeat::All.cycle(), Repeat::One);
+        assert_eq!(Repeat::One.cycle(), Repeat::Off);
+        assert_eq!(format_countdown(65), "1:05");
+        assert_eq!(format_countdown(3725), "1:02:05");
     }
 
     #[test]

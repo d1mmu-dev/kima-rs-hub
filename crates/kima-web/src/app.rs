@@ -17,7 +17,7 @@ use crate::player::Player;
 use crate::route::Route;
 use crate::shell;
 use crate::style::stylesheet;
-use crate::ui::Ctx;
+use crate::ui::{Ctx, Refine};
 
 pub fn render() -> DomNode {
     let session = Session::new(Rc::new(BrowserStorage));
@@ -38,6 +38,8 @@ pub fn render() -> DomNode {
         refresh: Value::new(0),
         playlists_rev: Value::new(0),
         query: Value::new(String::new()),
+        refine: Value::new(Refine::default()),
+        refine_open: Value::new(false),
         menu_open: Value::new(false),
         toast: Value::new(None),
     };

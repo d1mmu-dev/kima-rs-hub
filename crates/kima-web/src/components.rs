@@ -10,7 +10,7 @@ use vertigo::{DomNode, bind, dom, get_driver};
 use crate::icons::icon;
 use crate::player::queue_item;
 use crate::route::Route;
-use crate::ui::Ctx;
+use crate::ui::{Ctx, PER_PAGE_OPTIONS, Refine, rows_box};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -52,6 +52,113 @@ fn shuffle_library(ctx: &Ctx) {
     }));
 }
 
+/// Sorts a tab offers: `(sortBy value, label)`; year for albums, track count for artists (legacy `sortOptionsFor`).
+pub fn sort_options(tab: Tab) -> Vec<(&'static str, &'static str)> {
+    let mut options = vec![("name", "Name (A–Z)"), ("name-desc", "Name (Z–A)")];
+    match tab {
+        Tab::Albums => options.push(("recent", "Year (Newest)")),
+        Tab::Artists => options.push(("tracks", "Most Tracks")),
+        Tab::Tracks => {}
+    }
+    options
+}
+
+const REFINE_CHOICE_ON: &str = "border-brand/50 bg-brand/10 text-brand";
+const REFINE_CHOICE_OFF: &str = "border-white/5 bg-white/3 text-[var(--text-secondary)] hover:bg-white/8 hover:border-white/15 hover:text-white";
+
+/// The "Refine" button and its panel (sort order and items per page; the legacy "Show" filter has no
+/// counterpart: recommendations are not part of kima-web).
+fn refine_panel(ctx: &Ctx, tab: Tab) -> DomNode {
+    let state = {
+        let (refine, open) = (ctx.refine.clone(), ctx.refine_open.clone());
+        vertigo::Computed::from(move |c| (refine.get(c), open.get(c)))
+    };
+    state.render_value(bind!(ctx, |(refine, open): (Refine, bool)| {
+        let active = refine != Refine::default();
+        let button_class = if open {
+            "relative flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg border transition-colors min-h-[44px] select-none border-brand bg-brand/10 text-brand"
+        } else if active {
+            "relative flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg border transition-colors min-h-[44px] select-none border-brand/50 bg-white/5 text-brand hover:border-brand hover:bg-brand/10"
+        } else {
+            "relative flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg border transition-colors min-h-[44px] select-none border-white/10 bg-white/5 text-[var(--text-secondary)] hover:text-white hover:bg-white/10 hover:border-white/20"
+        };
+        let toggle = bind!(ctx, |_| {
+            let now = vertigo::transaction(|c| ctx.refine_open.get(c));
+            ctx.refine_open.set(!now);
+        });
+        let dot = if active && !open {
+            dom! { <span aria-label="Refinements active" class="w-1.5 h-1.5 rounded-full bg-brand flex-shrink-0"></span> }
+        } else {
+            dom! { <span class="hidden" /> }
+        };
+        let panel = if open {
+            let sorts: Vec<DomNode> = sort_options(tab)
+                .into_iter()
+                .map(|(value, label)| {
+                    let class = format!(
+                        "px-3 py-2 min-h-[44px] text-sm font-medium rounded-lg border transition-colors {}",
+                        if refine.sort == value { REFINE_CHOICE_ON } else { REFINE_CHOICE_OFF }
+                    );
+                    let pressed = (refine.sort == value).to_string();
+                    let pick = bind!(ctx, |_| ctx.refine.set(Refine { sort: value, ..refine }));
+                    dom! { <button type="button" class={class} aria-pressed={pressed} on_click={pick}>{label}</button> }
+                })
+                .collect();
+            let sizes: Vec<DomNode> = PER_PAGE_OPTIONS
+                .iter()
+                .map(|&n| {
+                    let class = format!(
+                        "py-2 min-h-[44px] text-sm font-medium tabular-nums rounded-lg border transition-colors {}",
+                        if refine.per_page == n { REFINE_CHOICE_ON } else { REFINE_CHOICE_OFF }
+                    );
+                    let pressed = (refine.per_page == n).to_string();
+                    let pick = bind!(ctx, |_| ctx.refine.set(Refine { per_page: n, ..refine }));
+                    dom! { <button type="button" class={class} aria-pressed={pressed} on_click={pick}>{n.to_string()}</button> }
+                })
+                .collect();
+            let close = bind!(ctx, |_| ctx.refine_open.set(false));
+            let close_outside = bind!(ctx, |_| ctx.refine_open.set(false));
+            dom! {
+                <div>
+                    <div class="fixed inset-0 z-(--z-dropdown)" on_click={close_outside}></div>
+                    <div id="refine-panel" role="dialog" aria-label="Refine options"
+                        class="absolute left-0 top-full mt-2 z-(--z-dropdown) w-72 max-w-[calc(100vw-2rem)] rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-secondary)] p-4 flex flex-col gap-5 animate-panel-up">
+                        <div class="flex items-center justify-between">
+                            <span class="text-sm font-medium text-white">"Refine"</span>
+                            <button type="button" aria-label="Close refine panel" on_click={close}
+                                class="p-1 rounded text-[var(--text-muted)] hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-brand)] transition-colors">
+                                {icon("x", "w-3.5 h-3.5")}
+                            </button>
+                        </div>
+                        <fieldset class="flex flex-col gap-1">
+                            <legend class="text-xs font-medium text-[var(--text-muted)] mb-2">"Sort by"</legend>
+                            <div class="grid grid-cols-2 gap-1.5">{rows_box(sorts)}</div>
+                        </fieldset>
+                        <fieldset class="flex flex-col gap-1">
+                            <legend class="text-xs font-medium text-[var(--text-muted)] mb-2">"Items per page"</legend>
+                            <div class="grid grid-cols-4 gap-1.5">{rows_box(sizes)}</div>
+                        </fieldset>
+                    </div>
+                </div>
+            }
+        } else {
+            dom! { <span class="hidden" /> }
+        };
+        let expanded = open.to_string();
+        dom! {
+            <div class="relative">
+                <button type="button" aria-expanded={expanded} aria-controls="refine-panel"
+                    aria-label="Refine: sort and per-page options" class={button_class} on_click={toggle}>
+                    {icon("sliders-horizontal", "w-3.5 h-3.5 flex-shrink-0")}
+                    <span>"Refine"</span>
+                    {dot}
+                </button>
+                {panel}
+            </div>
+        }
+    }))
+}
+
 /// The collection page: masthead with the count, the tabs, the toolbar row and the list below.
 pub fn library_page(ctx: &Ctx, tab: Tab, count: Option<String>, body: DomNode) -> DomNode {
     let count = count.unwrap_or_else(|| "\u{a0}".to_owned());
@@ -79,6 +186,7 @@ pub fn library_page(ctx: &Ctx, tab: Tab, count: Option<String>, body: DomNode) -
                 </div>
                 <div class="mb-8">
                     <div class="flex items-center gap-3 pb-4 border-b border-white/5">
+                        {refine_panel(ctx, tab)}
                         <button type="button" aria-label="Shuffle entire library" title="shuffle library" on_click={shuffle}
                             class="ml-auto p-2.5 min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg bg-[var(--color-brand)] hover:bg-[var(--color-brand-hover)] text-black transition-all hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-brand)]">
                             {icon("shuffle", "w-4 h-4")}
@@ -201,4 +309,101 @@ pub fn media_card(card: Card) -> DomNode {
 /// The grid every wall of cards uses.
 pub fn media_grid(cards: Vec<DomNode>) -> DomNode {
     dom! { <div class="grid-media">{..cards}</div> }
+}
+
+/// The covers of a playlist's 2x2 mosaic: albums with the most tracks first; with two or three albums the leading
+/// ones repeat so all four cells are filled (legacy `mosaicCovers`). `covers` are cover-art ids, empty ones ignored.
+pub fn mosaic_covers(covers: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for cover in covers.into_iter().filter(|c| !c.is_empty()) {
+        match counts.iter_mut().find(|(c, _)| *c == cover) {
+            Some(entry) => entry.1 += 1,
+            None => counts.push((cover, 1)),
+        }
+    }
+    // `sort_by` is stable, like the legacy `Array.prototype.sort`: ties keep their first-seen order.
+    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    let ranked: Vec<String> = counts.into_iter().map(|(c, _)| c).collect();
+    match ranked.len() {
+        2 => vec![
+            ranked[0].clone(),
+            ranked[1].clone(),
+            ranked[1].clone(),
+            ranked[0].clone(),
+        ],
+        3 => vec![
+            ranked[0].clone(),
+            ranked[1].clone(),
+            ranked[2].clone(),
+            ranked[0].clone(),
+        ],
+        _ => ranked.into_iter().take(4).collect(),
+    }
+}
+
+/// `SectionHeader`: coloured bar, title, count, hairline (legacy `components/ui/SectionHeader`).
+pub fn section_header(kind: Kind, title: &str, count: i64) -> DomNode {
+    let bar = match kind {
+        Kind::Artist => "bg-type-artist",
+        Kind::Album => "bg-type-album",
+        Kind::Playlist => "bg-type-track",
+    };
+    let class = format!("w-1 rounded-full shrink-0 h-8 {bar}");
+    let (title, count) = (title.to_owned(), count.to_string());
+    dom! {
+        <div class="flex items-center gap-3 mb-6">
+            <span aria-hidden="true" class={class}></span>
+            <h2 class="font-bold tracking-tight text-white text-2xl">{title}</h2>
+            <span class="t-meta">{count}</span>
+            <span class="flex-1 border-t border-white/10"></span>
+        </div>
+    }
+}
+
+/// `PageHeader`'s eyebrow: amber dot and a spaced label.
+pub fn eyebrow(text: &str) -> DomNode {
+    let text = text.to_owned();
+    dom! {
+        <p class="t-eyebrow mb-4 flex items-center gap-2">
+            <span aria-hidden="true" class="w-1.5 h-1.5 rounded-full bg-brand"></span>
+            {text}
+        </p>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn covers(list: &[&str]) -> Vec<String> {
+        mosaic_covers(list.iter().map(|s| (*s).to_owned()))
+    }
+
+    #[test]
+    fn mosaic_ranks_by_track_count_and_fills_four_cells() {
+        assert!(covers(&[]).is_empty());
+        assert!(covers(&["", ""]).is_empty());
+        assert_eq!(covers(&["a"]), ["a"]);
+        assert_eq!(covers(&["a", "b"]), ["a", "b", "b", "a"]);
+        assert_eq!(covers(&["a", "b", "b"]), ["b", "a", "a", "b"]);
+        assert_eq!(covers(&["a", "b", "c"]), ["a", "b", "c", "a"]);
+        assert_eq!(covers(&["a", "b", "c", "d", "e"]), ["a", "b", "c", "d"]);
+        assert_eq!(
+            covers(&["a", "b", "c", "c", "d", "d", "d"]),
+            ["d", "c", "a", "b"]
+        );
+    }
+
+    #[test]
+    fn collection_sorts_depend_on_the_tab() {
+        let names = |t| {
+            sort_options(t)
+                .into_iter()
+                .map(|(v, _)| v)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(Tab::Albums), ["name", "name-desc", "recent"]);
+        assert_eq!(names(Tab::Artists), ["name", "name-desc", "tracks"]);
+        assert_eq!(names(Tab::Tracks), ["name", "name-desc"]);
+    }
 }

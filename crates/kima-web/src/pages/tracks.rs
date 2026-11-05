@@ -9,9 +9,19 @@ use vertigo::{DomNode, Resource, Value, bind, computed_tuple, dom};
 use crate::api::client::load;
 use crate::components::{Tab, library_page};
 use crate::tracklist::library_rows;
-use crate::ui::{Ctx, PAGE_SIZE, empty_state, pager, plural};
+use crate::ui::{Ctx, Refine, empty_state, pager, plural};
 
 pub fn render(ctx: &Ctx, album: Option<String>) -> DomNode {
+    // A new Refine choice rebuilds the page, so it starts at page 1 again.
+    ctx.refine
+        .render_value(bind!(ctx, album, |refine: Refine| page(
+            &ctx,
+            album.clone(),
+            refine
+        )))
+}
+
+fn page(ctx: &Ctx, album: Option<String>, refine: Refine) -> DomNode {
     let offset = Value::new(0_i64);
     let refresh = ctx.refresh.clone();
     let key = computed_tuple!(offset, refresh);
@@ -23,7 +33,9 @@ pub fn render(ctx: &Ctx, album: Option<String>) -> DomNode {
         let resource = load(bind!(ctx, async move {
             ctx.client
                 .get::<TracksResponse>(&format!(
-                    "/api/library/tracks?limit={PAGE_SIZE}&offset={off}&sortBy=name{filter}"
+                    "/api/library/tracks?limit={}&offset={off}&sortBy={}{filter}",
+                    refine.per_page,
+                    refine.sort
                 ))
                 .await
         }));
@@ -49,7 +61,7 @@ pub fn render(ctx: &Ctx, album: Option<String>) -> DomNode {
                         dom! {
                             <div>
                                 {library_rows(&ctx, page.tracks.clone())}
-                                {pager(offset.clone(), page.offset, page.tracks.len(), page.total)}
+                                {pager(offset.clone(), page.offset, page.tracks.len(), page.total, refine.per_page)}
                             </div>
                         }
                     };

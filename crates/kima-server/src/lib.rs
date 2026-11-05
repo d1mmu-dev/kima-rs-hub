@@ -18,7 +18,8 @@ pub mod web_ssr;
 
 use kima_jobs::schedule::{Cron, EnqueueFn};
 
-/// Upstream's Next.js `headers()` block, now applied by the server to every response.
+/// Upstream's Next.js `headers()` block, now applied by the server to every response. `font-src` also allows
+/// `data:` because kima-web embeds Montserrat in its inline stylesheet as a data URI.
 const SECURITY_HEADERS: &[(&str, &str)] = &[
     (
         "permissions-policy",
@@ -33,7 +34,7 @@ const SECURITY_HEADERS: &[(&str, &str)] = &[
         "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: blob: https://cdn-images.dzcdn.net https://e-cdns-images.dzcdn.net \
          https://assets.pippa.io https://is1-ssl.mzstatic.com; media-src 'self' blob:; \
-         connect-src 'self' ws: wss:; font-src 'self'; frame-ancestors 'none'; worker-src 'self' blob:",
+         connect-src 'self' ws: wss:; font-src 'self' data:; frame-ancestors 'none'; worker-src 'self' blob:",
     ),
 ];
 

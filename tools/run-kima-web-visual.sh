@@ -4,10 +4,11 @@
 #
 #   tools/run-kima-web-visual.sh up       start everything that is not running (idempotent), print the env
 #   tools/run-kima-web-visual.sh reload   rebuild kima-web (vertigo build) and restart ONLY kima-server
-#   tools/run-kima-web-visual.sh compare [args]   `up`, run tools/compare-kima-web-visual.mjs, leave the stack up
+#   tools/run-kima-web-visual.sh compare [args]   css --check, `up`, `reload`, run tools/compare-kima-web-visual.mjs, leave the stack up
 #   tools/run-kima-web-visual.sh run [args]       `compare`, then `down`
 #   tools/run-kima-web-visual.sh down     stop kima/next and remove the postgres container + state
 #
+# The legacy Next.js app is used ONLY here, as the visual reference (scratch copy; it is not part of any product path).
 # Needs: cargo, node/npm (legacy frontend only: dependencies are installed in a scratch COPY, never in frontend/),
 # docker (pgvector/pgvector:pg17 on a random 127.0.0.1 port, never 5456), ffmpeg, vertigo 0.13.4 (+ wasm-opt), Chrome.
 # Environment (all optional): VISUAL_DIR (default ~/.hermes/cache/scratch/m9-visual), LEGACY_COPY
@@ -166,7 +167,10 @@ case "$cmd" in
   up) up ;;
   reload) reload ;;
   compare | run)
+    # A stale checked-in Tailwind sheet made kima-web render without any utility class once; refuse to compare then.
+    node "$root/tools/gen-kima-web-css.mjs" --check || { echo "run: node tools/gen-kima-web-css.mjs" >&2; exit 1; }
     up >/dev/null
+    reload >/dev/null   # always a real `vertigo build` + server rebuild/restart, never a leftover build directory
     load
     set +e
     WEB_URL="http://127.0.0.1:${KIMA_PORT}" LEGACY_URL="http://127.0.0.1:${LEGACY_PORT}" \

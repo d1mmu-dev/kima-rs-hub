@@ -50,25 +50,10 @@ jobs:
           }
       - run: DATABASE_URL=postgres://kima:kima@localhost:5433/kima cargo test -p kima-api --test login_limit
       - run: DATABASE_URL=postgres://kima:kima@localhost:5433/kima cargo test -p kima-subsonic --test auth
-  frontend:
+  # kima-web is the only frontend (Next.js is in no CI path; `frontend/` stays in the repo only as the
+  # visual reference for tools/run-kima-web-visual.sh until M10 deletes it).
+  kima-web:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - run: npx tsc --noEmit
-      - run: npm run test:unit
-      - run: npm run build
-  e2e:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -81,86 +66,16 @@ jobs:
           --health-cmd "pg_isready -U kima"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      DATABASE_URL: postgres://kima:kima@localhost:5432/kima
       SQLX_OFFLINE: "true"
-      # kima under test makes no outbound lookups (identification off), and kima-net refuses
-      # any host but this machine should one slip through.
-      KIMA_IDENTIFY: "off"
       KIMA_NET_DENY_REAL: "1"
-    steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-        working-directory: frontend
-      - run: npm run build
-        working-directory: frontend
-      - run: cargo build -p kima-server
-      - name: Generate fixture library
-        run: tools/make-fixture-library.sh "$RUNNER_TEMP/music"
-      - name: Start kima
-        run: |
-          mkdir -p "$RUNNER_TEMP/data" "$RUNNER_TEMP/organized"
-          DATABASE_URL=postgres://kima:kima@localhost:5432/kima \
-          KIMA_DATA_DIR="$RUNNER_TEMP/data" \
-          KIMA_FRONTEND_DIR=frontend/out \
-          MUSIC_PATH="$RUNNER_TEMP/music" \
-          KIMA_ORGANIZE_TARGET="$RUNNER_TEMP/organized" \
-          KIMA_WATCH_MODE=poll \
-          KIMA_IDENTIFY=off \
-          KIMA_NET_DENY_REAL=1 \
-          PORT=3030 \
-          nohup target/debug/kima > "$RUNNER_TEMP/kima.log" 2>&1 &
-          for i in $(seq 1 60); do
-            curl -fs http://localhost:3030/health && exit 0
-            sleep 1
-          done
-          cat "$RUNNER_TEMP/kima.log"
-          exit 1
-      - name: Seed stored autotag candidate after the first scan
-        env:
-          DATABASE_URL: postgres://kima:kima@localhost:5432/kima
-        run: |
-          ready=0
-          for i in $(seq 1 60); do
-            if [ "$(psql "$DATABASE_URL" -Atqc "SELECT count(*)=14 AND NOT EXISTS (SELECT 1 FROM jobs WHERE queue='library' AND state IN ('queued','running') AND payload->>'kind'='scan') FROM tracks WHERE missing_since IS NULL")" = t ]; then
-              ready=1
-              break
-            fi
-            sleep 1
-          done
-          test "$ready" = 1
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tools/seed-autotag-candidate.sql
-      - run: npx playwright install --with-deps chromium
-        working-directory: frontend
-      - run: npx playwright test -c playwright.kima-rs.config.ts
-        working-directory: frontend
-      - name: kima log
-        if: failure()
-        run: cat "$RUNNER_TEMP/kima.log"
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: playwright-test-results
-          path: frontend/test-results
-          if-no-files-found: ignore
-  # Activated by M9 Task 2 (the placeholder from Task 0 carried `if: false`).
-  web-wasm:
-    runs-on: ubuntu-latest
-    env:
-      SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
       # kima-web builds on stable and nightly (see crates/kima-web/README.md); nightly keeps parity with dev.
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: wasm32-unknown-unknown
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       # wasm-opt (binaryen) is required by `vertigo build`; apt's binaryen is too old, use the release.
       - name: Install wasm-opt
@@ -168,9 +83,23 @@ jobs:
           curl -sL https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz | tar xz -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/binaryen-version_133/bin" >> "$GITHUB_PATH"
       - run: tools/verify-wasm-toolchain.sh
-      # Proves kima-api-types stays wasm-buildable (Task 1 creates it).
+      - run: cargo fmt -p kima-web --check
+      # Proves kima-api-types stays wasm-buildable.
       - run: cargo build -p kima-api-types --target wasm32-unknown-unknown
+      - run: cargo clippy -p kima-web --all-targets -- -D warnings
       - run: cargo clippy -p kima-web --target wasm32-unknown-unknown -- -D warnings
       - run: cargo test -p kima-web
+      # Node is used ONLY here: kima.css is a checked-in Tailwind output, so a stale one must fail. The three
+      # packages are installed in a scratch dir at the versions frontend/package-lock.json pins (the legacy
+      # frontend's install is not needed); the build and runtime paths never use Node.
+      - name: Stale kima.css guard
+        run: |
+          mkdir "$RUNNER_TEMP/tailwind" && cd "$RUNNER_TEMP/tailwind"
+          echo '{"private":true}' > package.json
+          npm install --no-audit --no-fund --save-exact tailwindcss@4.2.1 @tailwindcss/postcss@4.2.1 postcss@8.5.23
+          cd "$GITHUB_WORKSPACE"
+          LEGACY_COPY="$RUNNER_TEMP/tailwind" node tools/gen-kima-web-css.mjs --check
       - run: cargo install vertigo-cli --version 0.13.4 --locked
       - run: tools/verify-kima-web-build.sh
+      # The embedded SSR tests render the real build; a missing build is a failure here, not a skip.
+      - run: KIMA_WEB_REQUIRE_BUILD=1 cargo test -p kima-server --test web_ssr_embed

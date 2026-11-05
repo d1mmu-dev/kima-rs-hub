@@ -5,6 +5,7 @@ mod app;
 mod auth;
 mod pages;
 mod player;
+mod position;
 mod route;
 mod tracklist;
 mod ui;

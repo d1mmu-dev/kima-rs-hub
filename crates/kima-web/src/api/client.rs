@@ -89,6 +89,18 @@ impl ApiClient {
         self.send(FetchMethod::POST, path, Some(body)).await
     }
 
+    pub async fn put<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ApiError> {
+        self.send(FetchMethod::PUT, path, Some(body)).await
+    }
+
+    pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        self.send::<(), T>(FetchMethod::DELETE, path, None).await
+    }
+
     /// A POST without a body.
     pub async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         self.send::<(), T>(FetchMethod::POST, path, None).await

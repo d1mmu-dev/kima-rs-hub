@@ -56,6 +56,8 @@ pub fn render() -> DomNode {
             Route::Albums { artist } => pages::albums::render(&ctx, artist),
             Route::Tracks { album } => pages::tracks::render(&ctx, album),
             Route::Search => pages::search::render(&ctx),
+            Route::Playlists => pages::playlists::list::render(&ctx),
+            Route::Playlist { id } => pages::playlists::detail::render(&ctx, id),
             Route::NotFound => dom! {
                 <div css={page_css()}>
                     <h2>"Page not found"</h2>
@@ -120,6 +122,7 @@ fn header(ctx: &Ctx) -> DomNode {
             <a href={Route::Albums { artist: None }.to_string()}>"Albums"</a>
             <a href={Route::Tracks { album: None }.to_string()}>"Tracks"</a>
             <a href={Route::Search.to_string()}>"Search"</a>
+            <a href={Route::Playlists.to_string()}>"Playlists"</a>
             <button on_click={scan} disabled={flag(scanning.to_computed())}>"Scan library"</button>
             <span css={muted_css()}>{message.to_computed()}</span>
             <button on_click={sign_out}>"Sign out"</button>

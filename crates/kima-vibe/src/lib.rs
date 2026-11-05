@@ -4,3 +4,4 @@
 pub mod exact_math;
 pub mod formula;
 pub mod prng;
+pub mod song_path;

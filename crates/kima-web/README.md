@@ -47,14 +47,34 @@ MUSIC_PATH=$HOME/Music VERTIGO=~/.local/opt/vertigo-cli-0.13.4/bin/vertigo tools
 - First run: open the page; with no account yet `/login` sends you to `/setup` (create the admin, you are
   signed in and onboarding is marked complete); the library is then browsable and playable.
 
-## What the slice contains (M9 Tasks 4, 5, 6-reduced, 7, 8, 9, 10, 11, 14)
+## What kima-web contains (M9 Tasks 4-15)
 
 Routes: `/login`, `/setup`, `/collection` (artists), `/collection/albums[?artist=]`,
-`/collection/tracks[?album=]`, `NotFound`. Search, playlists and settings from the plan's table are not
-built yet (they fall under `NotFound`). Session token: `localStorage` key `kima-web.token` (the legacy
-Next.js app uses `auth_token`). Player: persistent bar, `<audio>` on the existing stream endpoint
-(`?token=`), queue persisted through `/api/playback-state`; the backend does not store the in-track position
-for web saves, so a reload resumes at the start of the saved track.
+`/collection/tracks[?album=]`, `/search`, `/playlists`, `/playlists/<uuid>`, `/settings`, `NotFound`. Session
+token: `localStorage` key `kima-web.token` (the legacy Next.js app uses `auth_token`). Player: persistent bar,
+`<audio>` on the existing stream endpoint (`?token=`), queue persisted through `/api/playback-state`.
+
+- **Search** (`pages/search.rs`): query box (300 ms debounce, Enter searches at once) over `GET /api/search`,
+  results grouped artists / albums / tracks. An empty or blank query shows a hint and sends no request. The
+  query is page state, not part of the URL. Track results play (queue = the visible tracks) and can be added
+  to a playlist.
+- **Playlists** (`pages/playlists/`): list with a create form (creating opens the new playlist), detail with
+  play all, rename, two-step delete and per-track remove. Every change refetches the playlist (no optimistic
+  edits). Every track list (tracks, search, playlist) has a "＋ Playlist" picker (`tracklist.rs`); adding a
+  track that is already there answers 200 with `duplicated`, shown as "Already in <name>". Reordering and
+  public/hidden playlists are not in the UI.
+- **Settings** (`pages/settings.rs`, spec §5.7 account slice only): username and role from `GET /auth/me`, and
+  a password change (`POST /auth/change-password`). The backend revokes the old tokens on a change and returns
+  a new access token, which replaces the stored session; the audio element of a track that is already playing
+  keeps the old `?token=` until the next track loads.
+- **Resume position** (`position.rs`): `POST /api/playback-state` stores the queue, index, track id and
+  shuffle, but never the in-track position for web saves (`position` is written only by the Subsonic queue, as
+  upstream), so `GET /api/playback-state` reports `position: 0`. kima-web keeps the position itself under
+  `localStorage` key `kima-web.position` as `{"id": <track id>, "t": <seconds>}`, written about once a second
+  while the position moves (not below 1 s), and applies it after a reload only when `id` is the track the
+  restored queue points at and it is not within the last second. It is applied once the audio metadata is
+  loaded (setting `currentTime` on a fresh element earlier did not stick in Chromium). The backend is
+  unchanged.
 
 Deviations from the plan text, all forced by the real vertigo 0.13.4 API:
 
@@ -71,3 +91,11 @@ Deviations from the plan text, all forced by the real vertigo 0.13.4 API:
   vertigo's fetch API, so only the message is shown.
 - `kima-api` route modules still build their `json!` literals; they are not migrated to the new
   `kima-api-types::library` / `playback_state` DTOs yet. The fixture round-trip tests are the drift guard.
+
+## End-to-end check
+
+`tools/verify-kima-web-e2e.mjs` drives headless Chromium over CDP against a running stack (see the header of
+the file): login, browse, playback, seek, resume position after a reload, search (debounce, play), playlists
+(create, add, play, rename, remove, delete), password change and re-login, scan, 401 handling. Chromium and
+its remote-debugging port are `CHROME` and `DEBUG_PORT`. The run changes the admin password through the
+Settings page and changes it back, so it can be repeated.

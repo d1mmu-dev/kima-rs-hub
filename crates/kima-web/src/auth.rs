@@ -83,6 +83,11 @@ impl Session {
         }
     }
 
+    /// The backing storage, for other kima-web-owned keys (the player's resume position).
+    pub fn storage(&self) -> Rc<dyn Storage> {
+        self.storage.clone()
+    }
+
     pub fn token(&self) -> Computed<Option<String>> {
         self.token.to_computed()
     }

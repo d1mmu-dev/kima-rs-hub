@@ -5,7 +5,8 @@
 //! `GET /api/library/tracks/:id/stream`, byte ranges, the access token in `?token=` because `<audio>`
 //! cannot send headers. What the backend persists for the web client is the queue, the current index,
 //! the track id and shuffle; it does not store the in-track position for web saves (`position` is
-//! written by the Subsonic queue only), so a reload resumes at the start of the current track.
+//! written by the Subsonic queue only). The position is therefore kept client-side in a kima-web-owned
+//! `localStorage` key scoped to the track id (see `position.rs`) and applied after a reload.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -21,12 +22,15 @@ use vertigo::{
 
 use crate::api::client::ApiClient;
 use crate::auth::Session;
+use crate::position;
 use crate::ui::{format_time, muted_css};
 
 /// How often the `<audio>` element is sampled (position, paused, ended).
 const POLL_MS: u32 = 500;
 /// Pressing "previous" past this many seconds restarts the track instead of going back.
 const RESTART_AFTER_SECS: f64 = 3.0;
+/// `last_saved` of a freshly loaded track: the first sample is always written.
+const NOT_SAVED: f64 = -1000.0;
 
 pub fn queue_item(t: &Track) -> QueueItem {
     QueueItem {
@@ -75,6 +79,12 @@ struct Inner {
     restored: Cell<bool>,
     /// Index whose `ended` was already handled, so a still-`ended` element is not advanced twice.
     ended_handled: Cell<Option<usize>>,
+    /// The track id of the current `<audio>` element (what `tick` attributes the position to).
+    audio_track: RefCell<Option<String>>,
+    /// Position to seek to when the restored track's `<audio>` appears.
+    pending_seek: Cell<Option<f64>>,
+    /// The last position written to storage.
+    last_saved: Cell<f64>,
 }
 
 #[derive(Clone)]
@@ -95,6 +105,9 @@ impl Player {
             ticker: RefCell::new(None),
             restored: Cell::new(false),
             ended_handled: Cell::new(None),
+            audio_track: RefCell::new(None),
+            pending_seek: Cell::new(None),
+            last_saved: Cell::new(NOT_SAVED),
         }))
     }
 
@@ -115,6 +128,7 @@ impl Player {
         let start = start.min(queue.len() - 1);
         let before = self.current_item();
         self.0.autoplay.set(true);
+        self.0.pending_seek.set(None);
         self.0.ended_handled.set(None);
         vertigo::transaction(|_| {
             self.0.queue.set(queue);
@@ -129,6 +143,7 @@ impl Player {
     fn go_to(&self, index: usize) {
         let before = self.current_item();
         self.0.autoplay.set(true);
+        self.0.pending_seek.set(None);
         self.0.ended_handled.set(None);
         vertigo::transaction(|_| {
             self.0.index.set(index);
@@ -238,10 +253,20 @@ impl Player {
                 && !queue.is_empty()
             {
                 let index = (state.current_index.max(0) as usize).min(queue.len() - 1);
+                // The backend has no in-track position for web saves; ours is stored client-side.
+                let resume = position::restore_point(
+                    me.0.session.storage().get(position::STORAGE_KEY).as_deref(),
+                    &queue[index].id,
+                    queue[index].duration,
+                );
                 me.0.autoplay.set(false);
+                me.0.pending_seek.set(resume);
                 vertigo::transaction(|_| {
                     me.0.queue.set(queue);
                     me.0.index.set(index);
+                    if let Some(secs) = resume {
+                        me.0.position.set(secs);
+                    }
                 });
             }
         });
@@ -274,8 +299,17 @@ impl Player {
         };
         let position = number(js! { #audio.currentTime });
         let duration = number(js! { #audio.duration });
+        let ready = number(js! { #audio.readyState });
         let paused = matches!(js! { #audio.paused }, JsJson::True);
         let ended = matches!(js! { #audio.ended }, JsJson::True);
+        // The restored point is applied once the metadata is loaded: setting `currentTime` on a fresh
+        // element before that did not stick in Chromium.
+        if ready >= 1.0
+            && let Some(secs) = self.0.pending_seek.take()
+        {
+            self.seek(secs);
+            return;
+        }
         vertigo::transaction(|_| {
             self.0.position.set(position);
             if duration > 0.0 {
@@ -283,10 +317,25 @@ impl Player {
             }
             self.0.playing.set(!paused && !ended);
         });
+        self.save_position(position);
         let index = Self::read(&self.0.index);
         if ended && self.0.ended_handled.get() != Some(index) {
             self.0.ended_handled.set(Some(index));
             self.next();
+        }
+    }
+
+    /// Writes the position of the current `<audio>` to storage once it moved by a second.
+    fn save_position(&self, position: f64) {
+        let Some(id) = self.0.audio_track.borrow().clone() else {
+            return;
+        };
+        if position::should_write(self.0.last_saved.get(), position) {
+            self.0.last_saved.set(position);
+            self.0
+                .session
+                .storage()
+                .set(position::STORAGE_KEY, &position::encode(&id, position));
         }
     }
 
@@ -302,6 +351,7 @@ impl Player {
         let audio_view = current.render_value(bind!(me, |item: Option<QueueItem>| match item {
             None => {
                 *me.0.audio.borrow_mut() = None;
+                *me.0.audio_track.borrow_mut() = None;
                 dom! { <span /> }
             }
             Some(item) => {
@@ -315,6 +365,8 @@ impl Player {
                 }
                 let audio = element.get_ref();
                 *me.0.audio.borrow_mut() = Some(audio.clone());
+                *me.0.audio_track.borrow_mut() = Some(item.id.clone());
+                me.0.last_saved.set(NOT_SAVED);
                 if autoplay {
                     // The `autoplay` attribute alone did not start playback in Chromium when it is
                     // added right after `src`; ask explicitly once the element is in the document.

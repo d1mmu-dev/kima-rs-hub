@@ -33,6 +33,51 @@ pub async fn embedding_claim(pool: &PgPool, track: Uuid) -> sqlx::Result<Option<
     ).fetch_optional(pool).await
 }
 
+/// Capture the file generation only for the exact claim held by this worker.
+pub async fn embedding_claim_for_worker(
+    pool: &PgPool,
+    track: Uuid,
+    started_at: OffsetDateTime,
+) -> sqlx::Result<Option<EmbeddingClaim>> {
+    let generation: Option<i64> = sqlx::query_scalar(
+        "SELECT t.ml_generation FROM tracks t JOIN track_stages s ON s.track_id=t.id AND s.stage='embedding'
+         WHERE t.id=$1 AND t.missing_since IS NULL AND s.status='working'
+           AND s.started_at=$2 AND s.next_attempt_at > clock_timestamp()",
+    )
+    .bind(track)
+    .bind(started_at)
+    .fetch_optional(pool)
+    .await?;
+    Ok(generation.map(|file_generation| EmbeddingClaim {
+        track_id: track,
+        started_at,
+        file_generation,
+    }))
+}
+
+/// Atomically capture the path and generation belonging to the exact worker claim.
+pub async fn embedding_input_for_worker(
+    pool: &PgPool,
+    track: Uuid,
+    started_at: OffsetDateTime,
+) -> sqlx::Result<Option<(String, EmbeddingClaim)>> {
+    let row: Option<(String, i64)> = sqlx::query_as(
+        "SELECT t.path, t.ml_generation FROM tracks t JOIN track_stages s ON s.track_id=t.id AND s.stage='embedding'
+         WHERE t.id=$1 AND t.missing_since IS NULL AND s.status='working'
+           AND s.started_at=$2 AND s.next_attempt_at > clock_timestamp()",
+    ).bind(track).bind(started_at).fetch_optional(pool).await?;
+    Ok(row.map(|(path, file_generation)| {
+        (
+            path,
+            EmbeddingClaim {
+                track_id: track,
+                started_at,
+                file_generation,
+            },
+        )
+    }))
+}
+
 /// Publish the result and stage success in one transaction, or change nothing.
 /// Locks track then stage, matching file invalidation's lock order. Invalid dimensions,
 /// nonfinite/zero vectors or invalid provenance fail in Postgres and roll back success.
@@ -59,17 +104,17 @@ pub async fn complete_embedding(
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let done = sqlx::query!(
+    let done = sqlx::query(
         "UPDATE track_stages SET status='done', next_attempt_at=NULL, last_error=NULL,
              error_code=NULL, error_class=NULL, source=$3, evidence=$4,
              finished_at=clock_timestamp(), updated_at=clock_timestamp()
          WHERE track_id=$1 AND stage='embedding' AND status='working' AND started_at=$2
            AND next_attempt_at > clock_timestamp()",
-        claim.track_id,
-        claim.started_at,
-        provenance.model_id,
-        serde_json::json!({"pipeline_version": provenance.pipeline_version})
     )
+    .bind(claim.track_id)
+    .bind(claim.started_at)
+    .bind("clap")
+    .bind(serde_json::json!({"pipeline_version": provenance.pipeline_version}))
     .execute(&mut *tx)
     .await?;
     if done.rows_affected() == 0 {

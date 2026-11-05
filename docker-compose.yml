@@ -5,12 +5,17 @@ services:
     ports:
       - "3030:3030"
     volumes:
-      - ${MUSIC_DIR:-./music}:/music:ro
+      # Read-write on purpose (M4 embeddings): the private snapshot directory lives on the SAME
+      # mount as the library, because a reflink cannot cross mounts. See docs/m4-input-snapshots.md.
+      - ${MUSIC_DIR:-./music}:/music
       - kima_data:/data
       # Organizer copy mode: uncomment, point at a writable folder, and set KIMA_ORGANIZE_TARGET.
       # - ${ORGANIZE_DIR:-./organized}:/organized
-    # environment:
-    #   - KIMA_ORGANIZE_TARGET=/organized
+    environment:
+      # Private (0700, kima-owned) directory on the library mount; created by the entrypoint.
+      # The library scanner skips dot-prefixed directories, so it is never indexed.
+      - KIMA_SNAPSHOT_DIR=/music/.kima-snapshots
+      # - KIMA_ORGANIZE_TARGET=/organized
     restart: unless-stopped
     # kima drains for up to 10 s, then the bundled Postgres needs time to stop cleanly.
     stop_grace_period: 30s

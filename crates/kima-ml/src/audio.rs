@@ -100,7 +100,7 @@ pub fn decode_and_resample_bytes(
     decode_and_resample_media_source(Box::new(cursor), &hint)
 }
 
-pub(crate) fn decode_and_resample_media_source(
+pub fn decode_and_resample_media_source(
     source: Box<dyn MediaSource>,
     hint: &Hint,
 ) -> Result<DecodedAudio, AudioError> {

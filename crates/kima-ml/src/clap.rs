@@ -280,7 +280,7 @@ impl WindowCollector {
 /// Output is 1001 frames of 64 dB values in frame-major order.
 pub struct ClapMelFrontend {
     fft: std::sync::Arc<dyn rustfft::Fft<f64>>,
-    filters: [[f64; 513]; 64],
+    filters: Box<[[f64; 513]; 64]>,
     window: [f64; 1024],
 }
 
@@ -304,16 +304,21 @@ impl ClapMelFrontend {
                 1000.0 * (step * (mel - 15.0)).exp()
             }
         });
-        let filters = std::array::from_fn(|b| {
-            std::array::from_fn(|k| {
+        let mut filters = vec![[0.0_f64; 513]; 64];
+        for (b, filter) in filters.iter_mut().enumerate() {
+            for (k, entry) in filter.iter_mut().enumerate() {
                 let f = k as f64 * 46.875;
-                ((f - hz[b]) / (hz[b + 1] - hz[b]))
+                *entry = ((f - hz[b]) / (hz[b + 1] - hz[b]))
                     .min((hz[b + 2] - f) / (hz[b + 2] - hz[b + 1]))
                     .max(0.0)
                     * 2.0
-                    / (hz[b + 2] - hz[b])
-            })
-        });
+                    / (hz[b + 2] - hz[b]);
+            }
+        }
+        let filters: Box<[[f64; 513]; 64]> = match filters.into_boxed_slice().try_into() {
+            Ok(b) => b,
+            Err(_) => unreachable!(),
+        };
         let window = std::array::from_fn(|i| {
             0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / 1024.0).cos()
         });
@@ -369,7 +374,7 @@ impl ClapMelFrontend {
                 return Err("non-finite frontend output");
             }
             let bands = std::array::from_fn(|b| {
-                let sum: f64 = power.iter().zip(self.filters[b]).map(|(p, w)| p * w).sum();
+                let sum: f64 = power.iter().zip(&self.filters[b]).map(|(p, w)| p * w).sum();
                 (10.0 * sum.max(1e-10).log10()) as f32
             });
             if bands.iter().any(|v: &f32| !v.is_finite()) {

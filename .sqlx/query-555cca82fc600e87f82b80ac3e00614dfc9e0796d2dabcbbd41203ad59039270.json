@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO track_analysis\n             (track_id, file_generation, musicnn_pipeline_version, musicnn_danceability,\n              musicnn_valence, musicnn_arousal, musicnn_mood_happy, musicnn_mood_sad,\n              musicnn_mood_relaxed, musicnn_mood_aggressive, musicnn_mood_party,\n              musicnn_mood_acoustic, musicnn_mood_electronic, musicnn_computed_at)\n         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,clock_timestamp())\n         ON CONFLICT (track_id) DO UPDATE SET\n             file_generation=EXCLUDED.file_generation,\n             musicnn_pipeline_version=EXCLUDED.musicnn_pipeline_version,\n             musicnn_danceability=EXCLUDED.musicnn_danceability,\n             musicnn_valence=EXCLUDED.musicnn_valence,\n             musicnn_arousal=EXCLUDED.musicnn_arousal,\n             musicnn_mood_happy=EXCLUDED.musicnn_mood_happy,\n             musicnn_mood_sad=EXCLUDED.musicnn_mood_sad,\n             musicnn_mood_relaxed=EXCLUDED.musicnn_mood_relaxed,\n             musicnn_mood_aggressive=EXCLUDED.musicnn_mood_aggressive,\n             musicnn_mood_party=EXCLUDED.musicnn_mood_party,\n             musicnn_mood_acoustic=EXCLUDED.musicnn_mood_acoustic,\n             musicnn_mood_electronic=EXCLUDED.musicnn_mood_electronic,\n             musicnn_computed_at=clock_timestamp(), updated_at=clock_timestamp()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Text",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4",
+        "Float4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "555cca82fc600e87f82b80ac3e00614dfc9e0796d2dabcbbd41203ad59039270"
+}

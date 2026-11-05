@@ -264,6 +264,8 @@ fn ident_ctx(pool: &PgPool) -> kima_ident::IdentCtx {
         cipher: std::sync::Arc::new(kima_core::cipher::Cipher::from_secret("t")),
         events: EventBus::new(4),
         progress_events: kima_ident::events::ProgressEvents::new(EventBus::new(4)),
+        embedding_runtime: Default::default(),
+        analysis_runtime: Default::default(),
         library: LibraryCtx {
             pool: pool.clone(),
             root: std::path::PathBuf::from("/music").into(),

@@ -41,6 +41,12 @@ pub enum Phase {
     Artists,
     Tracks,
     Fingerprint,
+    /// CLAP embedding (M4): local work, independent of the MusicBrainz switch, same
+    /// pattern as [`Phase::Fingerprint`].
+    Embedding,
+    /// Analysis stage (M4): local DSP + MusiCNN work, independent of the MusicBrainz
+    /// switch.
+    Analysis,
 }
 
 impl Phase {
@@ -49,6 +55,8 @@ impl Phase {
             Phase::Artists => "artists",
             Phase::Tracks => "tracks",
             Phase::Fingerprint => "fingerprint",
+            Phase::Embedding => "embedding",
+            Phase::Analysis => "analysis",
         }
     }
 
@@ -57,6 +65,8 @@ impl Phase {
             "artists" => Some(Phase::Artists),
             "tracks" => Some(Phase::Tracks),
             "fingerprint" => Some(Phase::Fingerprint),
+            "embedding" => Some(Phase::Embedding),
+            "analysis" => Some(Phase::Analysis),
             _ => None,
         }
     }
@@ -622,7 +632,7 @@ impl Default for AudioAnalysisProgress {
     }
 }
 
-/// M4's embeddings: all zero in M3.
+/// CLAP embedding work, read from the embedding stage (same counters as fingerprints).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClapProgress {
@@ -784,10 +794,13 @@ async fn artist_progress(pool: &PgPool) -> sqlx::Result<ArtistProgress> {
 /// The progress readout (spec §10.8). `fingerprinting`: whether the fingerprint stage can run
 /// (spec §9.4); when it cannot, the recording gate counts as settled (nothing `waiting`) and
 /// the fingerprint stage does not hold `isFullyComplete` back.
+/// Embedding remains independently owed while unavailable/disabled; only settled
+/// embedding work permits full completion. `coreComplete` stays metadata-only.
 pub async fn progress(pool: &PgPool, fingerprinting: bool) -> sqlx::Result<Progress> {
     let artists = artist_progress(pool).await?;
     let rec = stage_counts(pool, "recording", fingerprinting).await?;
     let fp = stage_counts(pool, "fingerprint", false).await?;
+    let emb = stage_counts(pool, "embedding", false).await?;
 
     let track_tags = TrackTagProgress {
         total: rec.total,
@@ -815,11 +828,28 @@ pub async fn progress(pool: &PgPool, fingerprinting: bool) -> sqlx::Result<Progr
         artists,
         track_tags,
         audio_analysis: AudioAnalysisProgress::default(),
-        clap_embeddings: ClapProgress::default(),
+        clap_embeddings: {
+            let c = emb;
+            ClapProgress {
+                total: c.total,
+                completed: c.done,
+                pending: c.open,
+                processing: c.working,
+                failed: c.retrying + c.terminal,
+                retrying: c.retrying,
+                waiting_missing: c.waiting_missing,
+                progress: percent(c.done, c.total),
+                is_background: true,
+            }
+        },
         fingerprints,
         similarity: SimilarityProgress::default(),
         core_complete,
-        is_fully_complete: core_complete && fingerprints_settled,
+        is_fully_complete: core_complete
+            && fingerprints_settled
+            && emb.open == 0
+            && emb.working == 0
+            && emb.retrying == 0,
     })
 }
 
@@ -831,7 +861,7 @@ pub struct Counter {
     pub failed: i64,
 }
 
-/// The audio counter (M4): all zero in M3.
+/// The audio counter (M4): embedding stage state; no synthetic analysis completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct AudioCounter {
     pub total: i64,
@@ -862,7 +892,15 @@ pub async fn status_counts(pool: &PgPool) -> sqlx::Result<StatusCounts> {
             completed: rec.done,
             failed: rec.retrying + rec.terminal,
         },
-        audio: AudioCounter::default(),
+        audio: {
+            let c = stage_counts(pool, "embedding", false).await?;
+            AudioCounter {
+                total: c.total,
+                completed: c.done,
+                failed: c.retrying + c.terminal,
+                processing: c.working,
+            }
+        },
     })
 }
 
@@ -888,7 +926,7 @@ pub struct FailureFilter {
 pub struct FailureRow {
     /// `"<trackId>__<stage>"` for a stage row, the artist id for an artist.
     pub id: String,
-    /// `track` (recording), `scan` (fingerprint) or `artist`.
+    /// `track` (recording), `scan` (fingerprint), `audio` (embedding) or `artist`.
     pub entity_type: String,
     pub entity_id: uuid::Uuid,
     pub entity_name: Option<String>,
@@ -930,10 +968,11 @@ struct Parts {
     track: bool,
     scan: bool,
     artist: bool,
+    audio: bool,
 }
 
 impl Parts {
-    /// Whitelisted entity types; `audio`, `vibe`, `podcast` and anything unknown select
+    /// Whitelisted entity types; `vibe`, `podcast` and anything unknown select
     /// nothing.
     fn of(entity_type: Option<&str>) -> Parts {
         let (track, scan, artist) = match entity_type {
@@ -947,6 +986,7 @@ impl Parts {
             track,
             scan,
             artist,
+            audio: entity_type.is_none() || entity_type == Some("audio"),
         }
     }
 }
@@ -963,7 +1003,8 @@ pub async fn failures(pool: &PgPool, f: &FailureFilter) -> sqlx::Result<(Vec<Fai
     let rows = sqlx::query!(
         r#"WITH f AS (
              SELECT s.track_id::text || '__' || s.stage AS id,
-                    CASE s.stage WHEN 'recording' THEN 'track' ELSE 'scan' END AS entity_type,
+                    CASE s.stage WHEN 'recording' THEN 'track'
+                                 WHEN 'embedding' THEN 'audio' ELSE 'scan' END AS entity_type,
                     s.track_id AS entity_id,
                     t.title AS entity_name,
                     left(s.last_error, $6) AS error_message,
@@ -976,7 +1017,8 @@ pub async fn failures(pool: &PgPool, f: &FailureFilter) -> sqlx::Result<(Vec<Fai
                       AS metadata
              FROM track_stages s JOIN tracks t ON t.id = s.track_id
              WHERE s.status = 'failed' AND s.error_class IS DISTINCT FROM 'FILE_MISSING'
-               AND ((s.stage = 'recording' AND $1) OR (s.stage = 'fingerprint' AND $2))
+               AND ((s.stage = 'recording' AND $1) OR (s.stage = 'fingerprint' AND $2)
+                    OR (s.stage = 'embedding' AND $7))
              UNION ALL
              SELECT a.id::text, 'artist', a.id, a.name, left(a.last_error, $6),
                     a.last_error_code, a.enrichment_failures::int,
@@ -1001,6 +1043,7 @@ pub async fn failures(pool: &PgPool, f: &FailureFilter) -> sqlx::Result<(Vec<Fai
         limit,
         offset,
         max_chars,
+        parts.audio,
     )
     .fetch_all(pool)
     .await?;
@@ -1053,17 +1096,20 @@ pub async fn failure_counts(pool: &PgPool) -> sqlx::Result<FailureCounts> {
                 AND error_class IS DISTINCT FROM 'FILE_MISSING') AS "track!",
              (SELECT count(*) FROM track_stages
               WHERE stage = 'fingerprint' AND status = 'failed'
-                AND error_class IS DISTINCT FROM 'FILE_MISSING') AS "scan!""#
+                AND error_class IS DISTINCT FROM 'FILE_MISSING') AS "scan!",
+             (SELECT count(*) FROM track_stages
+              WHERE stage = 'embedding' AND status = 'failed'
+                AND error_class IS DISTINCT FROM 'FILE_MISSING') AS "audio!""#
     )
     .fetch_one(pool)
     .await?;
     Ok(FailureCounts {
         artist: r.artist,
         track: r.track,
-        audio: 0,
+        audio: r.audio,
         vibe: 0,
         scan: r.scan,
         podcast: 0,
-        total: r.artist + r.track + r.scan,
+        total: r.artist + r.track + r.scan + r.audio,
     })
 }

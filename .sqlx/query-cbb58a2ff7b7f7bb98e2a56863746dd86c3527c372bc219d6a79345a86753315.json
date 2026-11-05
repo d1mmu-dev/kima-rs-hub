@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO track_analysis\n             (track_id, file_generation, dsp_key_pipeline_version, key_tonic, key_mode,\n              key_strength, key_computed_at)\n         VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp())\n         ON CONFLICT (track_id) DO UPDATE SET\n             file_generation=EXCLUDED.file_generation,\n             dsp_key_pipeline_version=EXCLUDED.dsp_key_pipeline_version,\n             key_tonic=EXCLUDED.key_tonic,\n             key_mode=EXCLUDED.key_mode,\n             key_strength=EXCLUDED.key_strength,\n             key_computed_at=clock_timestamp(), updated_at=clock_timestamp()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Text",
+        "Int2",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cbb58a2ff7b7f7bb98e2a56863746dd86c3527c372bc219d6a79345a86753315"
+}

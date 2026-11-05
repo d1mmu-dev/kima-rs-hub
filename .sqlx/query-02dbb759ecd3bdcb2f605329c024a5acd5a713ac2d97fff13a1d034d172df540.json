@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO track_analysis\n             (track_id, file_generation, dsp_tempo_pipeline_version, tempo_bpm,\n              tempo_confidence, tempo_computed_at)\n         VALUES ($1,$2,$3,$4,$5,clock_timestamp())\n         ON CONFLICT (track_id) DO UPDATE SET\n             file_generation=EXCLUDED.file_generation,\n             dsp_tempo_pipeline_version=EXCLUDED.dsp_tempo_pipeline_version,\n             tempo_bpm=EXCLUDED.tempo_bpm,\n             tempo_confidence=EXCLUDED.tempo_confidence,\n             tempo_computed_at=clock_timestamp(), updated_at=clock_timestamp()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Text",
+        "Float8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "02dbb759ecd3bdcb2f605329c024a5acd5a713ac2d97fff13a1d034d172df540"
+}

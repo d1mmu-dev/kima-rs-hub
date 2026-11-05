@@ -400,6 +400,34 @@ async fn paused_musicbrainz_skips_tracks_phase(pool: PgPool) {
     assert_eq!(stage_status(&pool, t, "recording").await, None);
 }
 
+/// Owner decision 2026-11-04 (1): the embedding phase runs as a phase inside the existing
+/// enrich cycle, independent of the MusicBrainz on/off switch. While MusicBrainz is
+/// paused, an unconfigured embedding capability must not claim or fail a track.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn embedding_phase_runs_while_musicbrainz_is_paused(pool: PgPool) {
+    let rec = rec_id(1);
+    let replay = Replay::start(Recording(vec![details(&rec)])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    let t = track(&pool, "a.wav", Some(&rec)).await;
+    sqlx::query(
+        "INSERT INTO source_pauses (source, paused_until, reason)
+         VALUES ('musicbrainz', now() + interval '10 minutes', 'HTTP 503')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    ctx.net.load_pauses().await.unwrap();
+
+    let report = cycle(&ctx).await;
+
+    assert!(replay.asked().is_empty());
+    assert_eq!(stage_status(&pool, t, "recording").await, None);
+    assert_eq!(report.embedding.claimed, 0);
+    assert_eq!(stage_status(&pool, t, "embedding").await, None);
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn next_cycle_in_5s_after_work_and_60s_when_idle(pool: PgPool) {
     let rec = rec_id(1);

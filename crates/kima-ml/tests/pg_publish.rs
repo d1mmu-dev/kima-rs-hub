@@ -72,7 +72,8 @@ async fn assert_published(pool: &PgPool, claim: &ml::EmbeddingClaim) {
             "done".into(),
             true,
             true,
-            provenance().model_id,
+            // `track_stages.source` is the stage's fixed source, not the model id.
+            "clap".into(),
             provenance().pipeline_version
         )
     );

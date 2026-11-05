@@ -13,6 +13,7 @@ kima-core.workspace = true
 kima-db.workspace = true
 kima-jobs.workspace = true
 kima-library.workspace = true
+kima-ml = { workspace = true, features = ["pg-publish"] }
 kima-net.workspace = true
 md-5.workspace = true
 pathfinding.workspace = true
@@ -22,6 +23,7 @@ rusty-chromaprint.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
+symphonia.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true

@@ -100,6 +100,96 @@ fn failure(code: &str, class: Option<&str>, retry_at: Option<OffsetDateTime>) ->
 fn stage_names() {
     assert_eq!(Stage::Fingerprint.as_str(), "fingerprint");
     assert_eq!(Stage::Recording.as_str(), "recording");
+    assert_eq!(Stage::Embedding.as_str(), "embedding");
+    assert_eq!(Stage::Analysis.as_str(), "analysis");
+}
+
+/// The analysis stage is eligible as soon as a track exists (unconditional, like
+/// fingerprint/embedding): it is never gated on fingerprint, recording or embedding
+/// settling.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn analysis_is_claimed_unconditionally_like_embedding(pool: PgPool) {
+    let al = album(&pool).await;
+    let new = track(&pool, al, 10).await;
+    let old = track(&pool, al, 300).await;
+    put(&pool, new, "embedding", "pending", "NULL").await;
+    let got = stages::claim(&pool, Stage::Analysis, 20, true)
+        .await
+        .unwrap();
+    assert_eq!(ids(&got), vec![new, old]);
+    for c in &got {
+        assert_eq!(c.stage, Stage::Analysis);
+        assert_eq!(c.attempts, 0);
+        assert_eq!(c.redelivered, 0);
+    }
+}
+
+/// Analysis shares the exact lease/redelivery policy already used for embedding: a
+/// lapsed working lease is redelivered and counted, same as every other stage.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn analysis_lease_and_redelivery_match_embedding(pool: PgPool) {
+    let al = album(&pool).await;
+    let t = track(&pool, al, 10).await;
+    let first = stages::claim(&pool, Stage::Analysis, 20, true)
+        .await
+        .unwrap();
+    assert_eq!(ids(&first), vec![t]);
+    lapse(&pool, "analysis").await;
+    let second = stages::claim(&pool, Stage::Analysis, 20, true)
+        .await
+        .unwrap();
+    assert_eq!(ids(&second), vec![t]);
+    assert_eq!(second[0].redelivered, 1);
+}
+
+/// The embedding stage is eligible as soon as a track exists (unconditional, like
+/// fingerprint): it is never gated on fingerprint or recording settling.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn embedding_is_claimed_unconditionally_like_fingerprint(pool: PgPool) {
+    let al = album(&pool).await;
+    let new = track(&pool, al, 10).await;
+    let old = track(&pool, al, 300).await;
+    // No fingerprint or recording row exists for either track.
+    let got = stages::claim(&pool, Stage::Embedding, 20, true)
+        .await
+        .unwrap();
+    assert_eq!(ids(&got), vec![new, old]);
+    for c in &got {
+        assert_eq!(c.stage, Stage::Embedding);
+        assert_eq!(c.attempts, 0);
+        assert_eq!(c.redelivered, 0);
+    }
+}
+
+/// Embedding shares the exact lease/redelivery policy already used for recording: a
+/// lapsed working lease is redelivered and counted, same as every other stage.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn embedding_lease_and_redelivery_match_recording(pool: PgPool) {
+    let al = album(&pool).await;
+    let t = track(&pool, al, 10).await;
+    let first = stages::claim(&pool, Stage::Embedding, 20, true)
+        .await
+        .unwrap();
+    assert_eq!(ids(&first), vec![t]);
+    lapse(&pool, "embedding").await;
+    let second = stages::claim(&pool, Stage::Embedding, 20, true)
+        .await
+        .unwrap();
+    assert_eq!(ids(&second), vec![t]);
+    assert_eq!(second[0].redelivered, 1);
+}
+
+/// Embedding is claimable even when the track's recording stage is still pending
+/// (independent of Recording/Analysis eligibility, per owner decision).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn embedding_does_not_wait_for_recording(pool: PgPool) {
+    let al = album(&pool).await;
+    let t = track(&pool, al, 10).await;
+    put(&pool, t, "recording", "pending", "NULL").await;
+    let got = stages::claim(&pool, Stage::Embedding, 20, true)
+        .await
+        .unwrap();
+    assert_eq!(ids(&got), vec![t]);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

@@ -117,6 +117,12 @@ async fn status(State(state): State<AppState>, _user: AuthUser) -> Result<Json<V
     out["artists"] = json!(counts.artists);
     out["tracks"] = json!(counts.tracks);
     out["audio"] = json!(counts.audio);
+    out["mlCapabilities"] = json!(
+        state
+            .ident
+            .as_ref()
+            .and_then(kima_ident::stages::embedding::cached_status)
+    );
     Ok(Json(out))
 }
 

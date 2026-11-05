@@ -32,7 +32,7 @@ use tracing::{info, warn};
 use crate::IdentCtx;
 use crate::artist;
 use crate::events::ProgressEvents;
-use crate::stages::{BatchReport, fingerprint, recording};
+use crate::stages::{BatchReport, analysis, embedding, fingerprint, recording};
 
 /// The coordinator's job queue (concurrency 1).
 pub const QUEUE: &str = "enrich";
@@ -119,6 +119,8 @@ pub struct CycleReport {
     /// The state let the cycle run (`running`, not halted).
     pub ran: bool,
     pub fingerprint: BatchReport,
+    pub embedding: BatchReport,
+    pub analysis: BatchReport,
     pub artists: BatchReport,
     pub tracks: BatchReport,
     /// Batches that ended in a database error (recorded as `last_error`, retried next cycle).
@@ -130,7 +132,12 @@ pub struct CycleReport {
 impl CycleReport {
     /// Whether any item was claimed.
     pub fn any_work(&self) -> bool {
-        self.fingerprint.claimed + self.artists.claimed + self.tracks.claimed > 0
+        self.fingerprint.claimed
+            + self.embedding.claimed
+            + self.analysis.claimed
+            + self.artists.claimed
+            + self.tracks.claimed
+            > 0
     }
 }
 
@@ -159,18 +166,22 @@ pub async fn run_cycle(
 
     let stop = CancellationToken::new();
     let phases = async {
-        let (fp, net) = tokio::join!(
+        let (fp, emb, an, net) = tokio::join!(
             fingerprint_phase(ctx, cancel, &stop, &ann),
+            embedding_phase(ctx, cancel, &stop, &ann),
+            analysis_phase(ctx, cancel, &stop, &ann),
             network_phases(ctx, cancel, &stop, &ann)
         );
         stop.cancel(); // ends the watcher
-        (fp, net)
+        (fp, emb, an, net)
     };
-    let ((fp, net), ()) = tokio::join!(phases, watch_state(pool, cancel, &stop));
+    let ((fp, emb, an, net), ()) = tokio::join!(phases, watch_state(pool, cancel, &stop));
     report.fingerprint = fp.report;
+    report.embedding = emb.report;
+    report.analysis = an.report;
     report.artists = net.artists.report;
     report.tracks = net.tracks.report;
-    report.errors = fp.errors + net.artists.errors + net.tracks.errors;
+    report.errors = fp.errors + emb.errors + an.errors + net.artists.errors + net.tracks.errors;
     if cancel.is_cancelled() {
         return Err(JobError::Retry("enrichment cycle cancelled".into()));
     }
@@ -272,6 +283,10 @@ async fn batch_failed(ctx: &IdentCtx, phase: Phase, e: sqlx::Error) {
 struct Announcer<'a> {
     events: &'a ProgressEvents,
     status: Mutex<Status>,
+    /// Serializes `mark`'s set-phase-then-read-state critical section: two local phases
+    /// (fingerprint, embedding) run concurrently and must not interleave their writes and
+    /// reads of `enrichment_state.current_phase`, or one can observe the other's phase.
+    mark_lock: tokio::sync::Mutex<()>,
 }
 
 impl<'a> Announcer<'a> {
@@ -279,6 +294,7 @@ impl<'a> Announcer<'a> {
         Self {
             events,
             status: Mutex::new(found),
+            mark_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -304,8 +320,10 @@ impl<'a> Announcer<'a> {
 /// logged only.
 async fn mark(ctx: &IdentCtx, ann: &Announcer<'_>, phase: Phase, b: BatchReport) {
     let changed = b.done + b.failed > 0;
+    let _guard = ann.mark_lock.lock().await;
     if let Err(error) = enrichment::set_phase(&ctx.pool, Some(phase), changed).await {
         warn!(%error, "recording the enrichment phase failed");
+        return;
     }
     if !changed && b.claimed == 0 {
         return;
@@ -345,6 +363,76 @@ async fn fingerprint_phase(
             Err(e) => {
                 out.errors += 1;
                 batch_failed(ctx, Phase::Fingerprint, e).await;
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Step 3b: embedding batches until none is left. Local work like fingerprint: runs
+/// unconditionally, independent of `ctx.config.fingerprinting` and of
+/// `network_may_run`/`ctx.net` (the MusicBrainz switch), per the owner's 2026-11-04
+/// decision. Joined alongside `fingerprint_phase` and `network_phases` in `run_cycle`, so
+/// it keeps claiming even while MusicBrainz network phases are paused or disabled.
+async fn embedding_phase(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    stop: &CancellationToken,
+    ann: &Announcer<'_>,
+) -> PhaseOutcome {
+    let mut out = PhaseOutcome::default();
+    let mut marked = false;
+    while go_on(cancel, stop) {
+        match embedding::run_batch_until(ctx, cancel, stop).await {
+            Ok(b) => {
+                let changed = b.done + b.failed > 0;
+                if changed || !marked {
+                    mark(ctx, ann, Phase::Embedding, b).await;
+                    marked = true;
+                }
+                out.report += b;
+                if b.claimed == 0 || b.halted {
+                    break;
+                }
+            }
+            Err(e) => {
+                out.errors += 1;
+                batch_failed(ctx, Phase::Embedding, e).await;
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Analysis (M4) batches until none is left. Local DSP+MusiCNN work, independent of
+/// the MusicBrainz switch. Runs in parallel with the network phases inside
+/// `run_cycle`'s `tokio::join!`, so it never blocks the artists/tracks requests.
+async fn analysis_phase(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    stop: &CancellationToken,
+    _ann: &Announcer<'_>,
+) -> PhaseOutcome {
+    let mut out = PhaseOutcome::default();
+    let mut marked = false;
+    while go_on(cancel, stop) {
+        match analysis::run_batch_until(ctx, cancel, stop).await {
+            Ok(b) => {
+                let changed = b.done + b.failed > 0;
+                if changed || !marked {
+                    mark(ctx, _ann, Phase::Analysis, b).await;
+                    marked = true;
+                }
+                out.report += b;
+                if b.claimed == 0 || b.halted {
+                    break;
+                }
+            }
+            Err(e) => {
+                out.errors += 1;
+                batch_failed(ctx, Phase::Analysis, e).await;
                 break;
             }
         }

@@ -7,7 +7,7 @@ use kima_core::config::Config;
 use kima_core::secrets;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -56,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
     // One handle for the HTTP side, the job worker and the watcher: switching the library to
     // an organized copy changes it for all three.
+    let snapshot_root = library_root.clone();
     let library_root = kima_library::scan::LibraryRoot::new(library_root);
     let cipher = kima_core::cipher::Cipher::from_secret(&secrets.settings_encryption_key);
     let kv = kima_db::settings_kv::load(&pool, &cipher)
@@ -108,6 +109,42 @@ async fn main() -> anyhow::Result<()> {
         data_dir: config.data_dir.clone(),
         ignore: state.library.ignore.clone(),
     };
+    let mut embedding = kima_ident::EmbeddingConfig {
+        model_dir: config.clap_model_dir.clone(),
+        disabled: config.disable_clap,
+        snapshot_dir: config.snapshot_dir.clone(),
+        snapshot_limits: kima_ident::SnapshotLimits {
+            max_bytes: config
+                .snapshot_max_bytes
+                .unwrap_or(kima_ident::SnapshotLimits::default().max_bytes),
+            max_concurrent: config
+                .snapshot_max_concurrent
+                .unwrap_or(kima_ident::SnapshotLimits::default().max_concurrent),
+        },
+        ..Default::default()
+    };
+    // Fail fast on a bad snapshot directory (absent, not private, `..`, other mount than the
+    // library root): the server still starts, but audio embedding is blocked (CLAP text is not) and the
+    // capability status says why, instead of every attempt failing later.
+    match &config.snapshot_dir {
+        Some(dir) => {
+            if let Err(error) =
+                kima_ident::stages::embedding::check_snapshot_setup(&mut embedding, &snapshot_root)
+            {
+                error!(
+                    snapshot_dir = %dir.display(),
+                    root = %snapshot_root.display(),
+                    %error,
+                    "invalid snapshot setup; audio embedding blocked (CLAP text unaffected)"
+                );
+            } else {
+                info!(snapshot_dir = %dir.display(), "snapshot directory validated");
+            }
+        }
+        None => {
+            warn!("KIMA_SNAPSHOT_DIR is not set: audio embedding is off and reported unavailable")
+        }
+    }
     // Built from the same pieces the HTTP side holds (spec §10.6). `fingerprinting` is the
     // `fpcalc` feature (ffmpeg present, AcoustID not disabled, spec §9.4).
     let ident_ctx = kima_ident::IdentCtx {
@@ -124,11 +161,23 @@ async fn main() -> anyhow::Result<()> {
             acoustid_env_key: config.acoustid_client_key.clone(),
             fanart_env_key: state.fanart_env_key.clone(),
             artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
+            embedding,
+            analysis: kima_ident::AnalysisConfig {
+                model_dir: config.musicnn_model_dir.clone(),
+                disabled: config.disable_musicnn,
+                ..Default::default()
+            },
         },
         last_cycle: Default::default(),
         progress_events: state.progress_events.clone(),
+        embedding_runtime: Default::default(),
+        analysis_runtime: Default::default(),
     };
     info!(config = ?ident_ctx.config, "identification");
+    let clap_status = kima_ident::stages::embedding::initialize(&ident_ctx)
+        .await
+        .context("initializing CLAP blocking worker")?;
+    info!(capabilities = ?clap_status.capabilities, "ML capability status");
     let mut registry = kima_server::jobs::Registry::new();
     registry.register_library(library_ctx.clone());
     let state = state.with_ident(ident_ctx.clone());

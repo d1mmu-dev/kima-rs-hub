@@ -87,6 +87,6 @@ pub(in crate::routes) async fn album_page(
         .remove(&album.id)
         .unwrap_or_default();
     let mut v = album_with_tracks(&album, &tracks);
-    v["genres"] = json!(genres::merged(&album.user_genres, &effective));
+    v["genres"] = json!(genres::merged_for_display(&album.user_genres, &effective));
     Ok(Some(v))
 }

@@ -340,31 +340,57 @@ musicbrainz_reader!(
     musicbrainz_for_artists, "artist_genres", "artist_id"
 );
 
-/// `[...user, ...genres]`, unique by [`genre_key`] (first spelling wins), empty names dropped
-/// (upstream `getMergedGenres`).
-pub fn merged(user: &[String], genres: &[String]) -> Vec<String> {
+/// The genres an entity shows (upstream `getMergedGenres`, D-166): a person's own list **is**
+/// the result when it has any name, and the enriched `genres` only when it has none. Either way
+/// unique by [`genre_key`] (the first spelling wins, in order) with empty names dropped.
+pub fn merged_for_display(user: &[String], genres: &[String]) -> Vec<String> {
+    let own = unique_by_key(user);
+    if own.is_empty() {
+        unique_by_key(genres)
+    } else {
+        own
+    }
+}
+
+fn unique_by_key(names: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
-    user.iter()
-        .chain(genres)
-        .filter(|g| seen.insert(genre_key(g)) && !genre_key(g).is_empty())
+    names
+        .iter()
+        .filter(|g| {
+            let key = genre_key(g);
+            !key.is_empty() && seen.insert(key)
+        })
         .cloned()
         .collect()
 }
 
-/// Effective artist genres with the number of distinct present tracks of the artist's albums
-/// that sit under them, at least [`LIBRARY_GENRES_MIN_TRACKS`], most first (ties by name),
-/// at most [`LIBRARY_GENRES_LIMIT`] (spec §13.2).
+/// Artist genres with the number of distinct present tracks of the artist's albums that sit
+/// under them, at least [`LIBRARY_GENRES_MIN_TRACKS`], most first (ties by name), at most
+/// [`LIBRARY_GENRES_LIMIT`] (spec §13.2). An artist's genres are a person's own list when it has
+/// any name (D-166), else its effective genres; so a genre a person removed counts under none.
 pub async fn library_genres(pool: &PgPool) -> sqlx::Result<Vec<(String, i64)>> {
     sqlx::query_as(
-        "SELECT g.name, count(DISTINCT t.id) AS n
-         FROM artist_genres_effective ag
-         JOIN genres g ON g.id = ag.genre_id
+        "WITH own AS (
+             SELECT ar.id AS artist_id, btrim(u.name) AS name,
+                    lower(regexp_replace(btrim(u.name), '\\s+', ' ', 'g')) AS key,
+                    min(u.ord) AS ord
+             FROM artists ar, unnest(ar.user_genres) WITH ORDINALITY AS u(name, ord)
+             WHERE btrim(u.name) <> ''
+             GROUP BY ar.id, 2, 3),
+         ag AS (
+             SELECT artist_id, name, key FROM own
+             UNION ALL
+             SELECT e.artist_id, g.name, g.key
+             FROM artist_genres_effective e JOIN genres g ON g.id = e.genre_id
+             WHERE NOT EXISTS (SELECT 1 FROM own WHERE own.artist_id = e.artist_id))
+         SELECT min(ag.name) AS name, count(DISTINCT t.id) AS n
+         FROM ag
          JOIN albums b ON b.artist_id = ag.artist_id
          JOIN tracks t ON t.album_id = b.id AND t.missing_since IS NULL
-         WHERE g.name NOT LIKE '\\_%'
-         GROUP BY g.id, g.name
+         WHERE ag.name NOT LIKE '\\_%'
+         GROUP BY ag.key
          HAVING count(DISTINCT t.id) >= $1
-         ORDER BY n DESC, g.name, g.id
+         ORDER BY n DESC, min(ag.name), ag.key
          LIMIT $2",
     )
     .bind(LIBRARY_GENRES_MIN_TRACKS)

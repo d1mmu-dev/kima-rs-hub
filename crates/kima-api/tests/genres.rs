@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// An artist with one album of `n` present tracks and one file genre.
-async fn artist_with(pool: &PgPool, name: &str, n: usize, genre: &str) {
+async fn artist_with(pool: &PgPool, name: &str, n: usize, genre: &str) -> Uuid {
     let a = Uuid::new_v4();
     let b = Uuid::new_v4();
     sqlx::query("INSERT INTO artists (id, name, name_key) VALUES ($1, $2, lower($2))")
@@ -43,6 +43,7 @@ async fn artist_with(pool: &PgPool, name: &str, n: usize, genre: &str) {
     genres::replace_artist_genres(&mut c, a, GenreSource::File, &[genre.to_string()])
         .await
         .unwrap();
+    a
 }
 
 async fn get(pool: PgPool) -> (axum_test::TestServer, String) {
@@ -104,3 +105,107 @@ async fn library_genres_drops_artist_named_genres(pool: PgPool) {
     let v = list(pool).await;
     assert_eq!(v, json!({"genres": [{"genre": "blues", "count": 17}]}));
 }
+
+async fn mb_genres(pool: &PgPool, artist: Uuid, names: &[&str]) {
+    let mut c = pool.acquire().await.unwrap();
+    let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    genres::replace_artist_genres(&mut c, artist, GenreSource::MusicBrainz, &names)
+        .await
+        .unwrap();
+}
+
+async fn user_genres(pool: &PgPool, artist: Uuid, names: &[&str]) {
+    let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    sqlx::query("UPDATE artists SET user_genres = $2 WHERE id = $1")
+        .bind(artist)
+        .bind(names)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn page(server: &axum_test::TestServer, token: &str, artist: Uuid) -> Value {
+    let res = server
+        .get(&format!("/api/library/artists/{artist}"))
+        .authorization_bearer(token)
+        .await;
+    res.assert_status_ok();
+    res.json()
+}
+
+/// M-SYNC Task 9 (upstream `getMergedGenres`, D-166): a non-empty list of a person's own genres
+/// *is* the artist's genres; the enriched ones show again only when they have none.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn user_genres_replace_enriched(pool: PgPool) {
+    let a = artist_with(&pool, "Band", 15, "rock").await;
+    mb_genres(&pool, a, &["rock", "indie"]).await;
+    user_genres(&pool, a, &["jazz"]).await;
+    let (server, token) = get(pool.clone()).await;
+
+    let v = page(&server, &token, a).await;
+    assert_eq!(v["genres"], json!(["jazz"]));
+    assert_eq!(v["userGenres"], json!(["jazz"]));
+    // `tags` stays the MusicBrainz list, whatever a person set.
+    assert_eq!(v["tags"], json!(["rock", "indie"]));
+
+    // The genre list counts the artist under jazz only.
+    let res = server
+        .get("/api/library/genres")
+        .authorization_bearer(&token)
+        .await;
+    res.assert_status_ok();
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"genres": [{"genre": "jazz", "count": 15}]})
+    );
+
+    // Emptying their list brings the enriched genres back.
+    user_genres(&pool, a, &[]).await;
+    let v = page(&server, &token, a).await;
+    assert_eq!(v["genres"], json!(["rock", "indie"]));
+    let res = server
+        .get("/api/library/genres")
+        .authorization_bearer(&token)
+        .await;
+    let names: Vec<_> = res.json::<Value>()["genres"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["genre"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["indie", "rock"]);
+}
+
+/// A genre a person removes from the list is gone from the page and the genre list, not merged
+/// back from the enriched genres.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn removed_genre_disappears_everywhere(pool: PgPool) {
+    let a = artist_with(&pool, "Band", 15, "rock").await;
+    mb_genres(&pool, a, &["rock", "indie"]).await;
+    let state = common::state(pool.clone());
+    let (_, admin) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+
+    // The editor opens on the page's genres [rock, indie] and saves [indie].
+    let res = server
+        .put(&format!("/api/enrichment/artists/{a}/metadata"))
+        .authorization_bearer(&admin)
+        .json(&json!({"genres": ["indie"]}))
+        .await;
+    res.assert_status_ok();
+
+    let v = page(&server, &admin, a).await;
+    assert_eq!(v["genres"], json!(["indie"]));
+    let res = server
+        .get("/api/library/genres")
+        .authorization_bearer(&admin)
+        .await;
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"genres": [{"genre": "indie", "count": 15}]})
+    );
+}
+
+// `non_list_genre_json_reads_empty` (upstream `efcea10f`) does not apply: kima-rs keeps genres
+// in relational tables (`genres`, `*_genres`) and a person's list in a `text[]` column, so there
+// is no JSON value that can be anything but a list.

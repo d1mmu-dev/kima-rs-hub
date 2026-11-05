@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE playlist_items i SET track_id = $2 WHERE i.track_id = $1\n           AND NOT EXISTS (SELECT 1 FROM playlist_items o WHERE o.playlist_id = i.playlist_id AND o.track_id = $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "32fa7766f837d67d58bd5d6d7bd03870ad9e6a6f137b8a70e395509f3aef0213"
+}

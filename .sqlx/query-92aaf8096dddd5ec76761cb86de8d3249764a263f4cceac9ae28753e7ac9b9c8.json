@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.id AS gone, k.id AS kept, g.title AS gone_title, k.title AS kept_title\n           FROM tracks g JOIN tracks k\n             ON k.album_id = g.album_id AND k.track_no = g.track_no AND k.disc = g.disc\n            AND k.missing_since IS NULL AND k.id <> g.id\n           WHERE g.id = ANY($1) ORDER BY g.id, k.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gone",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "kept",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "gone_title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "kept_title",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "92aaf8096dddd5ec76761cb86de8d3249764a263f4cceac9ae28753e7ac9b9c8"
+}

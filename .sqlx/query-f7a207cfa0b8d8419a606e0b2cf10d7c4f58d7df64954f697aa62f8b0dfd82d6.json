@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, file_path, title, artist_name, album_title, reason, artifacts, removed_at\n         FROM removal_log ORDER BY removed_at DESC, id DESC LIMIT $1 OFFSET $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "file_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "artist_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "album_title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "artifacts",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "removed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f7a207cfa0b8d8419a606e0b2cf10d7c4f58d7df64954f697aa62f8b0dfd82d6"
+}

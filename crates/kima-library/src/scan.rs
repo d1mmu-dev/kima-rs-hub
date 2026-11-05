@@ -18,7 +18,7 @@ use kima_db::{PgConnection, PgPool, retry_once_on_conflict};
 use kima_db::{lyrics, stages};
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::resolve::{ArtistFrom, Resolved, parse_credit, resolve};
@@ -1163,9 +1163,31 @@ pub async fn reconcile_cancellable(
 
     check()?;
     if !report.root_empty_guard {
-        let albums = library::purge_missing_albums(&ctx.pool, MISSING_GRACE).await?;
-        report.purged = albums.len();
-        refresh_albums(&ctx.pool, albums.into_iter().collect()).await?;
+        let cache = ctx.data_dir.join("transcode");
+        let retired = library::retire_missing(&ctx.pool, MISSING_GRACE, Some(&cache)).await?;
+        if retired.stood_down {
+            warn!(
+                "a large share of the library is missing at once; this looks like a dropped \
+                 mount, not a deletion: nothing retired"
+            );
+        }
+        report.purged = retired.tracks;
+        if retired.tracks > 0 {
+            info!(
+                tracks = retired.tracks,
+                handed_over = retired.handed_over,
+                "retired tracks missing past the grace period"
+            );
+            for path in &retired.artifacts {
+                if let Err(e) = tokio::fs::remove_file(path).await
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    warn!(path = %path.display(), error = %e, "could not unlink a transcode of a retired track");
+                }
+            }
+            kima_db::genres::prune_unused(&ctx.pool).await?;
+        }
+        refresh_albums(&ctx.pool, retired.albums.into_iter().collect()).await?;
     }
     prune_empty(ctx).await?;
     progress.finish();

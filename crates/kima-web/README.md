@@ -156,8 +156,8 @@ seeded library) at 1440x900, 1024x768 and 390x844 and prints the share of pixels
 24. **No page is within the 1% threshold**; the measured values are in the table below, so the work is
 "close in structure", not pixel-identical. Known reasons for the gaps:
 
-- kima-web has no queue / vibe / browse / stats pages, no album/artist admin actions (delete buttons, "refine"
-  filter) and no notifications panel; the legacy sidebar, drawer and toolbars show them, so shell regions differ.
+- The legacy sidebar lists queue / vibe / browse / stats and its album cards carry delete buttons plus a "refine"
+  filter; kima-web has no such pages or actions (seen in the diff images, not audited feature by feature); the legacy sidebar, drawer and toolbars show them, so shell regions differ.
   `/collection/albums` is the worst page for this (25-39%).
 - Cover art, generated gradients and font anti-aliasing differ by a few pixels; text is lowercase through the
   copied `body { text-transform: lowercase }`.
@@ -166,7 +166,6 @@ seeded library) at 1440x900, 1024x768 and 390x844 and prints the share of pixels
 - Icons are a fixed subset of lucide (`src/icons_data.rs`); add a name to `tools/gen-kima-web-icons.mjs` and rerun.
 - The player queue is persisted through `/api/playback-state` as before; the in-track position is stored in
   `localStorage` (`kima-web.position`).
-- Playlists have no cover mosaic editor, description or drag-and-drop ordering (legacy has them).
 - Pages are server-rendered as a shell plus what needs no fetch; "ssr->hydrated" in the report is the share of
   pixels that change when hydration finishes.
 

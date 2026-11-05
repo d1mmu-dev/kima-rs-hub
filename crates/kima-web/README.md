@@ -153,11 +153,25 @@ Settings page and changes it back, so it can be repeated.
 
 `tools/run-kima-web-visual.sh compare` screenshots kima-web and the legacy Next.js frontend (same backend, same
 seeded library) at 1440x900, 1024x768 and 390x844 and prints the share of pixels whose channel delta exceeds
-24. **No page is within the 1% threshold**; the measured values are in the table below, so the work is
-"close in structure", not pixel-identical. Known reasons for the gaps:
+24. **No page is within the 1% threshold**; measured on 2026-11-05 (percent of differing pixels):
+
+| page | 1440x900 | 1024x768 | 390x844 |
+|---|---|---|---|
+| login | 2.81 | 4.53 | 9.25 |
+| setup | 5.52 | 8.90 | 12.10 |
+| artists | 4.43 | 4.97 | 10.46 |
+| albums | 25.05 | 23.05 | 39.04 |
+| tracks | 5.21 | 6.16 | 12.34 |
+| search | 2.60 | 2.37 | 5.93 |
+| playlists | 6.81 | 5.65 | 14.97 |
+| playlist | 5.93 | 6.68 | 12.27 |
+| settings | 4.15 | 4.19 | 6.18 |
+| player | 5.21 | 6.16 | 12.34 |
+
+So the work is "close in structure", not pixel-identical. Known reasons for the gaps:
 
 - The legacy sidebar lists queue / vibe / browse / stats and its album cards carry delete buttons plus a "refine"
-  filter; kima-web has no such pages or actions (seen in the diff images, not audited feature by feature); the legacy sidebar, drawer and toolbars show them, so shell regions differ.
+  filter; kima-web has no such pages or actions (seen in the diff images, not audited feature by feature), so shell regions differ.
   `/collection/albums` is the worst page for this (25-39%).
 - Cover art, generated gradients and font anti-aliasing differ by a few pixels; text is lowercase through the
   copied `body { text-transform: lowercase }`.

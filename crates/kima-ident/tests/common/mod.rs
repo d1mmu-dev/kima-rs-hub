@@ -88,6 +88,7 @@ pub fn ident_ctx_with_embedding_and_analysis(
             artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
             embedding,
             analysis,
+            vibe: Default::default(),
         },
         last_cycle: Default::default(),
         embedding_runtime: Default::default(),

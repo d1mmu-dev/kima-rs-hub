@@ -263,6 +263,9 @@ pub fn cached_status(ctx: &IdentCtx) -> Option<CapabilityEvaluationReport> {
     if let Some(reason) = cached_block(&ctx.embedding_runtime, &ctx.config.embedding) {
         apply_audio_block(&mut capabilities, &reason);
     }
+    if let Some(vibe) = super::vibe_assets::cached(ctx) {
+        capabilities.extend(vibe.report.capabilities.clone());
+    }
     (!capabilities.is_empty()).then_some(CapabilityEvaluationReport { capabilities })
 }
 

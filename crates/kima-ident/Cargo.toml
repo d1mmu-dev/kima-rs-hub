@@ -15,6 +15,7 @@ kima-jobs.workspace = true
 kima-library.workspace = true
 kima-ml = { workspace = true, features = ["pg-publish"] }
 kima-net.workspace = true
+kima-vibe = { workspace = true, features = ["parallel"] }
 md-5.workspace = true
 pathfinding.workspace = true
 percent-encoding.workspace = true
@@ -33,6 +34,8 @@ unicode-normalization.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
+sha2.workspace = true
 kima-net = { workspace = true, features = ["testing"] }
 kima-test-support.workspace = true
 tempfile.workspace = true

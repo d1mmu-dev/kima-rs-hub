@@ -184,6 +184,10 @@ async fn main() -> anyhow::Result<()> {
                 disabled: config.disable_musicnn,
                 ..Default::default()
             },
+            vibe: kima_ident::VibeConfig {
+                asset_dir: config.vibe_asset_dir.clone(),
+                exact_max: config.vibe_exact_max,
+            },
         },
         last_cycle: Default::default(),
         progress_events: state.progress_events.clone(),
@@ -195,6 +199,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("initializing CLAP blocking worker")?;
     info!(capabilities = ?clap_status.capabilities, "ML capability status");
+    // The vibe assets are optional: a missing or unpinned file turns the dependent capability off, never the server.
+    let vibe = kima_ident::stages::vibe_assets::initialize(&ident_ctx)
+        .await
+        .context("loading the vibe assets")?;
+    info!(capabilities = ?vibe.report.capabilities, "vibe asset status");
     let mut registry = kima_server::jobs::Registry::new();
     registry.register_library(library_ctx.clone());
     let state = state.with_ident(ident_ctx.clone());

@@ -9,6 +9,7 @@ pub mod analysis;
 pub mod embedding;
 pub mod fingerprint;
 pub mod recording;
+pub mod vibe_assets;
 
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;

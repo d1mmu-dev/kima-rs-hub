@@ -19,6 +19,7 @@ kima-library = { path = "crates/kima-library" }
 kima-net = { path = "crates/kima-net" }
 kima-subsonic = { path = "crates/kima-subsonic" }
 kima-ml = { path = "crates/kima-ml" }
+kima-vibe = { path = "crates/kima-vibe" }
 kima-test-support = { path = "crates/kima-test-support" }
 
 anyhow = "1"

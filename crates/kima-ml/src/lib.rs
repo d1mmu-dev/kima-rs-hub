@@ -132,6 +132,10 @@ pub enum Capability {
     ClapAudioEmbedding,
     ClapTextEmbedding,
     Dsp,
+    /// The vibe engine's feel probe (M5): without it there is no matching formula.
+    VibeAssets,
+    /// The vibe engine's 22 mood heads (M5): without them moods are off, similarity is not.
+    VibeMoodHeads,
 }
 
 #[derive(

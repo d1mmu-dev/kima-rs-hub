@@ -208,6 +208,7 @@ impl AppState {
                 artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
                 embedding: kima_ident::EmbeddingConfig::default(),
                 analysis: kima_ident::AnalysisConfig::default(),
+                vibe: kima_ident::VibeConfig::default(),
             },
             last_cycle: Default::default(),
             progress_events: self.progress_events.clone(),

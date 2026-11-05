@@ -53,6 +53,12 @@ pub struct Config {
     pub snapshot_max_bytes: Option<u64>,
     /// `KIMA_SNAPSHOT_MAX_CONCURRENT`: live snapshots at once; `None` is the `kima-ml` default.
     pub snapshot_max_concurrent: Option<usize>,
+    /// `KIMA_VIBE_ASSET_DIR`: directory with the private vibe assets (feel probe, mood heads, SHA-256 pinned).
+    /// Unset: the vibe capabilities are `unavailable`; the server still boots.
+    pub vibe_asset_dir: Option<PathBuf>,
+    /// `KIMA_VIBE_EXACT_MAX`: text search scans exactly up to this many eligible tracks, then uses the HNSW
+    /// index; 0 always uses the index. Default [`DEFAULT_VIBE_EXACT_MAX`].
+    pub vibe_exact_max: u64,
     /// `ACOUSTID_DISABLED=true` (any case): no AcoustID rung, `fpcalc: false` (upstream's name).
     pub acoustid_disabled: bool,
     /// `ACOUSTID_CLIENT_KEY`: the AcoustID client key after the stored setting (spec §8.4). A
@@ -100,12 +106,17 @@ impl std::fmt::Debug for Config {
             .field("snapshot_dir", &self.snapshot_dir)
             .field("snapshot_max_bytes", &self.snapshot_max_bytes)
             .field("snapshot_max_concurrent", &self.snapshot_max_concurrent)
+            .field("vibe_asset_dir", &self.vibe_asset_dir)
+            .field("vibe_exact_max", &self.vibe_exact_max)
             .field("acoustid_disabled", &self.acoustid_disabled)
             .field("acoustid_client_key", &hidden(&self.acoustid_client_key))
             .field("fanart_api_key", &hidden(&self.fanart_api_key))
             .finish()
     }
 }
+
+/// `KIMA_VIBE_EXACT_MAX` when unset (design 11.3, chosen from a 0.17-0.4 s exact scan at 100k tracks).
+pub const DEFAULT_VIBE_EXACT_MAX: u64 = 200_000;
 
 /// `KIMA_CONTACT` when unset.
 /// Loopback port of the embedded `kima-web` SSR server when `KIMA_WEB_SSR_PORT` is unset.
@@ -312,6 +323,13 @@ impl Config {
                 name: "KIMA_SNAPSHOT_MAX_CONCURRENT",
                 value: "too large".into(),
             })?;
+        let vibe_exact_max = match value("KIMA_VIBE_EXACT_MAX") {
+            None => DEFAULT_VIBE_EXACT_MAX,
+            Some(raw) => raw.parse::<u64>().map_err(|_| ConfigError::Invalid {
+                name: "KIMA_VIBE_EXACT_MAX",
+                value: raw,
+            })?,
+        };
         // Upstream compares with `'true'`; any other value leaves AcoustID on.
         let acoustid_disabled =
             value("ACOUSTID_DISABLED").is_some_and(|v| v.eq_ignore_ascii_case("true"));
@@ -351,6 +369,8 @@ impl Config {
             snapshot_dir: value("KIMA_SNAPSHOT_DIR").map(PathBuf::from),
             snapshot_max_bytes,
             snapshot_max_concurrent,
+            vibe_asset_dir: value("KIMA_VIBE_ASSET_DIR").map(PathBuf::from),
+            vibe_exact_max,
             acoustid_disabled,
             acoustid_client_key: value("ACOUSTID_CLIENT_KEY"),
             fanart_api_key: value("FANART_API_KEY"),
@@ -397,6 +417,35 @@ mod tests {
             ]))
             .unwrap();
             assert_eq!(config.disable_clap, expected);
+        }
+    }
+
+    #[test]
+    fn vibe_settings_parse_and_default_to_unset() {
+        let base = [("DATABASE_URL", "postgres://x")];
+        let config = Config::from_lookup(lookup(&base)).unwrap();
+        assert_eq!(
+            config.vibe_asset_dir, None,
+            "the server boots without vibe assets"
+        );
+        assert_eq!(config.vibe_exact_max, DEFAULT_VIBE_EXACT_MAX);
+        assert_eq!(DEFAULT_VIBE_EXACT_MAX, 200_000);
+        let config = Config::from_lookup(lookup(&[
+            base[0],
+            ("KIMA_VIBE_ASSET_DIR", "/models/vibe"),
+            ("KIMA_VIBE_EXACT_MAX", " 0 "),
+        ]))
+        .unwrap();
+        assert_eq!(config.vibe_asset_dir, Some(PathBuf::from("/models/vibe")));
+        assert_eq!(config.vibe_exact_max, 0, "0 forces the index path");
+        for bad in ["-1", "lots", "1.5"] {
+            assert_eq!(
+                Config::from_lookup(lookup(&[base[0], ("KIMA_VIBE_EXACT_MAX", bad)])),
+                Err(ConfigError::Invalid {
+                    name: "KIMA_VIBE_EXACT_MAX",
+                    value: bad.into()
+                })
+            );
         }
     }
 

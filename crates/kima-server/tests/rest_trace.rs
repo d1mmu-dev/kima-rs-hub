@@ -42,6 +42,8 @@ fn config() -> Config {
         snapshot_dir: None,
         snapshot_max_bytes: None,
         snapshot_max_concurrent: None,
+        vibe_asset_dir: None,
+        vibe_exact_max: kima_core::config::DEFAULT_VIBE_EXACT_MAX,
         acoustid_disabled: false,
         acoustid_client_key: None,
         fanart_api_key: None,

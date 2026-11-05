@@ -8,7 +8,8 @@ use vertigo::{DomNode, Resource, Value, bind, dom, get_driver};
 
 use crate::api::client::load;
 use crate::route::Route;
-use crate::ui::{Ctx, card_css, error_css, flag, muted_css};
+use crate::shell::kima_mark;
+use crate::ui::{BTN_PRIMARY, Ctx, LABEL, flag};
 
 /// Mirrors the backend's rules (3-50 character username, 6+ character password) so the common
 /// mistakes are caught without a round trip; the backend's own message wins for anything else.
@@ -36,13 +37,13 @@ pub fn render(ctx: &Ctx) -> DomNode {
             .await
     }));
     status.render_value(bind!(ctx, |state| match state {
-        Resource::Loading => dom! { <p css={muted_css()}>"Loading…"</p> },
-        Resource::Error(message) => dom! { <p css={error_css()}>{message}</p> },
+        Resource::Loading => dom! { <p class="min-h-screen flex items-center justify-center text-sm text-[var(--text-muted)]">"Loading…"</p> },
+        Resource::Error(message) => dom! { <p class="min-h-screen flex items-center justify-center text-sm text-danger-light">{message}</p> },
         Resource::Ready(s) if s.has_account => {
             // An admin exists already: registration happens elsewhere, sign in instead.
             let router = ctx.router.clone();
             get_driver().spawn(async move { router.set(Route::Login) });
-            dom! { <p css={muted_css()}>"An account already exists. Redirecting to sign in…"</p> }
+            dom! { <p class="min-h-screen flex items-center justify-center text-sm text-[var(--text-muted)]">"An account already exists. Redirecting to sign in…"</p> }
         }
         Resource::Ready(_) => form(&ctx),
     }))
@@ -90,23 +91,63 @@ fn form(ctx: &Ctx) -> DomNode {
     });
 
     let error_view = error.render_value(|e| match e {
-        Some(message) => dom! { <p css={error_css()}>{message}</p> },
+        Some(message) => dom! {
+            <div role="alert" class="p-3 rounded-lg bg-danger/10 border border-danger/30 text-sm text-danger-light">{message}</div>
+        },
         None => dom! { <span /> },
     });
+    let input = "w-full px-4 py-3 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-transparent transition-all";
 
     dom! {
-        <form css={card_css()} on_submit={submit}>
-            <h2>"Welcome to Kima"</h2>
-            <p css={muted_css()}>"Create the administrator account."</p>
-            <input type="text" name="username" placeholder="Username" autocomplete="username"
-                value={username.clone()} on_input={bind!(username, |v: String| username.set(v))} />
-            <input type="password" name="password" placeholder="Password (6+ characters)" autocomplete="new-password"
-                value={password.clone()} on_input={bind!(password, |v: String| password.set(v))} />
-            <input type="password" name="confirm" placeholder="Repeat password" autocomplete="new-password"
-                value={confirm.clone()} on_input={bind!(confirm, |v: String| confirm.set(v))} />
-            {error_view}
-            <button type="submit" disabled={flag(busy.to_computed())}>"Create account"</button>
-        </form>
+        <div class="min-h-screen relative overflow-hidden">
+            <div class="absolute inset-0 bg-[#000]">
+                <div class="absolute inset-0 bg-gradient-to-br from-brand/5 via-transparent to-transparent"></div>
+            </div>
+            <div class="relative z-(--z-raised) min-h-screen flex items-center justify-center p-6">
+                <div class="w-full max-w-4xl">
+                    <div class="text-center mb-8">
+                        <div class="inline-flex items-center gap-4 mb-4">
+                            <div class="relative">
+                                <div class="absolute inset-0 bg-white/10 blur-xl rounded-full"></div>
+                                {kima_mark(48, "kima-mark inline-block shrink-0 relative z-(--z-raised)")}
+                            </div>
+                            <h1 class="text-4xl font-bold text-white">"Kima Hub"</h1>
+                        </div>
+                        <p class="text-[var(--text-secondary)] text-lg">"Welcome to your personal music streaming platform"</p>
+                    </div>
+                    <div class="bg-[#111]/90 rounded-lg border border-white/10 overflow-hidden">
+                        <div class="p-6 md:p-8">
+                            <div class="space-y-6">
+                                <div>
+                                    <h2 class="text-2xl font-bold text-white mb-1">"Create Your Admin Account"</h2>
+                                    <p class="text-[var(--text-secondary)]">"This is the owner account for your Kima server. You'll manage users and settings from here."</p>
+                                </div>
+                                <form class="space-y-4 mt-8" on_submit={submit}>
+                                    <div>
+                                        <label for="username" class={LABEL}>"Username"</label>
+                                        <input id="username" type="text" name="username" placeholder="Choose a username" autocomplete="username"
+                                            class={input} value={username.clone()} on_input={bind!(username, |v: String| username.set(v))} />
+                                    </div>
+                                    <div>
+                                        <label for="password" class={LABEL}>"Password"</label>
+                                        <input id="password" type="password" name="password" placeholder="At least 6 characters" autocomplete="new-password"
+                                            class={input} value={password.clone()} on_input={bind!(password, |v: String| password.set(v))} />
+                                    </div>
+                                    <div>
+                                        <label for="confirmPassword" class={LABEL}>"Confirm Password"</label>
+                                        <input id="confirmPassword" type="password" name="confirm" placeholder="Confirm your password" autocomplete="new-password"
+                                            class={input} value={confirm.clone()} on_input={bind!(confirm, |v: String| confirm.set(v))} />
+                                    </div>
+                                    {error_view}
+                                    <button type="submit" class={format!("{BTN_PRIMARY} w-full mt-8")} disabled={flag(busy.to_computed())}>"Continue"</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    <p class="text-center text-[var(--text-muted)] text-sm mt-6">"© 2026 Kima. Your music, your way."</p>
+                </div>
+            </div>
+        </div>
     }
 }
 

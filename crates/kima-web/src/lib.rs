@@ -3,10 +3,15 @@
 mod api;
 mod app;
 mod auth;
+mod components;
+mod icons;
+mod icons_data;
 mod pages;
 mod player;
 mod position;
 mod route;
+mod shell;
+mod style;
 mod tracklist;
 mod ui;
 

@@ -376,6 +376,32 @@ in-flight milestone claimed it first).
   - Divergences: none.
   - [ ] **Step 3: Commit** `feat(web): settings — account slice`.
 
+- [ ] **Task 15b: Visual parity with the original Next.js frontend (owner requirement, 2026-11-05)**
+  - **Goal:** `kima-web` looks pixel-for-pixel like `frontend/` for every page built in M9 (login, setup, collection
+    artists/albums/tracks, search, playlists, settings, persistent player bar, header/nav). The owner accepts
+    reasonable compromises where exact reproduction costs disproportionate effort; every compromise is listed in
+    the task's commit body and in `crates/kima-web/README.md` (what differs, why, how big).
+  - **Step 1 (inventory):** extract the design tokens from `frontend/app/globals.css`, the Tailwind/PostCSS config
+    (`frontend/postcss.config.mjs`), `frontend/components/` and `frontend/features/` (colours, fonts, spacing,
+    radii, shadows, breakpoints, icons, animations). Check the licence of every font/icon/asset before copying it
+    into `kima-web`; assets without a clear right to reuse are replaced and listed as compromises.
+  - **Step 2 (shared styling layer):** implement the tokens once in `kima-web` (vertigo `css!`/a shared stylesheet
+    served with the build, no runtime dependency on Node/Tailwind at build time) and rebuild the shared pieces
+    (header/nav, track row, buttons, inputs, cards, player bar) on top of it before touching pages.
+  - **Step 3 (page by page):** restyle each page against the reference. Reference screenshots are produced by a
+    script that runs the legacy frontend (dev build, `/__legacy/`, or `frontend` run against the same isolated
+    backend and the generated test library) and `kima-web` side by side at fixed viewports (1440x900, 1024x768,
+    390x844) with identical seeded data, saved under a gitignored directory; the comparison script reports a
+    per-page pixel-difference ratio and writes diff images.
+  - **Acceptance criteria:** the comparison script runs for every M9 page at all three viewports; each page is
+    either under an agreed difference threshold (set in the script, start at 1% of pixels) or has an explicit entry
+    in the compromises list; no functional e2e check (`tools/verify-kima-web-e2e.mjs`) regresses; no layout shift
+    between SSR output and hydrated page that the comparison can see.
+  - Files: `crates/kima-web/src/{style.rs or styles/,ui.rs,...}` and page modules; `tools/compare-kima-web-visual.mjs`;
+    `crates/kima-web/README.md`.
+  - Divergences: none unless a compromise changes user-visible behaviour (then a D-135+ row).
+  - [ ] **Step 4: Commit** one commit per page or shared layer, `style(web): ...`.
+
 - [ ] **Task 16: End-to-end wiring check across all seven pages**
   - **Step 1 (test first):** a `kima-server` integration test driving the full flow through the HTTP layer only
     (no browser): onboarding → login → browse → search → create a playlist → add a track → play (assert the

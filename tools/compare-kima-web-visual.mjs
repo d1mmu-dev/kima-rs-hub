@@ -233,12 +233,13 @@ async function main() {
   const pl = pls.find((p) => p.name === 'Late Night Drive') || pls[0];
   const album = albums.find((a) => a.title === 'Northern Lights') || albums[0];
   void tracks;
-  const QUERY = 'night';
+  const QUERY = 'blues'; // matches a track of the seeded library on both frontends
 
   // Each page: how to reach it on each side, plus an optional `act` run after load (identical user action).
   const typeWeb = `(async()=>{const i=document.querySelector('input');i.focus();i.value=${JSON.stringify(QUERY)};i.dispatchEvent(new Event('input',{bubbles:true}));await new Promise(r=>setTimeout(r,1500))})()`;
   const typeLegacy = `(async()=>{await new Promise(r=>setTimeout(r,1500))})()`;
-  const playFirstWeb = `(async()=>{const b=document.querySelector('button[title=Play]');if(b)b.click();await new Promise(r=>setTimeout(r,1500));const a=document.querySelector('audio');if(a){a.pause();a.currentTime=0}})()`;
+  // The same user action on both sides: press the first row's Play button, let it load, pause at 0:00.
+  const playFirst = `(async()=>{const b=document.querySelector('main button[aria-label=Play]');if(b)b.click();await new Promise(r=>setTimeout(r,2000));const a=document.querySelector('audio');if(a){a.pause();a.currentTime=0}await new Promise(r=>setTimeout(r,500))})()`;
   const pages = [
     { name: 'login', legacy: '/login/', web: '/login' },
     // The seeded backend has an account, so both frontends would leave the wizard; the status call is mocked to a
@@ -251,7 +252,7 @@ async function main() {
     { name: 'playlists', legacy: '/playlists/', web: '/playlists', auth: true },
     { name: 'playlist', legacy: `/playlist/?id=${pl.id}`, web: `/playlists/${pl.id}`, auth: true },
     { name: 'settings', legacy: '/settings/', web: '/settings', auth: true },
-    { name: 'player', legacy: '/collection/?tab=tracks', web: '/collection/tracks', auth: true, actWeb: playFirstWeb, actLegacy: `(async()=>{await new Promise(r=>setTimeout(r,500))})()`, note: 'player bar with a track loaded' },
+    { name: 'player', legacy: '/collection/?tab=tracks', web: '/collection/tracks', auth: true, actWeb: playFirst, actLegacy: playFirst, note: 'player bar with a track loaded' },
   ].filter((p) => !ONLY || ONLY.includes(p.name));
   void album;
 

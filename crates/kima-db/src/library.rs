@@ -858,6 +858,21 @@ pub async fn set_via_symlink(pool: &PgPool, paths: &[String], on: bool) -> sqlx:
     Ok(r.rows_affected())
 }
 
+/// Paths of the present tracks whose file had this size and modification time when read.
+pub async fn present_paths_with_stat(
+    pool: &PgPool,
+    size: i64,
+    mtime: OffsetDateTime,
+) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar!(
+        "SELECT path FROM tracks WHERE size = $1 AND mtime = $2 AND missing_since IS NULL",
+        size,
+        mtime
+    )
+    .fetch_all(pool)
+    .await
+}
+
 /// Paths of the present (not missing) tracks anywhere under the folder `dir_prefix`
 /// (`"Artist/Album/"`, with the trailing slash). Used to expand a deleted or renamed folder.
 pub async fn paths_under(pool: &PgPool, dir_prefix: &str) -> sqlx::Result<Vec<String>> {

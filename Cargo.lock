@@ -1345,6 +1345,7 @@ dependencies = [
  "http-body-util",
  "httpdate",
  "image",
+ "kima-api-types",
  "kima-core",
  "kima-db",
  "kima-ident",
@@ -1364,6 +1365,15 @@ dependencies = [
  "tokio-util",
  "tower",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "kima-api-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

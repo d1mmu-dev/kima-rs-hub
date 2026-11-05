@@ -2,6 +2,9 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use kima_api_types::auth::{RegisterResponse, UserSummary};
+pub use kima_api_types::onboarding::Credentials;
+use kima_api_types::onboarding::OnboardingStatus;
 use kima_core::auth::hash_password;
 use kima_db::users::{self, Registration};
 use serde::Deserialize;
@@ -23,18 +26,10 @@ pub fn routes() -> Router<AppState> {
         .route("/onboarding/complete", post(complete))
 }
 
-#[derive(Deserialize)]
-pub struct Credentials {
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub password: String,
-}
-
 async fn status(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<OnboardingStatus>, ApiError> {
     let has_account = users::count(&state.pool).await? > 0;
     let registration_open = !has_account || users::registration_open(&state.pool).await?;
 
@@ -48,17 +43,17 @@ async fn status(
             .is_some_and(|u| u.onboarding_complete),
         None => !has_account,
     };
-    Ok(Json(json!({
-        "needsOnboarding": needs_onboarding,
-        "hasAccount": has_account,
-        "registrationOpen": registration_open,
-    })))
+    Ok(Json(OnboardingStatus {
+        needs_onboarding,
+        has_account,
+        registration_open,
+    }))
 }
 
 async fn register(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<Credentials>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<RegisterResponse>, ApiError> {
     let username = body.username.trim().to_string();
     if !(3..=users::MAX_USERNAME_CHARS).contains(&username.chars().count()) {
         return Err(ApiError::Invalid(
@@ -94,15 +89,15 @@ async fn register(
                 state
                     .jwt
                     .issue_access(user.id, &user.username, &user.role, user.token_version);
-            Ok(Json(json!({
-                "token": token,
-                "user": {
-                    "id": user.id,
-                    "username": user.username,
-                    "role": user.role,
-                    "onboardingComplete": false,
+            Ok(Json(RegisterResponse {
+                token,
+                user: UserSummary {
+                    id: user.id,
+                    username: user.username,
+                    role: user.role,
+                    onboarding_complete: false,
                 },
-            })))
+            }))
         }
     }
 }

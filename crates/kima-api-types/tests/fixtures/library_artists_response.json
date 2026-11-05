@@ -1,0 +1,26 @@
+{
+  "artists": [
+    {
+      "albumCount": 1,
+      "coverArt": null,
+      "heroUrl": null,
+      "id": "01a1aad3-f0c4-710b-b701-36f9f6b6972e",
+      "mbid": null,
+      "name": "Disc Band",
+      "trackCount": 6
+    },
+    {
+      "albumCount": 1,
+      "coverArt": null,
+      "heroUrl": null,
+      "id": "01a1aad3-f02f-722d-a39d-636a542d18f1",
+      "mbid": null,
+      "name": "Flac Artist",
+      "trackCount": 1
+    }
+  ],
+  "limit": 2,
+  "nextCursor": "01a1aad3-f02f-722d-a39d-636a542d18f1",
+  "offset": 0,
+  "total": 5
+}

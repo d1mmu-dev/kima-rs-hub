@@ -1,0 +1,112 @@
+[
+  {
+    "_count": {
+      "items": 2
+    },
+    "createdAt": "2026-11-05T09:11:18.775511Z",
+    "id": "01a1aafa-15f6-769f-b93a-6beb9bcd026c",
+    "isHidden": false,
+    "isOwner": true,
+    "isPublic": false,
+    "items": [
+      {
+        "id": "01a1aafa-1652-7351-9c34-5765dbc6cee6",
+        "track": {
+          "album": {
+            "artist": {
+              "id": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
+              "mbid": null,
+              "name": "Untagged Artist"
+            },
+            "artistId": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
+            "coverArt": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+            "coverUrl": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+            "id": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+            "title": "Plain Album",
+            "year": 1999
+          },
+          "albumId": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+          "artist": {
+            "id": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
+            "name": "Untagged Artist"
+          },
+          "audioFeatures": null,
+          "bitrate": 64,
+          "codec": "mp3",
+          "discNumber": 0,
+          "discSubtitle": null,
+          "displayTitle": null,
+          "displayTrackNo": null,
+          "duration": 900,
+          "hasUserOverrides": false,
+          "id": "01a1aaf9-552b-7335-859a-30d1397bd4b3",
+          "isMissing": false,
+          "isrc": null,
+          "listeners": 0,
+          "playCount": 0,
+          "previewUrl": null,
+          "recordingMbid": null,
+          "title": "First",
+          "trackNo": 1,
+          "trackNumber": 1,
+          "userPlayCount": 0,
+          "year": 1999
+        }
+      },
+      {
+        "id": "01a1aafa-168c-7087-af16-40164d2f32cc",
+        "track": {
+          "album": {
+            "artist": {
+              "id": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
+              "mbid": null,
+              "name": "Untagged Artist"
+            },
+            "artistId": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
+            "coverArt": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+            "coverUrl": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+            "id": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+            "title": "Plain Album",
+            "year": 1999
+          },
+          "albumId": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+          "artist": {
+            "id": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
+            "name": "Untagged Artist"
+          },
+          "audioFeatures": null,
+          "bitrate": 64,
+          "codec": "mp3",
+          "discNumber": 0,
+          "discSubtitle": null,
+          "displayTitle": null,
+          "displayTrackNo": null,
+          "duration": 20,
+          "hasUserOverrides": false,
+          "id": "01a1aaf9-5539-709b-bb58-6e9e8d0f9a0a",
+          "isMissing": false,
+          "isrc": null,
+          "listeners": 0,
+          "playCount": 0,
+          "previewUrl": null,
+          "recordingMbid": null,
+          "title": "Second",
+          "trackNo": 2,
+          "trackNumber": 2,
+          "userPlayCount": 0,
+          "year": 1999
+        }
+      }
+    ],
+    "mixId": null,
+    "name": "Road trip",
+    "spotifyPlaylistId": null,
+    "spotifyPlaylistUrl": null,
+    "trackCount": 2,
+    "updatedAt": "2026-11-05T09:11:18.919346Z",
+    "user": {
+      "username": "admin"
+    },
+    "userId": "01a1aaf9-d461-77bd-9614-d92dbc4cefe8"
+  }
+]

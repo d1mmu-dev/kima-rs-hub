@@ -1,7 +1,5 @@
 target
-frontend/node_modules
-frontend/.next
-frontend/out
+frontend
 .git
 .data
 .env
@@ -12,3 +10,4 @@ frontend/out
 .idea
 .env.*
 **/.data
+crates/kima-web/build

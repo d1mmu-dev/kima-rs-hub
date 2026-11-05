@@ -13,10 +13,13 @@ use tracing::Span;
 
 pub mod frontend;
 pub mod jobs;
+pub mod web_proxy;
+pub mod web_ssr;
 
 use kima_jobs::schedule::{Cron, EnqueueFn};
 
-/// Upstream's Next.js `headers()` block, now applied by the server to every response.
+/// Upstream's Next.js `headers()` block, now applied by the server to every response. `font-src` also allows
+/// `data:` because kima-web embeds Montserrat in its inline stylesheet as a data URI.
 const SECURITY_HEADERS: &[(&str, &str)] = &[
     (
         "permissions-policy",
@@ -31,14 +34,29 @@ const SECURITY_HEADERS: &[(&str, &str)] = &[
         "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; \
          img-src 'self' data: blob: https://cdn-images.dzcdn.net https://e-cdns-images.dzcdn.net \
          https://assets.pippa.io https://is1-ssl.mzstatic.com; media-src 'self' blob:; \
-         connect-src 'self' ws: wss:; font-src 'self'; frame-ancestors 'none'; worker-src 'self' blob:",
+         connect-src 'self' ws: wss:; font-src 'self' data:; frame-ancestors 'none'; worker-src 'self' blob:",
     ),
 ];
 
 pub fn app(state: AppState, config: &Config) -> Router {
+    app_with_web(state, config, None)
+}
+
+/// [`app`], with the `kima-web` routes forwarded to the embedded SSR server when `web_proxy` is
+/// given. The proxy sits in front of everything under the app-wide CORS and header layers, so a
+/// page wins over the legacy export's fallback and redirects (`/setup`), while `/api` and `/rest`
+/// are not on its allow-list.
+pub fn app_with_web(
+    state: AppState,
+    config: &Config,
+    web_proxy: Option<std::sync::Arc<web_proxy::WebProxy>>,
+) -> Router {
     let mut web = kima_api::router(state.clone());
     if let Some(dir) = &config.frontend_dir {
         web = web.merge(frontend::routes(dir));
+    }
+    if let Some(proxy) = web_proxy {
+        web = web_proxy::layer(web, proxy);
     }
     // `/rest` has its own CORS policy (D-090); the app-wide one must not apply to it.
     let rest = Router::new()

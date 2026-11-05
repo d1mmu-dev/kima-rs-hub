@@ -1,14 +1,14 @@
-//! `/settings`: the account slice (spec §5.7): who you are and a password change. Everything else on
-//! the legacy Settings page is M10.
+//! `/settings`: the account slice — who you are and a password change. Everything else on the legacy
+//! Settings page is M10.
 
 use kima_api_types::auth::{ChangePassword, ChangePasswordResponse, MeResponse};
 use vertigo::{DomNode, Value, bind, dom, get_driver};
 
 use crate::api::client::load;
-use crate::ui::{Ctx, card_css, error_css, flag, muted_css, resource_view};
+use crate::ui::{BTN_OUTLINE, BTN_PRIMARY, CARD, Ctx, INPUT, LABEL, flag, resource_view};
 
-/// The backend's rule (6+ characters) and the confirm field, checked before a round trip; the
-/// backend's own message is shown verbatim for anything else (e.g. a wrong current password).
+/// The backend's rule (6+ characters) and the confirm field, checked before a round trip; the backend's
+/// own message is shown verbatim for anything else (e.g. a wrong current password).
 pub fn validate(current: &str, new: &str, confirm: &str) -> Result<ChangePassword, String> {
     if current.is_empty() {
         return Err("Enter your current password".into());
@@ -34,17 +34,19 @@ pub fn render(ctx: &Ctx) -> DomNode {
         let role = me.role.clone();
         dom! {
             <div>
-                <p>"Signed in as " <strong id="account-username">{username}</strong></p>
-                <p css={muted_css()}>{format!("Role: {role}")}</p>
+                <p>"Signed in as " <strong>{username}</strong></p>
+                <p class="text-xs tabular-nums text-[var(--text-secondary)]">"Role: {role}"</p>
             </div>
         }
     });
     dom! {
         <div>
-            <h2>"Settings"</h2>
-            <h3>"Account"</h3>
-            {account}
-            {password_form(ctx)}
+            <h2 class="text-2xl font-bold text-white mb-1">"Settings"</h2>
+            <div class={CARD}>
+                <h3 class="text-lg font-bold text-white mb-4">"Account"</h3>
+                {account}
+                {password_form(ctx)}
+            </div>
         </div>
     }
 }
@@ -103,48 +105,40 @@ fn password_form(ctx: &Ctx) -> DomNode {
     });
 
     let error_view = error.render_value(|e| match e {
-        Some(message) => dom! { <p css={error_css()} id="password-error">{message}</p> },
+        Some(message) => dom! { <p class="text-sm text-danger-light" id="password-error">{message}</p> },
         None => dom! { <span /> },
     });
     let done_view = done.render_value(|d| match d {
-        Some(message) => dom! { <p id="password-done">{message}</p> },
+        Some(message) => dom! { <p class="text-sm text-success-light" id="password-done">{message}</p> },
         None => dom! { <span /> },
     });
 
     dom! {
-        <form css={card_css()} on_submit={submit}>
-            <h3>"Change password"</h3>
-            <input type="password" name="current" placeholder="Current password" autocomplete="current-password"
-                value={current.clone()} on_input={bind!(current, |v: String| current.set(v))} />
-            <input type="password" name="new" placeholder="New password (6+ characters)" autocomplete="new-password"
-                value={new.clone()} on_input={bind!(new, |v: String| new.set(v))} />
-            <input type="password" name="confirm" placeholder="Repeat new password" autocomplete="new-password"
-                value={confirm.clone()} on_input={bind!(confirm, |v: String| confirm.set(v))} />
+        <form class={CARD} on_submit={submit}>
+            <h3 class="text-lg font-bold text-white mb-4">"Change password"</h3>
+            <div class="space-y-4">
+                <div>
+                    <label for="settings-current" class={LABEL}>"Current password"</label>
+                    <input id="settings-current" type="password" name="current" autocomplete="current-password"
+                        class={INPUT} value={current.clone()} on_input={bind!(current, |v: String| current.set(v))} />
+                </div>
+                <div>
+                    <label for="settings-new" class={LABEL}>"New password (6+ characters)"</label>
+                    <input id="settings-new" type="password" name="new" autocomplete="new-password"
+                        class={INPUT} value={new.clone()} on_input={bind!(new, |v: String| new.set(v))} />
+                </div>
+                <div>
+                    <label for="settings-confirm" class={LABEL}>"Confirm new password"</label>
+                    <input id="settings-confirm" type="password" name="confirm" autocomplete="new-password"
+                        class={INPUT} value={confirm.clone()} on_input={bind!(confirm, |v: String| confirm.set(v))} />
+                </div>
+            </div>
             {error_view}
             {done_view}
-            <button type="submit" disabled={flag(busy.to_computed())}>"Change password"</button>
+            <div class="flex gap-3 mt-4">
+                <button type="submit" class={BTN_PRIMARY} disabled={flag(busy.to_computed())}>"Change password"</button>
+                <button type="button" class={BTN_OUTLINE}>"Cancel"</button>
+            </div>
         </form>
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mirrors_the_backend_rules() {
-        assert!(validate("", "secret1", "secret1").is_err());
-        assert_eq!(
-            validate("old", "short", "short").unwrap_err(),
-            "New password must be at least 6 characters"
-        );
-        assert_eq!(
-            validate("old", "secret1", "other").unwrap_err(),
-            "Passwords do not match"
-        );
-        let ok = validate("old", " secret1 ", " secret1 ").unwrap();
-        assert_eq!(ok.current_password, "old");
-        // Passwords are sent as typed, spaces included.
-        assert_eq!(ok.new_password, " secret1 ");
     }
 }

@@ -1,18 +1,20 @@
-//! Shared presentation: the app context, global styles, the `Resource` (loading / error / ready) view
-//! and the pager.
+//! Shared presentation: the app context, the class vocabulary every view builds on (buttons, inputs,
+//! cards, track rows, page headers: the same Tailwind classes as the legacy components), the
+//! `Resource` (loading / error / ready) view and the pager.
 
 use std::rc::Rc;
 
 use vertigo::router::Router;
-use vertigo::{Computed, Css, DomNode, Resource, Value, css, dom, dom_element};
+use vertigo::{Computed, DomNode, Resource, Value, dom, dom_element, get_driver};
 
 use crate::api::client::ApiClient;
 use crate::auth::Session;
+use crate::icons::icon;
 use crate::player::Player;
 use crate::route::Route;
 
-/// Page size of every list.
-pub const PAGE_SIZE: i64 = 50;
+/// Page size of every list (the legacy library shows 40 per page).
+pub const PAGE_SIZE: i64 = 40;
 
 /// What every page needs. Cheap to clone (all handles).
 #[derive(Clone)]
@@ -23,58 +25,71 @@ pub struct Ctx {
     pub player: Player,
     /// Bumped when the library changed (a scan finished) so the visible list refetches.
     pub refresh: Value<u32>,
+    /// Bumped when a playlist was created, renamed, deleted or changed so the sidebar refetches.
+    pub playlists_rev: Value<u32>,
+    /// The search box of the top bar; the search page shows the results for it.
+    pub query: Value<String>,
+    /// The phone / tablet menu drawer.
+    pub menu_open: Value<bool>,
+    /// A transient message `(id, text)` shown by the shell for a few seconds.
+    pub toast: Value<Option<(u32, String)>>,
 }
 
-pub fn global_css() -> &'static str {
-    "body { margin: 0; background: #121212; color: #e8e8e8; font-family: system-ui, sans-serif; }
-     a { color: #8ab4f8; text-decoration: none; } a:hover { text-decoration: underline; }
-     input, button { font: inherit; } input { background: #1e1e1e; color: inherit; border: 1px solid #444; padding: 6px 8px; border-radius: 4px; }
-     button { background: #2a2a2a; color: inherit; border: 1px solid #555; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
-     button:disabled { opacity: 0.5; cursor: default; }
-     input[type=range] { padding: 0; }"
+impl Ctx {
+    /// Shows `message` in the toast for four seconds (a newer message replaces it and restarts the clock).
+    pub fn notify(&self, message: impl Into<String>) {
+        let id = vertigo::transaction(|c| self.toast.get(c)).map_or(1, |(id, _)| id.wrapping_add(1));
+        self.toast.set(Some((id, message.into())));
+        let toast = self.toast.clone();
+        get_driver().spawn(async move {
+            get_driver().sleep(4000).await;
+            if vertigo::transaction(|c| toast.get(c)).is_some_and(|(current, _)| current == id) {
+                toast.set(None);
+            }
+        });
+    }
 }
 
-pub fn page_css() -> Css {
-    css! {"
-        max-width: 960px;
-        margin: 0 auto;
-        padding: 16px 16px 120px 16px;
-    "}
+// ---- the class vocabulary (ported from frontend/components/ui and the page components) ------------------------
+
+/// `Button` primary, size md.
+pub const BTN_PRIMARY: &str = "inline-flex items-center justify-center gap-2 rounded-lg font-semibold transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed bg-brand hover:bg-brand-hover text-black min-h-12 px-6 text-sm";
+/// Secondary outline button (page toolbars, "Rename", "Cancel").
+pub const BTN_OUTLINE: &str = "flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-all text-[var(--text-secondary)] hover:bg-white/5 border border-white/10 hover:text-white/70 hover:border-white/20 disabled:opacity-50 disabled:cursor-not-allowed";
+/// The brand-filled toolbar button of the playlists header.
+pub const BTN_BRAND_SM: &str = "flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-all bg-brand text-black hover:bg-brand-hover disabled:opacity-50 disabled:cursor-not-allowed";
+/// Text input of the forms.
+pub const INPUT: &str = "w-full px-4 py-2.5 bg-white/5 border border-white/10 rounded-lg text-white placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-transparent transition-all duration-200";
+pub const LABEL: &str = "block text-sm font-medium text-[var(--text-primary)] mb-1.5";
+/// The glass card of login / setup / settings sections.
+pub const CARD: &str = "bg-[#111]/90 rounded-lg p-6 md:p-8 border border-white/10";
+/// `<h1>` of a page (collection, playlists).
+pub const PAGE_TITLE: &str = "text-4xl md:text-5xl font-bold tracking-tight text-white leading-none";
+
+/// The coloured bar + title + count + rule that opens a section (`SectionHeader`).
+pub fn section_header(title: &str, count: Option<String>) -> DomNode {
+    let title = title.to_owned();
+    let count = count.unwrap_or_default();
+    dom! {
+        <div class="flex items-center gap-3 mb-6">
+            <span class="w-1 rounded-full shrink-0 h-8 bg-type-track"></span>
+            <h2 class="font-bold tracking-tight text-white text-2xl">{title}</h2>
+            <span class="t-meta">{count}</span>
+            <span class="flex-1 border-t border-white/10"></span>
+        </div>
+    }
 }
 
-pub fn card_css() -> Css {
-    css! {"
-        max-width: 360px;
-        margin: 64px auto;
-        padding: 24px;
-        background: #1b1b1b;
-        border-radius: 8px;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-    "}
-}
-
-pub fn row_css() -> Css {
-    css! {"
-        display: flex;
-        gap: 12px;
-        align-items: center;
-        padding: 8px 4px;
-        border-bottom: 1px solid #262626;
-    "}
-}
-
-pub fn error_css() -> Css {
-    css! {"
-        color: #ff8a80;
-    "}
-}
-
-pub fn muted_css() -> Css {
-    css! {"
-        color: #9a9a9a;
-    "}
+/// An empty state: big icon, heading, one line of help.
+pub fn empty_state(icon_name: &'static str, heading: &str, text: &str) -> DomNode {
+    let (heading, text) = (heading.to_owned(), text.to_owned());
+    dom! {
+        <div class="flex flex-col items-center justify-center py-12 md:py-16 text-center px-4">
+            <div class="mb-4 text-[var(--text-muted)]">{icon(icon_name, "w-16 h-16")}</div>
+            <h3 class="text-lg md:text-xl font-medium text-white mb-2">{heading}</h3>
+            <p class="text-sm md:text-base text-[var(--text-muted)] mb-6 max-w-md">{text}</p>
+        </div>
+    }
 }
 
 /// The one loading / error / ready presentation every data-driven view goes through.
@@ -83,8 +98,8 @@ pub fn resource_view<T: PartialEq + 'static>(
     render: impl Fn(Rc<T>) -> DomNode + 'static,
 ) -> DomNode {
     resource.render_value(move |state| match state {
-        Resource::Loading => dom! { <p css={muted_css()}>"Loading…"</p> },
-        Resource::Error(message) => dom! { <p css={error_css()}>{message}</p> },
+        Resource::Loading => dom! { <p class="py-8 text-sm text-[var(--text-muted)]">"Loading…"</p> },
+        Resource::Error(message) => dom! { <p class="py-8 text-sm text-danger-light">{message}</p> },
         Resource::Ready(data) => render(data),
     })
 }
@@ -105,7 +120,12 @@ pub fn rows_box(rows: Vec<DomNode>) -> DomNode {
     dom_element! { <div /> }.children(rows).into()
 }
 
-/// `1–50 of 120` (or `0 of 0`).
+/// Number of pages for `total` items.
+pub fn total_pages(total: i64) -> i64 {
+    ((total + PAGE_SIZE - 1) / PAGE_SIZE).max(1)
+}
+
+/// `1–40 of 120` (or `0 of 0`).
 pub fn page_label(offset: i64, shown: usize, total: i64) -> String {
     if shown == 0 {
         return format!("0 of {total}");
@@ -117,23 +137,57 @@ pub fn has_next(offset: i64, shown: usize, total: i64) -> bool {
     offset + (shown as i64) < total
 }
 
-/// Prev / next controls under a list. `offset` is the page the list is showing.
+const PAGER_BUTTON: &str = "flex items-center justify-center min-h-[44px] min-w-[44px] rounded-lg border border-white/10 bg-white/5 text-[var(--text-secondary)] transition-colors hover:text-white hover:bg-white/10 hover:border-white/20 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-white/5 disabled:hover:border-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-brand)]";
+
+/// Previous / next controls under a list (the legacy `Pagination`; nothing when there is one page).
+/// `offset` is the page the list is showing.
 pub fn pager(offset: Value<i64>, current: i64, shown: usize, total: i64) -> DomNode {
-    let prev = {
-        let offset = offset.clone();
-        move |_| offset.set((current - PAGE_SIZE).max(0))
-    };
-    let next = move |_| offset.set(current + PAGE_SIZE);
-    let label = page_label(current, shown, total);
-    let can_prev = current > 0;
-    let can_next = has_next(current, shown, total);
-    dom! {
-        <div css={row_css()}>
-            <button on_click={prev} disabled={flag_now(!can_prev)}>"Previous"</button>
-            <span css={muted_css()}>{label}</span>
-            <button on_click={next} disabled={flag_now(!can_next)}>"Next"</button>
-        </div>
+    let pages = total_pages(total);
+    if pages <= 1 {
+        return dom! { <span /> };
     }
+    let page = current / PAGE_SIZE + 1;
+    let go = |target: i64| {
+        let offset = offset.clone();
+        move |_| offset.set((target - 1).max(0) * PAGE_SIZE)
+    };
+    let (first, prev, next, last) = (go(1), go(page - 1), go(page + 1), go(pages));
+    let at_first = current <= 0;
+    let at_last = !has_next(current, shown, total);
+    let label = page_label(current, shown, total);
+    dom! {
+        <nav aria-label="Pagination" class="flex items-center justify-center gap-2 pt-6 mt-12 border-t border-white/5">
+            <button class={PAGER_BUTTON} aria-label="First page" on_click={first} disabled={flag_now(at_first)}>
+                {icon("chevron-left", "w-4 h-4")}
+            </button>
+            <button class={PAGER_BUTTON} aria-label="Previous page" on_click={prev} disabled={flag_now(at_first)}>
+                {icon("chevron-left", "w-4 h-4")}
+            </button>
+            <p class="px-3 text-sm text-[var(--text-secondary)] tabular-nums whitespace-nowrap">
+                "Page "<span class="text-white font-medium">{page.to_string()}</span>" of "
+                <span class="text-white font-medium">{pages.to_string()}</span>
+                <span class="sr-only">{label}</span>
+            </p>
+            <button class={PAGER_BUTTON} aria-label="Next page" on_click={next} disabled={flag_now(at_last)}>
+                {icon("chevron-right", "w-4 h-4")}
+            </button>
+            <button class={PAGER_BUTTON} aria-label="Last page" on_click={last} disabled={flag_now(at_last)}>
+                {icon("chevron-right", "w-4 h-4")}
+            </button>
+        </nav>
+    }
+}
+
+/// `/api/library/cover-art/<id>?size=<n>&token=<token>`: `<img>` cannot send headers, so the access token
+/// travels in the query, as in the legacy app. `None` when there is no art id or no session.
+pub fn cover_url(art_id: &str, size: u32, token: Option<&str>) -> Option<String> {
+    if art_id.is_empty() {
+        return None;
+    }
+    let token = token?;
+    Some(format!(
+        "/api/library/cover-art/{art_id}?size={size}&token={token}"
+    ))
 }
 
 /// `m:ss` for a duration in seconds.
@@ -146,17 +200,35 @@ pub fn format_time(secs: f64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
+/// `1 album` / `2 albums`.
+pub fn plural(n: i64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// `4 min` / `1 hr 5 min` for a total length in seconds (the playlist header).
+pub fn total_length(secs: i64) -> String {
+    let mins = (secs.max(0) + 30) / 60;
+    if mins >= 60 {
+        format!("{} hr {} min", mins / 60, mins % 60)
+    } else {
+        format!("{mins} min")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn paging_labels() {
-        assert_eq!(page_label(0, 50, 120), "1–50 of 120");
-        assert_eq!(page_label(100, 20, 120), "101–120 of 120");
+        assert_eq!(page_label(0, 40, 120), "1–40 of 120");
+        assert_eq!(page_label(80, 40, 120), "81–120 of 120");
         assert_eq!(page_label(0, 0, 0), "0 of 0");
-        assert!(has_next(0, 50, 120));
-        assert!(!has_next(100, 20, 120));
+        assert!(has_next(0, 40, 120));
+        assert!(!has_next(80, 40, 120));
+        assert_eq!(total_pages(0), 1);
+        assert_eq!(total_pages(40), 1);
+        assert_eq!(total_pages(41), 2);
     }
 
     #[test]
@@ -164,5 +236,19 @@ mod tests {
         assert_eq!(format_time(0.0), "0:00");
         assert_eq!(format_time(125.9), "2:05");
         assert_eq!(format_time(f64::NAN), "0:00");
+        assert_eq!(total_length(240), "4 min");
+        assert_eq!(total_length(3900), "1 hr 5 min");
+    }
+
+    #[test]
+    fn plurals_and_cover_urls() {
+        assert_eq!(plural(1, "album", "albums"), "1 album");
+        assert_eq!(plural(0, "album", "albums"), "0 albums");
+        assert_eq!(
+            cover_url("abc", 80, Some("tok")).as_deref(),
+            Some("/api/library/cover-art/abc?size=80&token=tok")
+        );
+        assert_eq!(cover_url("", 80, Some("tok")), None);
+        assert_eq!(cover_url("abc", 80, None), None);
     }
 }

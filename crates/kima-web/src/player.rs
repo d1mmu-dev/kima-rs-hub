@@ -16,14 +16,16 @@ use kima_api_types::playback_state::{
     PlaybackState, QueueAlbum, QueueArtist, QueueItem, SavePlaybackState,
 };
 use vertigo::{
-    Computed, DomElementRef, DomNode, DropResource, JsJson, JsJsonNumber, Value, bind, css, dom,
+    Computed, DomElementRef, DomNode, DropResource, JsJson, JsJsonNumber, Value, bind, dom,
     dom_element, get_driver, js,
 };
 
 use crate::api::client::ApiClient;
 use crate::auth::Session;
 use crate::position;
-use crate::ui::{format_time, muted_css};
+use crate::icons::icon;
+use crate::route::Route;
+use crate::ui::{cover_url, flag, format_time};
 
 /// How often the `<audio>` element is sampled (position, paused, ended).
 const POLL_MS: u32 = 500;
@@ -85,6 +87,9 @@ struct Inner {
     pending_seek: Cell<Option<f64>>,
     /// The last position written to storage.
     last_saved: Cell<f64>,
+    /// Output volume, 0-100.
+    volume: Value<f64>,
+    volume_before_mute: Cell<f64>,
 }
 
 #[derive(Clone)]
@@ -108,6 +113,8 @@ impl Player {
             audio_track: RefCell::new(None),
             pending_seek: Cell::new(None),
             last_saved: Cell::new(NOT_SAVED),
+            volume: Value::new(50.0),
+            volume_before_mute: Cell::new(50.0),
         }))
     }
 
@@ -274,7 +281,7 @@ impl Player {
 
     /// Signed out: stop and forget the queue (the saved one stays on the server). Runs from a render
     /// callback, where vertigo forbids `Value::set`, so the reset is deferred.
-    fn stop(&self) {
+    pub fn stop(&self) {
         self.0.restored.set(false);
         *self.0.audio.borrow_mut() = None;
         *self.0.ticker.borrow_mut() = None;
@@ -339,111 +346,355 @@ impl Player {
         }
     }
 
-    /// The bar; mounted once for every signed-in page.
-    pub fn render(&self) -> DomNode {
+    /// The current queue item (reactive).
+    pub fn current(&self) -> Computed<Option<QueueItem>> {
+        let (queue, index) = (self.0.queue.clone(), self.0.index.clone());
+        Computed::from(move |ctx| queue.get(ctx).get(index.get(ctx)).cloned())
+    }
+
+    /// The queue and the index of the current item (the side panel lists them).
+    pub fn queue_state(&self) -> Computed<(Vec<QueueItem>, usize)> {
+        let (queue, index) = (self.0.queue.clone(), self.0.index.clone());
+        Computed::from(move |ctx| (queue.get(ctx), index.get(ctx)))
+    }
+
+    /// `(current track id, playing)` for highlighting rows.
+    pub fn now_playing(&self) -> Computed<(Option<String>, bool)> {
+        let (current, playing) = (self.current(), self.0.playing.clone());
+        Computed::from(move |ctx| (current.get(ctx).map(|i| i.id), playing.get(ctx)))
+    }
+
+    /// Appends to the queue; starts playing when nothing is queued.
+    pub fn enqueue(&self, item: QueueItem) {
+        let mut queue = Self::read(&self.0.queue);
+        if queue.is_empty() {
+            self.play_queue(vec![item], 0);
+            return;
+        }
+        queue.push(item);
+        self.0.queue.set(queue);
+        self.persist();
+    }
+
+    pub fn jump_to(&self, index: usize) {
+        self.go_to(index);
+    }
+
+    /// `0..=100`.
+    fn set_volume(&self, percent: f64) {
+        let percent = percent.clamp(0.0, 100.0);
+        self.0.volume.set(percent);
+        if let Some(audio) = self.0.audio.borrow().clone() {
+            audio
+                .dom_access()
+                .set("volume", JsJson::Number(JsJsonNumber(percent / 100.0)))
+                .exec();
+        }
+    }
+
+    fn toggle_mute(&self) {
+        let now = Self::read(&self.0.volume);
+        if now > 0.0 {
+            self.0.volume_before_mute.set(now);
+            self.set_volume(0.0);
+        } else {
+            let back = self.0.volume_before_mute.get();
+            self.set_volume(if back > 0.0 { back } else { 50.0 });
+        }
+    }
+
+    fn skip_by(&self, secs: f64) {
+        let position = Self::read(&self.0.position);
+        let duration = Self::read(&self.0.duration);
+        let target = (position + secs).max(0.0);
+        self.seek(if duration > 0.0 {
+            target.min(duration)
+        } else {
+            target
+        });
+    }
+
+    /// The hidden `<audio>` of the current track; mounted once for the signed-in shell. It also starts the
+    /// sampling ticker and the restore of the saved queue.
+    pub fn audio_view(&self) -> DomNode {
         self.start();
         let me = self.clone();
-        let current: Computed<Option<QueueItem>> = {
-            let (queue, index) = (self.0.queue.clone(), self.0.index.clone());
-            Computed::from(move |ctx| queue.get(ctx).get(index.get(ctx)).cloned())
+        self.current()
+            .render_value(bind!(me, |item: Option<QueueItem>| match item {
+                None => {
+                    *me.0.audio.borrow_mut() = None;
+                    *me.0.audio_track.borrow_mut() = None;
+                    dom! { <span /> }
+                }
+                Some(item) => {
+                    let token = me.0.session.current_token().unwrap_or_default();
+                    let mut element = dom_element! {
+                        <audio src={stream_url(&item.id, &token)} preload="auto" />
+                    };
+                    let autoplay = me.0.autoplay.get();
+                    if autoplay {
+                        element = element.attr("autoplay", "true");
+                    }
+                    let audio = element.get_ref();
+                    *me.0.audio.borrow_mut() = Some(audio.clone());
+                    *me.0.audio_track.borrow_mut() = Some(item.id.clone());
+                    me.0.last_saved.set(NOT_SAVED);
+                    let volume = Self::read(&me.0.volume);
+                    audio
+                        .dom_access()
+                        .set("volume", JsJson::Number(JsJsonNumber(volume / 100.0)))
+                        .exec();
+                    if autoplay {
+                        // The `autoplay` attribute alone did not start playback in Chromium when it is
+                        // added right after `src`; ask explicitly once the element is in the document.
+                        get_driver().spawn(async move {
+                            get_driver().sleep(50).await;
+                            js! { #audio.play() };
+                        });
+                    }
+                    element.into()
+                }
+            }))
+    }
+
+    fn cover(&self, item: &QueueItem, size: u32) -> Option<String> {
+        let art = item.album.as_ref()?.cover_art.clone()?;
+        cover_url(&art, size, self.0.session.current_token().as_deref())
+    }
+
+    /// The desktop player bar (`UniversalPlayer` at its widest: cover + title, transport, seek, volume).
+    pub fn desktop_bar(&self) -> DomNode {
+        let me = self.clone();
+        let current = self.current();
+        let has_track = current.map(|i| i.is_some());
+        let class_if = |on: Computed<bool>, yes: &'static str, no: &'static str| {
+            on.map(move |b| if b { yes } else { no }.to_owned())
         };
 
-        let audio_view = current.render_value(bind!(me, |item: Option<QueueItem>| match item {
-            None => {
-                *me.0.audio.borrow_mut() = None;
-                *me.0.audio_track.borrow_mut() = None;
-                dom! { <span /> }
-            }
-            Some(item) => {
-                let token = me.0.session.current_token().unwrap_or_default();
-                let mut element = dom_element! {
-                    <audio src={stream_url(&item.id, &token)} preload="auto" />
-                };
-                let autoplay = me.0.autoplay.get();
-                if autoplay {
-                    element = element.attr("autoplay", "true");
-                }
-                let audio = element.get_ref();
-                *me.0.audio.borrow_mut() = Some(audio.clone());
-                *me.0.audio_track.borrow_mut() = Some(item.id.clone());
-                me.0.last_saved.set(NOT_SAVED);
-                if autoplay {
-                    // The `autoplay` attribute alone did not start playback in Chromium when it is
-                    // added right after `src`; ask explicitly once the element is in the document.
-                    get_driver().spawn(async move {
-                        get_driver().sleep(50).await;
-                        js! { #audio.play() };
-                    });
-                }
-                element.into()
+        let cover = current.render_value(bind!(me, |item: Option<QueueItem>| {
+            let inner = match item.as_ref().and_then(|i| me.cover(i, 100)) {
+                Some(src) => dom! { <img alt="" decoding="async" class="absolute inset-0 w-full h-full object-cover" src={src} /> },
+                None => icon("music", "w-6 h-6 text-[var(--text-muted)]"),
+            };
+            let href = item
+                .as_ref()
+                .and_then(|i| i.album.as_ref())
+                .map(|a| Route::Tracks { album: Some(a.id.clone()) }.to_string());
+            let tile = dom! {
+                <div class="relative w-full h-full bg-gradient-to-br from-[#2a2a2a] to-[#1a1a1a] rounded-lg overflow-hidden flex items-center justify-center transition-transform duration-300">
+                    {inner}
+                </div>
+            };
+            match href {
+                Some(href) => dom! { <a class="relative flex-shrink-0 w-14 h-14" href={href}>{tile}</a> },
+                None => dom! { <div class="relative flex-shrink-0 w-14 h-14">{tile}</div> },
             }
         }));
-
-        let title = current.map(|item| match item {
-            Some(i) => format!(
-                "{} — {}",
-                i.title,
-                i.artist.map(|a| a.name).unwrap_or_default()
-            ),
-            None => "Nothing playing".to_owned(),
+        let title = current.map(|i| match i {
+            Some(i) => i.title,
+            None => "Not Playing".to_owned(),
         });
-        let play_label = self.0.playing.map(|p| if p { "⏸" } else { "▶" }.to_owned());
-        let times = {
+        let artist = current.map(|i| match i {
+            Some(i) => i.artist.map(|a| a.name).unwrap_or_default(),
+            None => "Select something to play".to_owned(),
+        });
+
+        let times_class = class_if(
+            has_track.clone(),
+            "text-xs text-right tabular-nums font-medium text-[var(--text-secondary)] w-10",
+            "text-xs text-right tabular-nums font-medium text-[var(--text-muted)] w-10",
+        );
+        let total_class = class_if(
+            has_track.clone(),
+            "text-xs tabular-nums font-medium text-[var(--text-secondary)] w-10",
+            "text-xs tabular-nums font-medium text-[var(--text-muted)] w-10",
+        );
+        let position_text = self.0.position.map(format_time);
+        let duration_text = self.0.duration.map(format_time);
+        let fill = {
             let (position, duration) = (self.0.position.clone(), self.0.duration.clone());
             Computed::from(move |ctx| {
-                format!(
-                    "{} / {}",
-                    format_time(position.get(ctx)),
-                    format_time(duration.get(ctx))
-                )
+                let d = duration.get(ctx);
+                let pct = if d > 0.0 { (position.get(ctx) / d * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+                format!("width: {pct:.3}%;")
             })
         };
+        let fill_class = class_if(
+            has_track.clone(),
+            "h-full rounded-full relative transition-[width] duration-150 bg-brand",
+            "h-full rounded-full relative transition-[width] duration-150 bg-gray-600",
+        );
         let slider_max = self.0.duration.map(|d| format!("{}", d.max(1.0)));
         let slider_value = self.0.position.map(|p| format!("{p}"));
 
-        let bar = css! {"
-            position: fixed;
-            left: 0; right: 0; bottom: 0;
-            display: flex;
-            gap: 12px;
-            align-items: center;
-            padding: 10px 16px;
-            background: #1b1b1b;
-            border-top: 1px solid #333;
-        "};
+        let play_label = self.0.playing.map(|p| if p { "Pause" } else { "Play" }.to_owned());
+        let play_title = self.0.playing.map(|p| if p { "pause" } else { "play" }.to_owned());
+        let play_icon = self.0.playing.render_value(|playing| {
+            if playing {
+                icon("pause", "w-5 h-5 relative z-(--z-raised)")
+            } else {
+                icon("play", "w-5 h-5 ml-0.5 relative z-(--z-raised)")
+            }
+        });
+        let no_track = flag(has_track.map(|h| !h));
+
+        let volume_value = self.0.volume.map(|v| format!("{v}"));
+        let volume_style = self.0.volume.map(|v| {
+            format!("background: linear-gradient(to right, rgb(252, 162, 0) {v}%, rgba(255, 255, 255, 0.15) {v}%);")
+        });
+        let volume_now = self.0.volume.map(|v| format!("{v}"));
+        let mute_icon = self.0.volume.render_value(|v| {
+            if v > 0.0 {
+                icon("volume-2", "w-5 h-5")
+            } else {
+                icon("volume-x", "w-5 h-5")
+            }
+        });
+
         dom! {
-            <div css={bar}>
-                {audio_view}
-                <button on_click={bind!(me, |_| me.prev())}>"⏮"</button>
-                <button on_click={bind!(me, |_| me.toggle())}>{play_label}</button>
-                <button on_click={bind!(me, |_| me.next())}>"⏭"</button>
-                <span>{title}</span>
-                <input type="range" min="0" max={slider_max} step="1" value={slider_value}
-                    on_input={bind!(me, |v: String| {
-                        if let Ok(secs) = v.parse::<f64>() {
-                            me.seek(secs);
-                        }
-                    })} />
-                <span css={muted_css()}>{times}</span>
+            <div class="relative flex-shrink-0 max-[1024px]:hidden">
+                <div class="bg-black border-t border-white/[0.08] h-24">
+                    <div class="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand/40 to-transparent"></div>
+                    <div class="flex items-center h-full px-6 gap-6">
+                        <div class="flex items-center gap-4 w-80">
+                            {cover}
+                            <div class="flex-1 min-w-0">
+                                <h4 class="text-white font-semibold truncate text-sm" data-testid="player-title">{title}</h4>
+                                <p class="text-xs text-[var(--text-secondary)] truncate">{artist}</p>
+                            </div>
+                        </div>
+                        <div class="flex-1 flex flex-col items-center gap-2">
+                            <div class="flex items-center gap-5" role="group" aria-label="Playback controls">
+                                <button class="transition-all duration-200 hover:scale-110 relative disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100 text-[var(--text-secondary)] hover:text-white"
+                                    aria-label="Rewind 30 seconds" title="rewind 30 seconds" disabled={no_track.clone()}
+                                    on_click={bind!(me, |_| me.skip_by(-30.0))}>
+                                    {icon("rotate-ccw", "w-4 h-4")}
+                                    <span class="absolute text-micro font-semibold top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">"30"</span>
+                                </button>
+                                <button class="text-[var(--text-secondary)] hover:text-white transition-all duration-200 hover:scale-110 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100"
+                                    aria-label="Previous track" title="previous track" disabled={no_track.clone()}
+                                    on_click={bind!(me, |_| me.prev())}>
+                                    {icon("skip-back", "w-5 h-5")}
+                                </button>
+                                <button class="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 relative group bg-brand text-black hover:scale-110 disabled:bg-gray-700 disabled:text-[var(--text-muted)] disabled:cursor-not-allowed disabled:hover:scale-100"
+                                    aria-label={play_label.clone()} title={play_title} disabled={no_track.clone()}
+                                    on_click={bind!(me, |_| me.toggle())}>
+                                    <div class="absolute inset-0 rounded-full bg-brand blur-md opacity-0 group-hover:opacity-50 group-disabled:hidden transition-opacity duration-200"></div>
+                                    <span>{play_icon}</span>
+                                </button>
+                                <button class="text-[var(--text-secondary)] hover:text-white transition-all duration-200 hover:scale-110 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100"
+                                    aria-label="Next track" title="next track" disabled={no_track.clone()}
+                                    on_click={bind!(me, |_| me.next())}>
+                                    {icon("skip-forward", "w-5 h-5")}
+                                </button>
+                                <button class="transition-all duration-200 hover:scale-110 relative disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100 text-[var(--text-secondary)] hover:text-white"
+                                    aria-label="Forward 30 seconds" title="forward 30 seconds" disabled={no_track.clone()}
+                                    on_click={bind!(me, |_| me.skip_by(30.0))}>
+                                    {icon("rotate-cw", "w-4 h-4")}
+                                    <span class="absolute text-micro font-semibold top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">"30"</span>
+                                </button>
+                            </div>
+                            <div class="w-full flex items-center gap-3">
+                                <span class={times_class}>{position_text}</span>
+                                <div class="relative rounded-full transition-all h-1 bg-white/[0.15] cursor-pointer group flex-1" title="click or drag to seek">
+                                    <div class={fill_class} style={fill}>
+                                        <div class="absolute right-0 top-1/2 -translate-y-1/2 w-3 h-3 bg-brand rounded-full transition-opacity opacity-0 group-hover:opacity-100"></div>
+                                    </div>
+                                    <input type="range" aria-label="Seek" min="0" max={slider_max} step="1" value={slider_value}
+                                        disabled={no_track.clone()}
+                                        class="absolute left-0 -top-2 w-full h-5 m-0 opacity-0 cursor-pointer disabled:cursor-not-allowed"
+                                        on_input={bind!(me, |v: String| {
+                                            if let Ok(secs) = v.parse::<f64>() {
+                                                me.seek(secs);
+                                            }
+                                        })} />
+                                </div>
+                                <span class={total_class}>{duration_text}</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3 w-52 justify-end">
+                            <button class="text-[var(--text-secondary)] hover:text-white transition-all duration-200 hover:scale-110" aria-label="Mute"
+                                on_click={bind!(me, |_| me.toggle_mute())}>
+                                {mute_icon}
+                            </button>
+                            <div class="relative flex-1">
+                                <input type="range" min="0" max="100" aria-label="Volume" aria-valuemin="0" aria-valuemax="100"
+                                    aria-valuenow={volume_now} value={volume_value} style={volume_style}
+                                    class="w-full h-1 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-brand [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:transition-all [&::-webkit-slider-thumb]:hover:scale-110"
+                                    on_input={bind!(me, |v: String| {
+                                        if let Ok(p) = v.parse::<f64>() {
+                                            me.set_volume(p);
+                                        }
+                                    })} />
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
         }
     }
 
-    /// Mount/unmount follows the session: the bar exists only while signed in.
-    pub fn render_for_session(&self) -> DomNode {
+    /// The phone / tablet mini player: floats above the bottom navigation, only while a track is loaded.
+    pub fn mobile_mini(&self) -> DomNode {
         let me = self.clone();
-        self.0
-            .session
-            .token()
-            .map(|t| t.is_some())
-            .render_value(move |signed_in| {
-                if signed_in {
-                    me.render()
-                } else {
-                    me.stop();
-                    dom! { <span /> }
-                }
+        let progress = {
+            let (position, duration) = (self.0.position.clone(), self.0.duration.clone());
+            Computed::from(move |ctx| {
+                let d = duration.get(ctx);
+                let pct = if d > 0.0 { (position.get(ctx) / d * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+                format!("width: {pct:.4}%;")
             })
+        };
+        let play_label = self.0.playing.map(|p| if p { "Pause" } else { "Play" }.to_owned());
+        let play_title = self.0.playing.map(|p| if p { "pause" } else { "play" }.to_owned());
+        let play_icon = self.0.playing.render_value(|playing| {
+            if playing {
+                icon("pause", "w-5 h-5")
+            } else {
+                icon("play", "w-5 h-5 ml-0.5")
+            }
+        });
+        self.current().render_value(bind!(me, progress, play_label, play_title, play_icon, |item: Option<QueueItem>| {
+            let Some(item) = item else {
+                return dom! { <span /> };
+            };
+            let cover = match me.cover(&item, 100) {
+                Some(src) => dom! { <img alt="" decoding="async" class="absolute inset-0 w-full h-full object-cover" src={src} /> },
+                None => icon("music", "w-5 h-5 text-[var(--text-muted)] m-auto"),
+            };
+            let title = item.title.clone();
+            let artist = item.artist.as_ref().map(|a| a.name.clone()).unwrap_or_default();
+            dom! {
+                <div class="fixed left-2 right-2 z-(--z-player) min-[1025px]:hidden" style="bottom: calc(var(--nav-h) + 8px);">
+                    <div class="pointer-events-none absolute bottom-full inset-x-4 h-6 rounded-t-full bg-gradient-to-b from-transparent to-[#15100a]/85"></div>
+                    <div class="rounded-2xl p-[2px]" style="background: linear-gradient(90deg, rgb(252, 162, 0) 0%, rgb(212, 140, 0) 50%, rgb(252, 162, 0) 100%);">
+                        <div class="rounded-xl overflow-hidden">
+                            <div class="relative bg-gradient-to-r from-[#1a1508] via-[#1a1200] to-[#1a1508]">
+                                <div class="absolute inset-0 bg-gradient-to-r from-brand/25 via-brand-dark/35 to-brand/25"></div>
+                                <div class="relative h-[2px] bg-white/20 w-full">
+                                    <div class="h-full bg-brand transition-all duration-150" style={progress.clone()}></div>
+                                </div>
+                                <div class="relative flex items-center gap-3 px-3 py-3 landscape-short:py-1">
+                                    <div class="relative w-12 h-12 flex-shrink-0 rounded-lg overflow-hidden bg-black/30 landscape-short:w-10 landscape-short:h-10 flex items-center justify-center">{cover}</div>
+                                    <div class="flex-1 min-w-0">
+                                        <p class="text-white text-sm font-medium truncate leading-tight">{title}</p>
+                                        <div>
+                                            <p class="text-gray-300/70 text-xs truncate leading-tight mt-0.5">{artist}</p>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-1.5 flex-shrink-0" role="group" aria-label="Playback controls">
+                                        <button class="w-10 h-10 rounded-full flex items-center justify-center transition bg-brand text-black hover:scale-105"
+                                            aria-label={play_label.clone()} title={play_title.clone()} on_click={bind!(me, |_| me.toggle())}>
+                                            {play_icon.clone()}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            }
+        }))
     }
 }
 

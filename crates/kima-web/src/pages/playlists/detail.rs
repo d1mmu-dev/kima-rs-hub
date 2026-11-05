@@ -1,14 +1,7 @@
-//! `/playlists/<id>`: tracks (play, remove), rename, delete.
-//!
-//! Every change is followed by a refetch (not an optimistic edit): the page then always shows what the
-//! backend has, including its error when a call is refused.
-
-use std::rc::Rc;
+//! `/playlists/<id>`: the track table (number, title, artist, duration, remove), rename, delete.
 
 use kima_api_types::library::Track;
-use kima_api_types::playlists::{
-    MessageResponse, Playlist, PlaylistDetail, RemoveItemResponse, UpdatePlaylist,
-};
+use kima_api_types::playlists::{MessageResponse, PlaylistDetail, RemoveItemResponse, UpdatePlaylist};
 use vertigo::{DomNode, Value, bind, dom, get_driver};
 
 use super::validate_name;
@@ -16,7 +9,7 @@ use crate::api::client::load;
 use crate::player::queue_item;
 use crate::route::Route;
 use crate::tracklist::{RowExtra, track_rows};
-use crate::ui::{Ctx, error_css, flag_now, muted_css, resource_view, row_css};
+use crate::ui::{Ctx, error_css, flag_now, muted_css, resource_view};
 
 pub fn render(ctx: &Ctx, id: String) -> DomNode {
     let reload = Value::new(0_u32);
@@ -28,7 +21,7 @@ pub fn render(ctx: &Ctx, id: String) -> DomNode {
         }));
         resource_view(
             resource,
-            bind!(ctx, id, reload, |detail: Rc<PlaylistDetail>| body(
+            bind!(ctx, id, reload, |detail: std::rc::Rc<PlaylistDetail>| body(
                 &ctx, &id, &reload, &detail
             )),
         )
@@ -94,7 +87,7 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
                 </span>
             }
         } else {
-            dom! { <button name="delete-playlist" on_click={ask.clone()}>"Delete playlist"</button> }
+            dom! { <button name="delete-playlist" on_click={ask.clone()}>"Delete"</button> }
         }
     }));
 
@@ -102,8 +95,11 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
         let (ctx, id, message, reload) = (ctx.clone(), id.clone(), message.clone(), reload.clone());
         Rc::new(move |track: &Track| {
             let track_id = track.id.to_string();
-            let click = bind!(ctx, id, message, reload, |_| {
-                get_driver().spawn(bind!(ctx, id, message, reload, track_id, async move {
+            let click = move |_| {
+                let ctx = ctx.clone();
+                let message = message.clone();
+                let reload = reload.clone();
+                let _ = get_driver().spawn(async move {
                     match ctx
                         .client
                         .delete::<RemoveItemResponse>(&format!(
@@ -114,8 +110,8 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
                         Ok(_) => reload.change(|n| *n += 1),
                         Err(err) => message.set(Some(err.message)),
                     }
-                }));
-            });
+                });
+            };
             dom! { <button name="remove-track" on_click={click} title="Remove from playlist">"✕"</button> }
         })
     };
@@ -130,18 +126,23 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
         track_rows(ctx, tracks.clone(), Some(remove))
     };
     let title = detail.summary.playlist.name.clone();
-    let count = format!("{} tracks", detail.summary.track_count);
     dom! {
         <div>
-            <h2>{title}</h2>
-            <p css={muted_css()}>{count}</p>
-            <form css={row_css()} on_submit={rename}>
-                <input type="text" name="rename" value={name.clone()}
-                    on_input={bind!(name, |v: String| name.set(v))} />
-                <button type="submit">"Rename"</button>
-                <button type="button" name="play-all" on_click={play_all} disabled={flag_now(tracks.is_empty())}>"▶ Play all"</button>
-                {delete_view}
-            </form>
+            <h1 class="text-2xl font-bold text-white mb-1">{title}</h1>
+            <p class="text-[var(--text-secondary)] mb-4">"{detail.summary.track_count} tracks"</p>
+            <div class="flex flex-wrap items-center gap-3 mb-4">
+                <form css={row_css()} on_submit={rename}>
+                    <input type="text" name="rename" value={name.clone()}
+                        on_input={bind!(name, |v: String| name.set(v))} />
+                    <button type="submit">"Rename"</button>
+                </form>
+                <button class={crate::ui::BUTTON_TEMPLATE_FORMAT} on_click={play_all}>
+                    <div class="px-5 py-3 rounded-lg bg-[var(--bg-primary)] border border-white/10">"▶ Play all"</div>
+                </button>
+                <button class={crate::ui::BUTTON_TEMPLATE_FORMAT} on_click={ask.clone()}>
+                    <div class="px-5 py-3 rounded-lg bg-white/10 text-white font-semibold hover:bg-white/20 transition-colors">"Delete"</div>
+                </button>
+            </div>
             {message_view}
             {list}
         </div>

@@ -25,7 +25,10 @@ pub fn not_found() -> DomNode {
 
 /// Whether `route` matches the library browse root.
 pub fn is_library(route: &Route) -> bool {
-    matches!(route, Route::Artists | Route::Albums { .. } | Route::Tracks { .. })
+    matches!(
+        route,
+        Route::Artists | Route::Albums { .. } | Route::Tracks { .. }
+    )
 }
 
 /// The owner's first name for the "account" heading on Settings (legacy Settings shows

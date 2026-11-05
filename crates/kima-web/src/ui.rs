@@ -38,7 +38,8 @@ pub struct Ctx {
 impl Ctx {
     /// Shows `message` in the toast for four seconds (a newer message replaces it and restarts the clock).
     pub fn notify(&self, message: impl Into<String>) {
-        let id = vertigo::transaction(|c| self.toast.get(c)).map_or(1, |(id, _)| id.wrapping_add(1));
+        let id =
+            vertigo::transaction(|c| self.toast.get(c)).map_or(1, |(id, _)| id.wrapping_add(1));
         self.toast.set(Some((id, message.into())));
         let toast = self.toast.clone();
         get_driver().spawn(async move {
@@ -64,7 +65,8 @@ pub const LABEL: &str = "block text-sm font-medium text-[var(--text-primary)] mb
 /// The glass card of login / setup / settings sections.
 pub const CARD: &str = "bg-[#111]/90 rounded-lg p-6 md:p-8 border border-white/10";
 /// `<h1>` of a page (collection, playlists).
-pub const PAGE_TITLE: &str = "text-4xl md:text-5xl font-bold tracking-tight text-white leading-none";
+pub const PAGE_TITLE: &str =
+    "text-4xl md:text-5xl font-bold tracking-tight text-white leading-none";
 
 /// The coloured bar + title + count + rule that opens a section (`SectionHeader`).
 pub fn section_header(title: &str, count: Option<String>) -> DomNode {
@@ -98,8 +100,12 @@ pub fn resource_view<T: PartialEq + 'static>(
     render: impl Fn(Rc<T>) -> DomNode + 'static,
 ) -> DomNode {
     resource.render_value(move |state| match state {
-        Resource::Loading => dom! { <p class="py-8 text-sm text-[var(--text-muted)]">"Loading…"</p> },
-        Resource::Error(message) => dom! { <p class="py-8 text-sm text-danger-light">{message}</p> },
+        Resource::Loading => {
+            dom! { <p class="py-8 text-sm text-[var(--text-muted)]">"Loading…"</p> }
+        }
+        Resource::Error(message) => {
+            dom! { <p class="py-8 text-sm text-danger-light">{message}</p> }
+        }
         Resource::Ready(data) => render(data),
     })
 }

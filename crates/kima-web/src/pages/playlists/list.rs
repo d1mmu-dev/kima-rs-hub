@@ -19,12 +19,14 @@ fn mosaic_covers(summaries: &[PlaylistSummary]) -> Vec<String> {
             *counts.entry(id).or_insert(0) += 1;
         }
     }
-    let mut ranked: Vec<&PlaylistSummary> = summaries
-        .iter()
-        .filter(|s| s.cover_id.is_some())
-        .collect();
+    let mut ranked: Vec<&PlaylistSummary> =
+        summaries.iter().filter(|s| s.cover_id.is_some()).collect();
     ranked.sort_by_key(|s| {
-        std::cmp::Reverse(counts.get(s.cover_id.as_deref().unwrap_or(&"")).unwrap_or(0))
+        std::cmp::Reverse(
+            counts
+                .get(s.cover_id.as_deref().unwrap_or(&""))
+                .unwrap_or(0),
+        )
     });
     let mut out = Vec::new();
     for s in &ranked {
@@ -45,12 +47,7 @@ fn mosaic_covers(summaries: &[PlaylistSummary]) -> Vec<String> {
         .collect()
 }
 
-fn playlist_card(
-    ctx: &Ctx,
-    summary: &PlaylistSummary,
-    index: usize,
-    covers: &[String],
-) -> DomNode {
+fn playlist_card(ctx: &Ctx, summary: &PlaylistSummary, index: usize, covers: &[String]) -> DomNode {
     let id = summary.id.to_string();
     let token = ctx.session.current_token().unwrap_or_default();
     let tracks: Rc<dyn Fn()> = {
@@ -99,7 +96,10 @@ pub fn render(ctx: &Ctx) -> DomNode {
                 )
             } else {
                 let covers = mosaic_covers(
-                    &lists.iter().map(|l| &l.summary.playlist).collect::<Vec<_>>(),
+                    &lists
+                        .iter()
+                        .map(|l| &l.summary.playlist)
+                        .collect::<Vec<_>>(),
                 );
                 let button_class = format!(
                     "{BTN_PRIMARY} {BUTTON_TEMPLATE_FORMAT} min-w-[120px]",

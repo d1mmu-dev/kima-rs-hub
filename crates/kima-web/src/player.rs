@@ -22,8 +22,8 @@ use vertigo::{
 
 use crate::api::client::ApiClient;
 use crate::auth::Session;
-use crate::position;
 use crate::icons::icon;
+use crate::position;
 use crate::route::Route;
 use crate::ui::{cover_url, flag, format_time};
 
@@ -515,7 +515,11 @@ impl Player {
             let (position, duration) = (self.0.position.clone(), self.0.duration.clone());
             Computed::from(move |ctx| {
                 let d = duration.get(ctx);
-                let pct = if d > 0.0 { (position.get(ctx) / d * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+                let pct = if d > 0.0 {
+                    (position.get(ctx) / d * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
                 format!("width: {pct:.3}%;")
             })
         };
@@ -527,8 +531,14 @@ impl Player {
         let slider_max = self.0.duration.map(|d| format!("{}", d.max(1.0)));
         let slider_value = self.0.position.map(|p| format!("{p}"));
 
-        let play_label = self.0.playing.map(|p| if p { "Pause" } else { "Play" }.to_owned());
-        let play_title = self.0.playing.map(|p| if p { "pause" } else { "play" }.to_owned());
+        let play_label = self
+            .0
+            .playing
+            .map(|p| if p { "Pause" } else { "Play" }.to_owned());
+        let play_title = self
+            .0
+            .playing
+            .map(|p| if p { "pause" } else { "play" }.to_owned());
         let play_icon = self.0.playing.render_value(|playing| {
             if playing {
                 icon("pause", "w-5 h-5 relative z-(--z-raised)")
@@ -641,12 +651,22 @@ impl Player {
             let (position, duration) = (self.0.position.clone(), self.0.duration.clone());
             Computed::from(move |ctx| {
                 let d = duration.get(ctx);
-                let pct = if d > 0.0 { (position.get(ctx) / d * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+                let pct = if d > 0.0 {
+                    (position.get(ctx) / d * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                };
                 format!("width: {pct:.4}%;")
             })
         };
-        let play_label = self.0.playing.map(|p| if p { "Pause" } else { "Play" }.to_owned());
-        let play_title = self.0.playing.map(|p| if p { "pause" } else { "play" }.to_owned());
+        let play_label = self
+            .0
+            .playing
+            .map(|p| if p { "Pause" } else { "Play" }.to_owned());
+        let play_title = self
+            .0
+            .playing
+            .map(|p| if p { "pause" } else { "play" }.to_owned());
         let play_icon = self.0.playing.render_value(|playing| {
             if playing {
                 icon("pause", "w-5 h-5")

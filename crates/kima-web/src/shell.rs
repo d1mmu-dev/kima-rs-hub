@@ -146,10 +146,7 @@ fn on_search_input(ctx: &Ctx, text: String) {
 }
 
 fn on_search_submit(ctx: &Ctx) {
-    if !vertigo::transaction(|c| ctx.query.get(c))
-        .trim()
-        .is_empty()
-    {
+    if !vertigo::transaction(|c| ctx.query.get(c)).trim().is_empty() {
         ctx.router.set(Route::Search);
     }
 }
@@ -341,20 +338,19 @@ fn playlist_stack(ctx: &Ctx, route: Computed<Route>) -> DomNode {
                     .get::<Vec<PlaylistListEntry>>("/api/playlists?limit=100")
                     .await
             }));
-            resource.render_value(bind!(
-                route,
-                |state: Resource<Rc<Vec<PlaylistListEntry>>>| {
-                    let Resource::Ready(lists) = state else {
-                        return dom! { <span /> };
-                    };
-                    let items: Vec<DomNode> = lists
-                        .iter()
-                        .enumerate()
-                        .map(|(i, p)| playlist_link(&route, i, p))
-                        .collect();
-                    dom! { <div class="flex-1 overflow-y-auto space-y-0.5 px-3">{items}</div> }
-                }
-            ))
+            resource.render_value(bind!(route, |state: Resource<
+                Rc<Vec<PlaylistListEntry>>,
+            >| {
+                let Resource::Ready(lists) = state else {
+                    return dom! { <span /> };
+                };
+                let items: Vec<DomNode> = lists
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| playlist_link(&route, i, p))
+                    .collect();
+                dom! { <div class="flex-1 overflow-y-auto space-y-0.5 px-3">{items}</div> }
+            }))
         }));
     dom! {
         <div class="flex-1 overflow-hidden flex flex-col">

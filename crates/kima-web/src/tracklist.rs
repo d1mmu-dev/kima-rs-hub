@@ -21,7 +21,11 @@ fn token(ctx: &Ctx) -> Option<String> {
     ctx.session.current_token()
 }
 
-fn play_from(ctx: &Ctx, tracks: &Rc<Vec<Track>>, i: usize) -> impl Fn(vertigo::ClickEvent) + 'static {
+fn play_from(
+    ctx: &Ctx,
+    tracks: &Rc<Vec<Track>>,
+    i: usize,
+) -> impl Fn(vertigo::ClickEvent) + 'static {
     let (ctx, tracks) = (ctx.clone(), tracks.clone());
     move |_| {
         let queue = tracks.iter().map(queue_item).collect();

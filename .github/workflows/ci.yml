@@ -149,11 +149,8 @@ jobs:
           name: playwright-test-results
           path: frontend/test-results
           if-no-files-found: ignore
-  # PLACEHOLDER (M9 Task 0): `crates/kima-web` does not exist until Task 2, which flips `if: false`
-  # to `if: true` (deletes the line) and makes this job real. Written now so the toolchain groundwork
-  # and its activation are reviewable separately.
+  # Activated by M9 Task 2 (the placeholder from Task 0 carried `if: false`).
   web-wasm:
-    if: false
     runs-on: ubuntu-latest
     env:
       SQLX_OFFLINE: "true"
@@ -173,3 +170,7 @@ jobs:
       - run: tools/verify-wasm-toolchain.sh
       # Proves kima-api-types stays wasm-buildable (Task 1 creates it).
       - run: cargo build -p kima-api-types --target wasm32-unknown-unknown
+      - run: cargo clippy -p kima-web --target wasm32-unknown-unknown -- -D warnings
+      - run: cargo test -p kima-web
+      - run: cargo install vertigo-cli --version 0.13.4 --locked
+      - run: tools/verify-kima-web-build.sh

@@ -1,9 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "tools/record-fixtures"]
-# crates/kima-web holds only its README until Task 2 creates the crate (a `crates/*` glob
-# entry without a Cargo.toml is a manifest error); Task 2 removes this exclude.
-exclude = ["crates/kima-web"]
 
 [workspace.package]
 version = "0.1.0"

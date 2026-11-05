@@ -14,3 +14,9 @@ Arch `pacman -S binaryen`, or without root download a release from
 <https://github.com/WebAssembly/binaryen/releases> and put `bin/wasm-opt` on `PATH`. Check the whole setup with
 `tools/verify-wasm-toolchain.sh`. Install the CLI matching the library version:
 `cargo install vertigo-cli --version 0.13.4 --locked`.
+
+**Build.** `tools/verify-kima-web-build.sh` runs `vertigo build` in this crate and checks the output in `build/`
+(gitignored): `index.json` (manifest; `vertigo serve` renders the HTML from it), a hashed `kima_web.<hash>.wasm`
+and a hashed `wasm_run.<hash>.js`. vertigo 0.13 writes no static `index.html` and no unhashed `wasm_run.js`.
+Set `VERTIGO=/path/to/vertigo` to pick a CLI that is not first on `PATH`; keep it at the same version as the
+`vertigo` crate (`=0.13.4` in `Cargo.toml`).

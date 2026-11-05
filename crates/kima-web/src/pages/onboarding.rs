@@ -120,7 +120,7 @@ fn form(ctx: &Ctx) -> DomNode {
                             <div class="space-y-6">
                                 <div>
                                     <h2 class="text-2xl font-bold text-white mb-1">"Create Your Admin Account"</h2>
-                                    <p class="text-[var(--text-secondary)]">"This is the owner account for your Kima server. You'll manage users and settings from here."</p>
+                                    <p class="text-[var(--text-secondary)]">"This is the owner account for your Kima server. You'll manage users, integrations, and settings from here."</p>
                                 </div>
                                 <form class="space-y-4 mt-8" on_submit={submit}>
                                     <div>

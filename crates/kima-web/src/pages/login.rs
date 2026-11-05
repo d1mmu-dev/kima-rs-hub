@@ -7,7 +7,7 @@ use vertigo::{DomNode, Resource, Value, bind, dom, get_driver};
 use crate::api::client::load;
 use crate::route::Route;
 use crate::shell::kima_mark;
-use crate::ui::{BTN_PRIMARY, Ctx, INPUT, LABEL, flag, resource_view};
+use crate::ui::{BTN_PRIMARY, Ctx, INPUT, LABEL, flag};
 
 /// The form's input check; the server stays the authority (its message is shown for anything else).
 pub fn validate(username: &str, password: &str) -> Result<Credentials, String> {
@@ -68,22 +68,23 @@ pub fn render(ctx: &Ctx) -> DomNode {
             let router = ctx.router.clone();
             get_driver().spawn(async move { router.set(Route::Setup) });
         }
-        dom! { <span /> }
+        dom! { <span class="hidden" /> }
     }));
 
     let error_view = error.render_value(|e| match e {
         Some(message) => dom! {
             <div role="alert" class="p-3 rounded-lg bg-danger/10 border border-danger/30 text-sm text-danger-light">{message}</div>
         },
-        None => dom! { <span /> },
+        None => dom! { <span class="hidden" /> },
     });
     let disabled = busy.to_computed();
-    let setup_hint = resource_view(status, |s| {
-        if s.registration_open {
-            dom! { <a class="block text-center text-sm text-[var(--text-secondary)] hover:text-white" href={Route::Setup.to_string()}>"Create an account"</a> }
-        } else {
-            dom! { <span class="block text-center text-sm text-[var(--text-muted)]">"Registration is closed"</span> }
-        }
+    // Only when registration is open; nothing while loading, on an error or when it is closed (the legacy page
+    // shows nothing either), so the card does not change height when the status arrives.
+    let setup_hint = status.render_value(|state| match state {
+        Resource::Ready(s) if s.registration_open => dom! {
+            <a class="block mt-4 text-center text-sm text-[var(--text-secondary)] hover:text-white" href={Route::Setup.to_string()}>"Create an account"</a>
+        },
+        _ => dom! { <span class="hidden" /> },
     });
 
     dom! {
@@ -126,9 +127,9 @@ pub fn render(ctx: &Ctx) -> DomNode {
                             </div>
                             {error_view}
                             <button type="submit" class={format!("{BTN_PRIMARY} w-full")} disabled={flag(disabled)}>"Sign In"</button>
-                            {first_run}
-                            {setup_hint}
                         </form>
+                        {first_run}
+                        {setup_hint}
                     </div>
                     <p class="text-center text-[var(--text-muted)] text-sm mt-6">"© 2026 Kima. Your music, your way."</p>
                 </div>

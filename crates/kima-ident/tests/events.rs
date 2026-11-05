@@ -159,8 +159,32 @@ async fn cycle_emits_on_count_change_only(pool: PgPool) {
         assert!(progress(&got).is_empty(), "{got:?}");
     }
 
-    // A track to identify: its count change is announced, with the phase.
+    // A track to identify: its count change is announced, with the phase. The embedding
+    // and analysis stages are also unconditionally eligible for this track (owner decision,
+    // 2026-11-04), but are parked not-yet-due here so this test keeps exercising the tracks
+    // phase's own announcement in isolation, the same way `ctx.config.fingerprinting = false`
+    // above sidelines the fingerprint phase; embedding's own announcement is covered by
+    // `embedding_phase_runs_while_musicbrainz_is_paused` in `coordinator.rs`. Analysis runs
+    // in the same `tokio::join!` as the tracks network phase (`coordinator/mod.rs`), so this
+    // seeded track must be parked for BOTH local phases or `analysis_phase` claims it too,
+    // racing the tracks phase's own row lock in this same cycle.
     let t = common::track(&pool, "a.wav", 30).await;
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status, next_attempt_at)
+         VALUES ($1, 'embedding', 'pending', now() + interval '1 hour')",
+    )
+    .bind(t)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status, next_attempt_at)
+         VALUES ($1, 'analysis', 'pending', now() + interval '1 hour')",
+    )
+    .bind(t)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("UPDATE tracks SET title = 'Tone', tag_recording_mbid = $2 WHERE id = $1")
         .bind(t)
         .bind(Uuid::parse_str(&rec).unwrap())

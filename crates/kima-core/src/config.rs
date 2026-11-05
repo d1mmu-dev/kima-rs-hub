@@ -31,6 +31,23 @@ pub struct Config {
     pub musicbrainz_base_url: String,
     /// `KIMA_FINGERPRINT_WORKERS`: fingerprint pool size; half the cores, at least 1 (spec §9.3).
     pub fingerprint_workers: usize,
+    /// `KIMA_CLAP_MODEL_DIR`: directory containing the pinned CLAP audio model.
+    pub clap_model_dir: Option<PathBuf>,
+    /// `DISABLE_CLAP=true` skips CLAP initialization.
+    pub disable_clap: bool,
+    /// `KIMA_MUSICNN_MODEL_DIR`: directory containing the pinned MusiCNN analysis models
+    /// (core + 10 heads).
+    pub musicnn_model_dir: Option<PathBuf>,
+    /// `DISABLE_MUSICNN=true` skips MusiCNN initialization (DSP-only analysis).
+    pub disable_musicnn: bool,
+    /// `KIMA_SNAPSHOT_DIR`: absolute, private (0700, server-owned) directory for unnamed input
+    /// snapshots. It must be on the SAME mount as the library, which therefore must be mounted
+    /// read-write for the server. Unset: embeddings fail closed with `SNAPSHOT_UNAVAILABLE`.
+    pub snapshot_dir: Option<PathBuf>,
+    /// `KIMA_SNAPSHOT_MAX_BYTES`: largest input snapshotted; `None` is the `kima-ml` default.
+    pub snapshot_max_bytes: Option<u64>,
+    /// `KIMA_SNAPSHOT_MAX_CONCURRENT`: live snapshots at once; `None` is the `kima-ml` default.
+    pub snapshot_max_concurrent: Option<usize>,
     /// `ACOUSTID_DISABLED=true` (any case): no AcoustID rung, `fpcalc: false` (upstream's name).
     pub acoustid_disabled: bool,
     /// `ACOUSTID_CLIENT_KEY`: the AcoustID client key after the stored setting (spec §8.4). A
@@ -69,6 +86,13 @@ impl std::fmt::Debug for Config {
             .field("contact", &self.contact)
             .field("musicbrainz_base_url", &self.musicbrainz_base_url)
             .field("fingerprint_workers", &self.fingerprint_workers)
+            .field("clap_model_dir", &self.clap_model_dir)
+            .field("disable_clap", &self.disable_clap)
+            .field("musicnn_model_dir", &self.musicnn_model_dir)
+            .field("disable_musicnn", &self.disable_musicnn)
+            .field("snapshot_dir", &self.snapshot_dir)
+            .field("snapshot_max_bytes", &self.snapshot_max_bytes)
+            .field("snapshot_max_concurrent", &self.snapshot_max_concurrent)
             .field("acoustid_disabled", &self.acoustid_disabled)
             .field("acoustid_client_key", &hidden(&self.acoustid_client_key))
             .field("fanart_api_key", &hidden(&self.fanart_api_key))
@@ -248,6 +272,23 @@ impl Config {
                 }
             },
         };
+        let positive = |name: &'static str| -> Result<Option<u64>, ConfigError> {
+            match value(name) {
+                None => Ok(None),
+                Some(raw) => match raw.parse::<u64>() {
+                    Ok(n) if n > 0 => Ok(Some(n)),
+                    _ => Err(ConfigError::Invalid { name, value: raw }),
+                },
+            }
+        };
+        let snapshot_max_bytes = positive("KIMA_SNAPSHOT_MAX_BYTES")?;
+        let snapshot_max_concurrent = positive("KIMA_SNAPSHOT_MAX_CONCURRENT")?
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| ConfigError::Invalid {
+                name: "KIMA_SNAPSHOT_MAX_CONCURRENT",
+                value: "too large".into(),
+            })?;
         // Upstream compares with `'true'`; any other value leaves AcoustID on.
         let acoustid_disabled =
             value("ACOUSTID_DISABLED").is_some_and(|v| v.eq_ignore_ascii_case("true"));
@@ -277,6 +318,14 @@ impl Config {
             contact: value("KIMA_CONTACT").unwrap_or_else(|| DEFAULT_CONTACT.into()),
             musicbrainz_base_url,
             fingerprint_workers,
+            clap_model_dir: value("KIMA_CLAP_MODEL_DIR").map(PathBuf::from),
+            disable_clap: value("DISABLE_CLAP").is_some_and(|v| v.eq_ignore_ascii_case("true")),
+            musicnn_model_dir: value("KIMA_MUSICNN_MODEL_DIR").map(PathBuf::from),
+            disable_musicnn: value("DISABLE_MUSICNN")
+                .is_some_and(|v| v.eq_ignore_ascii_case("true")),
+            snapshot_dir: value("KIMA_SNAPSHOT_DIR").map(PathBuf::from),
+            snapshot_max_bytes,
+            snapshot_max_concurrent,
             acoustid_disabled,
             acoustid_client_key: value("ACOUSTID_CLIENT_KEY"),
             fanart_api_key: value("FANART_API_KEY"),
@@ -307,6 +356,104 @@ mod tests {
             Config::from_lookup(lookup(&[("DATABASE_URL", "  ")])),
             Err(ConfigError::Missing("DATABASE_URL"))
         );
+    }
+
+    #[test]
+    fn disable_clap_is_case_insensitive_true_only() {
+        for (value, expected) in [
+            ("true", true),
+            ("TRUE", true),
+            ("false", false),
+            ("1", false),
+        ] {
+            let config = Config::from_lookup(lookup(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("DISABLE_CLAP", value),
+            ]))
+            .unwrap();
+            assert_eq!(config.disable_clap, expected);
+        }
+    }
+
+    #[test]
+    fn snapshot_settings_parse_and_default_to_unset() {
+        let base = [("DATABASE_URL", "postgres://x")];
+        let config = Config::from_lookup(lookup(&base)).unwrap();
+        assert_eq!(config.snapshot_dir, None);
+        assert_eq!(config.snapshot_max_bytes, None);
+        assert_eq!(config.snapshot_max_concurrent, None);
+        let config = Config::from_lookup(lookup(&[
+            base[0],
+            ("KIMA_SNAPSHOT_DIR", "/music/.kima-snapshots"),
+            ("KIMA_SNAPSHOT_MAX_BYTES", " 1048576 "),
+            ("KIMA_SNAPSHOT_MAX_CONCURRENT", "3"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.snapshot_dir,
+            Some(PathBuf::from("/music/.kima-snapshots"))
+        );
+        assert_eq!(config.snapshot_max_bytes, Some(1_048_576));
+        assert_eq!(config.snapshot_max_concurrent, Some(3));
+        for name in ["KIMA_SNAPSHOT_MAX_BYTES", "KIMA_SNAPSHOT_MAX_CONCURRENT"] {
+            for bad in ["0", "-1", "lots", "1.5"] {
+                assert_eq!(
+                    Config::from_lookup(lookup(&[base[0], (name, bad)])),
+                    Err(ConfigError::Invalid {
+                        name,
+                        value: bad.into()
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clap_model_directory_is_configurable() {
+        let config = Config::from_lookup(lookup(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("KIMA_CLAP_MODEL_DIR", "/models/clap"),
+        ]))
+        .unwrap();
+        assert!(format!("{config:?}").contains("/models/clap"));
+    }
+
+    #[test]
+    fn musicnn_model_directory_is_configurable() {
+        let config = Config::from_lookup(lookup(&[
+            ("DATABASE_URL", "postgres://x"),
+            ("KIMA_MUSICNN_MODEL_DIR", "/models/musicnn"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.musicnn_model_dir,
+            Some(PathBuf::from("/models/musicnn"))
+        );
+        assert!(format!("{config:?}").contains("/models/musicnn"));
+    }
+
+    #[test]
+    fn disable_musicnn_is_case_insensitive_true_only() {
+        for (value, expected) in [
+            ("true", true),
+            ("TRUE", true),
+            ("false", false),
+            ("1", false),
+        ] {
+            let config = Config::from_lookup(lookup(&[
+                ("DATABASE_URL", "postgres://x"),
+                ("DISABLE_MUSICNN", value),
+            ]))
+            .unwrap();
+            assert_eq!(config.disable_musicnn, expected);
+        }
+    }
+
+    #[test]
+    fn musicnn_settings_default_to_unset() {
+        let config = Config::from_lookup(lookup(&[("DATABASE_URL", "postgres://x")])).unwrap();
+        assert_eq!(config.musicnn_model_dir, None);
+        assert!(!config.disable_musicnn);
     }
 
     #[test]

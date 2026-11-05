@@ -78,6 +78,116 @@ async fn put(pool: &PgPool, t: Uuid, stage: &str, status: &str, next: &str, clas
 
 const RETRY: &str = "now() + interval '1 minute'";
 
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn embedding_progress_and_audio_failures_are_real_stage_state(pool: PgPool) {
+    let a = artist(&pool, "CLAP", "completed").await;
+    let al = album(&pool, a).await;
+    let mut ids = Vec::new();
+    for n in 0..7 {
+        ids.push(track(&pool, al, &format!("{n}"), n == 6).await);
+    }
+    put(&pool, ids[0], "embedding", "done", "NULL", None).await;
+    put(&pool, ids[1], "embedding", "working", "NULL", None).await;
+    put(
+        &pool,
+        ids[2],
+        "embedding",
+        "failed",
+        RETRY,
+        Some("INCONCLUSIVE"),
+    )
+    .await;
+    put(
+        &pool,
+        ids[3],
+        "embedding",
+        "failed",
+        "NULL",
+        Some("INCONCLUSIVE"),
+    )
+    .await;
+    put(
+        &pool,
+        ids[4],
+        "embedding",
+        "failed",
+        "NULL",
+        Some("FILE_MISSING"),
+    )
+    .await;
+    // ids[5] has no row; ids[6] is physically missing.
+    let p = enrichment::progress(&pool, false).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(p.clap_embeddings).unwrap(),
+        json!({
+            "total":6,"completed":1,"pending":1,"processing":1,"failed":2,
+            "retrying":1,"waitingMissing":2,"progress":17,"isBackground":true
+        })
+    );
+    let c = enrichment::status_counts(&pool).await.unwrap().audio;
+    assert_eq!((c.total, c.completed, c.processing, c.failed), (6, 1, 1, 2));
+    for filter in [None, Some("audio")] {
+        let (rows, total) = enrichment::failures(
+            &pool,
+            &FailureFilter {
+                entity_type: filter.map(str::to_owned),
+                limit: 1,
+                offset: 0,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entity_type, "audio");
+        assert_eq!(rows[0].metadata["stage"], "embedding");
+        let (rows, total) = enrichment::failures(
+            &pool,
+            &FailureFilter {
+                entity_type: filter.map(str::to_owned),
+                limit: 1,
+                offset: 2,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(total, 2);
+        assert!(rows.is_empty());
+    }
+    let counts = enrichment::failure_counts(&pool).await.unwrap();
+    assert_eq!(
+        (counts.audio, counts.total, counts.track, counts.scan),
+        (2, 2, 0, 0)
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn embedding_owed_work_prevents_full_but_not_core_completion(pool: PgPool) {
+    let t = lone_track(&pool).await;
+    put(&pool, t, "recording", "done", "NULL", None).await;
+    let p = enrichment::progress(&pool, false).await.unwrap();
+    assert!(p.core_complete);
+    assert!(!p.is_fully_complete, "unattempted embedding is not success");
+    put(&pool, t, "embedding", "failed", RETRY, Some("INCONCLUSIVE")).await;
+    assert!(
+        !enrichment::progress(&pool, false)
+            .await
+            .unwrap()
+            .is_fully_complete
+    );
+    sqlx::query("UPDATE track_stages SET next_attempt_at=NULL WHERE stage='embedding'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        enrichment::progress(&pool, false)
+            .await
+            .unwrap()
+            .is_fully_complete,
+        "terminal failures settle background work, just like fingerprints"
+    );
+}
+
 // ---- state ----
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -293,6 +403,7 @@ async fn core_and_fully_complete_flags(pool: PgPool) {
     let t = track(&pool, al, "x", false).await;
     put(&pool, t, "fingerprint", "done", "NULL", None).await;
     put(&pool, t, "recording", "done", "NULL", None).await;
+    put(&pool, t, "embedding", "done", "NULL", None).await;
     // A missing file's open questions do not hold completion back.
     let gone = track(&pool, al, "gone", true).await;
     put(&pool, gone, "recording", "pending", "NULL", None).await;
@@ -459,7 +570,7 @@ async fn status_counts_from_the_same_numbers(pool: PgPool) {
     );
     assert_eq!(
         serde_json::to_value(c.audio).unwrap(),
-        json!({"total":0,"completed":0,"failed":0,"processing":0})
+        json!({"total":3,"completed":0,"failed":0,"processing":0})
     );
 }
 

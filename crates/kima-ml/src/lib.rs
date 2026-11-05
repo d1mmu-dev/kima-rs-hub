@@ -1,8 +1,12 @@
 //! kima-ml: Model integrity verification, capability evaluation, and ML runtime.
 
+#[cfg(feature = "pg-publish")]
+pub mod analysis_publish;
 pub mod attempt;
 pub mod audio;
 pub mod clap;
+pub mod dsp;
+pub mod input_snapshot;
 pub mod musicnn;
 pub mod onnx;
 #[cfg(feature = "pg-publish")]

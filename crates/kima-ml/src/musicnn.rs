@@ -5,6 +5,11 @@
 //! `services/audio-analyzer/musicnn_onnx.py` at commit
 //! `12faf1cd34ff53054221818b0ccde58b8e9b0020`.
 
+mod aggregate;
+mod compute;
+pub use aggregate::{MusicnnAggregate, MusicnnAnalysisResult, aggregate, aggregate_patches};
+pub use compute::{MusicnnComputation, MusicnnCompute, MusicnnComputeError, MusicnnPatchOutputs};
+
 /// Produce centered 512-sample frames at a 256-sample hop, padding with zero.
 ///
 /// An empty input produces no frames. A nonempty input includes a final frame

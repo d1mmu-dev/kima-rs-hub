@@ -91,6 +91,18 @@ stop_pg() {
     if [ "${BUNDLED_PG:-}" = 1 ]; then gosu postgres pg_ctl -D "$PGDATA" -m fast stop || true; fi
 }
 
+# Private snapshot directory for M4 embeddings: on the library mount (reflink cannot cross
+# mounts), owned by kima, mode 0700. kima itself verifies this at startup and disables the
+# embedding analysis (server keeps running) if it is wrong.
+if [ -n "${KIMA_SNAPSHOT_DIR:-}" ]; then
+    if [ -L "$KIMA_SNAPSHOT_DIR" ]; then
+        echo "kima-entrypoint: refusing to use $KIMA_SNAPSHOT_DIR: it is a symlink" >&2
+    elif ! { install -d -m 0700 -o kima -g kima "$KIMA_SNAPSHOT_DIR" \
+        && chown -h kima:kima "$KIMA_SNAPSHOT_DIR" && chmod 0700 "$KIMA_SNAPSHOT_DIR"; }; then
+        echo "kima-entrypoint: could not prepare $KIMA_SNAPSHOT_DIR (read-only mount?); embeddings will be disabled" >&2
+    fi
+fi
+
 gosu kima kima &
 KIMA_PID=$!
 trap 'kill -TERM "$KIMA_PID" 2>/dev/null || true' TERM INT

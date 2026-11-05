@@ -16,6 +16,21 @@ pub const LAST_ERROR_MAX_CHARS: usize = 2000;
 pub enum Stage {
     Fingerprint,
     Recording,
+    /// CLAP audio embedding (M4): eligible as soon as the track exists, the same
+    /// unconditional trigger as [`Stage::Fingerprint`] — never gated on `Recording` or
+    /// any future analysis stage, and independent of the MusicBrainz on/off switch.
+    Embedding,
+    /// MusiCNN + DSP per-track analysis (M4): already reserved in the `track_stages.stage`
+    /// CHECK constraint since the original schema (migration `0018_track_stages.sql`) and
+    /// in `invalidate_track_ml()`'s reset list (`0024`/`0026`), alongside `Embedding`.
+    /// Eligible as soon as the track exists, unconditionally like [`Stage::Fingerprint`]
+    /// and [`Stage::Embedding`] — never gated on `Recording` or `Embedding` settling.
+    /// Publication is `kima_ml::analysis_publish::publish_track_analysis`, which writes
+    /// four independent `track_analysis` column groups outside any single transaction with
+    /// this ledger row; closing or failing a claim must use the same lock-row-before-
+    /// evaluating-the-lease ordering as `Embedding` so a report cannot race a lease
+    /// expiry/redelivery during that gap.
+    Analysis,
 }
 
 impl Stage {
@@ -23,6 +38,8 @@ impl Stage {
         match self {
             Stage::Fingerprint => "fingerprint",
             Stage::Recording => "recording",
+            Stage::Embedding => "embedding",
+            Stage::Analysis => "analysis",
         }
     }
 }
@@ -173,10 +190,56 @@ pub struct FailureRecord {
     pub message: String,
 }
 
-/// Close a claim as failed per `rec`. `false` when the claim is no longer current: nothing
-/// is written.
+/// Close a claim as failed per `rec`. Embedding and Analysis claims must also have a
+/// live lease after the track and stage locks are acquired (both stages have an
+/// out-of-transaction publication step — `ml::complete_embedding`'s single call, or
+/// `analysis_publish`'s four independent group writes — that can span the gap between
+/// lock wait and lease check). Rejected claims write nothing.
 pub async fn report_failure(
     pool: &PgPool,
+    claim: &Claim,
+    rec: &FailureRecord,
+) -> sqlx::Result<bool> {
+    if matches!(claim.stage, Stage::Embedding | Stage::Analysis) {
+        let mut tx = pool.begin().await?;
+        // Match publication and invalidation: track first, then stage.
+        let track = sqlx::query("SELECT id FROM tracks WHERE id = $1 FOR UPDATE")
+            .bind(claim.track_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if track.is_none() {
+            return Ok(false);
+        }
+        let stage = sqlx::query(
+            "SELECT track_id FROM track_stages WHERE track_id = $1 AND stage = $2 FOR UPDATE",
+        )
+        .bind(claim.track_id)
+        .bind(claim.stage.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if stage.is_none() {
+            return Ok(false);
+        }
+        // Separate statement: evaluate the database clock only after any lock wait.
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM track_stages WHERE track_id = $1 AND stage = $2 AND status = 'working' AND started_at = $3 AND next_attempt_at > clock_timestamp())")
+            .bind(claim.track_id)
+            .bind(claim.stage.as_str())
+            .bind(claim.started_at)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !valid {
+            return Ok(false);
+        }
+        let result = report_failure_on(&mut tx, claim, rec).await?;
+        tx.commit().await?;
+        return Ok(result);
+    }
+    let mut conn = pool.acquire().await?;
+    report_failure_on(&mut conn, claim, rec).await
+}
+
+async fn report_failure_on(
+    conn: &mut PgConnection,
     claim: &Claim,
     rec: &FailureRecord,
 ) -> sqlx::Result<bool> {
@@ -201,7 +264,7 @@ pub async fn report_failure(
         cut_chars(&rec.message, LAST_ERROR_MAX_CHARS),
         finished,
     )
-    .execute(pool)
+    .execute(conn)
     .await?;
     Ok(r.rows_affected() == 1)
 }

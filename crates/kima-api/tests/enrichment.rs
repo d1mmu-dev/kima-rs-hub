@@ -88,6 +88,151 @@ fn sorted(names: &[&str]) -> Vec<String> {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn embedding_api_progress_status_and_failure_counts_agree(pool: PgPool) {
+    let t = track(&pool, 1).await;
+    let done = track(&pool, 2).await;
+    stage(&pool, t, "embedding", "failed", Some(60)).await;
+    stage(&pool, done, "embedding", "done", None).await;
+    let (srv, _, user) = server(pool).await;
+    let p = get(&srv, &user, "/api/enrichment/progress").await;
+    assert_eq!(p["clapEmbeddings"]["completed"], 1);
+    assert_eq!(p["clapEmbeddings"]["failed"], 1);
+    assert_eq!(p["clapEmbeddings"]["retrying"], 1);
+    assert_eq!(p["clapEmbeddings"]["progress"], 50);
+    let s = get(&srv, &user, "/api/enrichment/status").await;
+    assert_eq!(
+        s["audio"],
+        json!({"total":2,"completed":1,"processing":0,"failed":1})
+    );
+    let c = get(&srv, &user, "/api/enrichment/failures/counts").await;
+    assert_eq!(c["audio"], 1);
+    assert_eq!(c["total"], 1);
+    for path in [
+        "/api/enrichment/failures",
+        "/api/enrichment/failures?entityType=audio",
+    ] {
+        let f = get(&srv, &user, path).await;
+        assert_eq!(f["total"], 1);
+        assert_eq!(f["failures"][0]["entityType"], "audio");
+        assert_eq!(f["failures"][0]["metadata"]["stage"], "embedding");
+    }
+}
+
+#[tokio::test]
+#[ignore = "private audio+text CLAP models, trusted ORT, unprivileged reflink filesystem and guarded isolated DB required"]
+async fn runtime_snapshot_failure_reaches_http_ml_capabilities_audio_only() {
+    // No sqlx test harness: identity must be checked before ANY setup/migration.
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::str::FromStr;
+    let options =
+        PgConnectOptions::from_str(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
+            .unwrap();
+    let database = std::env::var("PGDATABASE").expect("PGDATABASE required");
+    assert_eq!(options.get_host(), "127.0.0.1");
+    assert_ne!(options.get_port(), 5456);
+    assert_eq!(options.get_database(), Some(database.as_str()));
+    assert!(
+        database.starts_with("kima_fix_"),
+        "run-owned empty database required"
+    );
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await
+        .unwrap();
+    let identity: (String, bool) =
+        sqlx::query_as("SELECT current_database()::text, NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        identity,
+        (database, true),
+        "refuse preexisting application database"
+    );
+    kima_db::MIGRATOR.run(&pool).await.unwrap();
+    use kima_ident::stages::embedding;
+    use std::os::unix::fs::PermissionsExt;
+    use tokio_util::sync::CancellationToken;
+    let model_dir = std::env::var_os("KIMA_CLAP_MODEL_DIR").expect("KIMA_CLAP_MODEL_DIR required");
+    let root = tempfile::tempdir().unwrap();
+    let snapshot_dir = root.path().join("snapshots");
+    std::fs::create_dir(&snapshot_dir).unwrap();
+    std::fs::set_permissions(&snapshot_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    struct Restore(std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    let mut state = common::state(pool.clone()).with_library_root(root.path().to_path_buf());
+    let mut ctx = state.ident_ctx();
+    ctx.config.embedding = kima_ident::EmbeddingConfig {
+        model_dir: Some(model_dir.into()),
+        snapshot_dir: Some(snapshot_dir.clone()),
+        ..Default::default()
+    };
+    embedding::check_snapshot_setup(&mut ctx.config.embedding, root.path()).unwrap();
+    let init = embedding::initialize(&ctx).await.unwrap();
+    let init = serde_json::to_value(init).unwrap();
+    assert_eq!(
+        init["capabilities"]["clap_audio_embedding"]["state"], "available",
+        "{init}"
+    );
+    assert_eq!(
+        init["capabilities"]["clap_text_embedding"]["state"], "available",
+        "{init}"
+    );
+    embedding::run_batch(&ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    state.ident = Some(ctx.clone());
+    let (_, user) = common::user_with_token(&state, "ml-reader").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    let before = get(&srv, &user, "/api/enrichment/status").await;
+    assert_eq!(
+        before["mlCapabilities"]["capabilities"]["clap_audio_embedding"]["state"],
+        "available"
+    );
+    let t = track(&pool, 1).await;
+    std::fs::write(root.path().join("track.wav"), b"source bytes").unwrap();
+    sqlx::query("UPDATE tracks SET path='track.wav' WHERE id=$1")
+        .bind(t)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let _restore = Restore(snapshot_dir.clone());
+    std::fs::set_permissions(&snapshot_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(
+        std::fs::File::create(snapshot_dir.join("probe")).is_err(),
+        "must run unprivileged"
+    );
+    let batch = embedding::run_batch(&ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(batch.halted);
+    assert_eq!(batch.failed, 1);
+    let after = get(&srv, &user, "/api/enrichment/status").await;
+    println!("production-router status before failure: {before}");
+    println!("production-router status after failure: {after}");
+    let caps = &after["mlCapabilities"]["capabilities"];
+    assert_eq!(
+        caps["clap_audio_embedding"]["state"], "unavailable",
+        "{after}"
+    );
+    assert!(caps["clap_audio_embedding"].to_string().contains("restart"));
+    assert_eq!(caps["clap_text_embedding"]["state"], "available");
+    embedding::embed_text(&ctx, "a piano").await.unwrap();
+    assert_eq!(
+        embedding::run_batch(&ctx, &CancellationToken::new())
+            .await
+            .unwrap()
+            .claimed,
+        0
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn progress_shape_exact(pool: PgPool) {
     let (srv, _, user) = server(pool).await;
     let p = get(&srv, &user, "/api/enrichment/progress").await;

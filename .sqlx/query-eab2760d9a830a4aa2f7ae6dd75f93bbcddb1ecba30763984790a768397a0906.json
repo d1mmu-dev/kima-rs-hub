@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO track_analysis\n             (track_id, file_generation, dsp_loudness_pipeline_version, integrated_lufs,\n              loudness_range_lu, loudness_computed_at)\n         VALUES ($1,$2,$3,$4,$5,clock_timestamp())\n         ON CONFLICT (track_id) DO UPDATE SET\n             file_generation=EXCLUDED.file_generation,\n             dsp_loudness_pipeline_version=EXCLUDED.dsp_loudness_pipeline_version,\n             integrated_lufs=EXCLUDED.integrated_lufs,\n             loudness_range_lu=EXCLUDED.loudness_range_lu,\n             loudness_computed_at=clock_timestamp(), updated_at=clock_timestamp()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Text",
+        "Float8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eab2760d9a830a4aa2f7ae6dd75f93bbcddb1ecba30763984790a768397a0906"
+}

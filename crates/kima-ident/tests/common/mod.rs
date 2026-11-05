@@ -27,6 +27,42 @@ pub fn ident_ctx_with(
     bases: Bases,
     switch: IdentifySwitch,
 ) -> IdentCtx {
+    ident_ctx_with_embedding(
+        pool,
+        root,
+        bases,
+        switch,
+        kima_ident::EmbeddingConfig::default(),
+    )
+}
+
+/// [`ident_ctx_with`], additionally configuring the CLAP embedding stage.
+pub fn ident_ctx_with_embedding(
+    pool: &PgPool,
+    root: &Path,
+    bases: Bases,
+    switch: IdentifySwitch,
+    embedding: kima_ident::EmbeddingConfig,
+) -> IdentCtx {
+    ident_ctx_with_embedding_and_analysis(
+        pool,
+        root,
+        bases,
+        switch,
+        embedding,
+        kima_ident::AnalysisConfig::default(),
+    )
+}
+
+/// [`ident_ctx_with_embedding`], additionally configuring the M4 analysis stage.
+pub fn ident_ctx_with_embedding_and_analysis(
+    pool: &PgPool,
+    root: &Path,
+    bases: Bases,
+    switch: IdentifySwitch,
+    embedding: kima_ident::EmbeddingConfig,
+    analysis: kima_ident::AnalysisConfig,
+) -> IdentCtx {
     let cipher = Arc::new(Cipher::from_secret("kima-ident tests"));
     let events = EventBus::new(64);
     IdentCtx {
@@ -50,8 +86,12 @@ pub fn ident_ctx_with(
             acoustid_env_key: None,
             fanart_env_key: None,
             artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
+            embedding,
+            analysis,
         },
         last_cycle: Default::default(),
+        embedding_runtime: Default::default(),
+        analysis_runtime: Default::default(),
     }
 }
 

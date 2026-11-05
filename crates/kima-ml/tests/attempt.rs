@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::io::Cursor;
 
-use kima_ml::attempt::{AttemptKind, StageOutcome, run_attempt};
+use kima_ml::attempt::{AnalysisAvailability, AttemptKind, StageOutcome, run_attempt};
 use kima_ml::onnx::{MINIMAL_IDENTITY_ONNX, OnnxModelConsumer};
 use kima_ml::{
     ArtifactId, Capability, CapabilityEvaluationReport, CapabilityStatus, ModelConsumer,
@@ -64,7 +64,7 @@ fn duration_discovery_stays_inside_the_attempt_decode_boundary() {
             },
             &Hint::new(),
             frame_hint,
-            |_| {
+            |_, _| {
                 analyses.set(analyses.get() + 1);
                 Ok::<_, &str>(())
             },
@@ -89,7 +89,7 @@ fn decode_failure_never_calls_publication_callbacks() {
         || Ok(source(b"invalid synthetic audio")),
         &Hint::new(),
         Some(8_000),
-        |_| -> Result<(), &str> { panic!("invalid audio cannot complete analysis") },
+        |_, _| -> Result<(), &str> { panic!("invalid audio cannot complete analysis") },
         |_, _| -> Result<(), &str> { panic!("invalid audio cannot complete embedding") },
     )
     .unwrap_err();
@@ -114,7 +114,7 @@ fn changed_source_between_discovery_passes_cannot_publish() {
         },
         &Hint::new(),
         None,
-        |_| -> Result<(), &str> { panic!("changed source cannot complete analysis") },
+        |_, _| -> Result<(), &str> { panic!("changed source cannot complete analysis") },
         |_, _| -> Result<(), &str> { panic!("changed source cannot complete embedding") },
     )
     .unwrap_err();
@@ -137,7 +137,7 @@ fn embedding_retry_ignores_unavailable_analysis_models() {
         || Ok(source(&bytes)),
         &Hint::new(),
         Some(8_000),
-        |_| -> Result<(), &str> { panic!("durably completed analysis must not rerun") },
+        |_, _| -> Result<(), &str> { panic!("durably completed analysis must not rerun") },
         |windows, _| {
             assert!(!windows.is_empty());
             Ok(())
@@ -164,7 +164,7 @@ fn disabled_embedding_retry_does_not_open_audio_or_claim_success() {
         },
         &Hint::new(),
         None,
-        |_| -> Result<(), &str> { panic!("completed analysis") },
+        |_, _| -> Result<(), &str> { panic!("completed analysis") },
         |_, _| -> Result<(), &str> { panic!("disabled embedding") },
     )
     .unwrap();
@@ -176,28 +176,106 @@ fn disabled_embedding_retry_does_not_open_audio_or_claim_success() {
 }
 
 #[test]
-fn unavailable_analysis_is_not_false_success_and_does_not_decode() {
-    for missing in [Capability::MusicnnAnalysis, Capability::Dsp] {
-        let mut caps = capabilities();
-        caps.capabilities.remove(&missing);
-        let report = run_attempt(
-            AttemptKind::Combined,
-            &caps,
-            || -> Result<Box<dyn MediaSource>, kima_ml::audio::AudioError> {
-                panic!("blocked attempt must not open audio")
-            },
-            &Hint::new(),
-            Some(8_000),
-            |_| -> Result<(), &str> { panic!("incomplete analysis capability") },
-            |_, _| -> Result<(), &str> { panic!("analysis prerequisite unavailable") },
-        )
-        .unwrap();
-        assert_eq!(
-            report.analysis,
-            StageOutcome::Blocked(vec![(missing, caps.status(missing).clone())])
-        );
-        assert_eq!(report.embedding, StageOutcome::AnalysisPrerequisite);
-    }
+fn both_analysis_capabilities_missing_blocks_and_does_not_decode() {
+    // D-157: the whole analysis attempt is only skipped (no decode at all) when *no*
+    // group could possibly produce anything — MusiCNN and DSP both unavailable.
+    let mut caps = capabilities();
+    caps.capabilities.remove(&Capability::MusicnnAnalysis);
+    caps.capabilities.remove(&Capability::Dsp);
+    let report = run_attempt(
+        AttemptKind::Combined,
+        &caps,
+        || -> Result<Box<dyn MediaSource>, kima_ml::audio::AudioError> {
+            panic!("blocked attempt must not open audio")
+        },
+        &Hint::new(),
+        Some(8_000),
+        |_, _| -> Result<(), &str> { panic!("no analysis capability at all") },
+        |_, _| -> Result<(), &str> { panic!("analysis prerequisite unavailable") },
+    )
+    .unwrap();
+    assert_eq!(
+        report.analysis,
+        StageOutcome::Blocked(vec![
+            (
+                Capability::MusicnnAnalysis,
+                caps.status(Capability::MusicnnAnalysis).clone()
+            ),
+            (Capability::Dsp, caps.status(Capability::Dsp).clone())
+        ])
+    );
+    assert_eq!(report.embedding, StageOutcome::AnalysisPrerequisite);
+}
+
+#[test]
+fn missing_musicnn_alone_still_decodes_and_degrades_only_that_group() {
+    // D-157 / independent per-group degradation: MusiCNN missing must not block DSP's
+    // groups (loudness/key/tempo) or the whole analysis stage.
+    let bytes = wav();
+    let mut caps = capabilities();
+    caps.capabilities.remove(&Capability::MusicnnAnalysis);
+    let opens = Cell::new(0);
+    let report = run_attempt(
+        AttemptKind::Combined,
+        &caps,
+        || {
+            opens.set(opens.get() + 1);
+            Ok(source(&bytes))
+        },
+        &Hint::new(),
+        Some(8_000),
+        |tail, availability| {
+            assert!(!tail.is_empty());
+            assert_eq!(
+                availability,
+                AnalysisAvailability {
+                    musicnn: false,
+                    dsp: true
+                }
+            );
+            Ok::<_, &str>(())
+        },
+        |windows, _| {
+            assert!(!windows.is_empty());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        opens.get(),
+        1,
+        "accurate frame_hint needs no discovery pass"
+    );
+    assert_eq!(report.analysis, StageOutcome::Published);
+    assert_eq!(report.embedding, StageOutcome::Published);
+}
+
+#[test]
+fn missing_dsp_alone_still_decodes_and_degrades_only_that_group() {
+    let bytes = wav();
+    let mut caps = capabilities();
+    caps.capabilities.remove(&Capability::Dsp);
+    let report = run_attempt(
+        AttemptKind::Combined,
+        &caps,
+        || Ok(source(&bytes)),
+        &Hint::new(),
+        Some(8_000),
+        |_, availability| {
+            assert_eq!(
+                availability,
+                AnalysisAvailability {
+                    musicnn: true,
+                    dsp: false
+                }
+            );
+            Ok::<_, &str>(())
+        },
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(report.analysis, StageOutcome::Published);
+    assert_eq!(report.embedding, StageOutcome::Published);
 }
 
 #[test]
@@ -209,7 +287,7 @@ fn analysis_failure_blocks_combined_embedding_publication() {
         || Ok(source(&bytes)),
         &Hint::new(),
         Some(8_000),
-        |_| Err("analysis publication rejected"),
+        |_, _| Err("analysis publication rejected"),
         |_, _| -> Result<(), &str> { panic!("analysis prerequisite did not publish") },
     )
     .unwrap();
@@ -237,7 +315,7 @@ fn unavailable_clap_does_not_block_analysis_or_report_embedding_success() {
         },
         &Hint::new(),
         None,
-        |tail| {
+        |tail, _| {
             assert_eq!(tail.len(), 16_000);
             Ok::<_, &str>(())
         },
@@ -266,7 +344,7 @@ fn embedding_retry_redecodes_without_repeating_published_analysis() {
         },
         &Hint::new(),
         Some(8_000),
-        |_| {
+        |_, _| {
             analyses.set(analyses.get() + 1);
             Ok::<_, &str>(())
         },
@@ -288,7 +366,7 @@ fn embedding_retry_redecodes_without_repeating_published_analysis() {
         },
         &Hint::new(),
         Some(8_000),
-        |_| -> Result<(), &str> { panic!("completed analysis must not rerun") },
+        |_, _| -> Result<(), &str> { panic!("completed analysis must not rerun") },
         |windows, rate| {
             assert!(!windows.is_empty());
             assert_eq!(rate, 8_000);
@@ -322,9 +400,16 @@ fn combined_attempt_shares_decode_and_publishes_analysis_before_embedding() {
         },
         &Hint::new(),
         Some(8_000),
-        |tail| {
+        |tail, availability| {
             assert_eq!(tail.len(), 16_000);
             assert!(tail.iter().any(|v| *v != 0.0));
+            assert_eq!(
+                availability,
+                AnalysisAvailability {
+                    musicnn: true,
+                    dsp: true
+                }
+            );
             assert_eq!(session.run_1d(&[tail[100]]).unwrap(), vec![tail[100]]);
             order.borrow_mut().push("analysis published");
             Ok::<_, &'static str>(())

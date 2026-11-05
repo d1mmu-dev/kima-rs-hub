@@ -28,7 +28,7 @@ Then open <http://localhost:3030> and register. The first account becomes the ad
 bundles Postgres, `ffmpeg` and the `kima` binary; state lives in the `kima_data` volume (`/data`).
 The bundled Postgres gets a random password on first start (`/data/postgres-password`, readable by
 root only) and kima connects as an unprivileged `kima` role. Put your
-music in `./music` or set `MUSIC_DIR` to its location (mounted read-only at `/music`).
+music in `./music` or set `MUSIC_DIR` to its location (mounted read-write at `/music`; embeddings keep a private snapshot directory `/music/.kima-snapshots` on the same mount, see [docs/m4-input-snapshots.md](docs/m4-input-snapshots.md)); the `.kima-snapshots` directory is visible in the library on the host. A read-only library cannot hold the snapshots: either disable embeddings (`DISABLE_CLAP=true`) or use a separate read-write mount with reflink support (Btrfs, XFS `reflink=1`) for the library and the snapshot directory.
 
 ## Library
 
@@ -76,7 +76,7 @@ travel with their album; a scoped move leaves sidecars in a folder shared with a
   mode is unavailable. Once happy, use **Switch library to the organized copy** to make that
   folder the library root; plays and playlists carry over. A copy that has not been switched
   to can be undone (the copies are deleted).
-- **Move**: renames files inside `MUSIC_PATH`, which must be mounted writable (drop `:ro`).
+- **Move**: renames files inside `MUSIC_PATH`, which must be mounted writable (the default compose file already does).
   Undo restores every original path from the journal.
 
 ### Autotagger

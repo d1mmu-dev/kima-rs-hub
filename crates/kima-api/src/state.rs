@@ -9,6 +9,7 @@ use kima_core::events::EventBus;
 use kima_core::identify::IdentifySwitch;
 use kima_db::PgPool;
 use kima_db::settings_kv::SettingsCache;
+use kima_ident::AnalysisRuntimeCache;
 use kima_ident::IdentCtx;
 use kima_ident::events::ProgressEvents;
 use kima_library::scan::LibraryRoot;
@@ -205,9 +206,13 @@ impl AppState {
                 acoustid_env_key: None,
                 fanart_env_key: self.fanart_env_key.clone(),
                 artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
+                embedding: kima_ident::EmbeddingConfig::default(),
+                analysis: kima_ident::AnalysisConfig::default(),
             },
             last_cycle: Default::default(),
             progress_events: self.progress_events.clone(),
+            embedding_runtime: Default::default(),
+            analysis_runtime: AnalysisRuntimeCache::default(),
         }
     }
 

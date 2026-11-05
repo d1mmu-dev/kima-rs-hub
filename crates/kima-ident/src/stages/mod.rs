@@ -5,6 +5,8 @@
 //! library root or an io `NotFound`; any other io error is `Transient`, classified by its
 //! message.
 
+pub mod analysis;
+pub mod embedding;
 pub mod fingerprint;
 pub mod recording;
 
@@ -136,6 +138,13 @@ pub enum StageFailure {
     Permanent(Failure),
     /// Timeouts, network and server errors, decode errors: classified by message.
     Transient(Failure),
+    /// Model preprocessing or inference failed; retry independently of decode text.
+    Inference(Failure),
+    /// This one file cannot be read (permissions, nested mount): `INCONCLUSIVE` with the
+    /// normal bounded retry schedule; other files are unaffected.
+    Unreadable(Failure),
+    /// Infrastructure unavailable: retry without consuming the track's attempt budget.
+    Infrastructure(Failure),
     /// The path escapes the root or the file is gone (io `NotFound` only).
     FileMissing(String),
 }
@@ -178,11 +187,25 @@ pub fn record_for(claim: &Claim, f: &StageFailure, now: OffsetDateTime) -> Failu
             class: None,
             message: "source paused (rate limited)".to_owned(),
         },
+        StageFailure::Infrastructure(failure) => FailureRecord {
+            pending_until: None,
+            retry_at: Some(now + RETRY_DELAYS[2]),
+            count_attempt: false,
+            code: failure.code.clone(),
+            class: Some(ErrorClass::Inconclusive.as_str().to_owned()),
+            message: message(&failure.message),
+        },
         StageFailure::Permanent(f) => terminal(&f.code, ErrorClass::Permanent, &f.message),
         StageFailure::FileMissing(msg) => terminal("FILE_MISSING", ErrorClass::FileMissing, msg),
-        StageFailure::Transient(f) => {
-            let class = classify(&f.message);
-            let mut rec = terminal(&f.code, class, &f.message);
+        StageFailure::Transient(failure)
+        | StageFailure::Inference(failure)
+        | StageFailure::Unreadable(failure) => {
+            let class = if matches!(f, StageFailure::Inference(_) | StageFailure::Unreadable(_)) {
+                ErrorClass::Inconclusive
+            } else {
+                classify(&failure.message)
+            };
+            let mut rec = terminal(&failure.code, class, &failure.message);
             if class == ErrorClass::Inconclusive && claim.attempts.saturating_add(1) < RETRY_CAP {
                 rec.retry_at = usize::try_from(claim.attempts)
                     .ok()
@@ -228,6 +251,9 @@ pub struct BatchReport {
     pub done: usize,
     /// Closed `failed` (or parked) by this batch.
     pub failed: usize,
+    /// The batch stopped on a failure shared by every claim (e.g. snapshot setup); the
+    /// phase must not claim again this cycle.
+    pub halted: bool,
 }
 
 impl std::ops::AddAssign for BatchReport {
@@ -235,6 +261,7 @@ impl std::ops::AddAssign for BatchReport {
         self.claimed += b.claimed;
         self.done += b.done;
         self.failed += b.failed;
+        self.halted |= b.halted;
     }
 }
 

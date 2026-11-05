@@ -2,6 +2,40 @@ use kima_db::{PgPool, ml};
 use uuid::Uuid;
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn embedding_input_pairs_path_and_generation_across_invalidation(pool: PgPool) {
+    let t = track(&pool).await;
+    let worker = working(&pool, t).await;
+    let (old_path, old) = ml::embedding_input_for_worker(&pool, t, worker.started_at)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::query("UPDATE tracks SET path='new-input.wav', size=size+1 WHERE id=$1")
+        .bind(t)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE track_stages SET status='working', started_at=$2, next_attempt_at=now()+interval '15 minutes' WHERE track_id=$1 AND stage='embedding'")
+        .bind(t).bind(worker.started_at).execute(&pool).await.unwrap();
+    let (new_path, new) = ml::embedding_input_for_worker(&pool, t, worker.started_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(old_path, new_path);
+    assert_eq!(new_path, "new-input.wav");
+    assert!(new.file_generation > old.file_generation);
+    assert!(
+        !ml::complete_embedding(&pool, &old, &model("v1"), &vector())
+            .await
+            .unwrap()
+    );
+    assert!(
+        ml::complete_embedding(&pool, &new, &model("v1"), &vector())
+            .await
+            .unwrap()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn generation_fence_rejects_reused_stage_token_but_title_edits_preserve_results(
     pool: PgPool,
 ) {
@@ -242,6 +276,49 @@ async fn wait_for_lock(pool: &PgPool, query_prefix: &str) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn queued_publishers_have_one_winner_and_cannot_overwrite_it(pool: PgPool) {
+    let t = track(&pool).await;
+    let claim = working(&pool, t).await;
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT track_id FROM track_stages WHERE track_id=$1 FOR UPDATE")
+        .bind(t)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let first_claim = claim.clone();
+    let p = pool.clone();
+    let first = tokio::spawn(async move {
+        ml::complete_embedding(&p, &first_claim, &model("winner"), &vector())
+            .await
+            .unwrap()
+    });
+    wait_for_lock(&pool, "SELECT track_id FROM track_stages WHERE track_id=").await;
+    let p = pool.clone();
+    let second = tokio::spawn(async move {
+        let mut other = vector();
+        other[0] = 0.;
+        other[1] = 1.;
+        ml::complete_embedding(&p, &claim, &model("loser"), &other)
+            .await
+            .unwrap()
+    });
+    wait_for_lock(&pool, "SELECT id FROM tracks WHERE id=").await;
+    blocker.commit().await.unwrap();
+    assert!(first.await.unwrap());
+    assert!(!second.await.unwrap());
+    assert_eq!(
+        ml::embedding(&pool, t, &model("winner")).await.unwrap(),
+        Some(vector())
+    );
+    assert!(
+        ml::embedding(&pool, t, &model("loser"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn invalidation_committing_before_waiting_publication_rejects_old_generation(pool: PgPool) {
     let t = track(&pool).await;
     let claim = working(&pool, t).await;
@@ -459,6 +536,14 @@ async fn current_claim_atomically_persists_vector_provenance_and_done(pool: PgPo
             .await
             .unwrap()
     );
+    let source: Option<String> = sqlx::query_scalar(
+        "SELECT source FROM track_stages WHERE track_id=$1 AND stage='embedding'",
+    )
+    .bind(t)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(source.as_deref(), Some("clap"));
     assert_eq!(
         ml::embedding(&pool, t, &model("v1")).await.unwrap(),
         Some(vector())

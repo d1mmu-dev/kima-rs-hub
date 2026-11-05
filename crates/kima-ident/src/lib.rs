@@ -23,5 +23,9 @@ pub mod stages;
 pub mod text;
 pub mod wikidata;
 
-pub use ctx::{IdentConfig, IdentCtx};
+pub use ctx::{
+    AnalysisConfig, AnalysisRuntimeCache, EmbeddingConfig, EmbeddingRuntimeCache, IdentConfig,
+    IdentCtx,
+};
+pub use kima_ml::input_snapshot::SnapshotLimits;
 pub use mbid::Mbid;

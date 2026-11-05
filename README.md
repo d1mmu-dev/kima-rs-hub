@@ -3,9 +3,13 @@
 This project is a fork of [Chevron7Locked/kima-hub](https://github.com/Chevron7Locked/kima-hub),
 ported to the Rust language.
 
-Kima is a self-hosted music server. kima-rs keeps the upstream Next.js frontend (built as a static
-export) and replaces the Node/TypeScript backend and the Python analyzers with a single Rust
-`kima` binary plus Postgres. Every difference from upstream is logged in
+Kima is a self-hosted music server. kima-rs replaces the Node/TypeScript backend and the Python analyzers with a single Rust
+`kima` binary plus Postgres, and replaces the upstream Next.js frontend with `kima-web`, a Rust/WASM
+frontend (vertigo) that `kima` renders on the server. `kima-web` is the only frontend: no Next.js or Node
+runs in the Docker image, the production server or CI. The `frontend/` directory (the upstream Next.js app)
+is a temporary visual/functional reference for the comparison tooling (`tools/run-kima-web-visual.sh`) and is
+deleted in M10. The target look is the upstream kima-hub v1.12.3 UI (after the M-SYNC milestone); `kima-web`
+does not match it yet, see [`crates/kima-web/README.md`](crates/kima-web/README.md). Every difference from upstream is logged in
 [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md). Licensed under GPL-3.0-only, like upstream.
 
 ## Status
@@ -123,7 +127,9 @@ itself only fills the database; the separate autotagger can write tags when expl
 
 ## Local development
 
-Requirements: Rust 1.85+, Node.js, Docker (for the dev database).
+Requirements: Rust 1.85+ with the `wasm32-unknown-unknown` target, `vertigo-cli` 0.13.4 and `wasm-opt` (for
+`kima-web`, see [`crates/kima-web/README.md`](crates/kima-web/README.md)), Docker (for the dev database). Node.js is
+needed only for the stale-CSS check and the visual comparison tooling, never to run or build the product.
 
 1. Start the dev Postgres (listens on `localhost:5456`):
    ```bash
@@ -136,23 +142,14 @@ Requirements: Rust 1.85+, Node.js, Docker (for the dev database).
    ```
    Migrations run on startup; it listens on port 3030 unless `PORT` is set.
    `.env.example` sets `KIMA_DATA_DIR=./.data`, so a non-root run doesn't need a writable `/data`.
-4. Frontend dev loop: run the Rust server on another port and point the Next dev server at it.
-   Use two terminals. In the first, start the server and leave it running:
-   ```bash
-   set -a; source .env; set +a; PORT=3111 cargo run -p kima-server
-   ```
-   In the second, start the frontend:
-   ```bash
-   cd frontend && npm install && npm run dev
-   ```
-   `npm run dev` serves on port 3030 and rewrites `/api`, `/rest` and `/health` to the backend.
-
-Note: under `npm run dev`, `/api/events` goes through a Next dev rewrite, which may buffer
-server-sent events. Test event-stream behaviour against the built export served by kima
-(`npm run build` in `frontend/`, then run kima with `KIMA_FRONTEND_DIR=frontend/out`).
+4. Frontend dev loop (`kima-web`): `MUSIC_PATH=$HOME/Music tools/run-kima-web-dev.sh` starts the server and the
+   vertigo dev server on <http://127.0.0.1:4444> (`/api` is proxied to the server); `--ssr` instead serves the
+   production shape (embedded server-side rendering) on the server's own port. Details and env vars are in
+   [`crates/kima-web/README.md`](crates/kima-web/README.md).
 
 Checks: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo test --workspace`, and in `frontend/`: `npx tsc --noEmit`, `npm run test:unit`.
+`cargo test --workspace`; for `kima-web` also
+`cargo clippy -p kima-web --target wasm32-unknown-unknown -- -D warnings` and `cargo test -p kima-web`.
 CI builds with `SQLX_OFFLINE=true`; after changing any `sqlx::query!` macro run
 `cargo sqlx prepare --workspace -- --all-targets` and commit `.sqlx/`.
 
@@ -175,7 +172,9 @@ New in kima-rs:
 | Variable | Default | Meaning |
 |---|---|---|
 | `KIMA_DATA_DIR` | `/data` | State directory. Holds `secrets.json` (mode 0600), which stores the generated secrets. |
-| `KIMA_FRONTEND_DIR` | unset | Directory of the exported frontend. Unset means the server serves the API only. |
+| `KIMA_WEB_BUILD_DIR` | unset (set to `/srv/kima/web` in the Docker image) | `vertigo build` output of `kima-web`. Setting it turns on the embedded server-side rendering of the web UI; unset means the server serves the API only. |
+| `KIMA_WEB_SSR_PORT` | `3031` | Loopback port of the embedded SSR server (never exposed). |
+| `KIMA_FRONTEND_DIR` | unset | Directory of a legacy static export (Next.js era). Not set in the image and no longer produced by any build; removed with `frontend/` in M10. |
 | `KIMA_BIND_HOST` | `0.0.0.0` | Address to bind. |
 | `KIMA_WATCH_MODE` | `auto` | Library watching: `auto` (native events, fall back to polling), `poll` or `off`. |
 | `KIMA_WATCH_POLL_SECS` | `60` | Poll interval in seconds (must be > 0) for `poll` mode and the `auto` fallback. |

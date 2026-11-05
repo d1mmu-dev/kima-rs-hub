@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE playlist_items i SET sort = n.rn\n         FROM (SELECT id, (row_number() OVER (PARTITION BY playlist_id ORDER BY sort) - 1)::int AS rn\n               FROM playlist_items WHERE playlist_id = ANY($1)) n\n         WHERE i.id = n.id AND i.sort <> n.rn",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3049a9d4c77ee490668ba44ecd4834292d2c65dc73d8d2d0dbf7e1b1c9606e65"
+}

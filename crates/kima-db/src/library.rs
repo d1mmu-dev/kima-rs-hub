@@ -504,23 +504,229 @@ pub async fn album_of_path(conn: &mut PgConnection, path: &str) -> sqlx::Result<
     .await
 }
 
-/// Deletes tracks missing for longer than `older_than`. Returns how many.
-pub async fn purge_missing(pool: &PgPool, older_than: Duration) -> sqlx::Result<u64> {
-    Ok(purge_missing_albums(pool, older_than).await?.len() as u64)
+/// A mass disappearance (a dropped mount, not a deletion) stands the sweep down when at least
+/// this many tracks, and more than [`MASS_MISSING_ABORT`] of the library, are flagged missing.
+pub const MASS_MISSING_FLOOR: i64 = 10;
+/// See [`MASS_MISSING_FLOOR`] (upstream `libraryReconcile.ts`: 10 % and 10).
+pub const MASS_MISSING_ABORT: f64 = 0.10;
+
+/// What [`retire_missing`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Retired {
+    /// Tracks deleted.
+    pub tracks: usize,
+    /// The album of each deleted track (one id per track), to refresh what derives from them.
+    pub albums: Vec<Uuid>,
+    /// `(owner, playlist)` of every playlist that held a retired track, for live updates.
+    pub playlists: Vec<(Uuid, Uuid)>,
+    /// Transcode-cache files of the retired tracks; the caller unlinks them after the commit.
+    pub artifacts: Vec<std::path::PathBuf>,
+    /// The guard fired: more than 10 % (and at least 10) of all tracks are flagged missing.
+    pub stood_down: bool,
+    /// How many tracks had their history handed to another copy.
+    pub handed_over: usize,
 }
 
-/// [`purge_missing`], answering the album of each deleted track (one id per track), so the
-/// caller can refresh what those albums derive from their tracks.
-pub async fn purge_missing_albums(pool: &PgPool, older_than: Duration) -> sqlx::Result<Vec<Uuid>> {
-    sqlx::query_scalar!(
-        "DELETE FROM tracks
-         WHERE missing_since IS NOT NULL
-           AND missing_since < now() - make_interval(secs => $1::float8)
-         RETURNING album_id",
+/// Deletes tracks missing for longer than `older_than` (D-040, D-161), in one transaction:
+/// stands down on a mass disappearance; hands plays, stars, ratings, playlist places and
+/// bookmarks to a live copy of the same song (same album, disc, track number, title ignoring
+/// case) unless the user already has that on the copy; writes `removal_log`; clears
+/// `playback_state` references; deletes. `cache_dir` is where transcodes are cached as
+/// `<track id>-<quality>-<size>-<mtime>.mp3`; those files are listed, not unlinked.
+pub async fn retire_missing(
+    pool: &PgPool,
+    older_than: Duration,
+    cache_dir: Option<&std::path::Path>,
+) -> sqlx::Result<Retired> {
+    let mut tx = pool.begin().await?;
+    sqlx::query!("SET LOCAL statement_timeout = '120s'")
+        .execute(&mut *tx)
+        .await?;
+    let counts = sqlx::query!(
+        r#"SELECT count(*) AS "total!", count(missing_since) AS "flagged!" FROM tracks"#
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if counts.flagged >= MASS_MISSING_FLOOR
+        && counts.flagged as f64 / counts.total as f64 > MASS_MISSING_ABORT
+    {
+        return Ok(Retired {
+            stood_down: true,
+            ..Default::default()
+        });
+    }
+    let gone = sqlx::query!(
+        r#"SELECT t.id, t.album_id, t.path, t.title, al.title AS album_title, ar.name AS artist_name
+           FROM tracks t JOIN albums al ON al.id = t.album_id JOIN artists ar ON ar.id = al.artist_id
+           WHERE t.missing_since IS NOT NULL
+             AND t.missing_since < now() - make_interval(secs => $1::float8)
+           ORDER BY t.id
+           FOR UPDATE OF t"#,
         older_than.as_secs_f64()
     )
-    .fetch_all(pool)
-    .await
+    .fetch_all(&mut *tx)
+    .await?;
+    if gone.is_empty() {
+        return Ok(Retired::default());
+    }
+    let ids: Vec<Uuid> = gone.iter().map(|g| g.id).collect();
+
+    let playlists: Vec<(Uuid, Uuid)> = sqlx::query!(
+        "SELECT DISTINCT p.user_id, p.id FROM playlist_items i JOIN playlists p ON p.id = i.playlist_id
+         WHERE i.track_id = ANY($1) ORDER BY 1, 2",
+        &ids
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .map(|r| (r.user_id, r.id))
+    .collect();
+
+    // Titles are compared here, not in SQL: the database lower-cases ASCII only.
+    let slots = sqlx::query!(
+        r#"SELECT g.id AS gone, k.id AS kept, g.title AS gone_title, k.title AS kept_title
+           FROM tracks g JOIN tracks k
+             ON k.album_id = g.album_id AND k.track_no = g.track_no AND k.disc = g.disc
+            AND k.missing_since IS NULL AND k.id <> g.id
+           WHERE g.id = ANY($1) ORDER BY g.id, k.id"#,
+        &ids
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut pairs: Vec<(Uuid, Uuid)> = Vec::new();
+    for s in slots {
+        if s.gone_title.to_lowercase() != s.kept_title.to_lowercase() {
+            continue;
+        }
+        if pairs.last().map(|p| p.0) != Some(s.gone) {
+            pairs.push((s.gone, s.kept));
+        }
+    }
+    for &(from, to) in &pairs {
+        hand_over(&mut tx, from, to).await?;
+    }
+    let copy_of: std::collections::HashMap<Uuid, Uuid> = pairs.iter().copied().collect();
+
+    let mut artifacts = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+    if let Some(dir) = cache_dir
+        && let Ok(rd) = std::fs::read_dir(dir)
+    {
+        files = rd
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+    }
+    for g in &gone {
+        let prefix = format!("{}-", g.id);
+        let mine: Vec<std::path::PathBuf> = files
+            .iter()
+            .filter(|f| f.starts_with(&prefix))
+            .filter_map(|f| cache_dir.map(|d| d.join(f)))
+            .collect();
+        let listing = Json(
+            mine.iter()
+                .map(|p| serde_json::json!({"table": "transcodes", "path": p.to_string_lossy()}))
+                .collect::<Vec<_>>(),
+        );
+        let reason = if copy_of.contains_key(&g.id) {
+            "replaced-by-another-file"
+        } else {
+            "file-missing-grace"
+        };
+        sqlx::query!(
+            "INSERT INTO removal_log (id, file_path, title, artist_name, album_title, reason, artifacts)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            Uuid::now_v7(),
+            g.path,
+            g.title,
+            g.artist_name,
+            g.album_title,
+            reason,
+            listing as Json<Vec<serde_json::Value>>
+        )
+        .execute(&mut *tx)
+        .await?;
+        artifacts.extend(mine);
+    }
+
+    // `playback_state.track_id` is text without a foreign key (D-061): clear it like upstream.
+    let text_ids: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+    sqlx::query!(
+        "UPDATE playback_state SET track_id = NULL WHERE track_id = ANY($1)",
+        &text_ids
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!("DELETE FROM tracks WHERE id = ANY($1)", &ids)
+        .execute(&mut *tx)
+        .await?;
+    // A playlist that lost a place closes the gap, keeping `sort` dense (0..n-1).
+    let lists: Vec<Uuid> = playlists.iter().map(|p| p.1).collect();
+    sqlx::query!(
+        "UPDATE playlist_items i SET sort = n.rn
+         FROM (SELECT id, (row_number() OVER (PARTITION BY playlist_id ORDER BY sort) - 1)::int AS rn
+               FROM playlist_items WHERE playlist_id = ANY($1)) n
+         WHERE i.id = n.id AND i.sort <> n.rn",
+        &lists
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Retired {
+        tracks: gone.len(),
+        albums: gone.iter().map(|g| g.album_id).collect(),
+        playlists,
+        artifacts,
+        stood_down: false,
+        handed_over: pairs.len(),
+    })
+}
+
+/// Moves `from`'s history onto `to`, each kind unless the same user already has it on `to`
+/// (that row stays; the duplicate goes with the retiring track).
+async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE plays SET track_id = $2 WHERE track_id = $1",
+        from,
+        to
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query!(
+        "UPDATE stars s SET track_id = $2 WHERE s.track_id = $1
+           AND NOT EXISTS (SELECT 1 FROM stars o WHERE o.user_id = s.user_id AND o.track_id = $2)",
+        from,
+        to
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query!(
+        "UPDATE ratings r SET track_id = $2 WHERE r.track_id = $1
+           AND NOT EXISTS (SELECT 1 FROM ratings o WHERE o.user_id = r.user_id AND o.track_id = $2)",
+        from,
+        to
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query!(
+        "UPDATE playlist_items i SET track_id = $2 WHERE i.track_id = $1
+           AND NOT EXISTS (SELECT 1 FROM playlist_items o WHERE o.playlist_id = i.playlist_id AND o.track_id = $2)",
+        from,
+        to
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query!(
+        "UPDATE subsonic_bookmarks b SET track_id = $2 WHERE b.track_id = $1
+           AND NOT EXISTS (SELECT 1 FROM subsonic_bookmarks o WHERE o.user_id = b.user_id AND o.track_id = $2)",
+        from,
+        to
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// The albums of the tracks at these paths.
@@ -650,6 +856,21 @@ pub async fn set_via_symlink(pool: &PgPool, paths: &[String], on: bool) -> sqlx:
     .execute(pool)
     .await?;
     Ok(r.rows_affected())
+}
+
+/// Paths of the present tracks whose file had this size and modification time when read.
+pub async fn present_paths_with_stat(
+    pool: &PgPool,
+    size: i64,
+    mtime: OffsetDateTime,
+) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar!(
+        "SELECT path FROM tracks WHERE size = $1 AND mtime = $2 AND missing_since IS NULL",
+        size,
+        mtime
+    )
+    .fetch_all(pool)
+    .await
 }
 
 /// Paths of the present (not missing) tracks anywhere under the folder `dir_prefix`

@@ -887,3 +887,97 @@ async fn similar_names_fold_ampersand_and_punctuation(pool: PgPool) {
     assert_eq!(s[3]["inLibrary"], false);
     assert_eq!(s[4]["mbid"], Value::Null);
 }
+
+// ---- M-SYNC Task 5: GET /api/library/removals (D-161) ----
+
+async fn log_removal(pool: &PgPool, path: &str, minutes_ago: i32, reason: &str) {
+    sqlx::query(
+        "INSERT INTO removal_log (id, file_path, title, artist_name, album_title, reason, artifacts, removed_at)
+         VALUES ($1, $2, 't', 'a', 'b', $3, '[{\"table\":\"transcodes\",\"path\":\"/c/x.mp3\"}]',
+                 now() - make_interval(mins => $4))",
+    )
+    .bind(Uuid::now_v7())
+    .bind(path)
+    .bind(reason)
+    .bind(minutes_ago)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn removals_route_is_admin_only_and_newest_first(pool: PgPool) {
+    log_removal(&pool, "old", 30, "file-missing-grace").await;
+    log_removal(&pool, "new", 1, "replaced-by-another-file").await;
+    let e = env(pool).await;
+    let res = e
+        .server
+        .get("/api/library/removals")
+        .authorization_bearer(&e.user)
+        .await;
+    res.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(res.json::<Value>()["error"], "Admin access required");
+    e.server
+        .get("/api/library/removals")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+
+    let res = e
+        .server
+        .get("/api/library/removals")
+        .authorization_bearer(&e.admin)
+        .await;
+    res.assert_status_ok();
+    let v: Value = res.json();
+    assert_eq!(v["count"], 2);
+    let rows = v["removals"].as_array().unwrap();
+    assert_eq!(rows[0]["filePath"], "new");
+    assert_eq!(rows[0]["reason"], "replaced-by-another-file");
+    assert_eq!(rows[1]["filePath"], "old");
+    has_keys(
+        &rows[0],
+        &[
+            "id",
+            "filePath",
+            "title",
+            "artistName",
+            "albumTitle",
+            "reason",
+            "artifacts",
+            "removedAt",
+        ],
+    );
+    assert_eq!(rows[0]["artifacts"][0]["table"], "transcodes");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn removals_paging_clamps(pool: PgPool) {
+    for i in 0..3 {
+        log_removal(&pool, &format!("f{i}"), i, "file-missing-grace").await;
+    }
+    let e = env(pool).await;
+    let page = |q: &'static str| {
+        let e = &e;
+        async move {
+            let res = e
+                .server
+                .get(&format!("/api/library/removals{q}"))
+                .authorization_bearer(&e.admin)
+                .await;
+            res.assert_status_ok();
+            let v: Value = res.json();
+            (
+                v["count"].as_i64().unwrap(),
+                v["removals"].as_array().unwrap().len(),
+            )
+        }
+    };
+    assert_eq!(page("?limit=1").await, (3, 1));
+    assert_eq!(page("?limit=1&offset=2").await, (3, 1));
+    assert_eq!(page("?limit=1&offset=3").await, (3, 0));
+    // Garbled or negative values take the defaults, never a 500.
+    assert_eq!(page("?limit=abc&offset=zzz").await, (3, 3));
+    assert_eq!(page("?limit=-5&offset=-9").await, (3, 3));
+    assert_eq!(page("?limit=0").await, (3, 3));
+    assert_eq!(page("?limit=999999999999999999999").await, (3, 3));
+}

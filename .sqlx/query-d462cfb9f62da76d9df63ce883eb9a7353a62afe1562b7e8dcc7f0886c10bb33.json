@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id, t.album_id, t.path, t.title, al.title AS album_title, ar.name AS artist_name\n           FROM tracks t JOIN albums al ON al.id = t.album_id JOIN artists ar ON ar.id = al.artist_id\n           WHERE t.missing_since IS NOT NULL\n             AND t.missing_since < now() - make_interval(secs => $1::float8)\n           ORDER BY t.id\n           FOR UPDATE OF t",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "album_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "album_title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "artist_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d462cfb9f62da76d9df63ce883eb9a7353a62afe1562b7e8dcc7f0886c10bb33"
+}

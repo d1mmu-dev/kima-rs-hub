@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE playback_state SET track_id = NULL WHERE track_id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fe950cbcc91b15e374cffd59def4633f9e826dc5aa96e11b688429b2ea3cecc6"
+}

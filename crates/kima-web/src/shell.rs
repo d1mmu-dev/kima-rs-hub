@@ -349,7 +349,7 @@ fn playlist_stack(ctx: &Ctx, route: Computed<Route>) -> DomNode {
                     .enumerate()
                     .map(|(i, p)| playlist_link(&route, i, p))
                     .collect();
-                dom! { <div class="flex-1 overflow-y-auto space-y-0.5 px-3">{items}</div> }
+                dom! { <div class="flex-1 overflow-y-auto space-y-0.5 px-3">{..items}</div> }
             }))
         }));
     dom! {
@@ -457,7 +457,7 @@ fn side_panel(ctx: &Ctx, open: Value<bool>) -> DomNode {
                     }
                 })
                 .collect();
-            dom! { <div class="flex-1 overflow-y-auto">{rows}</div> }
+            dom! { <div class="flex-1 overflow-y-auto">{..rows}</div> }
         }));
     dom! {
         <div class="shrink-0 h-full relative z-(--z-raised) max-[1024px]:hidden" style={wrapper_style}>

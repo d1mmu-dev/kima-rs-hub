@@ -227,7 +227,7 @@ pub fn library_rows(ctx: &Ctx, tracks: Vec<Track>) -> DomNode {
                 <div class="hidden md:block text-xs font-semibold text-[var(--text-muted)]">"Album"</div>
                 <div class="w-[140px] text-right pr-2 text-xs font-semibold text-[var(--text-muted)]">"Duration"</div>
             </div>
-            <div class="space-y-1">{rows}</div>
+            <div class="space-y-1">{..rows}</div>
         </div>
     }
 }
@@ -277,7 +277,7 @@ pub fn compact_rows(ctx: &Ctx, tracks: Vec<Track>) -> DomNode {
             }
         })
         .collect();
-    dom! { <div class="space-y-1">{rows}</div> }
+    dom! { <div class="space-y-1">{..rows}</div> }
 }
 
 /// The playlist page's rows: `n | cover, title, artist | album | duration | actions`.
@@ -338,7 +338,7 @@ pub fn playlist_rows(ctx: &Ctx, tracks: Vec<Track>, extra: RowExtra) -> DomNode 
                 <span class="text-right">"Duration"</span>
                 <span class="sr-only">"Actions"</span>
             </div>
-            <div>{rows}</div>
+            <div>{..rows}</div>
         </div>
     }
 }

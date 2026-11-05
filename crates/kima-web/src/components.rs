@@ -157,7 +157,7 @@ pub fn media_card(card: Card) -> DomNode {
                     }
                 })
                 .collect();
-            dom! { <div class="grid grid-cols-2 w-full h-full cover-zoom">{tiles}</div> }
+            dom! { <div class="grid grid-cols-2 w-full h-full cover-zoom">{..tiles}</div> }
         }
     };
     let play = match on_play {
@@ -200,5 +200,5 @@ pub fn media_card(card: Card) -> DomNode {
 
 /// The grid every wall of cards uses.
 pub fn media_grid(cards: Vec<DomNode>) -> DomNode {
-    dom! { <div class="grid-media">{cards}</div> }
+    dom! { <div class="grid-media">{..cards}</div> }
 }

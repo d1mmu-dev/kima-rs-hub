@@ -2,4 +2,5 @@
 #![forbid(unsafe_code)]
 
 pub mod exact_math;
+pub mod formula;
 pub mod prng;

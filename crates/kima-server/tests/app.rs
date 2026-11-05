@@ -196,6 +196,13 @@ async fn security_headers_on_every_response(pool: PgPool) {
                 .unwrap()
                 .contains("frame-ancestors 'none'")
         );
+        // kima-web's embedded Montserrat is a data: URI; `font-src 'self'` alone silently drops it.
+        assert!(
+            res.header("content-security-policy")
+                .to_str()
+                .unwrap()
+                .contains("font-src 'self' data:")
+        );
         assert_eq!(
             res.header("permissions-policy"),
             "camera=(), microphone=(), geolocation=()"

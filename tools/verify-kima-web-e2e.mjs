@@ -12,7 +12,7 @@
 // back at the end, so it can be repeated against the same stack. It creates and deletes the playlist
 // "E2E Playlist".
 // Chromium flags: --autoplay-policy=no-user-gesture-required --mute-audio (no audio device needed).
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 
 const CHROME = process.env.CHROME || 'chromium';
@@ -62,6 +62,12 @@ const audio = () => ev(`(()=>{const a=document.querySelector('audio');return a?{
 const ctl = (label) => ev(`(()=>{const b=[...document.querySelectorAll('[role=group][aria-label="Playback controls"] button[aria-label=${JSON.stringify(label)}]')].find((b)=>b.offsetParent!==null);if(!b)return false;b.click();return true})()`);
 const results = []; const check = (name, ok, detail = '') => { results.push([ok, name, detail]); console.log(ok ? 'PASS' : 'FAIL', name, detail); };
 
+// A stale checked-in Tailwind sheet once shipped a page without any utility class. Fail loudly, before anything else.
+{
+  const gen = spawnSync(process.execPath, [new URL('./gen-kima-web-css.mjs', import.meta.url).pathname, '--check'], { encoding: 'utf8' });
+  check('assets/kima.css is up to date (node tools/gen-kima-web-css.mjs --check)', gen.status === 0, (gen.stdout + gen.stderr).trim().split('\n').pop());
+}
+
 if (SSR) {
   // Plain HTTP fetches: no JavaScript runs, so this is what the server itself rendered.
   const page = async (path) => { const r = await fetch(BASE + path, { redirect: 'manual' }); return { status: r.status, type: r.headers.get('content-type') || '', body: await r.text() }; };
@@ -85,6 +91,11 @@ if (SSR) {
 await goto(BASE + '/');
 await ev('localStorage.clear()'); await goto(BASE + '/collection');
 check('unauthenticated /collection shows login and rewrites the URL', (await ev('location.pathname')) === '/login' && (await text()).includes('Sign in to continue to Kima'));
+
+// The sheet really reaches the browser: class rules present, Montserrat loaded (CSP `font-src` once blocked its data: URI).
+const styled = await ev(`(async()=>{await document.fonts.ready;let n=0;const walk=(l)=>{for(const r of l){if(r.cssRules&&r.cssRules.length)walk(r.cssRules);if(r.selectorText&&/(^|,)\\s*\\./.test(r.selectorText))n++}};for(const s of document.styleSheets){try{walk(s.cssRules)}catch{}}
+  const btn=document.querySelector('button[type=submit]');return {n,font:document.fonts.check('16px Montserrat')&&[...document.fonts].every(f=>f.status==='loaded'),btnBg:btn&&getComputedStyle(btn).backgroundColor}})()`);
+check('login page is styled: utility class rules present, Montserrat loaded, primary button is amber', styled.n >= 100 && styled.font && styled.btnBg === 'rgb(252, 162, 0)', JSON.stringify(styled));
 
 await setInput('username', USER); await setInput('password', 'nope-wrong');
 await ev(`document.querySelector('button[type=submit]').click()`); await sleep(1500);

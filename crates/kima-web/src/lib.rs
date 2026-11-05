@@ -5,6 +5,7 @@ mod app;
 mod auth;
 mod components;
 mod icons;
+#[rustfmt::skip]
 mod icons_data;
 mod pages;
 mod player;

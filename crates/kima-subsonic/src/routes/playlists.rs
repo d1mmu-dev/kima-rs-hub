@@ -155,7 +155,7 @@ async fn update_playlist(
     let add = song_ids(&params, "songIdToAdd");
 
     if name.is_some() || public.is_some() {
-        playlists::update(pool, playlist.id, name, public)
+        playlists::update(pool, playlist.id, name, public, None)
             .await?
             .ok_or_else(not_found)?;
     }

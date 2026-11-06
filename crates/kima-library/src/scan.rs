@@ -1409,6 +1409,16 @@ pub async fn reconcile_cancellable(
             }
             kima_db::genres::prune_unused(&ctx.pool).await?;
         }
+        // Upstream `playlistsHoldingTracks` (`bafecf23`): the owner of each playlist that lost a
+        // place is told once, after the commit.
+        for (owner, playlist) in &retired.playlists {
+            ctx.events.publish(Event {
+                user_id: Some(*owner),
+                data: serde_json::json!({
+                    "type": "playlist:updated", "playlistId": playlist, "deleted": false,
+                }),
+            });
+        }
         refresh_albums(&ctx.pool, retired.albums.into_iter().collect()).await?;
     }
     prune_empty(ctx).await?;

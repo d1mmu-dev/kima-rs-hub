@@ -16,6 +16,8 @@ pub struct Playlist {
     pub user_id: Uuid,
     pub name: String,
     pub is_public: bool,
+    /// Shown newest first (display only; `sort` is unchanged).
+    pub reverse_order: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }
@@ -41,7 +43,8 @@ pub struct ItemRow {
     pub track: TrackRow,
 }
 
-const PLAYLIST_COLS: &str = "p.id, p.user_id, p.name, p.is_public, p.created_at, p.updated_at";
+const PLAYLIST_COLS: &str =
+    "p.id, p.user_id, p.name, p.is_public, p.reverse_order, p.created_at, p.updated_at";
 
 const ITEM_COLS: &str = "pi.playlist_id, pi.id AS item_id, pi.sort,
         t.id, t.title, t.artist_name, t.duration_secs, t.disc, t.track_no,
@@ -71,7 +74,7 @@ pub async fn create(
 ) -> sqlx::Result<Playlist> {
     sqlx::query_as(
         "INSERT INTO playlists (id, user_id, name, is_public) VALUES ($1, $2, $3, $4)
-         RETURNING id, user_id, name, is_public, created_at, updated_at",
+         RETURNING id, user_id, name, is_public, reverse_order, created_at, updated_at",
     )
     .bind(id)
     .bind(user)
@@ -86,16 +89,18 @@ pub async fn update(
     id: Uuid,
     name: Option<&str>,
     is_public: Option<bool>,
+    reverse_order: Option<bool>,
 ) -> sqlx::Result<Option<Playlist>> {
     sqlx::query_as(
         "UPDATE playlists SET name = COALESCE($2, name), is_public = COALESCE($3, is_public),
-                updated_at = now()
+                reverse_order = COALESCE($4, reverse_order), updated_at = now()
          WHERE id = $1
-         RETURNING id, user_id, name, is_public, created_at, updated_at",
+         RETURNING id, user_id, name, is_public, reverse_order, created_at, updated_at",
     )
     .bind(id)
     .bind(name)
     .bind(is_public)
+    .bind(reverse_order)
     .fetch_optional(pool)
     .await
 }
@@ -520,8 +525,9 @@ pub async fn move_item(
     Ok(Ok(sort))
 }
 
-pub async fn hide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<()> {
-    sqlx::query(
+/// Hides a playlist from `user`'s view. `true` when it was not hidden before.
+pub async fn hide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<bool> {
+    let done = sqlx::query(
         "INSERT INTO hidden_playlists (user_id, playlist_id) VALUES ($1, $2)
          ON CONFLICT DO NOTHING",
     )
@@ -529,14 +535,15 @@ pub async fn hide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<()>
     .bind(playlist)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(done.rows_affected() > 0)
 }
 
-pub async fn unhide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM hidden_playlists WHERE user_id = $1 AND playlist_id = $2")
+/// Shows a hidden playlist to `user` again. `true` when it was hidden.
+pub async fn unhide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<bool> {
+    let done = sqlx::query("DELETE FROM hidden_playlists WHERE user_id = $1 AND playlist_id = $2")
         .bind(user)
         .bind(playlist)
         .execute(pool)
         .await?;
-    Ok(())
+    Ok(done.rows_affected() > 0)
 }

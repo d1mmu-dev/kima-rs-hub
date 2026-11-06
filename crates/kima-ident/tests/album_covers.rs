@@ -806,3 +806,38 @@ async fn a_transient_cover_failure_is_retried_later(pool: PgPool) {
     );
     assert!(stored(&g, days).is_some());
 }
+
+// ---- M-SYNC Task 13: the cover of an album that was just identified ----
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn an_identified_album_gets_its_cover_from_its_release_group_alone(pool: PgPool) {
+    let a = artist_row(&pool, "Low").await;
+    let alpha = album(&pool, a, "Low", "Alpha", Some(RG_A)).await;
+    // Another album of the artist without a cover is not this call's business.
+    let beta = album(&pool, a, "Low", "Beta", Some(RG_B)).await;
+    let w = World::default()
+        .deezer_none("Low", "Alpha")
+        .caa_front(RG_A, "{images}/alpha.jpg");
+    let images = World::default().image("/alpha.jpg", &jpeg(600, 600, 1));
+    let f = fx(&pool, w, images).await;
+
+    let out = album_covers::fill_album(&f.ctx, alpha).await;
+
+    assert!(matches!(out, Outcome::Answered(1)), "{out:?}");
+    assert_eq!(
+        image_of(&pool, alpha).await,
+        (Some(format!("{alpha}.jpg")), Some("coverartarchive".into()))
+    );
+    assert_eq!(image_of(&pool, beta).await, (None, None));
+    // An album that has a cover (or is gone) is left as it is, without a request.
+    let asked = f.asked().len();
+    assert!(matches!(
+        album_covers::fill_album(&f.ctx, alpha).await,
+        Outcome::Answered(0)
+    ));
+    assert!(matches!(
+        album_covers::fill_album(&f.ctx, Uuid::new_v4()).await,
+        Outcome::Answered(0)
+    ));
+    assert_eq!(f.asked().len(), asked);
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.fingerprint, a.duration_secs\n           FROM tracks t\n           JOIN track_acoustid a ON a.track_id = t.id\n           LEFT JOIN track_stages s ON s.track_id = t.id AND s.stage = 'recording'\n           WHERE t.missing_since IS NULL\n             AND t.tag_recording_mbid IS NULL\n             AND a.duration_secs > 0\n             AND (s.track_id IS NULL\n                  OR (s.status = 'pending'\n                      AND (s.next_attempt_at IS NULL OR s.next_attempt_at <= now()))\n                  OR (s.status IN ('failed', 'working') AND s.next_attempt_at <= now()))\n           ORDER BY t.mtime DESC, t.id\n           LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "fingerprint",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "duration_secs",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "e14d8bb1c32b320d0805a56bb028dafdca275d2adc56a6f0cfad868a27f496c1"
+}

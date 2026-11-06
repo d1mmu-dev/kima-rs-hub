@@ -1,7 +1,9 @@
 //! Track identification (spec M3a): fingerprints, text rules, and later the identification ladder.
 
 pub mod acoustid;
+pub mod acoustid_batch;
 pub mod album_covers;
+pub mod album_vote;
 mod answer;
 pub mod artist;
 pub mod autotag;

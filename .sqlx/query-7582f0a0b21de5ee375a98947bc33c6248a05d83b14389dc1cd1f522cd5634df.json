@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.album_id AS \"album_id!\"\n           FROM (SELECT t.album_id, t.mtime, t.id\n                 FROM tracks t\n                 LEFT JOIN track_stages s ON s.track_id = t.id AND s.stage = 'recording'\n                 WHERE t.missing_since IS NULL\n                   AND (s.track_id IS NULL\n                        OR (s.status = 'pending'\n                            AND (s.next_attempt_at IS NULL OR s.next_attempt_at <= now()))\n                        OR (s.status IN ('failed', 'working') AND s.next_attempt_at <= now()))\n                 ORDER BY t.mtime DESC, t.id\n                 LIMIT $1) t\n           ORDER BY t.mtime DESC, t.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "album_id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7582f0a0b21de5ee375a98947bc33c6248a05d83b14389dc1cd1f522cd5634df"
+}

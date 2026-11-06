@@ -47,6 +47,9 @@ pub const NEXT_AFTER_WORK: Duration = Duration::from_secs(5);
 pub const NEXT_WHEN_IDLE: Duration = Duration::from_secs(60);
 /// The state is re-read at most this often while a cycle runs.
 pub const STATE_REREAD: Duration = Duration::from_secs(2);
+/// While a library scan is running or queued a cycle starts nothing and comes back this soon
+/// (upstream's "declined" cycle: an empty one backs off, a declined one returns promptly).
+pub const WHILE_SCANNING: Duration = Duration::from_secs(10);
 /// A running pipeline with no activity for this long is hung (upstream `detectHang`).
 pub const HUNG_AFTER: time::Duration = time::Duration::minutes(15);
 
@@ -154,6 +157,29 @@ pub async fn run_cycle(
     // The status before the cycle touches it: what the cycle's announcements compare against.
     let found = enrichment::state(pool).await.map_err(db)?.status;
     let ann = Announcer::new(&ctx.progress_events, found);
+
+    // The scan goes first: every step starts from the whole library, never the part scanned so
+    // far (upstream `b78b1167`). Paused, halted and stopping pipelines go on to step 1-2 below
+    // as they are; a declined cycle leaves the state alone and returns soon.
+    let before = enrichment::state(pool).await.map_err(db)?;
+    let may_start = !before.halted && matches!(before.status, Status::Idle | Status::Running);
+    if may_start && enrichment::library_scan_running(pool).await.map_err(db)? {
+        tracing::debug!("enrichment waits: a library scan is still adding songs");
+        queue::enqueue_in_unless_queued_with_key(
+            pool,
+            QUEUE,
+            payload(),
+            MAX_ATTEMPTS,
+            "kind",
+            WHILE_SCANNING,
+        )
+        .await
+        .map_err(db)?;
+        return Ok(CycleReport {
+            next: Some(WHILE_SCANNING),
+            ..CycleReport::default()
+        });
+    }
 
     // Steps 1-2: paused, halted or stopping end here and queue nothing.
     let st = enrichment::begin_cycle(pool).await.map_err(db)?;

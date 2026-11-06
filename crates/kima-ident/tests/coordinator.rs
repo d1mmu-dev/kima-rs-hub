@@ -884,3 +884,155 @@ async fn a_short_outage_cannot_make_an_artist_unresolvable(pool: PgPool) {
 
     assert_eq!(artist_row(&pool, a).await, ("failed".to_string(), 1));
 }
+
+// ---- M-SYNC Task 14 (upstream b78b1167): the scan first, then each step for the whole library ----
+
+/// A `library`-queue job of `kind` in `state`, due in `due_in_secs` (a retry waits in `queued`).
+async fn library_job(pool: &PgPool, kind: &str, state: &str, due_in_secs: i32) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO jobs (id, queue, payload, state, run_at, attempts) \
+         VALUES ($1, 'library', $2, $3, now() + make_interval(secs => $4), 1)",
+    )
+    .bind(id)
+    .bind(json!({ "kind": kind }))
+    .bind(state)
+    .bind(due_in_secs)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+async fn finish_job(pool: &PgPool, id: Uuid) {
+    sqlx::query("UPDATE jobs SET state = 'done', finished_at = now() WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn clear_jobs(pool: &PgPool, queue: &str) {
+    sqlx::query("DELETE FROM jobs WHERE queue = $1")
+        .bind(queue)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enrichment_waits_for_a_running_scan(pool: PgPool) {
+    let rec = rec_id(1);
+    let replay = Replay::start(Recording(vec![details(&rec)])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    let t = track(&pool, "a.wav", Some(&rec)).await;
+
+    // A scan that is running, one that is queued and one waiting out a retry delay each hold
+    // the cycle back; so does a single-file update (it adds songs too).
+    for (kind, state, due) in [
+        ("reconcile", "running", 0),
+        ("reconcile", "queued", 0),
+        ("reconcile", "queued", 600),
+        ("path", "queued", 0),
+    ] {
+        clear_jobs(&pool, "library").await;
+        library_job(&pool, kind, state, due).await;
+        let report = cycle(&ctx).await;
+        assert!(!report.ran, "{kind} {state} {due}");
+        assert!(!report.any_work());
+        assert_eq!(stage_rows(&pool).await, 0, "{kind} {state} {due}");
+        // It comes back promptly, not a minute later.
+        let queued = queued_enrich(&pool).await;
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        assert!(queued[0] <= 11.0, "{queued:?}");
+        assert_eq!(enrichment::state(&pool).await.unwrap().status, Status::Idle);
+        clear_jobs(&pool, "enrich").await;
+    }
+    assert!(replay.asked().is_empty());
+
+    // Once the scan is done the cycle runs.
+    clear_jobs(&pool, "library").await;
+    let scan = library_job(&pool, "reconcile", "running", 0).await;
+    assert!(!cycle(&ctx).await.ran);
+    finish_job(&pool, scan).await;
+    let report = cycle(&ctx).await;
+    assert!(report.ran);
+    assert_eq!(report.tracks.done, 1);
+    assert_eq!(
+        stage_status(&pool, t, "recording").await.as_deref(),
+        Some("done")
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn an_organizer_or_autotag_job_does_not_hold_enrichment_back(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ident_ctx(&pool, &root(&dir), common::dead_bases());
+    for kind in ["organize", "autotag-apply", "autotag-undo"] {
+        library_job(&pool, kind, "running", 0).await;
+        library_job(&pool, kind, "queued", 0).await;
+    }
+    // A finished or failed scan holds nothing either.
+    library_job(&pool, "reconcile", "done", 0).await;
+    library_job(&pool, "reconcile", "failed", 0).await;
+
+    assert!(cycle(&ctx).await.ran);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_scan_does_not_wake_a_paused_pipeline(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ident_ctx(&pool, &root(&dir), common::dead_bases());
+    library_job(&pool, "reconcile", "running", 0).await;
+    set_state(&pool, "paused", false).await;
+
+    let report = cycle(&ctx).await;
+
+    assert!(!report.ran);
+    assert!(
+        queued_enrich(&pool).await.is_empty(),
+        "paused queues nothing"
+    );
+    assert_eq!(
+        enrichment::state(&pool).await.unwrap().status,
+        Status::Paused
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn retry_failed_and_blocked_offers_nothing_while_a_scan_runs(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ident_ctx(&pool, &root(&dir), common::dead_bases());
+    let t = track(&pool, "a.wav", None).await;
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status, attempts, next_attempt_at) \
+         VALUES ($1, 'recording', 'failed', 1, now() + interval '1 hour')",
+    )
+    .bind(t)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let scan = library_job(&pool, "reconcile", "running", 0).await;
+
+    // The scan goes first; the next cycle after it offers the same work.
+    let n = coordinator::control::retry_failed_and_blocked(&ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(n, 0);
+    assert_eq!(
+        stage_status(&pool, t, "recording").await.as_deref(),
+        Some("failed")
+    );
+    finish_job(&pool, scan).await;
+    let n = coordinator::control::retry_failed_and_blocked(&ctx)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    assert_eq!(
+        stage_status(&pool, t, "recording").await.as_deref(),
+        Some("pending")
+    );
+}

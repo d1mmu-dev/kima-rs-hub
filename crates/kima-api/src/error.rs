@@ -48,6 +48,9 @@ pub enum ApiError {
     /// serialization victim, so it changed nothing and may be sent again.
     #[error("Temporarily busy, please retry")]
     Busy,
+    /// 500 with a message of its own (upstream's `Failed to …` texts), the cause logged only.
+    #[error("{0}")]
+    Failed(&'static str),
     #[error("Internal error")]
     Internal(#[from] anyhow::Error),
 }
@@ -102,6 +105,7 @@ impl ApiError {
             Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Busy => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Internal(error) => {
                 tracing::error!(error = ?error, "internal error");
                 StatusCode::INTERNAL_SERVER_ERROR

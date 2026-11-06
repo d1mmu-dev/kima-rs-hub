@@ -13,7 +13,7 @@ use kima_db::settings_kv::{KvSettings, SettingsCache};
 use kima_net::{Evidence, Failure, Host, Net, Outcome, Req};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::de::{DeserializeOwned, Error as _};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 use crate::Mbid;
@@ -65,18 +65,30 @@ pub async fn resolve_client_key(settings: &SettingsCache, env: Option<&str>) -> 
 
 /// A recording an AcoustID result names. `duration` is in seconds, a positive finite number or
 /// unknown.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AcoustidRecording {
     pub id: Mbid,
     #[serde(default, deserialize_with = "lenient_opt_text")]
     pub title: Option<String>,
     #[serde(default, deserialize_with = "lenient_duration")]
     pub duration: Option<f64>,
+    /// The albums (release groups) AcoustID lists for the recording; ones whose id is not an
+    /// MBID are dropped.
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub releasegroups: Vec<AcoustidGroup>,
+}
+
+/// An album (release group) AcoustID lists for a recording.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AcoustidGroup {
+    pub id: Mbid,
+    #[serde(default, deserialize_with = "lenient_text")]
+    pub title: String,
 }
 
 /// One result: an AcoustID track id, its score (NaN when missing or not a number) and its
 /// recordings (`None` for a fingerprint-only match).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AcoustidResult {
     #[serde(default, deserialize_with = "lenient_text")]
     pub id: String,
@@ -92,6 +104,14 @@ pub struct Picked {
     pub recording: Mbid,
     pub score: f64,
     pub acoustid_id: String,
+    /// The pick's title (and version) is the track's. `false`: only the track's length agrees.
+    pub title_agrees: bool,
+    /// The recordings of the matching result that are this track, best first; the first is
+    /// `recording`.
+    pub candidates: Vec<Mbid>,
+    /// Every album AcoustID lists for the pick; when the title agrees, the union over all the
+    /// candidates in order (one song is often several recordings, each on other albums).
+    pub release_groups: Vec<AcoustidGroup>,
 }
 
 impl Picked {
@@ -196,6 +216,8 @@ fn lookup_request(key: &str, fingerprint: &str, duration_secs: i32) -> Req {
     )
     .absent_when(no_results)
     .budget(STAGE_TIMEOUT)
+    // The reply is kept per fingerprint in `acoustid_replies` (M-SYNC Task 12), not here.
+    .no_cache()
 }
 
 /// An `ok` answer with no results: absent, and cached as such.
@@ -204,6 +226,115 @@ fn no_results(v: &Value) -> bool {
         && v.get("results")
             .and_then(Value::as_array)
             .is_none_or(Vec::is_empty)
+}
+
+/// Fingerprints per batch request. The server takes 20 and its own code says that will drop to
+/// 10 or less (upstream `BATCH_SIZE`).
+pub const BATCH_SIZE: usize = 10;
+
+/// One `batch=1` request for at most [`BATCH_SIZE`] `(fingerprint, seconds)` questions: each
+/// answered question as `(index, results)`, `index` naming its place in `questions`. A question
+/// whose index is absent from the reply was dropped by the server (upstream saves it as
+/// `rejected`). No key is `Permanent("NO_CLIENT_KEY")`; a `status` other than `ok` or a reply with
+/// no `fingerprints` list is `Transient("BAD_RESPONSE")`.
+pub async fn lookup_batch(
+    net: &Net,
+    key: &str,
+    questions: &[(&str, i32)],
+) -> Outcome<Vec<(usize, Vec<AcoustidResult>)>> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Outcome::Permanent(Failure::new(
+            "NO_CLIENT_KEY",
+            "no AcoustID client key configured; the question was never asked",
+        ));
+    }
+    if questions.len() > BATCH_SIZE {
+        return Outcome::Permanent(Failure::new(
+            "BATCH_TOO_LARGE",
+            format!(
+                "{} questions in one request; at most {BATCH_SIZE}",
+                questions.len()
+            ),
+        ));
+    }
+    if questions.is_empty() {
+        return Outcome::Answered(Vec::new());
+    }
+    let req = Req::post_form(Host::AcoustId, "/lookup", batch_body(key, questions))
+        .budget(STAGE_TIMEOUT)
+        // The reply is kept per fingerprint in `acoustid_replies`, not as one cache row.
+        .no_cache();
+    match net.post_form_json::<BatchResponse>(req).await {
+        Outcome::Answered(r) => Outcome::Answered(
+            r.fingerprints
+                .into_iter()
+                .filter_map(|item| {
+                    let index = usize::try_from(item.get("index")?.as_u64()?).ok()?;
+                    // An index that names no question in this request is ignored.
+                    (index < questions.len()).then_some(())?;
+                    let results = serde_json::from_value::<LenientResults>(item).ok()?.0;
+                    Some((index, results))
+                })
+                .collect(),
+        ),
+        Outcome::Absent(e) => Outcome::Absent(e),
+        Outcome::RateLimited { until } => Outcome::RateLimited { until },
+        Outcome::Transient(f) => Outcome::Transient(f),
+        Outcome::Permanent(f) => Outcome::Permanent(f),
+    }
+}
+
+/// The body of a batch request, by hand like [`request_body`]: `duration.N` / `fingerprint.N`
+/// pairs after `client`, `meta` and `batch=1`.
+fn batch_body(key: &str, questions: &[(&str, i32)]) -> String {
+    let mut body = format!(
+        "client={}&meta=recordings%20releasegroups&batch=1",
+        utf8_percent_encode(key, FORM)
+    );
+    for (i, (fingerprint, secs)) in questions.iter().enumerate() {
+        body.push_str(&format!(
+            "&duration.{i}={secs}&fingerprint.{i}={}",
+            utf8_percent_encode(fingerprint.trim(), FORM)
+        ));
+    }
+    body
+}
+
+/// A `batch=1` answer: one item per fingerprint the server kept, `index` naming its place in the
+/// request. Without a `fingerprints` list the whole reply is unusable.
+#[derive(Deserialize)]
+struct BatchResponse {
+    #[serde(rename = "status", deserialize_with = "ok_status")]
+    _status: (),
+    fingerprints: Vec<Value>,
+}
+
+/// One batch item's `results`, read as leniently as a single lookup's.
+#[derive(Deserialize)]
+struct LenientResults(#[serde(deserialize_with = "item_results")] Vec<AcoustidResult>);
+
+fn item_results<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<AcoustidResult>, D::Error> {
+    #[derive(Deserialize)]
+    struct Item {
+        #[serde(default, deserialize_with = "lenient_vec")]
+        results: Vec<AcoustidResult>,
+    }
+    Ok(Item::deserialize(d)?.results)
+}
+
+/// AcoustID answers HTTP 400 when the request's own input is refused: code 3 (invalid
+/// fingerprint, when none in the request is valid), 8 (invalid duration), 2 (missing parameter,
+/// which a duration of 0 gets). Asking again can never help, so these are not source failures.
+/// Other 400s (a bad key) are not listed.
+pub fn refused_input(failure: &Failure) -> bool {
+    if failure.code != "HTTP_400" {
+        return false;
+    }
+    serde_json::from_str::<Value>(&failure.message)
+        .ok()
+        .and_then(|v| v.pointer("/error/code")?.as_i64())
+        .is_some_and(|c| matches!(c, 2 | 3 | 8))
 }
 
 /// `POST /lookup` for `fingerprint` (trimmed) of a track `duration_secs` long. No key is
@@ -256,7 +387,7 @@ fn whole_secs(d: f64) -> i32 {
     d.round().clamp(1.0, f64::from(i32::MAX)) as i32
 }
 
-fn no_match(results: &[AcoustidResult], duration_secs: i32) -> Evidence {
+pub(crate) fn no_match(results: &[AcoustidResult], duration_secs: i32) -> Evidence {
     let top = results
         .first()
         .map(|r| r.score)
@@ -301,24 +432,62 @@ pub fn pick_fingerprint_match(
                 lengths_agree(Some(duration_secs), r.duration.map(whole_secs)) != Some(false)
             })
         };
-        let titled = wanted.as_ref().and_then(|(t, version)| {
-            fits()
-                .filter(|r| {
-                    r.title.as_deref().is_some_and(|rt| {
-                        !rt.is_empty() && titles_agree(rt, t) && version_of(rt) == *version
+        let titled: Vec<&AcoustidRecording> =
+            wanted.as_ref().map_or_else(Vec::new, |(t, version)| {
+                fits()
+                    .filter(|r| {
+                        r.title.as_deref().is_some_and(|rt| {
+                            !rt.is_empty() && titles_agree(rt, t) && version_of(rt) == *version
+                        })
                     })
-                })
-                .min_by(closest)
-        });
-        if let Some(r) = titled.or_else(|| fits().min_by(closest)) {
-            return Ok(Picked {
-                recording: r.id,
-                score: result.score,
-                acoustid_id: result.id.clone(),
+                    .collect()
             });
+        let title_agrees = !titled.is_empty();
+        let mut candidates: Vec<&AcoustidRecording> = if title_agrees {
+            titled
+        } else {
+            fits().collect()
+        };
+        // Stable: the closest length first, the first listed on a tie.
+        candidates.sort_by(closest);
+        let Some(&best) = candidates.first() else {
+            continue;
+        };
+        let mut groups: Vec<AcoustidGroup> = Vec::new();
+        for r in if title_agrees {
+            &candidates[..]
+        } else {
+            &candidates[..1]
+        } {
+            for g in &r.releasegroups {
+                if !groups.iter().any(|seen| seen.id == g.id) {
+                    groups.push(g.clone());
+                }
+            }
         }
+        return Ok(Picked {
+            recording: best.id,
+            score: result.score,
+            acoustid_id: result.id.clone(),
+            title_agrees,
+            candidates: candidates.iter().map(|r| r.id).collect(),
+            release_groups: groups,
+        });
     }
     Err(no_match(results, duration_secs))
+}
+
+/// [`pick_fingerprint_match`] over the results of an answer, as an outcome: the pick, or
+/// `Absent` with `{askedDuration, topScore, reason}`.
+pub(crate) fn pick_outcome(
+    results: &[AcoustidResult],
+    duration_secs: i32,
+    title: Option<&str>,
+) -> Outcome<Picked> {
+    match pick_fingerprint_match(results, duration_secs, title) {
+        Ok(p) => Outcome::Answered(p),
+        Err(e) => Outcome::Absent(e),
+    }
 }
 
 /// [`lookup`] then [`pick_fingerprint_match`]: the recording a fingerprint is, or `Absent` with
@@ -331,12 +500,7 @@ pub async fn identify(
     title: Option<&str>,
 ) -> Outcome<Picked> {
     match lookup(net, key, fingerprint, duration_secs).await {
-        Outcome::Answered(results) => {
-            match pick_fingerprint_match(&results, duration_secs, title) {
-                Ok(p) => Outcome::Answered(p),
-                Err(e) => Outcome::Absent(e),
-            }
-        }
+        Outcome::Answered(results) => pick_outcome(&results, duration_secs, title),
         Outcome::Absent(_) => Outcome::Absent(no_match(&[], duration_secs)),
         Outcome::RateLimited { until } => Outcome::RateLimited { until },
         Outcome::Transient(f) => Outcome::Transient(f),

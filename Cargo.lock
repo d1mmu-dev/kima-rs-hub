@@ -2777,9 +2777,12 @@ dependencies = [
 name = "kima-db"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "kima-core",
+ "kima-vibe",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "time",
  "tokio",

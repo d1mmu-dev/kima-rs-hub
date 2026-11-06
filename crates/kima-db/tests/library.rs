@@ -915,3 +915,147 @@ async fn removal_log_lists_newest_first_with_paging(pool: PgPool) {
     let page = kima_db::removal_log::list(&pool, 1, 1).await.unwrap();
     assert_eq!(page[0].file_path, "b");
 }
+
+// M-SYNC Task 11 (upstream `cb21c307`): an album's release-group id may come from AcoustID, the
+// weakest source (`acoustid` < `tag` < `autotag` < `user`).
+mod acoustid_group {
+    use super::*;
+    use kima_db::identity;
+    use uuid::Uuid;
+
+    const A: Uuid = uuid::uuid!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    const B: Uuid = uuid::uuid!("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+
+    async fn tagged(pool: &PgPool, rg: Option<Uuid>) -> (Uuid, Uuid) {
+        let mut t = track("Act", "Rec", Some(2000), "One", "a/1.flac");
+        t.ids.release_group = rg;
+        let id = upsert(pool, &t).await;
+        let album = sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        (id, album)
+    }
+
+    async fn refresh(pool: &PgPool, album: Uuid) {
+        let mut conn = pool.acquire().await.unwrap();
+        library::refresh_album_mbids(&mut conn, album)
+            .await
+            .unwrap();
+    }
+
+    async fn group(pool: &PgPool, album: Uuid) -> (Option<Uuid>, Option<String>) {
+        sqlx::query_as(
+            "SELECT release_group_mbid, release_group_mbid_source FROM albums WHERE id = $1",
+        )
+        .bind(album)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn set(pool: &PgPool, album: Uuid, rg: Uuid) -> bool {
+        let mut conn = pool.acquire().await.unwrap();
+        identity::set_acoustid_group(&mut conn, album, rg)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn acoustid_writes_an_album_with_no_id(pool: PgPool) {
+        let (_, album) = tagged(&pool, None).await;
+        assert!(set(&pool, album, A).await);
+        assert_eq!(
+            group(&pool, album).await,
+            (Some(A), Some("acoustid".into()))
+        );
+        // A later vote may change it.
+        assert!(set(&pool, album, B).await);
+        assert_eq!(
+            group(&pool, album).await,
+            (Some(B), Some("acoustid".into()))
+        );
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn file_tag_replaces_acoustid_id(pool: PgPool) {
+        let (track_id, album) = tagged(&pool, None).await;
+        assert!(set(&pool, album, A).await);
+        sqlx::query("UPDATE tracks SET tag_release_group_mbid = $2 WHERE id = $1")
+            .bind(track_id)
+            .bind(B)
+            .execute(&pool)
+            .await
+            .unwrap();
+        refresh(&pool, album).await;
+        assert_eq!(group(&pool, album).await, (Some(B), Some("tag".into())));
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn file_tag_confirming_acoustid_id_takes_source_tag(pool: PgPool) {
+        let (track_id, album) = tagged(&pool, None).await;
+        assert!(set(&pool, album, A).await);
+        sqlx::query("UPDATE tracks SET tag_release_group_mbid = $2 WHERE id = $1")
+            .bind(track_id)
+            .bind(A)
+            .execute(&pool)
+            .await
+            .unwrap();
+        refresh(&pool, album).await;
+        assert_eq!(group(&pool, album).await, (Some(A), Some("tag".into())));
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn tag_and_user_ids_are_never_replaced_by_acoustid(pool: PgPool) {
+        let (_, album) = tagged(&pool, Some(A)).await;
+        refresh(&pool, album).await;
+        assert_eq!(group(&pool, album).await, (Some(A), Some("tag".into())));
+        assert!(!set(&pool, album, B).await);
+        assert_eq!(group(&pool, album).await, (Some(A), Some("tag".into())));
+        for source in ["autotag", "user"] {
+            sqlx::query("UPDATE albums SET release_group_mbid_source = $2 WHERE id = $1")
+                .bind(album)
+                .bind(source)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert!(!set(&pool, album, B).await, "{source}");
+            assert_eq!(group(&pool, album).await, (Some(A), Some(source.into())));
+        }
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn no_tags_keeps_acoustid_id(pool: PgPool) {
+        let (_, album) = tagged(&pool, None).await;
+        assert!(set(&pool, album, A).await);
+        refresh(&pool, album).await;
+        assert_eq!(
+            group(&pool, album).await,
+            (Some(A), Some("acoustid".into()))
+        );
+        // Tag ids that were there and are gone: a *tag* id goes, an AcoustID one stays.
+        let (_, tagged_album) = tagged_other(&pool).await;
+        refresh(&pool, tagged_album).await;
+        assert_eq!(group(&pool, tagged_album).await.1.as_deref(), Some("tag"));
+        sqlx::query("UPDATE tracks SET tag_release_group_mbid = NULL WHERE album_id = $1")
+            .bind(tagged_album)
+            .execute(&pool)
+            .await
+            .unwrap();
+        refresh(&pool, tagged_album).await;
+        assert_eq!(group(&pool, tagged_album).await, (None, None));
+    }
+
+    async fn tagged_other(pool: &PgPool) -> (Uuid, Uuid) {
+        let mut t = track("Other", "Disc", Some(1999), "Two", "b/1.flac");
+        t.ids.release_group = Some(B);
+        let id = upsert(pool, &t).await;
+        let album = sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        (id, album)
+    }
+}

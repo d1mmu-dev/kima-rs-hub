@@ -88,6 +88,17 @@ fn playlist_shapes_round_trip() {
     assert_eq!(err.error, "Playlist not found");
 }
 
+/// A server from before the 1.12 base sends no `reverseOrder`: it reads as false.
+#[test]
+fn playlist_without_reverse_order_parses() {
+    let mut v: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/playlist_create_response.json")).unwrap();
+    assert_eq!(v["reverseOrder"], false);
+    v.as_object_mut().unwrap().remove("reverseOrder");
+    let p: Playlist = serde_json::from_value(v).unwrap();
+    assert!(!p.reverse_order);
+}
+
 #[test]
 fn playlist_requests_serialize_as_the_backend_reads_them() {
     let create = serde_json::to_value(CreatePlaylist {
@@ -99,9 +110,16 @@ fn playlist_requests_serialize_as_the_backend_reads_them() {
     let rename = serde_json::to_value(UpdatePlaylist {
         name: Some("y".into()),
         is_public: None,
+        reverse_order: None,
     })
     .unwrap();
     assert_eq!(rename, json!({ "name": "y" }));
+    let reverse = serde_json::to_value(UpdatePlaylist {
+        reverse_order: Some(true),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(reverse, json!({ "reverseOrder": true }));
     let add = serde_json::to_value(AddItems::one("t1")).unwrap();
     assert_eq!(add, json!({ "trackId": "t1" }));
 }

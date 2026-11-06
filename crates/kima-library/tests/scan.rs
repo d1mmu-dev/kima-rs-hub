@@ -475,6 +475,103 @@ async fn purge_logs_the_removal_and_unlinks_transcodes(pool: PgPool) {
     assert!(theirs.exists(), "another track's transcode stays");
 }
 
+/// Task 4 / D-163 (upstream `bafecf23`, `playlistsHoldingTracks`): the owner of each playlist
+/// that held a purged track is told once, whatever number of its tracks went.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn purged_track_announces_playlists_holding_it(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let c = ctx(&pool, dir.path());
+    let a = make_audio(
+        dir.path(),
+        "A/B/01.flac",
+        tags("A", "B", "one", "2000", "1"),
+    );
+    let b = make_audio(
+        dir.path(),
+        "A/B/02.flac",
+        tags("A", "B", "two", "2000", "2"),
+    );
+    make_audio(
+        dir.path(),
+        "C/D/01.flac",
+        tags("C", "D", "three", "2001", "1"),
+    );
+    scan::reconcile(&c).await.unwrap();
+    let (one, two, three) = (
+        track_id(&pool, "A/B/01.flac").await,
+        track_id(&pool, "A/B/02.flac").await,
+        track_id(&pool, "C/D/01.flac").await,
+    );
+    let (ana, ben) = (Uuid::now_v7(), Uuid::now_v7());
+    for (id, name) in [(ana, "ana"), (ben, "ben")] {
+        sqlx::query("INSERT INTO users (id, username, password_hash) VALUES ($1, $2, 'x')")
+            .bind(id)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let (holds_both, holds_kept) = (Uuid::now_v7(), Uuid::now_v7());
+    for (pl, owner) in [(holds_both, ana), (holds_kept, ben)] {
+        sqlx::query("INSERT INTO playlists (id, user_id, name) VALUES ($1, $2, 'p')")
+            .bind(pl)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for (pl, track, sort) in [
+        (holds_both, one, 0),
+        (holds_both, two, 1),
+        (holds_kept, three, 0),
+    ] {
+        sqlx::query(
+            "INSERT INTO playlist_items (id, playlist_id, track_id, sort) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(pl)
+        .bind(track)
+        .bind(sort)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    std::fs::remove_file(a).unwrap();
+    std::fs::remove_file(b).unwrap();
+    scan::reconcile(&c).await.unwrap();
+    sqlx::query("UPDATE tracks SET missing_since = now() - interval '8 days' WHERE id = ANY($1)")
+        .bind([one, two])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut rx = c.events.subscribe();
+    let report = scan::reconcile(&c).await.unwrap();
+    assert_eq!(report.purged, 2, "{report:?}");
+
+    let mut told = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if ev.data["type"] == "playlist:updated" {
+            told.push((
+                ev.user_id,
+                ev.data["playlistId"].clone(),
+                ev.data["deleted"].clone(),
+            ));
+        }
+    }
+    assert_eq!(
+        told,
+        vec![(
+            Some(ana),
+            serde_json::json!(holds_both),
+            serde_json::json!(false)
+        )]
+    );
+}
+
 /// D-161 (upstream `43e2be99`): a track flagged missing whose file is on disk when the scan
 /// walks is un-flagged before the sweep runs, so it is never retired, however old the flag.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

@@ -9,18 +9,24 @@ use uuid::Uuid;
 
 struct Env {
     server: TestServer,
+    state: kima_api::AppState,
     ana: String,
     ben: String,
+    ana_id: Uuid,
+    ben_id: Uuid,
 }
 
 async fn env(pool: PgPool) -> Env {
     let state = common::state(pool);
-    let (_, ana) = common::user_with_token(&state, "ana").await;
-    let (_, ben) = common::user_with_token(&state, "ben").await;
+    let (ana_user, ana) = common::user_with_token(&state, "ana").await;
+    let (ben_user, ben) = common::user_with_token(&state, "ben").await;
     Env {
-        server: TestServer::new(kima_api::router(state)).unwrap(),
+        server: TestServer::new(kima_api::router(state.clone())).unwrap(),
+        state,
         ana,
         ben,
+        ana_id: ana_user.id,
+        ben_id: ben_user.id,
     }
 }
 
@@ -612,4 +618,306 @@ async fn create_validates(pool: PgPool) {
         .json(&json!({ "name": "" }))
         .await
         .assert_status(StatusCode::BAD_REQUEST);
+}
+
+async fn patch_playlist(e: &Env, token: &str, id: &str, body: Value) -> axum_test::TestResponse {
+    e.server
+        .patch(&format!("/api/playlists/{id}"))
+        .authorization_bearer(token)
+        .json(&body)
+        .await
+}
+
+async fn get_order(e: &Env, token: &str, id: &str, query: &str) -> axum_test::TestResponse {
+    e.server
+        .get(&format!("/api/playlists/{id}{query}"))
+        .authorization_bearer(token)
+        .await
+}
+
+fn merged_titles(v: &Value) -> Vec<String> {
+    v["mergedItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["track"]["title"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn patch_and_put_both_set_reverse_order(pool: PgPool) {
+    let e = env(pool).await;
+    let id = create(&e, &e.ana, "Mix", true).await;
+    assert_eq!(detail(&e, &e.ana, &id).await["reverseOrder"], false);
+
+    let res = patch_playlist(&e, &e.ana, &id, json!({ "reverseOrder": true })).await;
+    res.assert_status_ok();
+    assert_eq!(res.json::<Value>()["reverseOrder"], true);
+
+    // A PUT that does not name the flag leaves it alone.
+    let res = e
+        .server
+        .put(&format!("/api/playlists/{id}"))
+        .authorization_bearer(&e.ana)
+        .json(&json!({ "name": "x" }))
+        .await;
+    res.assert_status_ok();
+    let v: Value = res.json();
+    assert_eq!(v["name"], "x");
+    assert_eq!(v["reverseOrder"], true);
+    assert_eq!(detail(&e, &e.ana, &id).await["reverseOrder"], true);
+
+    // PUT sets it too.
+    e.server
+        .put(&format!("/api/playlists/{id}"))
+        .authorization_bearer(&e.ana)
+        .json(&json!({ "reverseOrder": false }))
+        .await
+        .assert_status_ok();
+    assert_eq!(detail(&e, &e.ana, &id).await["reverseOrder"], false);
+
+    // Lists and create carry it.
+    let list: Value = e
+        .server
+        .get("/api/playlists")
+        .authorization_bearer(&e.ana)
+        .await
+        .json();
+    assert_eq!(list[0]["reverseOrder"], false);
+
+    // Not the owner: a public playlist is 403, a private one 404 (D-063).
+    patch_playlist(&e, &e.ben, &id, json!({ "reverseOrder": true }))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    let private = create(&e, &e.ana, "Private", false).await;
+    patch_playlist(&e, &e.ben, &private, json!({ "reverseOrder": true }))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(detail(&e, &e.ana, &id).await["reverseOrder"], false);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn detail_reverses_items_and_merged_items_only(pool: PgPool) {
+    let t = tracks(&pool, 3).await;
+    let e = env(pool).await;
+    let id = create(&e, &e.ana, "Mix", false).await;
+    add(&e, &e.ana, &id, json!({ "trackIds": t }))
+        .await
+        .assert_status_ok();
+    let forward = detail(&e, &e.ana, &id).await;
+    let ranks: Vec<String> = forward["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["rank"].as_str().unwrap().to_owned())
+        .collect();
+
+    patch_playlist(&e, &e.ana, &id, json!({ "reverseOrder": true }))
+        .await
+        .assert_status_ok();
+    let v = detail(&e, &e.ana, &id).await;
+    assert_eq!(titles(&v), ["Song 2", "Song 1", "Song 0"]);
+    assert_eq!(merged_titles(&v), ["Song 2", "Song 1", "Song 0"]);
+    assert_eq!(v["trackCount"], 3);
+    assert_eq!(v["pendingTracks"], json!([]));
+    assert_eq!(v["pendingCount"], 0);
+    // `rank` strings travel with their item and are not renumbered.
+    let rev_ranks: Vec<String> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["rank"].as_str().unwrap().to_owned())
+        .collect();
+    let mut expected = ranks.clone();
+    expected.reverse();
+    assert_eq!(rev_ranks, expected);
+
+    // An explicit ?order beats the stored flag, both ways.
+    let v: Value = get_order(&e, &e.ana, &id, "?order=asc").await.json();
+    assert_eq!(titles(&v), ["Song 0", "Song 1", "Song 2"]);
+    assert_eq!(merged_titles(&v), ["Song 0", "Song 1", "Song 2"]);
+    patch_playlist(&e, &e.ana, &id, json!({ "reverseOrder": false }))
+        .await
+        .assert_status_ok();
+    let v: Value = get_order(&e, &e.ana, &id, "?order=rev").await.json();
+    assert_eq!(titles(&v), ["Song 2", "Song 1", "Song 0"]);
+
+    let res = get_order(&e, &e.ana, &id, "?order=sideways").await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    let v: Value = res.json();
+    assert_eq!(v["error"], "Invalid order");
+    assert!(v["details"].is_array());
+    // An empty value is not "no order" either (zod enum rejects "").
+    get_order(&e, &e.ana, &id, "?order=")
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn move_item_is_unchanged_by_reverse_order(pool: PgPool) {
+    let t = tracks(&pool, 4).await;
+    let e = env(pool).await;
+    let id = create(&e, &e.ana, "Mix", false).await;
+    add(&e, &e.ana, &id, json!({ "trackIds": t }))
+        .await
+        .assert_status_ok();
+    let ids = item_ids(&e, &id).await;
+    patch_playlist(&e, &e.ana, &id, json!({ "reverseOrder": true }))
+        .await
+        .assert_status_ok();
+    // Storage order: item 3 goes first, whatever the display order.
+    mv(&e, &id, &ids[3], None).await.assert_status_ok();
+    let v: Value = get_order(&e, &e.ana, &id, "?order=asc").await.json();
+    assert_eq!(titles(&v), ["Song 3", "Song 0", "Song 1", "Song 2"]);
+    // Display order is the reverse of it.
+    assert_eq!(
+        titles(&detail(&e, &e.ana, &id).await),
+        ["Song 2", "Song 1", "Song 0", "Song 3"]
+    );
+}
+
+/// Every `playlist:updated` for `user` already published, as `(playlistId, deleted)`.
+fn drain(
+    rx: &mut tokio::sync::broadcast::Receiver<kima_core::events::Event>,
+    user: Uuid,
+) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if ev.is_for(user) && ev.data["type"] == "playlist:updated" {
+            assert_eq!(
+                ev.user_id,
+                Some(user),
+                "playlist events are never broadcast"
+            );
+            out.push((
+                ev.data["playlistId"].as_str().unwrap().to_owned(),
+                ev.data["deleted"]
+                    .as_bool()
+                    .expect("deleted is always sent"),
+            ));
+        }
+    }
+    out
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn every_change_announces_to_the_actor_only(pool: PgPool) {
+    let t = tracks(&pool, 4).await;
+    let e = env(pool).await;
+    let mut ana_rx = e.state.events.subscribe();
+    let mut ben_rx = e.state.events.subscribe();
+    let one = |v: Vec<(String, bool)>, id: &str, deleted: bool, what: &str| {
+        assert_eq!(v, vec![(id.to_owned(), deleted)], "{what}");
+    };
+
+    let id = create(&e, &e.ana, "Mix", true).await;
+    one(drain(&mut ana_rx, e.ana_id), &id, false, "create");
+    patch_playlist(&e, &e.ana, &id, json!({ "name": "Renamed" }))
+        .await
+        .assert_status_ok();
+    one(drain(&mut ana_rx, e.ana_id), &id, false, "rename");
+    patch_playlist(&e, &e.ana, &id, json!({ "isPublic": false }))
+        .await
+        .assert_status_ok();
+    one(drain(&mut ana_rx, e.ana_id), &id, false, "make private");
+    patch_playlist(&e, &e.ana, &id, json!({ "isPublic": true }))
+        .await
+        .assert_status_ok();
+    one(drain(&mut ana_rx, e.ana_id), &id, false, "make public");
+    patch_playlist(&e, &e.ana, &id, json!({ "reverseOrder": true }))
+        .await
+        .assert_status_ok();
+    one(drain(&mut ana_rx, e.ana_id), &id, false, "reverse");
+
+    add(&e, &e.ana, &id, json!({ "trackId": t[0] }))
+        .await
+        .assert_status_ok();
+    one(drain(&mut ana_rx, e.ana_id), &id, false, "add");
+    e.server
+        .post(&format!("/api/playlists/{id}/items/batch"))
+        .authorization_bearer(&e.ana)
+        .json(&json!({ "trackIds": [t[1], t[2]] }))
+        .await
+        .assert_status_ok();
+    one(drain(&mut ana_rx, e.ana_id), &id, false, "add_batch");
+    // Nothing added (a duplicate): nothing announced.
+    add(&e, &e.ana, &id, json!({ "trackId": t[0] }))
+        .await
+        .assert_status_ok();
+    assert!(drain(&mut ana_rx, e.ana_id).is_empty(), "duplicate add");
+
+    let items = item_ids(&e, &id).await;
+    mv(&e, &id, &items[2], None).await.assert_status_ok();
+    one(drain(&mut ana_rx, e.ana_id), &id, false, "move");
+    e.server
+        .delete(&format!("/api/playlists/{id}/items/{}", t[1]))
+        .authorization_bearer(&e.ana)
+        .await
+        .assert_status_ok();
+    one(drain(&mut ana_rx, e.ana_id), &id, false, "remove_item");
+
+    // Ben hides and unhides Ana's public playlist: Ben is told (his own view), Ana is not.
+    e.server
+        .post(&format!("/api/playlists/{id}/hide"))
+        .authorization_bearer(&e.ben)
+        .await
+        .assert_status_ok();
+    one(drain(&mut ben_rx, e.ben_id), &id, false, "hide");
+    e.server
+        .post(&format!("/api/playlists/{id}/hide"))
+        .authorization_bearer(&e.ben)
+        .await
+        .assert_status_ok();
+    assert!(
+        drain(&mut ben_rx, e.ben_id).is_empty(),
+        "hide of a hidden playlist"
+    );
+    e.server
+        .delete(&format!("/api/playlists/{id}/hide"))
+        .authorization_bearer(&e.ben)
+        .await
+        .assert_status_ok();
+    one(drain(&mut ben_rx, e.ben_id), &id, false, "unhide");
+    e.server
+        .delete(&format!("/api/playlists/{id}/hide"))
+        .authorization_bearer(&e.ben)
+        .await
+        .assert_status_ok();
+    assert!(
+        drain(&mut ben_rx, e.ben_id).is_empty(),
+        "unhide of a visible playlist"
+    );
+
+    // Refused requests tell nobody: a non-owner write, a bad name, a bad order, an unknown item.
+    patch_playlist(&e, &e.ben, &id, json!({ "name": "no" }))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    patch_playlist(&e, &e.ana, &id, json!({ "name": "" }))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    e.server
+        .delete(&format!("/api/playlists/{id}/items/{}", Uuid::now_v7()))
+        .authorization_bearer(&e.ana)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    e.server
+        .delete(&format!("/api/playlists/{id}"))
+        .authorization_bearer(&e.ben)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+
+    // None of the above reached the other user.
+    assert!(drain(&mut ana_rx, e.ana_id).is_empty(), "refusals");
+    assert!(
+        drain(&mut ben_rx, e.ben_id).is_empty(),
+        "refusals / Ben never hears of Ana's edits"
+    );
+
+    e.server
+        .delete(&format!("/api/playlists/{id}"))
+        .authorization_bearer(&e.ana)
+        .await
+        .assert_status_ok();
+    one(drain(&mut ana_rx, e.ana_id), &id, true, "delete");
+    assert!(drain(&mut ben_rx, e.ben_id).is_empty());
 }

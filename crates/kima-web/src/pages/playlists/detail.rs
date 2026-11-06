@@ -103,6 +103,7 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
                 let body = UpdatePlaylist {
                     name: Some(new_name),
                     is_public: None,
+                    reverse_order: None,
                 };
                 match ctx
                     .client
@@ -124,6 +125,7 @@ fn body(ctx: &Ctx, id: &str, reload: &Value<u32>, detail: &PlaylistDetail) -> Do
             let body = UpdatePlaylist {
                 name: None,
                 is_public: Some(!is_public),
+                reverse_order: None,
             };
             match ctx
                 .client

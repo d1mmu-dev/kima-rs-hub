@@ -179,3 +179,18 @@ pub fn cached(ctx: &IdentCtx) -> Option<Arc<VibeAssets>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
 }
+
+/// Replaces the cached assets (a test, or a caller that already holds them) and returns what is now cached.
+pub fn install(ctx: &IdentCtx, assets: VibeAssets) -> Arc<VibeAssets> {
+    let assets = Arc::new(assets);
+    *ctx.embedding_runtime
+        .vibe_assets
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(assets.clone());
+    // The mood step was built from the previous heads.
+    *ctx.embedding_runtime
+        .vibe_moods
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    assets
+}

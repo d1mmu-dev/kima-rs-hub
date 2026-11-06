@@ -5,6 +5,7 @@
 
 mod eligible;
 pub mod map;
+pub mod moods;
 pub mod path;
 pub mod rank;
 pub mod state;

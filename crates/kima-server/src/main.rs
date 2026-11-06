@@ -209,6 +209,9 @@ async fn main() -> anyhow::Result<()> {
     registry.register_library(library_ctx.clone());
     let state = state.with_ident(ident_ctx.clone());
     registry.register_autotag(ident_ctx.clone());
+    // The mood snapshot follows the statistics between cycles (every 30 s); stopped by the shutdown token.
+    let mood_snapshots =
+        kima_ident::stages::moods::spawn_refresher(ident_ctx.clone(), shutdown.clone());
     registry.register_enrich(ident_ctx);
     // Before any worker starts: recover library jobs a dead process left running, then queue
     // the safety-net reconcile (spec §4.4).
@@ -269,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
     shutdown.cancel();
     watcher.join().await;
     let _ = scheduler.await;
+    let _ = mood_snapshots.await;
     kima_server::jobs::drain(workers, SHUTDOWN_GRACE).await;
     served?;
     Ok(())

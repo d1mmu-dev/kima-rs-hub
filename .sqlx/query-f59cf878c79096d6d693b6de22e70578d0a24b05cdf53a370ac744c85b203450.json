@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH tg AS (\n               SELECT t.id AS track_id, t.album_id, g.key, g.name, 0 AS pri\n               FROM track_genres_effective e\n               JOIN genres g ON g.id = e.genre_id\n               JOIN tracks t ON t.id = e.track_id AND t.missing_since IS NULL\n               UNION ALL\n               SELECT t.id, t.album_id, o.key, o.name, 1\n               FROM tracks t\n               JOIN albums al ON al.id = t.album_id\n               JOIN artists ar ON ar.id = al.artist_id\n               JOIN artist_own_genres o ON o.artist_id = al.artist_id\n               WHERE t.missing_since IS NULL\n                 AND o.key <> lower(regexp_replace(btrim(ar.name), '\\s+', ' ', 'g'))),\n           ag AS (\n               SELECT e.album_id, g.key\n               FROM album_genres_effective e JOIN genres g ON g.id = e.genre_id\n               UNION\n               SELECT al.id, o.key\n               FROM albums al\n               JOIN artists ar ON ar.id = al.artist_id\n               JOIN artist_own_genres o ON o.artist_id = al.artist_id\n               WHERE o.key <> lower(regexp_replace(btrim(ar.name), '\\s+', ' ', 'g'))),\n           names AS (\n               SELECT DISTINCT ON (key) key, name FROM tg ORDER BY key, pri, name)\n           SELECT n.name AS \"name!\",\n                  (SELECT count(DISTINCT tg.track_id) FROM tg WHERE tg.key = n.key) AS \"songs!\",\n                  (SELECT count(DISTINCT ag.album_id) FROM ag\n                    WHERE ag.key = n.key\n                      AND EXISTS (SELECT 1 FROM tracks t\n                                  WHERE t.album_id = ag.album_id AND t.missing_since IS NULL)) AS \"albums!\"\n           FROM names n\n           ORDER BY lower(n.name), n.name, n.key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "songs!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "albums!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f59cf878c79096d6d693b6de22e70578d0a24b05cdf53a370ac744c85b203450"
+}

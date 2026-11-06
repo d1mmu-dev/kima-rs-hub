@@ -10,6 +10,7 @@ use axum_test::TestServer;
 use common::*;
 use kima_db::PgPool;
 use serde_json::Value;
+use uuid::Uuid;
 
 fn app(pool: PgPool) -> TestServer {
     let peer: SocketAddr = "10.0.0.1:4000".parse().unwrap();
@@ -839,3 +840,111 @@ async fn search3_sync_page_timing_10k(pool: PgPool) {
         assert!(!songs.is_empty());
     }
 }
+
+// Owner decision 2026-11-06 (extends D-114/D-166): a person's own genre list on an artist is seen
+// by `getGenres` and by every genre filter, as upstream's artist-only genres are.
+fixture_test!(
+    artists_own_genre_list_is_seen_by_genre_lists_and_filters,
+    |server, pool| {
+        let artist: Uuid = sqlx::query_scalar(
+        "SELECT al.artist_id FROM tracks t JOIN albums al ON al.id = t.album_id WHERE t.id = $1",
+    )
+    .bind(track_id(11))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+        // Present tracks / albums of that artist: what the person's genre must reach.
+        let tracks: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT t.id FROM tracks t JOIN albums al ON al.id = t.album_id
+         WHERE al.artist_id = $1 AND t.missing_since IS NULL ORDER BY t.id",
+        )
+        .bind(artist)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let albums: i64 = sqlx::query_scalar(
+            "SELECT count(DISTINCT al.id) FROM albums al JOIN tracks t ON t.album_id = al.id
+         WHERE al.artist_id = $1 AND t.missing_since IS NULL",
+        )
+        .bind(artist)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!tracks.is_empty());
+        sqlx::query("UPDATE artists SET user_genres = ARRAY['  Fusion   Jazz ', 'rock', '_hidden', ' '] WHERE id = $1")
+        .bind(artist)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // getGenres: the new genre is listed (the person's spelling); `_x` and blanks are not.
+        let res = alice(&server, "getGenres", &[]).await;
+        let list = res["genres"]["genre"].as_array().unwrap();
+        let fusion = list
+            .iter()
+            .find(|g| g["value"] == "Fusion Jazz")
+            .expect("Fusion Jazz listed");
+        assert_eq!(fusion["songCount"], tracks.len());
+        assert_eq!(fusion["albumCount"], albums);
+        assert!(
+            list.iter()
+                .all(|g| !g["value"].as_str().unwrap().starts_with('_'))
+        );
+        // A genre both sides carry is one entry, with its spelling from the genres table.
+        assert_eq!(
+            list.iter()
+                .filter(|g| g["value"].as_str().unwrap().to_lowercase() == "rock")
+                .count(),
+            1
+        );
+        assert!(list.iter().any(|g| g["value"] == "Rock"));
+
+        let got = |res: &Value, key: &str| sorted(ids(&res[key]["song"]));
+        // getSongsByGenre / getRandomSongs: the artist's present tracks, whatever their own genres.
+        let want: Vec<String> = {
+            let mut v: Vec<String> = tracks.iter().map(|t| t.to_string()).collect();
+            v.sort();
+            v
+        };
+        let res = alice(
+            &server,
+            "getSongsByGenre",
+            &[("genre", "fusion  jazz"), ("count", "500")],
+        )
+        .await;
+        assert_eq!(got(&res, "songsByGenre"), want);
+        let res = alice(
+            &server,
+            "getRandomSongs",
+            &[("genre", "FUSION JAZZ"), ("size", "500")],
+        )
+        .await;
+        assert_eq!(got(&res, "randomSongs"), want);
+        // Exact, as before: no substring.
+        let res = alice(&server, "getSongsByGenre", &[("genre", "jazz")]).await;
+        assert_eq!(res["songsByGenre"]["song"], serde_json::json!([]));
+        // byGenre: the artist's albums with a present track.
+        let res = alice(
+            &server,
+            "getAlbumList2",
+            &[
+                ("type", "byGenre"),
+                ("genre", "fusion jazz"),
+                ("size", "500"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            res["albumList2"]["album"].as_array().unwrap().len() as i64,
+            albums
+        );
+        // Clearing the list takes the genre away again.
+        sqlx::query("UPDATE artists SET user_genres = NULL WHERE id = $1")
+            .bind(artist)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let res = alice(&server, "getSongsByGenre", &[("genre", "Fusion Jazz")]).await;
+        assert_eq!(res["songsByGenre"]["song"], serde_json::json!([]));
+    }
+);

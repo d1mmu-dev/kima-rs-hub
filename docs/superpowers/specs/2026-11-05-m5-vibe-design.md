@@ -353,8 +353,19 @@ Only `POST /vibe/search` can use an ANN index. The ranking paths (`similar`, `al
 
 ### 11.3 Decision
 
+**Exact-scan threshold measurement (Task 6, [M]).** `tools/vibe-bench.sh` (example `kima-db/examples/vibe_bench.rs`): run-owned `pgvector/pgvector:pg17` (pgvector 0.8.7), `shared_buffers=1GB`, default `max_parallel_workers_per_gather=2`, 32-core host, random unit 512-d vectors, 5 % of tracks missing, HNSW index dropped (an exact `ORDER BY (embedding <=> q) + 0, track_id LIMIT 20` never uses it), 30 queries after 2 warm-up queries, each with a fresh query vector:
+
+| tracks | eligible | median | p95 | max |
+|---|---|---|---|---|
+| 25,000 | 23,754 | 163 ms | 169 ms | 177 ms |
+| 50,000 | 47,572 | 284 ms | 288 ms | 297 ms |
+| 100,000 | 95,102 | 303 ms | 311 ms | 314 ms |
+| 200,000 | 190,180 | 415 ms | 425 ms | 428 ms |
+
+A second run with `max_parallel_workers_per_gather=8` gave the same at 100k/200k (p95 319/428 ms; 25k/50k noisier, p95 195/399 ms). Growth is sub-linear (the parallel scan only engages above a table-size threshold). **Proposal: keep 200,000** — p95 at 200k is 0.43 s, far under the ~1.0 s rule, so the default is not lowered. It is a measurement on random vectors on one host, not a production guarantee; the embedding time of the query (≈150 ms [?]) is extra.
+
 - Keep `hnsw (embedding vector_cosine_ops)`; do **not** introduce IVFFlat. Rebuild it with `ef_construction = 200` if Task 14's recall on real vectors is below 0.95@20 at the chosen `ef_search` (a migration then, not now).
-- Text search: `eligible_count <= KIMA_VIBE_EXACT_MAX` (default **200,000**, chosen from the 0.17-0.4 s measured at 100k, not measured at 200k [?]) -> **exact** ordered scan (`ORDER BY (embedding <=> q) + 0, track_id`); above it -> index path as upstream: `SET LOCAL hnsw.ef_search = clamp(2·limit, 100, 1000)`, `hnsw.iterative_scan = relaxed_order`, `hnsw.max_scan_tuples = 40000`, re-sort outside the materialised CTE with `+ 0`, equal distances by id, and fall back to the exact read when the index returns fewer than `limit` [V `textEmbeddingBridge.ts:205-235`, `utils/knn.ts`]. Both paths must give the same top-`limit` on a clustered synthetic set (Task 14 test). D-184.
+- Text search: `eligible_count <= KIMA_VIBE_EXACT_MAX` (default **200,000**, configurable; owner Q6 2026-11-06 asked for a proposal, measured in Task 6 below) -> **exact** ordered scan (`ORDER BY (embedding <=> q) + 0, track_id`); above it -> index path as upstream: `SET LOCAL hnsw.ef_search = clamp(2·limit, 100, 1000)`, `hnsw.iterative_scan = relaxed_order`, `hnsw.max_scan_tuples = 40000`, re-sort outside the materialised CTE with `+ 0`, equal distances by id, and fall back to the exact read when the index returns fewer than `limit` [V `textEmbeddingBridge.ts:205-235`, `utils/knn.ts`]. Both paths must give the same top-`limit` on a clustered synthetic set (Task 14 test). D-184.
 - The 2-stage rank (index shortlist, exact rescore) is **not** done; the exact scan is upstream's behaviour and fits the budget up to ≈300 k tracks (§12.1).
 
 ## 12. Performance budget
@@ -363,7 +374,7 @@ Only `POST /vibe/search` can use an ANN index. The ranking paths (`similar`, `al
 
 | Operation | Budget | Evidence |
 |---|---|---|
-| `similar`, `alchemy` (one exact scored pass + caps) | p95 ≤ 1.0 s | [M] 0.41 s synthetic SQL shape, no real genre join; Task 6 re-measures through the real code |
+| `similar`, `alchemy` (one exact scored pass + caps) | p95 ≤ 1.0 s | [M] Task 6 through the real code (`rank_matches`, 95k eligible of 100k, genre term on, 32 cores, default 2 parallel workers): **steady state 0.62-0.71 s** per call (median 0.63 s); the first two calls after the state build took 1.1-1.2 s (cold buffers), so a p95 over 20 calls reads 1.1 s — **at the 1.0 s budget only when the cache is cold**. The earlier 0.41 s proxy had no genre/bonus join. `top_scores` median 0.56 s; two-set `score_library` (path) median 0.69-0.79 s; state build 33 s (first fill, 95k feel rows), unchanged-library rebuild check 2.3 s |
 | `path` (2-set scored pass + n waypoint scans in Rust) | p95 ≤ 2.0 s | scan once for both sets (as upstream); waypoint scans are `n ≤ 50` passes over a 100k-row in-memory `(id, artist, s0, s1)` vector |
 | `search` | embed ≤ 150 ms (CPU, [?]) + rank ≤ 0.5 s | [M] 165 ms exact top-20 |
 | `map` read | ≤ 1.5 s (≈30 MB JSON, gzip ≈ 4 MB) | upstream's size comment "tens of megabytes ... compresses ~8x" [V `vibe.ts:27`]; cache gzip keyed by version |

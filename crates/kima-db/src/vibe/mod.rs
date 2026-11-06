@@ -4,6 +4,7 @@
 //! `track_embeddings` mention anywhere else in this module.
 
 mod eligible;
+pub mod rank;
 pub mod state;
 
 pub use eligible::{ELIGIBLE, MATCHING_SOUND, SoundIdentity};

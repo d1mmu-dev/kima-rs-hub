@@ -391,6 +391,20 @@ A second run with `max_parallel_workers_per_gather=8` gave the same at 100k/200k
 | **First layout** | ≤ 10 min at 100k, 8 cores; hard memory cap 1 GB | n²·512 = 5.1e12 multiply-adds, plus fuzzy graph and 500 epochs. Estimate [?]: Task 8 microbenchmarks the neighbour sweep and fixes the f32/f64 accumulation choice (D-185). Upstream JS does this single-threaded in a worker. |
 | Incremental placement | ≤ 5 s per 100 new tracks | each new track scans the laid-out set |
 
+**Neighbour sweep, measured (Task 8, owner Q7: find out why before choosing a fix).** `crates/kima-vibe/examples/neighbour_bench.rs` (release, 512-d synthetic tracks, 10 per artist, genre bonuses on, 32-core host). A sweep's cost is linear in the rows, so a sample of rows against all N columns is timed and scaled to the full same-set sweep (`time x N / rows`); 8 threads = rayon pool of 8:
+
+| N columns | sampled rows | threads | accumulation | sample time | M pairs/s | full same-set sweep |
+|---|---|---|---|---|---|---|
+| 5,000 | 400 | 8 | f64 | 0.07 s | 27.9 | 1 s |
+| 20,000 | 400 | 8 | f64 | 0.23 s | 35.4 | 11 s |
+| 50,000 | 400 | 8 | f64 | 0.53 s | 38.1 | 66 s |
+| **100,000** | 800 | 8 | **f64** | 1.98 s | 40.4 | **248 s (4.1 min)** |
+| 100,000 | 800 | 8 | f32 | 1.68 s | 47.5 | 210 s (3.5 min) |
+| 100,000 | 800 | 32 | f64 | 1.39 s | 57.6 | 174 s (2.9 min) |
+| 100,000 | 400 | 1 | f64 | 5.65 s | 7.1 | 1412 s (23.5 min) |
+
+Findings: (1) the exact f64 sweep at 100k is **4.1 min on 8 threads**, inside the 10 min budget: no approximation and no f32 (f32 saves only 15 %, so the D-185 f32 amendment is not made). (2) The time is the dot products (single thread 7.3 GFLOP/s of multiply-adds in strict dimension order, the order the bit-exact goldens require); top-k selection is 0.03 ms per row of 20,000 scores (about 0.7 % of the 4 ms per row), genre-bonus builds once per artist. (3) Upstream's own TypeScript on the same shape (`tools/vibe-goldens/bench-neighbours.mjs`, Node 26.7, one thread) does 2.6 M pairs/s = **64.5 min at 100k single-threaded**, so Rust is 2.8x faster per thread before the 5.7x of 8 threads; the sample sizes above under-use the pool (800 rows = 12 chunks), the real 100k-row sweep balances better. (4) Headroom if ever needed, all exact: SIMD across columns (a column-major layout vectorises over j and leaves every pair's summation order unchanged). Still unmeasured: the fuzzy graph and the 500 optimisation epochs (Task 9), so the end-to-end first-layout time at 100k stays [?] until Task 9.
+
 The enrichment cycle must never block on the layout (the cycle awaits it only through the single-flight handle with a status; it proceeds when the task is running). `updateMap` runs every cycle but returns after one count query when the map is complete [V].
 
 ## 13. Hand-offs

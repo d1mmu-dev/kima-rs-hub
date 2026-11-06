@@ -20,3 +20,7 @@ parallel = ["dep:rayon"]
 
 [dev-dependencies]
 serde_json.workspace = true
+
+[[example]]
+name = "neighbour_bench"
+required-features = ["parallel"]

@@ -266,6 +266,7 @@ fn ident_ctx(pool: &PgPool) -> kima_ident::IdentCtx {
         progress_events: kima_ident::events::ProgressEvents::new(EventBus::new(4)),
         embedding_runtime: Default::default(),
         analysis_runtime: Default::default(),
+        acoustid_hold: Default::default(),
         library: LibraryCtx {
             pool: pool.clone(),
             root: std::path::PathBuf::from("/music").into(),

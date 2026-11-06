@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO album_votes (album_id, signature, verdict, decided_at, expires_at)\n         VALUES ($1, $2, $3, now(), now() + make_interval(secs => $4::float8))\n         ON CONFLICT (album_id) DO UPDATE SET\n             signature = EXCLUDED.signature, verdict = EXCLUDED.verdict,\n             decided_at = EXCLUDED.decided_at, expires_at = EXCLUDED.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0ffb6cba3156b0a2ba468f7b3710ff9ed56a6098265b8b2753d41a65649cc9af"
+}

@@ -615,3 +615,316 @@ async fn reads_need_auth_401(pool: PgPool) {
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
 }
+
+// ---- POST /api/enrichment/rerun (M-SYNC Task 14; upstream enrichmentRerun.route.test.ts) ----
+
+const SIX_STEPS: &str =
+    "step must be one of: identification, artists, analysis, vectors, moods, similarity";
+
+async fn rerun_as(srv: &TestServer, token: &str, body: Value) -> axum_test::TestResponse {
+    srv.post("/api/enrichment/rerun")
+        .authorization_bearer(token)
+        .json(&body)
+        .await
+}
+
+async fn enrich_jobs(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM jobs WHERE queue = 'enrich' AND state = 'queued'")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// An enriched artist: a bio, similar artists, `completed`, a MusicBrainz genre and one of the
+/// person's own.
+async fn enriched_artist(pool: &PgPool, name: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO artists (id, name, name_key, bio, \"similar\", enrichment_status, \
+         last_enriched_at, enrichment_failures, user_genres) \
+         VALUES ($1, $2, lower($2), 'a bio', '[]'::jsonb, 'completed', now(), 2, ARRAY['mine'])",
+    )
+    .bind(id)
+    .bind(name)
+    .execute(pool)
+    .await
+    .unwrap();
+    let genre = Uuid::now_v7();
+    sqlx::query("INSERT INTO genres (id, name, key) VALUES ($1, 'rock', $2)")
+        .bind(genre)
+        .bind(genre.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO artist_genres (artist_id, genre_id, source, rank) VALUES ($1, $2, 'musicbrainz', 0)")
+        .bind(id)
+        .bind(genre)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn artist_state(
+    pool: &PgPool,
+    id: Uuid,
+) -> (String, Option<String>, Option<Value>, i16, i64) {
+    let r: (String, Option<String>, Option<Value>, i16) = sqlx::query_as(
+        "SELECT enrichment_status, bio, \"similar\", enrichment_failures FROM artists WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let genres: i64 = sqlx::query_scalar("SELECT count(*) FROM artist_genres WHERE artist_id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (r.0, r.1, r.2, r.3, genres)
+}
+
+/// A track identified by a search: its `recording` row `done`.
+async fn identified_track(pool: &PgPool, n: i32) -> Uuid {
+    let t = track(pool, n).await;
+    sqlx::query("UPDATE tracks SET recording_mbid = $2, recording_source = 'search' WHERE id = $1")
+        .bind(t)
+        .bind(Uuid::new_v4())
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status, source, finished_at) \
+         VALUES ($1, 'recording', 'done', 'search', now())",
+    )
+    .bind(t)
+    .execute(pool)
+    .await
+    .unwrap();
+    t
+}
+
+async fn recording_status(pool: &PgPool, t: Uuid) -> String {
+    sqlx::query_scalar(
+        "SELECT status FROM track_stages WHERE track_id = $1 AND stage = 'recording'",
+    )
+    .bind(t)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn re_runs_from_a_valid_step_and_starts_the_engine(pool: PgPool) {
+    let (srv, admin, user) = server(pool.clone()).await;
+    // The progress memo is dropped by the re-run, and the coordinator is kicked.
+    let before = get(&srv, &user, "/api/enrichment/progress").await;
+    assert_eq!(before["trackTags"]["total"], 0);
+    track(&pool, 1).await;
+    enriched_artist(&pool, "Low").await;
+    assert_eq!(enrich_jobs(&pool).await, 0);
+
+    let res = rerun_as(&srv, &admin, json!({"step": "identification"})).await;
+
+    res.assert_status_ok();
+    let body: Value = res.json();
+    assert_eq!(
+        body,
+        // The track's own artist and "Low".
+        json!({"artists": 2, "tracks": 0, "vectors": 0, "message": "Re-running from identification"})
+    );
+    assert_eq!(enrich_jobs(&pool).await, 1);
+    let after = get(&srv, &user, "/api/enrichment/progress").await;
+    assert_eq!(after["trackTags"]["total"], 1);
+
+    let body: Value = rerun_as(&srv, &admin, json!({"step": "artists"}))
+        .await
+        .json();
+    assert_eq!(body["message"], "Re-running from artists");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn names_the_six_steps_when_refusing_one(pool: PgPool) {
+    let (srv, admin, _) = server(pool.clone()).await;
+    for step in [
+        json!("everything"),
+        json!(""),
+        json!(null),
+        json!(5),
+        json!("toString"),
+        json!("constructor"),
+        json!("Identification"),
+    ] {
+        let res = rerun_as(&srv, &admin, json!({ "step": step })).await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        let body: Value = res.json();
+        assert_eq!(body, json!({"error": SIX_STEPS}), "{step}");
+    }
+    // No step at all, and no JSON at all, are refused the same way.
+    let res = rerun_as(&srv, &admin, json!({})).await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(res.json::<Value>(), json!({"error": SIX_STEPS}));
+    let res = srv
+        .post("/api/enrichment/rerun")
+        .authorization_bearer(&admin)
+        .await;
+    res.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(res.json::<Value>(), json!({"error": SIX_STEPS}));
+    assert_eq!(enrich_jobs(&pool).await, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refuses_a_member_re_running_nothing(pool: PgPool) {
+    let (srv, _, user) = server(pool.clone()).await;
+    let a = enriched_artist(&pool, "Low").await;
+
+    let res = rerun_as(&srv, &user, json!({"step": "artists"})).await;
+
+    res.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(artist_state(&pool, a).await.0, "completed");
+    assert_eq!(enrich_jobs(&pool).await, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn needs_a_signed_in_user(pool: PgPool) {
+    let (srv, _, _) = server(pool.clone()).await;
+    let a = enriched_artist(&pool, "Low").await;
+
+    let res = srv
+        .post("/api/enrichment/rerun")
+        .json(&json!({"step": "artists"}))
+        .await;
+
+    res.assert_status(StatusCode::UNAUTHORIZED);
+    assert_eq!(artist_state(&pool, a).await.0, "completed");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn artists_step_resets_only_artists(pool: PgPool) {
+    let (srv, admin, _) = server(pool.clone()).await;
+    let t = identified_track(&pool, 1).await;
+    let a = enriched_artist(&pool, "Low").await;
+    let various = enriched_artist(&pool, "Various Artists").await;
+
+    let body: Value = rerun_as(&srv, &admin, json!({"step": "artists"}))
+        .await
+        .json();
+
+    // Artists back to `pending`: no bio, no similar list, no failures, their MusicBrainz genres
+    // gone and the person's own list kept; the track's answer and stage are untouched.
+    // The track's own artist and "Low"; Various Artists is not counted.
+    assert_eq!(body["artists"], 2);
+    assert_eq!(
+        artist_state(&pool, a).await,
+        ("pending".into(), None, None, 0, 0)
+    );
+    let own: Option<Vec<String>> =
+        sqlx::query_scalar("SELECT user_genres FROM artists WHERE id = $1")
+            .bind(a)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(own, Some(vec!["mine".to_string()]));
+    assert_eq!(artist_state(&pool, various).await.0, "completed");
+    assert_eq!(recording_status(&pool, t).await, "done");
+    let mbid: Option<Uuid> = sqlx::query_scalar("SELECT recording_mbid FROM tracks WHERE id = $1")
+        .bind(t)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(mbid.is_some());
+    assert_eq!(enrich_jobs(&pool).await, 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn identification_step_equals_wipe_and_rerun(pool: PgPool) {
+    let (srv, admin, _) = server(pool.clone()).await;
+    let seed_state = |pool: PgPool| async move {
+        let t = identified_track(&pool, 1).await;
+        let a = enriched_artist(&pool, &format!("Low {}", Uuid::new_v4())).await;
+        (t, a)
+    };
+    let (t, a) = seed_state(pool.clone()).await;
+    let by_wipe = post(&srv, &admin, "/api/enrichment/wipe-and-rerun").await;
+    let wiped = (
+        recording_status(&pool, t).await,
+        artist_state(&pool, a).await,
+    );
+
+    // The same state again, then the same effect through the new route.
+    sqlx::query("UPDATE track_stages SET status = 'done' WHERE track_id = $1")
+        .bind(t)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tracks SET recording_mbid = $2 WHERE id = $1")
+        .bind(t)
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE artists SET enrichment_status = 'completed', bio = 'a bio'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let by_rerun: Value = rerun_as(&srv, &admin, json!({"step": "identification"}))
+        .await
+        .json();
+
+    assert_eq!(by_rerun["artists"], by_wipe["artists"]);
+    assert_eq!(by_rerun["tracks"], by_wipe["tracks"]);
+    assert_eq!(by_rerun["vectors"], by_wipe["vectors"]);
+    assert_eq!(wiped.0, "pending");
+    assert_eq!(recording_status(&pool, t).await, "pending");
+    assert_eq!(artist_state(&pool, a).await.0, "pending");
+    assert_eq!(artist_state(&pool, a).await.1, None);
+    assert_eq!(by_rerun["message"], "Re-running from identification");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unavailable_step_is_409_and_changes_nothing(pool: PgPool) {
+    let (srv, admin, _) = server(pool.clone()).await;
+    let t = identified_track(&pool, 1).await;
+    let a = enriched_artist(&pool, "Low").await;
+
+    for step in ["analysis", "vectors", "moods", "similarity"] {
+        let res = rerun_as(&srv, &admin, json!({ "step": step })).await;
+        res.assert_status(StatusCode::CONFLICT);
+        assert_eq!(
+            res.json::<Value>(),
+            json!({"error": format!("The {step} step is not available yet")})
+        );
+    }
+
+    assert_eq!(recording_status(&pool, t).await, "done");
+    assert_eq!(artist_state(&pool, a).await.0, "completed");
+    assert_eq!(enrich_jobs(&pool).await, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reports_a_failed_re_run_as_a_500_and_starts_nothing(pool: PgPool) {
+    let (srv, admin, user) = server(pool.clone()).await;
+    let a = enriched_artist(&pool, "Low").await;
+    // The progress memo exists, so a refused re-run must leave it be.
+    get(&srv, &user, "/api/enrichment/progress").await;
+    sqlx::query("ALTER TABLE artist_genres RENAME TO artist_genres_gone")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let res = rerun_as(&srv, &admin, json!({"step": "artists"})).await;
+
+    res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"error": "Failed to re-run enrichment"})
+    );
+    assert_eq!(enrich_jobs(&pool).await, 0);
+    // Nothing was half done: the reset is one transaction.
+    let status: String = sqlx::query_scalar("SELECT enrichment_status FROM artists WHERE id = $1")
+        .bind(a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "completed");
+}

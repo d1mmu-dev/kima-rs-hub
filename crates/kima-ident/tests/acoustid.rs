@@ -13,7 +13,7 @@ use kima_core::identify::IdentifySwitch;
 use kima_db::settings_kv::{self, Key, KvSettings, SettingsCache};
 use kima_ident::Mbid;
 use kima_ident::acoustid::{
-    self, AcoustidRecording, AcoustidResult, DEFAULT_CLIENT_KEY, MIN_SCORE, Picked,
+    self, AcoustidGroup, AcoustidRecording, AcoustidResult, DEFAULT_CLIENT_KEY, MIN_SCORE, Picked,
 };
 use kima_net::testing::{Entry, Recording, Replay, body_sha256};
 use kima_net::{Bases, Net, NetConfig, Outcome};
@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 const RECORDING: &str = "8f6a1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b";
+const ALBUM: &str = "0e5df449-0e51-4f4f-9a33-6a17e7c6b717";
 const DAY_6: &str = "00000000-0000-4000-8000-000000000006";
 const DAY_2: &str = "00000000-0000-4000-8000-000000000002";
 const LIVE: &str = "00000000-0000-4000-8000-00000000000b";
@@ -100,6 +101,12 @@ async fn answers_a_confident_match_with_the_full_result_shape(pool: PgPool) {
             recording: mbid(RECORDING),
             score: 0.92,
             acoustid_id: RECORDING.into(),
+            title_agrees: false,
+            candidates: vec![mbid(RECORDING)],
+            release_groups: vec![AcoustidGroup {
+                id: mbid(ALBUM),
+                title: "Album".into(),
+            }],
         }
     );
     assert_eq!(
@@ -121,6 +128,10 @@ async fn answers_a_confident_match_with_the_full_result_shape(pool: PgPool) {
                 id: mbid(RECORDING),
                 title: Some("Song".into()),
                 duration: Some(200.0),
+                releasegroups: vec![AcoustidGroup {
+                    id: mbid(ALBUM),
+                    title: "Album".into(),
+                }],
             }]),
         }]
     );
@@ -383,7 +394,7 @@ async fn no_key_is_permanent_no_client_key_without_request(pool: PgPool) {
 // ---- kima-rs additions: secrets, cache, untrusted answers ----
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn the_key_never_reaches_the_cache_or_a_failure(pool: PgPool) {
+async fn the_key_never_reaches_a_failure_or_a_request_line(pool: PgPool) {
     let secret = "s3cret/KEY+value";
     let encoded = "s3cret%2FKEY%2Bvalue";
     let confident = fixture("confident").remove(0).body;
@@ -407,25 +418,14 @@ async fn the_key_never_reaches_the_cache_or_a_failure(pool: PgPool) {
     )
     .await;
 
-    // Answered, and cached under a key without the secret.
+    // Answered; nothing is kept in the response cache (replies are saved per fingerprint in
+    // `acoustid_replies`, which never holds a key either: see acoustid_batch.rs).
     picked(acoustid::identify(&net, secret, "fp", 200, None).await);
-    let rows: Vec<(String, String, String, String)> =
-        sqlx::query_as("SELECT key, source, request, body::text FROM http_cache")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    assert_eq!(rows.len(), 1);
-    for (key, source, request, body) in &rows {
-        assert_eq!(source, "acoustid");
-        for text in [key, request, body] {
-            assert!(!text.contains(secret) && !text.contains(encoded), "{text}");
-            assert!(!text.contains("client="), "{text}");
-        }
-        // The cache key is the source and a hash; the request names the body by its hash.
-        assert_eq!(key.len(), "acoustid:".len() + 64);
-        assert!(request.starts_with("POST "), "{request}");
-        assert_eq!(request.split('\n').nth(1).map(str::len), Some(64));
-    }
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM http_cache")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
 
     // A failure whose answer echoes the key carries it nowhere.
     let out = acoustid::identify(&net, secret, "other", 200, None).await;
@@ -449,16 +449,19 @@ async fn the_key_never_reaches_the_cache_or_a_failure(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn answers_are_cached_by_fingerprint_and_duration_not_key(pool: PgPool) {
+async fn a_lookup_is_never_kept_in_the_response_cache(pool: PgPool) {
+    // M-SYNC Task 12: AcoustID replies live in `acoustid_replies` (30 d / 7 d / 1 d), so Net's
+    // `http_cache` keeps none of them, and the same question is asked again at this layer.
     let (replay, net) = net_for(&pool, fixture("confident")).await;
-    let first = picked(acoustid::identify(&net, "key-one", "fp", 200, None).await);
-    // Another key, same question: served from the cache.
-    let second = picked(acoustid::identify(&net, "key-two", "fp", 200, None).await);
-    assert_eq!(first, second);
-    assert_eq!(replay.asked().len(), 1);
-    // Another fingerprint is another question.
-    picked(acoustid::identify(&net, "key-one", "fp2", 200, None).await);
+    picked(acoustid::identify(&net, "key-one", "fp", 200, None).await);
+    picked(acoustid::identify(&net, "key-two", "fp", 200, None).await);
     assert_eq!(replay.asked().len(), 2);
+    let cached: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM http_cache WHERE source = 'acoustid'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(cached, 0);
 }
 
 fn result(v: Value) -> AcoustidResult {
@@ -531,4 +534,133 @@ fn a_title_that_agrees_nowhere_falls_back_to_every_fitting_recording() {
     // An empty title is no title.
     let p = acoustid::pick_fingerprint_match(&results, 200, Some("")).unwrap();
     assert_eq!(p.recording, mbid(STUDIO));
+}
+
+// ---- the pick, M-SYNC Task 12 (acoustidService.pickFingerprintMatch, toResult) ----
+
+#[test]
+fn the_pick_says_whether_the_title_agrees_and_lists_the_candidates_best_first() {
+    let results = vec![result(json!({"id": "x", "score": 0.8, "recordings": [
+        {"id": LIVE, "title": "Song", "duration": 203},
+        {"id": STUDIO, "title": "Song", "duration": 200},
+        {"id": DAY_2, "title": "Other", "duration": 200},
+    ]}))];
+    let p = acoustid::pick_fingerprint_match(&results, 200, Some("Song")).unwrap();
+    assert!(p.title_agrees);
+    // Only the title-agreeing recordings, the closest length first.
+    assert_eq!(p.candidates, vec![mbid(STUDIO), mbid(LIVE)]);
+    assert_eq!(p.recording, mbid(STUDIO));
+
+    // No recording with the track's title: the pick has only the length, and every fitting
+    // recording is a candidate.
+    let p = acoustid::pick_fingerprint_match(&results, 200, Some("Nothing like it")).unwrap();
+    assert!(!p.title_agrees);
+    assert_eq!(p.candidates, vec![mbid(STUDIO), mbid(DAY_2), mbid(LIVE)]);
+}
+
+#[test]
+fn when_the_title_agrees_the_albums_are_the_union_over_the_candidates() {
+    let g = |n: u32| json!({"id": format!("00000000-0000-4000-8000-0000000000{n:02}"), "title": format!("Album {n}")});
+    let results = vec![result(json!({"id": "x", "score": 0.9, "recordings": [
+        {"id": STUDIO, "title": "Song", "duration": 200, "releasegroups": [g(1), g(2)]},
+        {"id": LIVE, "title": "Song", "duration": 201, "releasegroups": [g(2), g(3)]},
+        {"id": DAY_2, "title": "Other", "duration": 200, "releasegroups": [g(9)]},
+    ]}))];
+    let ids =
+        |p: &Picked| -> Vec<String> { p.release_groups.iter().map(|g| g.title.clone()).collect() };
+    let agreeing = acoustid::pick_fingerprint_match(&results, 200, Some("Song")).unwrap();
+    assert_eq!(ids(&agreeing), ["Album 1", "Album 2", "Album 3"]);
+    // A length-only pick lists only its own recording's albums.
+    let by_length = acoustid::pick_fingerprint_match(&results, 200, Some("Unrelated")).unwrap();
+    assert!(!by_length.title_agrees);
+    assert_eq!(by_length.recording, mbid(STUDIO));
+    assert_eq!(ids(&by_length), ["Album 1", "Album 2"]);
+}
+
+#[test]
+fn a_result_survives_being_saved_and_read_back() {
+    let r = result(json!({"id": "x", "score": 0.9, "recordings": [
+        {"id": STUDIO, "title": "Song", "duration": 200.5,
+         "releasegroups": [{"id": ALBUM, "title": "Album"}, {"id": "nope"}]},
+    ]}));
+    let back: Vec<AcoustidResult> =
+        serde_json::from_value(serde_json::to_value([&r]).unwrap()).unwrap();
+    assert_eq!(back, vec![r]);
+    // A score that was not a number comes back as one that is not a number.
+    let nan = result(json!({"id": "y", "recordings": []}));
+    let back: Vec<AcoustidResult> =
+        serde_json::from_value(serde_json::to_value([&nan]).unwrap()).unwrap();
+    assert!(back[0].score.is_nan());
+}
+
+// ---- lookup_batch ----
+
+fn batch_body(key: &str, qs: &[(&str, i32)]) -> String {
+    let mut s = format!("client={key}&meta=recordings%20releasegroups&batch=1");
+    for (i, (fp, secs)) in qs.iter().enumerate() {
+        s.push_str(&format!("&duration.{i}={secs}&fingerprint.{i}={fp}"));
+    }
+    s
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_batch_request_has_the_upstream_shape_and_maps_each_index_back(pool: PgPool) {
+    let qs = [("fpA", 200), ("fpB", 201), ("fpC", 202)];
+    let (replay, net) = net_for(
+        &pool,
+        vec![post(
+            200,
+            json!({"status": "ok", "fingerprints": [
+                {"index": 2, "results": [{"id": "r2", "score": 0.9, "recordings": [
+                    {"id": STUDIO, "title": "Song", "duration": 202}]}]},
+                {"index": 0, "results": []},
+                {"index": 9, "results": [{"id": "stray", "score": 1.0}]},
+            ]}),
+            Some(body_sha256(&batch_body(KEY, &qs))),
+        )],
+    )
+    .await;
+    let out = acoustid::lookup_batch(&net, KEY, &qs).await;
+    let got = match out {
+        Outcome::Answered(g) => g,
+        other => panic!("expected answered, got {other:?}"),
+    };
+    // Index 1 is absent (the server dropped it); index 9 names no question and is ignored.
+    assert_eq!(got.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![2, 0]);
+    assert_eq!(got[0].1[0].id, "r2");
+    assert!(got[1].1.is_empty());
+    assert_eq!(replay.asked(), vec!["POST /lookup".to_string()]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_batch_reply_without_a_fingerprints_list_is_a_bad_response(pool: PgPool) {
+    let (_replay, net) = net_for(&pool, vec![post(200, json!({"status": "ok"}), None)]).await;
+    let out = acoustid::lookup_batch(&net, KEY, &[("fpA", 200)]).await;
+    assert_eq!(out.code(), Some("BAD_RESPONSE"), "{out:?}");
+    let (_replay, net) = net_for(
+        &pool,
+        vec![post(
+            200,
+            json!({"status": "error", "fingerprints": []}),
+            None,
+        )],
+    )
+    .await;
+    let out = acoustid::lookup_batch(&net, KEY, &[("fpA", 200)]).await;
+    assert_eq!(out.code(), Some("BAD_RESPONSE"), "{out:?}");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_batch_needs_a_key_and_holds_at_most_ten_questions(pool: PgPool) {
+    let (replay, net) = net_for(&pool, vec![]).await;
+    let out = acoustid::lookup_batch(&net, " ", &[("fpA", 200)]).await;
+    assert_eq!(out.code(), Some("NO_CLIENT_KEY"));
+    let eleven: Vec<(&str, i32)> = (0..11).map(|_| ("fp", 200)).collect();
+    let out = acoustid::lookup_batch(&net, KEY, &eleven).await;
+    assert_eq!(out.code(), Some("BATCH_TOO_LARGE"));
+    assert_eq!(
+        acoustid::lookup_batch(&net, KEY, &[]).await,
+        Outcome::Answered(vec![])
+    );
+    assert!(replay.asked().is_empty());
 }

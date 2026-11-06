@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO acoustid_replies\n             (fingerprint_hash, duration_secs, status, results, saved_at, expires_at)\n         VALUES ($1, $2, $3, $4, now(), now() + make_interval(secs => $5::float8))\n         ON CONFLICT (fingerprint_hash, duration_secs) DO UPDATE SET\n             status = EXCLUDED.status, results = EXCLUDED.results,\n             saved_at = EXCLUDED.saved_at, expires_at = EXCLUDED.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Int4",
+        "Text",
+        "Jsonb",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e7aa024dc9dff14e31f2528f58d791415300bf958a8c7aadc4d5d9098dc39ef3"
+}

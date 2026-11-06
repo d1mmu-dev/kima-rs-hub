@@ -93,6 +93,7 @@ pub fn ident_ctx_with_embedding_and_analysis(
         last_cycle: Default::default(),
         embedding_runtime: Default::default(),
         analysis_runtime: Default::default(),
+        acoustid_hold: Default::default(),
     }
 }
 

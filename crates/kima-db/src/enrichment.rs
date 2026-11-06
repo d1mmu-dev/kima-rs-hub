@@ -397,6 +397,27 @@ pub async fn reopen_skipped_acoustid(
     Ok(r.rows_affected())
 }
 
+/// A fingerprint just landed for `track` (upstream `42ce4154`): its `recording` row closed `done`
+/// as "no match" for want of one (`acoustidReason = no_fingerprint`) goes back to `pending`,
+/// due now, to ask AcoustID. Any other closed answer is left alone. Returns rows reopened.
+pub async fn reopen_unasked_recording(
+    conn: &mut sqlx::PgConnection,
+    track: uuid::Uuid,
+) -> sqlx::Result<u64> {
+    let r = sqlx::query!(
+        "UPDATE track_stages
+         SET status = 'pending', next_attempt_at = NULL, started_at = NULL, finished_at = NULL,
+             updated_at = now()
+         WHERE track_id = $1 AND stage = 'recording' AND status = 'done'
+           AND evidence ->> 'acoustid' = 'skipped'
+           AND evidence ->> 'acoustidReason' = 'no_fingerprint'",
+        track
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(r.rows_affected())
+}
+
 /// Retry failed and blocked: the skipped-AcoustID reopen, then every `failed` row with a retry
 /// scheduled (`next_attempt_at` set) goes to `pending`, due now, its attempts kept. Nothing
 /// `done` or terminal is touched. Returns rows reopened.
@@ -445,6 +466,62 @@ pub async fn redecide(pool: &PgPool, now: AcoustidNow) -> sqlx::Result<u64> {
     let skipped = reopen_skipped_acoustid(&mut tx, now).await?;
     tx.commit().await?;
     Ok(reopened + skipped)
+}
+
+/// Puts every artist but Various Artists back to `pending`: `bio`, `similar` and
+/// `last_enriched_at` NULL, failures and cover deferrals 0, their `musicbrainz` genres deleted
+/// (the person's own list stays). The rows are locked first, in id order. Returns how many.
+async fn reset_artists_in(conn: &mut sqlx::PgConnection) -> sqlx::Result<u64> {
+    sqlx::query!(
+        "SELECT id FROM artists WHERE name_key <> 'various artists'
+         ORDER BY id
+         FOR NO KEY UPDATE"
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let artists = sqlx::query!(
+        r#"UPDATE artists
+           SET bio = NULL, "similar" = NULL, enrichment_status = 'pending',
+               enrichment_failures = 0, cover_deferrals = 0, last_enriched_at = NULL
+           WHERE name_key <> 'various artists'"#
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    sqlx::query!(
+        "DELETE FROM artist_genres
+         WHERE source = 'musicbrainz'
+           AND artist_id IN (SELECT id FROM artists WHERE name_key <> 'various artists')"
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(artists)
+}
+
+/// Re-run from the artists step (M-SYNC Task 14; upstream `rerunEnrichment("artists")`): only
+/// the artists are reset, in one transaction. Stage rows, recordings, tracks and albums stay.
+/// Returns how many artists.
+pub async fn reset_artists(pool: &PgPool) -> sqlx::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let artists = reset_artists_in(&mut tx).await?;
+    tx.commit().await?;
+    Ok(artists)
+}
+
+/// Whether a library scan is running, queued, or waiting out a retry delay (upstream
+/// `libraryScanRunning`, `b78b1167`): songs may still be on their way into the library, and
+/// enrichment starts from the whole library, never the part scanned so far. Counts the library
+/// jobs that add songs (`reconcile`, and the single-file `path` update); the organizer's and
+/// autotag's jobs share the queue but add none.
+pub async fn library_scan_running(pool: &PgPool) -> sqlx::Result<bool> {
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM jobs
+             WHERE queue = 'library' AND state IN ('queued', 'running')
+               AND payload ->> 'kind' IN ('reconcile', 'path')) AS "running!""#
+    )
+    .fetch_one(pool)
+    .await
 }
 
 /// What a wipe reset.
@@ -514,29 +591,10 @@ pub async fn wipe(pool: &PgPool) -> sqlx::Result<WipeCounts> {
     .await?;
     // Various Artists is never looked up (spec §6.3): it keeps `completed`. The artists are
     // locked in id order first (final review M2), the order the scanner uses.
-    sqlx::query!(
-        "SELECT id FROM artists WHERE name_key <> 'various artists'
-         ORDER BY id
-         FOR NO KEY UPDATE"
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let artists = sqlx::query!(
-        r#"UPDATE artists
-           SET bio = NULL, "similar" = NULL, enrichment_status = 'pending',
-               enrichment_failures = 0, cover_deferrals = 0, last_enriched_at = NULL
-           WHERE name_key <> 'various artists'"#
-    )
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-    sqlx::query!(
-        "DELETE FROM artist_genres
-         WHERE source = 'musicbrainz'
-           AND artist_id IN (SELECT id FROM artists WHERE name_key <> 'various artists')"
-    )
-    .execute(&mut *tx)
-    .await?;
+    let artists = reset_artists_in(&mut tx).await?;
+    // The remembered album verdicts go too, so every untagged album votes again; the saved
+    // AcoustID replies stay (upstream `forgetAlbumVerdicts`).
+    crate::album_votes::forget_all(&mut tx).await?;
     tx.commit().await?;
     Ok(WipeCounts {
         artists: i64::try_from(artists).unwrap_or(i64::MAX),

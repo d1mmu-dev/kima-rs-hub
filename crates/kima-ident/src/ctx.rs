@@ -35,6 +35,8 @@ pub struct EmbeddingRuntimeState {
     /// The vibe engine's private assets (feel probe, mood heads), loaded once per process; kept here with the
     /// other loaded-once model state so no `IdentCtx` constructor changes.
     pub(crate) vibe_assets: Mutex<Option<Arc<crate::stages::vibe_assets::VibeAssets>>>,
+    /// The mood step's per-process state (the heads, the last full hash, the mood snapshot).
+    pub(crate) vibe_moods: Mutex<Option<Arc<crate::stages::moods::MoodRuntime>>>,
 }
 
 pub type EmbeddingRuntimeCache = Arc<EmbeddingRuntimeState>;

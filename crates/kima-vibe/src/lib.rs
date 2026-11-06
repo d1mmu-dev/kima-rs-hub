@@ -9,6 +9,7 @@ pub mod feel_probe;
 pub mod formula;
 pub mod map_compute;
 pub mod mood_heads;
+pub mod moods;
 pub mod neighbours;
 pub mod pca;
 pub mod prng;

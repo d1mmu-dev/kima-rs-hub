@@ -24,3 +24,7 @@ serde_json.workspace = true
 [[example]]
 name = "neighbour_bench"
 required-features = ["parallel"]
+
+[[example]]
+name = "layout_bench"
+required-features = ["parallel"]

@@ -388,7 +388,7 @@ A second run with `max_parallel_workers_per_gather=8` gave the same at 100k/200k
 | Feel update | ≤ 60 s for a first fill of 100k | one `INSERT ... SELECT` |
 | State build | ≤ 60 s | holds the state row lock; timeouts as upstream |
 | Mood scoring (22 dot products/vector) + stats | ≤ 120 s first fill | one statement |
-| **First layout** | ≤ 10 min at 100k, 8 cores; hard memory cap 1 GB | n²·512 = 5.1e12 multiply-adds, plus fuzzy graph and 500 epochs. Estimate [?]: Task 8 microbenchmarks the neighbour sweep and fixes the f32/f64 accumulation choice (D-185). Upstream JS does this single-threaded in a worker. |
+| **First layout** | ≤ 10 min at 100k, 8 cores; hard memory cap 1 GB | n²·512 = 5.1e12 multiply-adds, plus fuzzy graph and 500 epochs. Measured (Task 8/9, §12.2): 290 s at 100k on 8 threads, 884 MB peak; f64 kept (no D-185 f32 amendment). Upstream JS does this single-threaded in a worker. |
 | Incremental placement | ≤ 5 s per 100 new tracks | each new track scans the laid-out set |
 
 **Neighbour sweep, measured (Task 8, owner Q7: find out why before choosing a fix).** `crates/kima-vibe/examples/neighbour_bench.rs` (release, 512-d synthetic tracks, 10 per artist, genre bonuses on, 32-core host). A sweep's cost is linear in the rows, so a sample of rows against all N columns is timed and scaled to the full same-set sweep (`time x N / rows`); 8 threads = rayon pool of 8:
@@ -404,6 +404,20 @@ A second run with `max_parallel_workers_per_gather=8` gave the same at 100k/200k
 | 100,000 | 400 | 1 | f64 | 5.65 s | 7.1 | 1412 s (23.5 min) |
 
 Findings: (1) the exact f64 sweep at 100k is **4.1 min on 8 threads**, inside the 10 min budget: no approximation and no f32 (f32 saves only 15 %, so the D-185 f32 amendment is not made). (2) The time is the dot products (single thread 7.3 GFLOP/s of multiply-adds in strict dimension order, the order the bit-exact goldens require); top-k selection is 0.03 ms per row of 20,000 scores (about 0.7 % of the 4 ms per row), genre-bonus builds once per artist. (3) Upstream's own TypeScript on the same shape (`tools/vibe-goldens/bench-neighbours.mjs`, Node 26.7, one thread) does 2.6 M pairs/s = **64.5 min at 100k single-threaded**, so Rust is 2.8x faster per thread before the 5.7x of 8 threads; the sample sizes above under-use the pool (800 rows = 12 chunks), the real 100k-row sweep balances better. (4) Headroom if ever needed, all exact: SIMD across columns (a column-major layout vectorises over j and leaves every pair's summation order unchanged). Still unmeasured: the fuzzy graph and the 500 optimisation epochs (Task 9), so the end-to-end first-layout time at 100k stays [?] until Task 9.
+
+**First layout, end to end, measured (Task 9, closes owner Q7).** `crates/kima-vibe/examples/layout_bench.rs` (release, same synthetic generator as the sweep bench, 8 rayon threads, 32-core host) times each stage after the sweep; the sweep's cache file lets the 100k run be split into bounded chunks. The TypeScript reference is `tools/vibe-goldens/bench-layout.mjs` (upstream's own `layoutLibrary`, Node 26.7, one thread, same data and draw order; the edge counts of both implementations agree exactly: 56,590 / 115,724 / 207,616 at 5k / 10k / 20k).
+
+| N | epochs | 1 sweep (8 thr) | 2 PCA start | 3 fuzzy graph | 4 optimise | 5 colour field | total | peak RSS |
+|---|---|---|---|---|---|---|---|---|
+| 5,000 | 500 | 0.4 s | 1.1 s | <0.1 s | 5.4 s | <0.1 s | 7 s | 46 MB |
+| 10,000 | 500 | 1.8 s | 2.2 s | <0.1 s | 10.8 s | <0.1 s | 15 s | 93 MB |
+| 20,000 | 200 | 7.4 s | 4.0 s | 0.1 s | 8.6 s | 0.1 s | 20 s | 184 MB |
+| 50,000 | 200 | 45.6 s | 10.3 s | 0.2 s | 23.2 s | 0.6 s | 80 s | 445 MB |
+| **100,000** | 200 | **217.2 s** | 22.4 s | 0.5 s (1,638,422 edges) | 48.4 s | 2.0 s | **290 s (4.8 min)** | 884 MB (sweep process), 620 MB (layout process) |
+
+TypeScript, one thread, same inputs (sweep / layout incl. fuzzy graph / colour field / `layoutLibrary` total): 5k 7.8 / 6.9 / 0.3 / 16.2 s; 10k 32.3 / 13.8 / 0.8 / 48.2 s; 20k 127.2 / 11.1 / 3.2 / 145.6 s. Rust single-thread stages against it: optimise 1.3x faster (10.8 vs 13.8 s at 10k), colour field 30x faster at 20k (0.1 vs 3.2 s; the per-query nearest-position scans run over rayon, bit-identical because queries are independent), PCA start about equal (derived for TS as total minus the other stages: ~1.3 s vs 2.2 s at 10k, ~4.1 s vs 4.0 s at 20k; derived, noisy).
+
+Findings: (1) **The first layout at 100k is not slow**: 290 s (4.8 min) on 8 threads against the 10 min budget; no approximation, no f32, no fix is needed, and none is made. (2) Why it costs what it costs: the neighbour sweep is 75 % of it (217 of 290 s; the dot products, see above); the 200-epoch optimisation is 17 % (48 s) and is inherently serial (one shared PRNG stream and in-place moves; parallelising it would change the result, so it stays serial); the PCA start is 8 % (22 s, serial, 13-wide subspace iteration with 544-dim rows); fuzzy graph and colour field together are under 1 %. (3) Upstream's TypeScript on the same data: 145.6 s at 20k single-threaded, of which the sweep is 87 %, and the sweep alone extrapolates to 64.5 min at 100k (Task 8), so the Rust port is faster than the reference at every stage and the ordering of costs is the same. (4) Memory: 884 MB peak in the sweep (the 100k x 512 f64 vectors alone are 410 MB), 620 MB in the layout stages; one process doing both peaks at about the sweep's figure, inside the 1 GB cap but with little headroom (storing the vectors as f32 would halve the dominant term; not done, it would change the arithmetic input). (5) Headroom if ever needed, all exact: SIMD across columns in the sweep (Task 8), a parallel subspace-iteration product (PCA start), neither required. `tests/layout_memory.rs` pins only the layout/colour stages (28 MB peak at 20k, budget 600 MB); the end-to-end figures above come from the benchmark, not a test.
 
 The enrichment cycle must never block on the layout (the cycle awaits it only through the single-flight handle with a status; it proceeds when the task is running). `updateMap` runs every cycle but returns after one count query when the map is complete [V].
 
@@ -443,7 +457,7 @@ The highest used on `main` is **D-180** (Next.js UI, `docs/DIVERGENCES.md`); `fe
 
 1. **Model checkpoint mismatch (§2.3)** — highest risk; real-model acceptance blocked by the M4 follow-up (Q1).
 2. **Rights of `feelProbe.json` (CC BY-NC) and `moodHeads.json` (unstated training sets)**; M4 is noncommercial, redistribution is not established [?]. Assets stay outside Git; Q3.
-3. **First-layout time at 100k** unmeasured (§12.2). Mitigation: Task 8 benchmark before Task 9; fall back to approximate neighbour candidates only with an owner-approved D-row (it would break the "exact" claim).
+3. **First-layout time at 100k** — closed by measurement (§12.2, Task 9): 290 s on 8 threads, inside the 10 min budget; no approximate candidates, no f32 accumulation. Remaining risk: peak memory 884 MB against the 1 GB cap.
 4. **HNSW recall on real CLAP vectors** unmeasured (§11.2.3).
 5. **`created_at` as freshness token**: if any writer touches `track_embeddings` without rewriting it, `matching_feel` goes stale silently. Test: every upsert path changes `created_at` (D-182).
 6. **`hashtextextended` fingerprint collisions** are a theoretical staleness risk, as upstream.
@@ -487,6 +501,6 @@ Assumptions (everything else follows the plan's recommendation):
 
 - **Q4:** CLAP zero-shot readings (instrumentalness, acousticness, valence/arousal; §8.3) are **in M5** (plan Task 17), not M5b.
 - **Q6:** the owner has no opinion and asked for a proposal. Proposal: `KIMA_VIBE_EXACT_MAX` default **200,000** as specced, configurable. Task 6 measures exact top-20 latency at 25k/50k/100k/200k synthetic vectors on the build host; if exact p95 at 200k exceeds ~1.0 s the default is lowered to the largest measured size under that budget. Numbers and the resulting default are recorded in §11.3.
-- **Q7:** if the first layout at 100k is slow, Task 8 first finds out *why* (profile distance computation vs neighbour search vs optimisation epochs; compare with upstream's algorithm and, if the TS reference runs, its real runtime on the same input), records the findings, then picks the cheapest faithful fix. No approximation is pre-committed.
+- **Q7:** if the first layout at 100k is slow, Task 8 first finds out *why* (profile distance computation vs neighbour search vs optimisation epochs; compare with upstream's algorithm and, if the TS reference runs, its real runtime on the same input), records the findings, then picks the cheapest faithful fix. No approximation is pre-committed. **Closed (Task 9, 2026-11-06):** measured end to end in §12.2 (sweep 75 %, serial optimisation 17 %, PCA start 8 %, rest <1 %); 4.8 min at 100k, so no fix was chosen.
 - **Q8:** `getSimilarSongs`/`getSimilarSongs2` are **vibe-based** (deliberate divergence, D-190). The artist-based path stays as the fallback when the seed track has no eligible embedding. The D-190 row lands in the commit that lands the behaviour (Task 19).
 - **Q9:** no answer; the plan's recommended option (version key for the map cache) applies.

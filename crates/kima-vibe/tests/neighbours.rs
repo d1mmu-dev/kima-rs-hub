@@ -5,66 +5,6 @@ use kima_vibe::formula::*;
 use kima_vibe::neighbours::*;
 use std::collections::{BTreeMap, HashSet};
 
-struct Lib {
-    tracks: Vec<MatchTrack>,
-    model: GenreModel,
-    gw_sq: f64,
-}
-
-/// A golden library as `buildLibrary` in `tools/vibe-goldens/run.mjs` makes it (rows already in id order).
-fn load(name: &str) -> Lib {
-    let json = fixture("ts-golden-library.json");
-    let lib = &json[name];
-    let bits = |v: &serde_json::Value| from_bits_hex(v.as_str().unwrap());
-    let stats = FeelStats {
-        mean: [bits(&lib["feelMean"][0]), bits(&lib["feelMean"][1])],
-        sd: [bits(&lib["feelSd"][0]), bits(&lib["feelSd"][1])],
-    };
-    let f32_of = |v: &serde_json::Value| f64::from(v.as_f64().unwrap() as f32);
-    let tracks: Vec<MatchTrack> = lib["tracks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| MatchTrack {
-            track_id: t["id"].as_str().unwrap().into(),
-            album_id: t["albumId"].as_str().unwrap().into(),
-            artist_id: t["artistId"].as_str().unwrap().into(),
-            sound: unit(
-                &t["sound"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|x| x.as_f64().unwrap())
-                    .collect::<Vec<_>>(),
-            ),
-            feel: feel_vector([f32_of(&t["valence"]), f32_of(&t["arousal"])], &stats),
-        })
-        .collect();
-    let artists: Vec<LibraryArtist> = lib["artistGenres"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(id, genres)| LibraryArtist {
-            artist_id: id.clone(),
-            tracks: tracks.iter().filter(|t| &t.artist_id == id).count() as u64,
-            genres: genres
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|g| g.as_str().unwrap().to_owned())
-                .collect(),
-        })
-        .collect();
-    let (model, spread) = build_genre_model(&artists);
-    assert!(same_bits(spread, bits(&lib["genreSpread"])), "genre spread");
-    let wg = bits(&lib["genreWeight"]);
-    Lib {
-        tracks,
-        model,
-        gw_sq: wg * wg,
-    }
-}
-
 const LIBS: [&str; 2] = ["fixture50", "synthetic300"];
 
 #[test]

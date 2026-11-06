@@ -2777,6 +2777,7 @@ dependencies = [
 name = "kima-db"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "hex",
  "kima-core",
  "kima-vibe",

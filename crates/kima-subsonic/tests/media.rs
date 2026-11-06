@@ -815,3 +815,24 @@ async fn media_needs_auth(pool: PgPool) {
     let body = res.json::<Value>();
     assert_eq!(body["subsonic-response"]["error"]["code"], 10);
 }
+
+// M-SYNC Task 10 (upstream `78dc8f1d`): track 2 has a row and no file, not flagged missing. It
+// answers error 70 with the fixed message at every bit rate, never a path or a server error.
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn stream_file_gone_before_the_scan_flags_it_is_70_without_a_path(pool: PgPool) {
+    let env = env(pool);
+    let t2 = id(2);
+    for extra in [
+        vec![],
+        vec![("format", "raw")],
+        vec![("maxBitRate", "64")],
+        vec![("maxBitRate", "128"), ("format", "mp3")],
+    ] {
+        let mut params = vec![("id", t2.as_str())];
+        params.extend(extra.iter().copied());
+        env.assert_error("stream", &params, 70, "Song not found").await;
+    }
+}

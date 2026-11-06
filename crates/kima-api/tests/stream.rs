@@ -477,3 +477,50 @@ async fn stream_serves_symlinked_track(pool: PgPool) {
     res.assert_status_ok();
     assert_eq!(res.as_bytes().as_ref(), &data[..]);
 }
+
+/// M-SYNC Task 10 (upstream `78dc8f1d`, `streaming.route.test.ts`): a file gone from disk
+/// before a scan has flagged it is "not available", at every quality, never a server error;
+/// any other open failure stays a 500.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stream_file_gone_before_the_scan_flags_it_is_404(pool: PgPool) {
+    let root = tempfile::tempdir().unwrap();
+    let id = track_with_file(&pool, root.path(), &bytes(100)).await;
+    let state = setup(pool, root.path());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    std::fs::remove_file(root.path().join("Artist/Album/1-1 Song.mp3")).unwrap();
+    // No transcoder is configured, so a lower quality falls back to the original, which is gone.
+    for query in ["", "?quality=original", "?quality=high", "?quality=low"] {
+        let res = server
+            .get(&format!("/api/library/tracks/{id}/stream{query}"))
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(
+            res.json::<serde_json::Value>(),
+            serde_json::json!({"error": "Track not available"}),
+            "{query}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stream_unreadable_file_stays_a_500(pool: PgPool) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let id = track_with_file(&pool, root.path(), &bytes(100)).await;
+    let file = root.path().join("Artist/Album/1-1 Song.mp3");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&file).is_ok() {
+        return; // running as root: permissions do not apply
+    }
+    let state = setup(pool, root.path());
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    server
+        .get(&format!("/api/library/tracks/{id}/stream"))
+        .authorization_bearer(&token)
+        .await
+        .assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+}

@@ -706,3 +706,28 @@ fixture_test!(
         assert_eq!(res["song"]["genre"], "Rock");
     }
 );
+
+// M-SYNC Task 10 (upstream `95e50b87`): junk or negative `size` / `offset` never fails. As
+// upstream (`parseIntParam`, `clamp(size, 0, 500)`, `max(0, offset)`): junk is the default, a
+// negative offset is 0, a negative size is an empty page.
+fixture_test!(album_list2_junk_paging_is_ok, |server, _pool| {
+    let default = alice(&server, "getAlbumList2", &[("type", "alphabeticalByName")]).await;
+    assert_eq!(ids(&default["albumList2"]["album"]).len(), 5);
+    for (size, offset) in [("abc", "abc"), ("", ""), ("abc", "-5"), ("10", "-5")] {
+        let res = alice(
+            &server,
+            "getAlbumList2",
+            &[("type", "alphabeticalByName"), ("size", size), ("offset", offset)],
+        )
+        .await;
+        assert_eq!(res["albumList2"], default["albumList2"], "{size:?} {offset:?}");
+    }
+    let res = alice(
+        &server,
+        "getAlbumList2",
+        &[("type", "alphabeticalByName"), ("size", "-3"), ("offset", "-5")],
+    )
+    .await;
+    assert!(res.get("error").is_none(), "{res}");
+    assert_eq!(ids(&res["albumList2"]["album"]).len(), 0);
+});

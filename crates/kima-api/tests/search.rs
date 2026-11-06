@@ -165,3 +165,54 @@ async fn requires_auth(pool: PgPool) {
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
 }
+
+/// M-SYNC Task 10 (upstream `4338048e`, `nonAsciiNames.integration.test.ts`, intent only):
+/// names in any script are found in any case, accents are folded, a decomposed accent reads as
+/// the composed letter and curly apostrophes match straight ones. kima-rs's database is UTF-8
+/// (`unaccent` + the `simple` configuration), so none of upstream's `SQL_ASCII` workarounds
+/// apply; this pins the outcome.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn search_non_ascii_names_any_case(pool: PgPool) {
+    seed(&pool, Seed::new("Beyoncé", "Lemonade", Some(2016), "Formation")).await;
+    seed(&pool, Seed::new("ДДТ", "Актриса Весна", Some(1992), "Родина")).await;
+    seed(&pool, Seed::new("東京事変", "大人", Some(2006), "群青日和")).await;
+    seed(&pool, Seed::new("Guns N’ Roses", "Appetite", Some(1987), "Welcome")).await;
+    seed(&pool, Seed::new("Zoë Keating", "Into the Trees", Some(2010), "Escape")).await;
+    let e = env(pool).await;
+    let artist = |v: &Value| -> Vec<String> {
+        v["artists"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for (query, expected) in [
+        ("beyonce", "Beyoncé"),
+        ("BEYONCÉ", "Beyoncé"),
+        ("beyoncé", "Beyoncé"),
+        ("ддт", "ДДТ"),
+        ("ДДТ", "ДДТ"),
+        ("東京事変", "東京事変"),
+        // Curly in the library, straight typed, and the reverse.
+        ("guns n' roses", "Guns N’ Roses"),
+        ("Guns N’ Roses", "Guns N’ Roses"),
+        // `e` + U+0308 (decomposed) against the composed `ë`.
+        ("zoe\u{308} keating", "Zoë Keating"),
+        ("ZOË", "Zoë Keating"),
+    ] {
+        let v = search(&e, &format!("/api/search?q={}", urlencode(query))).await;
+        assert_eq!(artist(&v), [expected], "{query:?}");
+    }
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes().fold(String::new(), |mut out, b| {
+        if b.is_ascii_alphanumeric() {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+        out
+    })
+}

@@ -543,7 +543,8 @@ async fn artist_detail_filled(pool: PgPool) {
     assert_eq!(v["image"], id);
     assert_eq!(v["heroUrl"], id);
     assert_eq!(v["userHeroUrl"], Value::Null);
-    assert_eq!(v["genres"], json!(["Shoegaze", "rock", "indie"]));
+    // D-166: a person's list replaces the enriched one.
+    assert_eq!(v["genres"], json!(["Shoegaze"]));
     assert_eq!(v["userGenres"], json!(["Shoegaze"]));
     assert_eq!(v["tags"], json!(["rock", "indie"]));
     assert_eq!(v["displayName"], "ALPHA");
@@ -802,7 +803,8 @@ async fn album_detail_filled(pool: PgPool) {
     assert_eq!(v["displayYear"], 2001);
     assert_eq!(v["title"], "A1");
     assert_eq!(v["year"], 1999);
-    assert_eq!(v["genres"], json!(["Dream Pop", "post-punk"]));
+    // D-166: a person's list replaces the enriched one.
+    assert_eq!(v["genres"], json!(["Dream Pop"]));
     assert_eq!(v["userGenres"], json!(["Dream Pop"]));
     assert_eq!(v["userCoverUrl"], Value::Null);
     assert_eq!(v["hasUserOverrides"], true);
@@ -1081,4 +1083,43 @@ async fn recent_added_clamps_limit(pool: PgPool) {
     assert_eq!(recent_names(&e, "?limit=-3").await, ["Artist 00"]);
     assert_eq!(recent_names(&e, "?limit=3x").await.len(), 3);
     assert_eq!(recent_names(&e, "?limit=500").await.len(), 12);
+}
+
+/// M-SYNC Task 10 (upstream `95e50b87`, `pagingOffsets.route.test.ts`): a negative or garbled
+/// `offset` or `limit` is the first page or the default, never a database error answered as 500.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn paging_junk_never_500(pool: PgPool) {
+    seed(&pool, Seed::new("Alpha", "A1", Some(2000), "s1")).await;
+    seed(&pool, Seed::new("Beta", "B1", Some(2001), "s2")).await;
+    let e = env(pool).await;
+    for path in [
+        "/api/library/albums",
+        "/api/library/artists",
+        "/api/library/tracks",
+    ] {
+        let first = get(&e, path).await;
+        for junk in [
+            "offset=-5",
+            "offset=abc",
+            "offset=",
+            "limit=abc",
+            "limit=-3",
+            "limit=",
+            "offset=-5&limit=abc",
+        ] {
+            let res = e
+                .server
+                .get(&format!("{path}?{junk}"))
+                .authorization_bearer(&e.user)
+                .await;
+            assert!(
+                res.status_code().is_success(),
+                "{path}?{junk}: {}",
+                res.status_code()
+            );
+            if junk.starts_with("offset") || junk == "limit=abc" || junk == "limit=" {
+                assert_eq!(res.json::<Value>(), first, "{path}?{junk}");
+            }
+        }
+    }
 }

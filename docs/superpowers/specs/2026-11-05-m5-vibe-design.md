@@ -409,7 +409,7 @@ The highest used on `main` is **D-180** (Next.js UI, `docs/DIVERGENCES.md`); `fe
 | D-187 | CLAP readings | Zero-shot readings computed after the fact from the stored vector (upstream: at embedding time). |
 | D-188 | Enrichment | Phases `mood`/`similarity`; progress `moods`; rerun steps real. |
 | D-189 | Similar artists | Re-rank enabled (supersedes the M3 delta 0). |
-| D-190 | Subsonic | `getSimilarSongs(2)` by artist+similar artists, random, as upstream. Amends D-086. |
+| D-190 | Subsonic | `getSimilarSongs(2)` is vibe-based (ranked by the formula from the seed track) instead of upstream's random artist+similar-artist pick; artist-based path kept as fallback when the seed has no eligible embedding. Owner decision Q8 (2026-11-06). Amends D-086. |
 | D-191 | Public vibe | Not in M5 core; D-062 stays. |
 | D-192 | Genres | Matching genres from `artist_genres_effective` + `user_genres` (replace), MB-list filter. |
 | D-193 | Validation | UUID checks replace CUID regex; non-numeric `length` ignored. |
@@ -457,3 +457,11 @@ Assumptions (everything else follows the plan's recommendation):
 11. **`KIMA_VIBE_EXACT_MAX=0` is valid** and forces the index path; non-numbers are a config error.
 12. **Asset cache lives in `EmbeddingRuntimeState`** (loaded-once model state) so no `IdentCtx` constructor changes.
 13. Task 3 step 3 (EXPLAIN on 10k rows) moves to Task 5, where the feel-join and map-count queries first exist.
+
+### 16.2 Owner decisions (2026-11-06)
+
+- **Q4:** CLAP zero-shot readings (instrumentalness, acousticness, valence/arousal; §8.3) are **in M5** (plan Task 17), not M5b.
+- **Q6:** the owner has no opinion and asked for a proposal. Proposal: `KIMA_VIBE_EXACT_MAX` default **200,000** as specced, configurable. Task 6 measures exact top-20 latency at 25k/50k/100k/200k synthetic vectors on the build host; if exact p95 at 200k exceeds ~1.0 s the default is lowered to the largest measured size under that budget. Numbers and the resulting default are recorded in §11.3.
+- **Q7:** if the first layout at 100k is slow, Task 8 first finds out *why* (profile distance computation vs neighbour search vs optimisation epochs; compare with upstream's algorithm and, if the TS reference runs, its real runtime on the same input), records the findings, then picks the cheapest faithful fix. No approximation is pre-committed.
+- **Q8:** `getSimilarSongs`/`getSimilarSongs2` are **vibe-based** (deliberate divergence, D-190). The artist-based path stays as the fallback when the seed track has no eligible embedding. The D-190 row lands in the commit that lands the behaviour (Task 19).
+- **Q9:** no answer; the plan's recommended option (version key for the map cache) applies.

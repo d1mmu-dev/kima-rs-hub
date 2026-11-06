@@ -1,6 +1,7 @@
 //! Shared helpers for the integration tests (included with `mod common;`).
 #![allow(dead_code)]
 
+use kima_vibe::formula::*;
 use std::path::PathBuf;
 
 pub fn fixture(name: &str) -> serde_json::Value {
@@ -46,5 +47,81 @@ impl Xorshift {
     /// Uniform in [0, 1).
     pub fn unit(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+pub struct Lib {
+    pub tracks: Vec<MatchTrack>,
+    pub model: GenreModel,
+    pub gw: f64,
+    pub gw_sq: f64,
+    /// n x 2 standardised (valence, arousal), as `buildLibrary` makes them.
+    pub feel_z: Vec<f64>,
+}
+
+/// A golden library as `buildLibrary` in `tools/vibe-goldens/run.mjs` makes it (rows already in id order).
+pub fn load(name: &str) -> Lib {
+    let json = fixture("ts-golden-library.json");
+    let lib = &json[name];
+    let bits = |v: &serde_json::Value| from_bits_hex(v.as_str().unwrap());
+    let stats = FeelStats {
+        mean: [bits(&lib["feelMean"][0]), bits(&lib["feelMean"][1])],
+        sd: [bits(&lib["feelSd"][0]), bits(&lib["feelSd"][1])],
+    };
+    let f32_of = |v: &serde_json::Value| f64::from(v.as_f64().unwrap() as f32);
+    let tracks: Vec<MatchTrack> = lib["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| MatchTrack {
+            track_id: t["id"].as_str().unwrap().into(),
+            album_id: t["albumId"].as_str().unwrap().into(),
+            artist_id: t["artistId"].as_str().unwrap().into(),
+            sound: unit(
+                &t["sound"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.as_f64().unwrap())
+                    .collect::<Vec<_>>(),
+            ),
+            feel: feel_vector([f32_of(&t["valence"]), f32_of(&t["arousal"])], &stats),
+        })
+        .collect();
+    let artists: Vec<LibraryArtist> = lib["artistGenres"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(id, genres)| LibraryArtist {
+            artist_id: id.clone(),
+            tracks: tracks.iter().filter(|t| &t.artist_id == id).count() as u64,
+            genres: genres
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| g.as_str().unwrap().to_owned())
+                .collect(),
+        })
+        .collect();
+    let (model, spread) = build_genre_model(&artists);
+    assert!(same_bits(spread, bits(&lib["genreSpread"])), "genre spread");
+    let wg = bits(&lib["genreWeight"]);
+    let mut feel_z = Vec::with_capacity(tracks.len() * 2);
+    for t in lib["tracks"].as_array().unwrap() {
+        for (key, c) in [("valence", 0), ("arousal", 1)] {
+            let raw = f32_of(&t[key]);
+            feel_z.push(if stats.sd[c] > 0.0 {
+                (raw - stats.mean[c]) / stats.sd[c]
+            } else {
+                0.0
+            });
+        }
+    }
+    Lib {
+        tracks,
+        model,
+        gw: wg,
+        gw_sq: wg * wg,
+        feel_z,
     }
 }

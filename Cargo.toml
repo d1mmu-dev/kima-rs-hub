@@ -77,3 +77,7 @@ walkdir = "2.5"
 # argon2 is unbearably slow unoptimised; tests hash passwords.
 [profile.dev.package.argon2]
 opt-level = 3
+
+# The layout and colour-field loops are plain arithmetic; the 20k-track memory/time test needs them optimised.
+[profile.dev.package.kima-vibe]
+opt-level = 3

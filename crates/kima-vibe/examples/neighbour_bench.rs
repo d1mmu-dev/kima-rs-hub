@@ -80,6 +80,7 @@ fn main() {
     let sweep = Sweep {
         accumulation: acc,
         parallel,
+        ..Default::default()
     };
     let t = Instant::now();
     let (near, stats) =
@@ -126,6 +127,7 @@ fn main() {
         Sweep {
             accumulation: acc,
             parallel: false,
+            ..Default::default()
         },
         &tracks[..8],
         &tracks,

@@ -4,6 +4,7 @@
 // Index loops mirror the TypeScript line for line: the port is checked bit for bit against it.
 #![allow(clippy::needless_range_loop)]
 
+use crate::cancel::Cancel;
 use crate::prng::{SeededRandom, gaussian};
 
 /// Symmetric eigen-decomposition by Jacobi rotations (100 sweeps, off-diagonal sum below 1e-30); the columns of
@@ -79,6 +80,19 @@ pub fn principal_scores(
     multiply_t: &dyn Fn(&[f64]) -> Vec<f64>,
     seed: u32,
 ) -> Vec<f64> {
+    principal_scores_cancellable(n, d, multiply, multiply_t, seed, &Cancel::default())
+        .expect("nothing cancels this call")
+}
+
+/// [`principal_scores`], stopping at the next iteration once `cancel` is set (then `None`).
+pub fn principal_scores_cancellable(
+    n: usize,
+    d: usize,
+    multiply: &dyn Fn(&[f64]) -> Vec<f64>,
+    multiply_t: &dyn Fn(&[f64]) -> Vec<f64>,
+    seed: u32,
+    cancel: &Cancel,
+) -> Option<Vec<f64>> {
     let mut rng = SeededRandom::new(seed);
     let width = d.min(13);
     let orthonormalise = |vs: Vec<Vec<f64>>| -> Vec<Vec<f64>> {
@@ -134,6 +148,9 @@ pub fn principal_scores(
     let mut basis = orthonormalise(start);
     let mut previous = [0.0_f64; 3];
     for _ in 0..200 {
+        if cancel.is_cancelled() {
+            return None;
+        }
         basis = orthonormalise(basis.iter().map(|v| multiply_t(&multiply(v))).collect());
         let (values, _) = ritz(&basis);
         let top = &values[..values.len().min(3)];
@@ -180,7 +197,7 @@ pub fn principal_scores(
             out[i * 3 + c] = scores[c][i];
         }
     }
-    out
+    Some(out)
 }
 
 /// umap-learn's start from the main axes (`noisy_scale_coords`): largest coordinate 10, then noise of 1e-4.
@@ -191,15 +208,30 @@ pub fn principal_start(
     multiply_t: &dyn Fn(&[f64]) -> Vec<f64>,
     seed: u32,
 ) -> Vec<f64> {
-    let scores = principal_scores(n, d, multiply, multiply_t, seed);
+    principal_start_cancellable(n, d, multiply, multiply_t, seed, &Cancel::default())
+        .expect("nothing cancels this call")
+}
+
+/// [`principal_start`], stopping at the next iteration once `cancel` is set (then `None`).
+pub fn principal_start_cancellable(
+    n: usize,
+    d: usize,
+    multiply: &dyn Fn(&[f64]) -> Vec<f64>,
+    multiply_t: &dyn Fn(&[f64]) -> Vec<f64>,
+    seed: u32,
+    cancel: &Cancel,
+) -> Option<Vec<f64>> {
+    let scores = principal_scores_cancellable(n, d, multiply, multiply_t, seed, cancel)?;
     let mut largest = 0.0_f64;
     for x in &scores {
         largest = largest.max(x.abs());
     }
     let scale = 10.0 / if largest == 0.0 { 1.0 } else { largest };
     let mut rng = SeededRandom::new(seed.wrapping_add(1));
-    scores
-        .iter()
-        .map(|x| x * scale + 1e-4 * gaussian(&mut rng))
-        .collect()
+    Some(
+        scores
+            .iter()
+            .map(|x| x * scale + 1e-4 * gaussian(&mut rng))
+            .collect(),
+    )
 }

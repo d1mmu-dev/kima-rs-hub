@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use crate::cancel::Cancel;
 use crate::formula::{
     FEEL_WEIGHT, GenreModel, MatchTrack, Placed, WeightedTrack, artist_bonuses, cap_list,
 };
@@ -25,11 +26,13 @@ pub enum Accumulation {
     F32,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Sweep {
     pub accumulation: Accumulation,
     /// Spread rows over the rayon pool. Ignored unless the `parallel` feature is on.
     pub parallel: bool,
+    /// Checked before every block of four rows; a cancelled sweep returns the rows scored so far.
+    pub cancel: Cancel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -99,6 +102,7 @@ struct Columns<'a, T: Real> {
     row_artist: Vec<usize>,
     slots: usize,
     slot_ids: HashMap<&'a str, usize>,
+    cancel: Cancel,
 }
 
 impl<'a, T: Real> Columns<'a, T> {
@@ -136,6 +140,7 @@ impl<'a, T: Real> Columns<'a, T> {
             row_artist,
             slots,
             slot_ids,
+            cancel: Cancel::default(),
         }
     }
 
@@ -215,6 +220,9 @@ impl<'a, T: Real> Columns<'a, T> {
         let mut cache = HashMap::new();
         let (mut builds, mut out) = (0, Vec::with_capacity(order.len()));
         for block in order.chunks(4) {
+            if self.cancel.is_cancelled() {
+                break;
+            }
             self.block(
                 block,
                 &mut cache,
@@ -242,7 +250,8 @@ fn score_rows<T: Real, R: Send>(
     if rows.is_empty() || cols.is_empty() {
         return (vec![], SweepStats::default());
     }
-    let ctx = Columns::<T>::new(rows, cols, model, gw_sq);
+    let mut ctx = Columns::<T>::new(rows, cols, model, gw_sq);
+    ctx.cancel = sweep.cancel.clone();
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by_key(|i| ctx.row_artist[*i]); // stable, as upstream's sort
 

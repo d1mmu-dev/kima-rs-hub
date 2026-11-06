@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod asset;
+pub mod cancel;
 pub mod colour;
 pub mod exact_math;
 pub mod feel_probe;

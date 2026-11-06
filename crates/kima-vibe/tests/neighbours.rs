@@ -199,6 +199,7 @@ fn f32_accumulation_stays_close_to_f64() {
         Sweep {
             accumulation: Accumulation::F32,
             parallel: false,
+            ..Default::default()
         },
         &lib.tracks,
         &lib.tracks,
@@ -225,6 +226,7 @@ fn parallel_equals_serial() {
                     Sweep {
                         accumulation: acc,
                         parallel,
+                        ..Default::default()
                     },
                     &lib.tracks,
                     &lib.tracks,
@@ -250,6 +252,7 @@ fn parallel_equals_serial() {
                 Sweep {
                     accumulation: Accumulation::F64,
                     parallel,
+                    ..Default::default()
                 },
                 &lib.tracks,
                 &lib.model,

@@ -6,11 +6,12 @@
 
 use std::collections::HashMap;
 
+use crate::cancel::Cancel;
 use crate::colour::{ColourFrame, colour_at, colour_field};
 use crate::formula::{FEEL_WEIGHT, GenreModel, MatchTrack};
-use crate::neighbours::{NearestColumns, nearest_columns};
-use crate::pca::principal_start;
-use crate::umap::{Graph, MAP_NEIGHBOURS, SEED, layout, place};
+use crate::neighbours::{NearestColumns, Sweep, nearest_columns_with};
+use crate::pca::principal_start_cancellable;
+use crate::umap::{Graph, MAP_NEIGHBOURS, SEED, layout_cancellable, place_cancellable};
 
 #[derive(Debug, Clone)]
 pub struct LaidOutMap {
@@ -167,8 +168,29 @@ pub fn library_start(
     genre_weight: f64,
     seed: u32,
 ) -> Vec<f64> {
+    library_start_cancellable(tracks, model, genre_weight, seed, &Cancel::default())
+        .expect("nothing cancels this call")
+}
+
+/// [`library_start`], stopping at the next iteration once `cancel` is set (then `None`).
+pub fn library_start_cancellable(
+    tracks: &[MatchTrack],
+    model: &GenreModel,
+    genre_weight: f64,
+    seed: u32,
+    cancel: &Cancel,
+) -> Option<Vec<f64>> {
     let (d, multiply, multiply_t) = centred_rows(tracks, model, genre_weight);
-    principal_start(tracks.len(), d, &*multiply, &*multiply_t, seed)
+    principal_start_cancellable(tracks.len(), d, &*multiply, &*multiply_t, seed, cancel)
+}
+
+/// The row-parallel sweep when the `parallel` feature is on (bit-identical to the serial one), serial otherwise.
+fn sweep(cancel: &Cancel) -> Sweep {
+    Sweep {
+        parallel: true,
+        cancel: cancel.clone(),
+        ..Sweep::default()
+    }
 }
 
 /// The whole library's map from neighbour lists that were already swept (`near` from a same-set
@@ -181,18 +203,40 @@ pub fn layout_from_neighbours(
     near: &NearestColumns,
     seed: Option<u32>,
 ) -> LaidOutMap {
+    layout_from_neighbours_cancellable(
+        tracks,
+        feel_z,
+        model,
+        genre_weight,
+        near,
+        seed,
+        &Cancel::default(),
+    )
+    .expect("nothing cancels this call")
+}
+
+/// [`layout_from_neighbours`], stopping at its next checkpoint once `cancel` is set (then `None`).
+pub fn layout_from_neighbours_cancellable(
+    tracks: &[MatchTrack],
+    feel_z: &[f64],
+    model: &GenreModel,
+    genre_weight: f64,
+    near: &NearestColumns,
+    seed: Option<u32>,
+    cancel: &Cancel,
+) -> Option<LaidOutMap> {
     let seed = seed.unwrap_or(SEED);
     let n = tracks.len();
     let graph = library_graph(n, near);
-    let start = library_start(tracks, model, genre_weight, seed);
-    let positions = layout(&graph, &start, seed);
+    let start = library_start_cancellable(tracks, model, genre_weight, seed, cancel)?;
+    let positions = layout_cancellable(&graph, &start, seed, cancel)?;
     let (frame, colour) = colour_field(&positions, n, feel_z);
-    LaidOutMap {
+    Some(LaidOutMap {
         positions,
         colour,
         frame,
         max_score: near.max_score,
-    }
+    })
 }
 
 /// The whole library's map: neighbours, start, layout and colour field. `feel_z` is `n x 2` standardised (valence,
@@ -204,7 +248,29 @@ pub fn layout_library(
     genre_weight: f64,
     seed: Option<u32>,
 ) -> LaidOutMap {
-    let near = nearest_columns(
+    layout_library_cancellable(
+        tracks,
+        feel_z,
+        model,
+        genre_weight,
+        seed,
+        &Cancel::default(),
+    )
+    .expect("nothing cancels this call")
+}
+
+/// [`layout_library`], stopping at its next checkpoint once `cancel` is set (then `None`). The checkpoints are
+/// every block of four sweep rows, every PCA iteration and every optimisation epoch.
+pub fn layout_library_cancellable(
+    tracks: &[MatchTrack],
+    feel_z: &[f64],
+    model: &GenreModel,
+    genre_weight: f64,
+    seed: Option<u32>,
+    cancel: &Cancel,
+) -> Option<LaidOutMap> {
+    let (near, _) = nearest_columns_with(
+        sweep(cancel),
         tracks,
         tracks,
         model,
@@ -212,7 +278,10 @@ pub fn layout_library(
         MAP_NEIGHBOURS - 1,
         true,
     );
-    layout_from_neighbours(tracks, feel_z, model, genre_weight, &near, seed)
+    if cancel.is_cancelled() {
+        return None;
+    }
+    layout_from_neighbours_cancellable(tracks, feel_z, model, genre_weight, &near, seed, cancel)
 }
 
 /// New tracks placed among the laid-out ones by umap's transform rule; each coloured by its area among every
@@ -228,8 +297,36 @@ pub fn place_tracks(
     frame: &ColourFrame,
     max_score: f64,
 ) -> PlacedTracks {
+    place_tracks_cancellable(
+        laid_out,
+        laid_out_positions,
+        positioned,
+        new_tracks,
+        model,
+        genre_weight,
+        frame,
+        max_score,
+        &Cancel::default(),
+    )
+    .expect("nothing cancels this call")
+}
+
+/// [`place_tracks`], stopping at its next checkpoint once `cancel` is set (then `None`).
+#[allow(clippy::too_many_arguments)]
+pub fn place_tracks_cancellable(
+    laid_out: &[MatchTrack],
+    laid_out_positions: &[f64],
+    positioned: &[f64],
+    new_tracks: &[MatchTrack],
+    model: &GenreModel,
+    genre_weight: f64,
+    frame: &ColourFrame,
+    max_score: f64,
+    cancel: &Cancel,
+) -> Option<PlacedTracks> {
     let m = new_tracks.len();
-    let near = nearest_columns(
+    let (near, _) = nearest_columns_with(
+        sweep(cancel),
         new_tracks,
         laid_out,
         model,
@@ -237,6 +334,9 @@ pub fn place_tracks(
         MAP_NEIGHBOURS,
         false,
     );
+    if cancel.is_cancelled() {
+        return None;
+    }
     let graph = Graph {
         rows: m,
         k: near.k,
@@ -247,10 +347,10 @@ pub fn place_tracks(
             .map(|s| (max_score - s).max(0.0))
             .collect(),
     };
-    let positions = place(laid_out_positions, laid_out.len(), &graph, SEED);
+    let positions = place_cancellable(laid_out_positions, laid_out.len(), &graph, SEED, cancel)?;
     let mut all = Vec::with_capacity(positioned.len() + positions.len());
     all.extend_from_slice(positioned);
     all.extend_from_slice(&positions);
     let colour = colour_at(frame, &all, all.len() / 3, &positions, m);
-    PlacedTracks { positions, colour }
+    Some(PlacedTracks { positions, colour })
 }

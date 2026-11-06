@@ -26,6 +26,25 @@ pub struct Guessed {
     /// replace the link with the real file (needs-attention `symlink`). Set by the scanner,
     /// never by tags, so a re-read of the real file clears it.
     pub via_symlink: bool,
+    /// What the file named as its album's artist when it was read: the sibling's vote in the
+    /// album-artist election (D-164). Absent on rows written before the election.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credit: Option<StoredCredit>,
+}
+
+/// One file's vote for its album's artist, kept in `guessed.credit` so a changed file can be
+/// elected with its unchanged siblings without re-reading them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredCredit {
+    /// Identity key of the album tag; `None` for a song with no album tag (its own album).
+    pub album_key: Option<String>,
+    pub name: String,
+    pub mbid: Option<Uuid>,
+    /// The name came from an album-artist tag.
+    pub from_album_artist: bool,
+    /// The file is tagged a compilation.
+    pub compilation: bool,
 }
 
 /// A track with every field resolved, ready to store. The `*_key` fields are the
@@ -810,6 +829,10 @@ pub struct IndexedTrack {
     /// The track's album has `identity_source = 'autotag'` and its `applied_identity` names the
     /// row's own artist key, title key and year (spec §19.7): a track agreeing with it is pinned.
     pub album_autotag: bool,
+    /// The name of the artist the track's album is filed under.
+    pub artist_name: String,
+    /// `guessed.credit`: the file's vote in the album-artist election (D-164), if it has one.
+    pub credit: Option<Json<StoredCredit>>,
 }
 
 /// Every track (`dir_prefix = None`), or only the tracks directly inside one folder:
@@ -831,13 +854,51 @@ pub async fn scan_index(
                            AND b.applied_identity ->> 'titleKey' = b.title_key
                            AND COALESCE(b.applied_identity -> 'year', 'null'::jsonb)
                                = COALESCE(to_jsonb(b.year), 'null'::jsonb),
-                           false) AS "album_autotag!"
+                           false) AS "album_autotag!",
+                  a.name AS artist_name,
+                  t.guessed -> 'credit' AS "credit: Json<StoredCredit>"
            FROM tracks t
            JOIN albums b ON b.id = t.album_id
            JOIN artists a ON a.id = b.artist_id
            WHERE $1::text IS NULL
               OR (starts_with(t.path, $1) AND strpos(substr(t.path, length($1) + 1), '/') = 0)"#,
         dir_prefix
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// The tracks of one album folder (D-164): those directly inside it (`folder_prefix` is
+/// `"Artist/Album/"`, or `""` for the library root) and those inside a disc subfolder of it
+/// (`CD 1`, `Disc 2`, ...). The match on the subfolder's name is a loose pre-filter; the caller
+/// keeps the rows whose album folder is exactly this one.
+pub async fn scan_index_album_folder(
+    pool: &PgPool,
+    folder_prefix: &str,
+) -> sqlx::Result<Vec<IndexedTrack>> {
+    sqlx::query_as!(
+        IndexedTrack,
+        r#"SELECT t.id, t.path, t.size, t.mtime,
+                  t.missing_since IS NOT NULL AS "missing!",
+                  t.year AS track_year, b.year AS album_year,
+                  b.title_key AS album_key, a.name_key AS artist_key,
+                  COALESCE((t.guessed ->> 'yearConflict')::boolean, false) AS "year_conflict!",
+                  COALESCE((t.guessed ->> 'viaSymlink')::boolean, false) AS "via_symlink!",
+                  COALESCE(b.identity_source = 'autotag'
+                           AND b.applied_identity ->> 'artistKey' = a.name_key
+                           AND b.applied_identity ->> 'titleKey' = b.title_key
+                           AND COALESCE(b.applied_identity -> 'year', 'null'::jsonb)
+                               = COALESCE(to_jsonb(b.year), 'null'::jsonb),
+                           false) AS "album_autotag!",
+                  a.name AS artist_name,
+                  t.guessed -> 'credit' AS "credit: Json<StoredCredit>"
+           FROM tracks t
+           JOIN albums b ON b.id = t.album_id
+           JOIN artists a ON a.id = b.artist_id
+           WHERE starts_with(t.path, $1)
+             AND (strpos(substr(t.path, length($1) + 1), '/') = 0
+                  OR substr(t.path, length($1) + 1) ~* '^(cd|dis[ck]|digital media|vinyl|side)[^/]*/[^/]+$')"#,
+        folder_prefix
     )
     .fetch_all(pool)
     .await

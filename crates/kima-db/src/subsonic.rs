@@ -72,8 +72,11 @@ const ALBUM_SELECT: &str = "SELECT al.id, al.title, al.year, al.created_at,
         COALESCE(
             (SELECT g.name FROM album_genres_effective e JOIN genres g ON g.id = e.genre_id
              WHERE e.album_id = al.id ORDER BY e.rank, g.name, g.id LIMIT 1),
-            (SELECT g.name FROM artist_genres_effective e JOIN genres g ON g.id = e.genre_id
-             WHERE e.artist_id = ar.id ORDER BY e.rank, g.name, g.id LIMIT 1)) AS genre
+            COALESCE(
+                (SELECT btrim(u.name) FROM unnest(ar.user_genres) WITH ORDINALITY AS u(name, ord)
+                 WHERE btrim(u.name) <> '' ORDER BY u.ord LIMIT 1),
+                (SELECT g.name FROM artist_genres_effective e JOIN genres g ON g.id = e.genre_id
+                 WHERE e.artist_id = ar.id ORDER BY e.rank, g.name, g.id LIMIT 1))) AS genre
     FROM albums al
     JOIN artists ar ON ar.id = al.artist_id
     JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL
@@ -88,8 +91,11 @@ const SONG_SELECT: &str = "SELECT t.id, t.title, t.artist_name, t.duration_secs,
         COALESCE(
             (SELECT g.name FROM track_genres_effective e JOIN genres g ON g.id = e.genre_id
              WHERE e.track_id = t.id ORDER BY e.rank, g.name, g.id LIMIT 1),
-            (SELECT g.name FROM artist_genres_effective e JOIN genres g ON g.id = e.genre_id
-             WHERE e.artist_id = ar.id ORDER BY e.rank, g.name, g.id LIMIT 1)) AS genre
+            COALESCE(
+                (SELECT btrim(u.name) FROM unnest(ar.user_genres) WITH ORDINALITY AS u(name, ord)
+                 WHERE btrim(u.name) <> '' ORDER BY u.ord LIMIT 1),
+                (SELECT g.name FROM artist_genres_effective e JOIN genres g ON g.id = e.genre_id
+                 WHERE e.artist_id = ar.id ORDER BY e.rank, g.name, g.id LIMIT 1))) AS genre
     FROM tracks t
     JOIN albums al ON al.id = t.album_id
     JOIN artists ar ON ar.id = al.artist_id

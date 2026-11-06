@@ -201,8 +201,9 @@ fn unless_original<T: PartialEq>(field: Field<T>, original: Option<&T>) -> Field
     }
 }
 
-/// Genres sent back as the page showed them (`[...user, ...effective]`) leave the user genres
-/// as they are; the effective genres alone clear them.
+/// Genres sent back as the page showed them (the user's own list when they have one, else the
+/// effective genres, D-166) leave the user genres as they are; the effective genres alone clear
+/// them.
 fn genres_unless_shown(
     field: Field<Vec<String>>,
     user: &[String],
@@ -212,7 +213,7 @@ fn genres_unless_shown(
     match field {
         Field::Set(sent) => {
             let sent_keys = keys(&sent);
-            if sent_keys == keys(&genres::merged(user, effective)) {
+            if sent_keys == keys(&genres::merged_for_display(user, effective)) {
                 Field::Absent
             } else if sent_keys == keys(effective) {
                 Field::Clear
@@ -659,8 +660,13 @@ mod tests {
         let user = s(&["Mine"]);
         let eff = s(&["Rock"]);
         assert_eq!(
-            genres_unless_shown(Field::Set(s(&["mine", "rock"])), &user, &eff),
+            genres_unless_shown(Field::Set(s(&["mine"])), &user, &eff),
             Field::Absent
+        );
+        // D-166: the old merged list is no longer what the page shows.
+        assert_eq!(
+            genres_unless_shown(Field::Set(s(&["mine", "rock"])), &user, &eff),
+            Field::Set(s(&["mine", "rock"]))
         );
         assert_eq!(
             genres_unless_shown(Field::Set(s(&["Rock"])), &user, &eff),

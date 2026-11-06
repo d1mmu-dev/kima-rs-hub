@@ -10,7 +10,7 @@ source: crates/kima-subsonic/tests/snapshots.rs
       "canDirectPlay": false,
       "canTranscode": true,
       "errorReason": "",
-      "transcodeParams": "format=mp3",
+      "transcodeParams": "mp3-high",
       "transcodeReason": [
         "source is flac, client asked for mp3"
       ]

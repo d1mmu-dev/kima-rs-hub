@@ -945,7 +945,17 @@ snap!(media_errors, |s| {
         &alice(&[
             ("mediaId", UNKNOWN),
             ("mediaType", "song"),
-            ("transcodeParams", "x"),
+            ("transcodeParams", "q-original"),
+        ]),
+    )
+    .await;
+    s.case(
+        "getTranscodeStream",
+        "invalid_params",
+        &alice(&[
+            ("mediaId", UNKNOWN),
+            ("mediaType", "song"),
+            ("transcodeParams", "q-high-100"),
         ]),
     )
     .await;
@@ -963,6 +973,26 @@ snap!(media_errors, |s| {
             ("mediaId", &track1),
             ("mediaType", "song"),
             ("format", "mp3"),
+        ]),
+    )
+    .await;
+    s.case(
+        "getTranscodeDecision",
+        "capped",
+        &alice(&[
+            ("mediaId", &track1),
+            ("mediaType", "song"),
+            ("maxBitRate", "256"),
+        ]),
+    )
+    .await;
+    s.case(
+        "getTranscodeDecision",
+        "refused",
+        &alice(&[
+            ("mediaId", &track1),
+            ("mediaType", "song"),
+            ("format", "opus"),
         ]),
     )
     .await;

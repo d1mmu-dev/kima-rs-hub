@@ -6,12 +6,13 @@ use std::process::Command;
 #[allow(unused_imports)]
 pub use kima_test_support::require_ffmpeg;
 
-/// Writes a 3 second sine tone at `dest`; the codec follows the extension (`flac` or `mp3`).
+/// Writes a 3 second sine tone at `dest`; the codec follows the extension (`flac`, `mp3` or `m4a`).
 pub fn sine(dest: &Path) {
     std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
     let codec = match dest.extension().and_then(|e| e.to_str()) {
         Some("flac") => "flac",
         Some("mp3") => "libmp3lame",
+        Some("m4a") => "aac",
         other => panic!("unsupported test audio extension {other:?}"),
     };
     let status = Command::new("ffmpeg")

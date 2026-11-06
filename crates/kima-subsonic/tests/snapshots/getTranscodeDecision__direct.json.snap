@@ -10,7 +10,7 @@ source: crates/kima-subsonic/tests/snapshots.rs
       "canDirectPlay": true,
       "canTranscode": true,
       "errorReason": "",
-      "transcodeParams": "",
+      "transcodeParams": "q-original",
       "transcodeReason": []
     },
     "type": "Kima",

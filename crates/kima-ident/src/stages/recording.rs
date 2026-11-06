@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 pub use super::ClaimResult;
 use super::{BatchReport, REDELIVERY_CAP, StageFailure, lost_worker, record_for, run_claims};
 use crate::matching::{self, Answer, LadderResult, no_match_evidence};
-use crate::{IdentCtx, acoustid_batch};
+use crate::{IdentCtx, acoustid_batch, album_vote};
 
 /// Claims taken per batch.
 pub const BATCH: i64 = 20;
@@ -54,6 +54,21 @@ pub async fn run_batch_until(
                 Err(error) => tracing::warn!(%error, "AcoustID batch lookup skipped"),
             }
         }
+    }
+    // Give untagged albums their release group from their songs' AcoustID answers before their
+    // songs are handed out, so each song's job reads the album's tracklist by that id.
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(BatchReport::default()),
+        () = async {
+            match identity::upcoming_albums(&ctx.pool, acoustid_batch::PREFETCH_AHEAD).await {
+                Ok(window) => {
+                    album_vote::round(ctx, &window).await;
+                }
+                // A failure here only means this round names no album.
+                Err(error) => tracing::warn!(%error, "album vote skipped this round"),
+            }
+        } => {}
     }
     let claims = stages::claim(
         &ctx.pool,

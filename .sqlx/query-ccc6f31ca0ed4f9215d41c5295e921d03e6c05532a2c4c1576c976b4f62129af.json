@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.id, t.title, t.duration_secs, ta.fingerprint AS \"fingerprint?\"\n           FROM tracks t LEFT JOIN track_acoustid ta ON ta.track_id = t.id\n           WHERE t.album_id = $1 AND t.missing_since IS NULL\n           ORDER BY t.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "duration_secs",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "fingerprint?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ccc6f31ca0ed4f9215d41c5295e921d03e6c05532a2c4c1576c976b4f62129af"
+}

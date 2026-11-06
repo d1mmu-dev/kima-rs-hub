@@ -4,9 +4,10 @@
 use kima_ident::Mbid;
 use kima_ident::text::{
     Candidate, Expected, album_identity_key, artist_identity_key, artist_sort_name, artists_agree,
-    escape_lucene, fold_identity, fold_title, is_generic_album_title, lengths_agree, local_names,
-    names_agree, normalize_artist_name, normalize_for_search, normalize_string, pick_recording,
-    recording_agrees, strip_artist_suffixes, titles_agree, version_of,
+    editionless_key, escape_lucene, fold_identity, fold_title, is_generic_album_title,
+    lengths_agree, local_names, names_agree, normalize_artist_name, normalize_for_search,
+    normalize_string, pick_recording, recording_agrees, strip_album_edition, strip_artist_suffixes,
+    titles_agree, version_of,
 };
 use std::collections::BTreeSet;
 
@@ -656,4 +657,65 @@ fn no_panic_on_hostile_input() {
             Mbid::parse(s),
         );
     }
+}
+
+// ---- utils/artistNormalization.ts stripAlbumEdition / albumIdentity.ts editionlessKey ----
+// (M-SYNC Task 13; upstream has no unit test for these, the cases are its doc comments plus the
+// edges its code spells out.)
+
+#[test]
+fn strip_album_edition_drops_edition_markers() {
+    for (title, bare) in [
+        ("Abbey Road - 2019 Remaster", "Abbey Road"),
+        ("Antics (Deluxe)", "Antics"),
+        ("Antics [Deluxe Edition]", "Antics"),
+        ("Dangerous Days (Deluxe Edition)", "Dangerous Days"),
+        ("Heaven: Special Edition", "Heaven"),
+        ("Sgt. Pepper (Remastered) (Deluxe)", "Sgt. Pepper"),
+        ("Album (2009)", "Album"),
+        ("Album - 2011 Remastered", "Album"),
+        ("  Plain   Title ", "Plain Title"),
+    ] {
+        assert_eq!(strip_album_edition(title), bare, "{title}");
+    }
+}
+
+#[test]
+fn strip_album_edition_keeps_what_names_a_different_recording() {
+    for title in [
+        "Get Born (Live)",
+        "Get Born (Live Edition)",
+        "Dangerous Days (Acoustic Version)",
+        "Heaven - Live",
+        "Trance",
+        "Album (Remix)",
+        "Album [Instrumental]",
+    ] {
+        assert_eq!(strip_album_edition(title), title, "{title}");
+    }
+    // Too long to run the patterns on: only trimmed.
+    let long = format!("  {}  ", "x".repeat(501));
+    assert_eq!(strip_album_edition(&long), "x".repeat(501));
+    assert_eq!(strip_album_edition(""), "");
+}
+
+#[test]
+fn editionless_key_covers_the_edition_but_never_a_substring() {
+    assert_eq!(
+        editionless_key("Antics (Deluxe)"),
+        editionless_key("Antics")
+    );
+    assert_eq!(editionless_key("Antics (Deluxe)"), "antics");
+    assert_ne!(
+        editionless_key("Get Born (Live)"),
+        editionless_key("Get Born")
+    );
+    assert_ne!(
+        editionless_key("Trance"),
+        editionless_key("Trust In Trance")
+    );
+    assert_eq!(
+        editionless_key("Il Pozzo D'Amor"),
+        editionless_key("Il Pozzo d'Amor")
+    );
 }

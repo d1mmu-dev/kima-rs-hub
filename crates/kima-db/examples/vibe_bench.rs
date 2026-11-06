@@ -7,6 +7,7 @@
 
 use std::time::{Duration, Instant};
 
+use kima_db::vibe::path::{PathOptions, generate_song_path};
 use kima_db::vibe::rank::{
     WeightedInput, matching_context, rank_matches, score_library, top_scores,
 };
@@ -215,6 +216,26 @@ async fn main() -> sqlx::Result<()> {
             println!(
                 "score_library two sets @100k (path scoring, whole library returned): {}",
                 stats(path)
+            );
+            let mut whole = vec![];
+            for i in 0..5 {
+                let t = Instant::now();
+                let p = generate_song_path(
+                    &pool,
+                    &probe,
+                    seeds[i],
+                    seeds[i + 5],
+                    PathOptions::default(),
+                    |_| 0,
+                )
+                .await
+                .expect("path");
+                whole.push(t.elapsed());
+                assert!(p.path.len() >= 8);
+            }
+            println!(
+                "generate_song_path (smooth, default length) @100k: {}",
+                stats(whole)
             );
         }
     }

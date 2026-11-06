@@ -105,3 +105,21 @@ fn layout_is_deterministic_and_seed_sensitive() {
     let c = layout_library(&lib.tracks, &lib.feel_z, &lib.model, lib.gw, Some(43));
     assert_ne!(a.positions, c.positions);
 }
+
+#[test]
+fn cancelled_layout_returns_nothing_and_an_uncancelled_one_is_unchanged() {
+    use kima_vibe::cancel::Cancel;
+    use kima_vibe::map_compute::layout_library_cancellable;
+    let lib = load("synthetic300");
+    let stop = Cancel::new();
+    stop.cancel();
+    assert!(
+        layout_library_cancellable(&lib.tracks, &lib.feel_z, &lib.model, lib.gw, None, &stop)
+            .is_none()
+    );
+    let live = Cancel::new();
+    let a = layout_library_cancellable(&lib.tracks, &lib.feel_z, &lib.model, lib.gw, None, &live)
+        .unwrap();
+    let b = layout_library(&lib.tracks, &lib.feel_z, &lib.model, lib.gw, None);
+    assert_eq!(a.positions, b.positions);
+}

@@ -8,6 +8,7 @@
 
 use std::f64::consts::LN_2;
 
+use crate::cancel::Cancel;
 use crate::exact_math::{exp, log};
 use crate::prng::SeededRandom;
 
@@ -202,7 +203,8 @@ fn optimize(
     alpha0: f64,
     rng: &mut SeededRandom,
     move_other: bool,
-) {
+    cancel: &Cancel,
+) -> bool {
     let m = edges.head.len();
     let mut wmax = 0.0_f64;
     for w in &edges.weight {
@@ -215,6 +217,9 @@ fn optimize(
     let (a, b) = (CURVE_A, CURVE_B);
     let mut alpha = alpha0;
     for n in 0..epochs {
+        if cancel.is_cancelled() {
+            return false;
+        }
         let nf = n as f64;
         for e in 0..m {
             if next_sample[e] > nf {
@@ -274,11 +279,22 @@ fn optimize(
         }
         alpha = alpha0 * (1.0 - nf / epochs as f64);
     }
+    true
 }
 
 /// Every track's position (`rows x 3`): the fuzzy graph of its neighbours, `start` stretched to 0-10 per axis, then
 /// the moves.
 pub fn layout(graph: &Graph, start: &[f64], seed: u32) -> Vec<f64> {
+    layout_cancellable(graph, start, seed, &Cancel::default()).expect("nothing cancels this call")
+}
+
+/// [`layout`], stopping at the next epoch once `cancel` is set (then `None`).
+pub fn layout_cancellable(
+    graph: &Graph,
+    start: &[f64],
+    seed: u32,
+    cancel: &Cancel,
+) -> Option<Vec<f64>> {
     let n = graph.rows;
     let epochs = layout_epochs(n);
     let edges = fuzzy_graph(graph, epochs);
@@ -299,8 +315,18 @@ pub fn layout(graph: &Graph, start: &[f64], seed: u32) -> Vec<f64> {
         }
     }
     let mut rng = SeededRandom::new(seed);
-    optimize(&mut pos, Tail::Same, &edges, epochs, n, 1.0, &mut rng, true);
-    pos
+    optimize(
+        &mut pos,
+        Tail::Same,
+        &edges,
+        epochs,
+        n,
+        1.0,
+        &mut rng,
+        true,
+        cancel,
+    )
+    .then_some(pos)
 }
 
 /// New tracks among laid-out ones (umap `transform`): their neighbours' strengths with local connectivity 0, a start
@@ -308,6 +334,18 @@ pub fn layout(graph: &Graph, start: &[f64], seed: u32) -> Vec<f64> {
 /// tracks) at a quarter of the step size with every laid-out track held still. Row i of `graph` lists new track i's
 /// nearest laid-out tracks, nearest first.
 pub fn place(fitted: &[f64], fitted_count: usize, graph: &Graph, seed: u32) -> Vec<f64> {
+    place_cancellable(fitted, fitted_count, graph, seed, &Cancel::default())
+        .expect("nothing cancels this call")
+}
+
+/// [`place`], stopping at the next epoch once `cancel` is set (then `None`).
+pub fn place_cancellable(
+    fitted: &[f64],
+    fitted_count: usize,
+    graph: &Graph,
+    seed: u32,
+    cancel: &Cancel,
+) -> Option<Vec<f64>> {
     let Graph { rows, k, idx, .. } = graph;
     let (rows, k) = (*rows, *k);
     let (mut pos, weight) = transform_start(fitted, graph);
@@ -339,8 +377,9 @@ pub fn place(fitted: &[f64], fitted_count: usize, graph: &Graph, seed: u32) -> V
         0.25,
         &mut rng,
         false,
-    );
-    pos
+        cancel,
+    )
+    .then_some(pos)
 }
 
 /// A new track's starting point (`init_graph_transform`) and its edge strengths, local connectivity 0.

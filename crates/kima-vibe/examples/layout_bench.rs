@@ -103,6 +103,7 @@ fn main() {
             Sweep {
                 accumulation: Default::default(),
                 parallel: true,
+                ..Default::default()
             },
             &tracks,
             &tracks,

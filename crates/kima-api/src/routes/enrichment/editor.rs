@@ -660,8 +660,13 @@ mod tests {
         let user = s(&["Mine"]);
         let eff = s(&["Rock"]);
         assert_eq!(
-            genres_unless_shown(Field::Set(s(&["mine", "rock"])), &user, &eff),
+            genres_unless_shown(Field::Set(s(&["mine"])), &user, &eff),
             Field::Absent
+        );
+        // D-166: the old merged list is no longer what the page shows.
+        assert_eq!(
+            genres_unless_shown(Field::Set(s(&["mine", "rock"])), &user, &eff),
+            Field::Set(s(&["mine", "rock"]))
         );
         assert_eq!(
             genres_unless_shown(Field::Set(s(&["Rock"])), &user, &eff),

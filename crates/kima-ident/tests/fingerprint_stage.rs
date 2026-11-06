@@ -372,3 +372,95 @@ async fn cancel_abandons_claims_working(pool: PgPool) {
     assert_eq!(row.get::<String, _>("status"), "working");
     assert!(row.get::<Option<String>, _>("error_code").is_none());
 }
+
+// ---- upstream 42ce4154: a fingerprint landing reopens the recording that never asked ----
+
+/// A `recording` stage closed `done` as "no match" with AcoustID skipped for `reason`.
+async fn skipped_recording(pool: &PgPool, t: Uuid, reason: &str) {
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status, source, evidence, finished_at) \
+         VALUES ($1, 'recording', 'done', 'acoustid', $2, now())",
+    )
+    .bind(t)
+    .bind(serde_json::json!({
+        "reason": "no match", "asked": ["search"], "acoustid": "skipped", "acoustidReason": reason,
+    }))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn recording_status(pool: &PgPool, t: Uuid) -> String {
+    sqlx::query_scalar(
+        "SELECT status FROM track_stages WHERE track_id = $1 AND stage = 'recording'",
+    )
+    .bind(t)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn fingerprint_landing_reopens_the_unasked_recording(pool: PgPool) {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ident_ctx(&pool, &root(&dir), dead_bases());
+    // Both have a stored fingerprint now, so the fingerprint stage reuses it.
+    let waiting = track(&pool, "a.flac", 120).await;
+    let no_key = track(&pool, "b.flac", 120).await;
+    let untouched = track(&pool, "c.flac", 120).await;
+    for t in [waiting, no_key] {
+        let mut conn = pool.acquire().await.unwrap();
+        kima_db::identity::store_fingerprint(&mut conn, t, "AQAAabc", 120)
+            .await
+            .unwrap();
+    }
+    skipped_recording(&pool, waiting, "no_fingerprint").await;
+    // Closed for another reason: a fingerprint landing changes nothing about a missing key.
+    skipped_recording(&pool, no_key, "no_key").await;
+    // No fingerprint stored for this one: stays closed (its fingerprint stage fails below).
+    skipped_recording(&pool, untouched, "no_fingerprint").await;
+
+    let report = run(&ctx).await;
+    assert_eq!(report.claimed, 3);
+
+    assert_eq!(recording_status(&pool, waiting).await, "pending");
+    assert_eq!(recording_status(&pool, no_key).await, "done");
+    assert_eq!(recording_status(&pool, untouched).await, "done");
+    // Reopened clean: due now, nothing left of the closed answer.
+    let row = sqlx::query(
+        "SELECT next_attempt_at, finished_at, attempts FROM track_stages \
+         WHERE track_id = $1 AND stage = 'recording'",
+    )
+    .bind(waiting)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        row.get::<Option<time::OffsetDateTime>, _>("next_attempt_at")
+            .is_none()
+    );
+    assert!(
+        row.get::<Option<time::OffsetDateTime>, _>("finished_at")
+            .is_none()
+    );
+    assert_eq!(row.get::<i16, _>("attempts"), 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_fingerprint_computed_now_reopens_the_unasked_recording_too(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = root(&dir);
+    let ctx = ident_ctx(&pool, &root, dead_bases());
+    tone(&root, "A/t.wav");
+    let t = track(&pool, "A/t.wav", 20).await;
+    skipped_recording(&pool, t, "no_fingerprint").await;
+
+    let report = run(&ctx).await;
+    assert_eq!((report.claimed, report.done), (1, 1));
+
+    assert!(acoustid_row(&pool, t).await.is_some());
+    assert_eq!(recording_status(&pool, t).await, "pending");
+}

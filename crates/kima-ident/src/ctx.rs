@@ -77,6 +77,8 @@ pub struct IdentCtx {
     pub embedding_runtime: EmbeddingRuntimeCache,
     /// Cached MusiCNN/analysis initialization result, shared by all context clones.
     pub analysis_runtime: AnalysisRuntimeCache,
+    /// Until when AcoustID batch requests wait after one failed (shared by clones).
+    pub acoustid_hold: crate::acoustid_batch::BatchHold,
 }
 
 /// Process configuration for identification.

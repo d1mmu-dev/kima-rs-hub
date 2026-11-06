@@ -1,8 +1,13 @@
-//! The identification ladder (spec §8.3; upstream `enrichSingleTrack`,
-//! `unifiedEnrichment.ts:1892-2184`): the file's recording id, the album's tracklist, the ISRC,
-//! the name search, then AcoustID. The first accepted candidate wins. Any source that fails to
-//! answer stops the ladder ([`LadderResult::Fail`]); only `Absent` falls through. What the answer
-//! writes (ISRC, genres, album blanks) is decided here (spec §8.5) and stored by
+//! The identification ladder (spec §8.3, amended by M-SYNC Task 12; upstream `enrichSingleTrack`,
+//! `unifiedEnrichment.ts:1892-2330` at v1.12.3): for a file whose tags do not name its recording,
+//! the file's recording id, then **AcoustID**, the album's tracklist, the ISRC, the name search.
+//! An AcoustID pick that agrees only by length ([`Rung::AcoustIdLength`]) is taken last, after
+//! all of those, and only when none of them failed. The first accepted candidate wins. A
+//! MusicBrainz source that fails to answer stops the ladder ([`LadderResult::Fail`]); AcoustID
+//! failing does not (its failure is the cause of the deferral only when MusicBrainz knows
+//! nothing either); only `Absent` falls through. A paused `acoustid` source parks the track
+//! unless saved replies settle its question: no lower source names it in AcoustID's place. What
+//! the answer writes (ISRC, genres, album blanks) is decided here (spec §8.5) and stored by
 //! [`crate::stages::recording`].
 //!
 //! Every request runs inside the stage budget ([`crate::stages::STAGE_TIMEOUT`]), set by the
@@ -19,7 +24,7 @@ use uuid::Uuid;
 use crate::musicbrainz::{self, Catalogue, Genre, Recording, top_genres};
 use crate::stages::StageFailure;
 use crate::text::{self, Candidate, Expected};
-use crate::{IdentCtx, Mbid, acoustid};
+use crate::{IdentCtx, Mbid, acoustid, acoustid_batch};
 
 /// Genres kept for a track or an album (`topVoted(…, 5)`).
 pub const TOP_GENRES: usize = 5;
@@ -28,14 +33,18 @@ pub const MAX_NAME_CHARS: usize = 200;
 /// An AcoustID track id in the evidence is cut to this many characters (a real one is 36).
 const MAX_ACOUSTID_ID_CHARS: usize = 64;
 
-/// Which rung answered; also the stage's `source`.
+/// Which rung answered; also the stage's `source`. In the order they are asked, except that
+/// [`Rung::AcoustIdLength`] is taken last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Rung {
     FileTag,
+    /// AcoustID's pick agrees with the track's title and length.
+    AcoustIdTitle,
+    /// AcoustID's pick agrees only by length: taken last.
+    AcoustIdLength,
     Tracklist,
     Isrc,
     Search,
-    AcoustId,
 }
 
 impl Rung {
@@ -45,12 +54,12 @@ impl Rung {
             Rung::Tracklist => "tracklist",
             Rung::Isrc => "isrc",
             Rung::Search => "search",
-            Rung::AcoustId => "acoustid",
+            Rung::AcoustIdTitle | Rung::AcoustIdLength => "acoustid",
         }
     }
 }
 
-/// Why rung 5 was not asked.
+/// Why AcoustID was not asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SkipReason {
     NoKey,
@@ -83,7 +92,7 @@ impl SkipReason {
     }
 }
 
-/// Whether and how rung 5 may ask AcoustID. `Ask` carries the client key, a secret: its `Debug`
+/// Whether and how the ladder may ask AcoustID. `Ask` carries the client key, a secret: its `Debug`
 /// never prints it (nor the fingerprint, only its length).
 #[derive(Clone, PartialEq, Eq)]
 pub enum AcoustidGate {
@@ -120,9 +129,10 @@ impl std::fmt::Debug for AcoustidGate {
     }
 }
 
-/// Rung 5's gate for `track` (spec §8.3): `ACOUSTID_DISABLED`; then a stored fingerprint is
+/// AcoustID's gate for `track` (spec §8.3): `ACOUSTID_DISABLED`; then a stored fingerprint is
 /// needed (none: fingerprinting unavailable, or the fingerprint stage closed without one); then a
-/// client key; then the `acoustid` source must not be paused.
+/// client key; then the `acoustid` source must not be paused, unless a saved reply already
+/// settles the question (it needs no request).
 pub async fn acoustid_gate(ctx: &IdentCtx, track: Uuid) -> sqlx::Result<AcoustidGate> {
     if ctx.config.acoustid_disabled {
         return Ok(AcoustidGate::Skip(SkipReason::Disabled));
@@ -140,7 +150,11 @@ pub async fn acoustid_gate(ctx: &IdentCtx, track: Uuid) -> sqlx::Result<Acoustid
     let Some(key) = ctx.acoustid_key().await else {
         return Ok(AcoustidGate::Skip(SkipReason::NoKey));
     };
-    if let Some(until) = ctx.net.paused_until(Source::AcoustId) {
+    if let Some(until) = ctx.net.paused_until(Source::AcoustId)
+        && acoustid_batch::saved_results(ctx, &fingerprint, duration_secs)
+            .await
+            .is_none()
+    {
         return Ok(AcoustidGate::Paused { until });
     }
     Ok(AcoustidGate::Ask {
@@ -169,12 +183,13 @@ pub struct Answer {
 #[derive(Debug, Clone, PartialEq)]
 pub enum LadderResult {
     Matched(Answer),
-    /// Every source asked said "nothing" (`asked` in order); `skipped` when rung 5 was not asked.
+    /// Every source asked said "nothing" (`asked` in order); `skipped` when AcoustID was not asked.
     NoMatch {
         asked: Vec<&'static str>,
         skipped: Option<SkipReason>,
     },
-    /// Rungs 1-4 found nothing and AcoustID is paused: wait for the pause, no attempt used.
+    /// AcoustID is paused and no saved reply settles its question: wait for the pause, no
+    /// attempt used, and no lower source answers in its place.
     Park {
         until: OffsetDateTime,
     },
@@ -302,6 +317,30 @@ pub async fn identify(ctx: &IdentCtx, t: &LadderTrack, gate: AcoustidGate) -> La
     walk(ctx, t, gate).await.unwrap_or_else(LadderResult::Fail)
 }
 
+/// A recording a rung before the MusicBrainz sources named, and what it writes with it.
+struct Found {
+    recording: Mbid,
+    rung: Rung,
+    /// Evidence fields of the rung (AcoustID's score, id and fingerprint).
+    extra: Value,
+    /// The recordings AcoustID would also accept, best first (the tagged id alone for a tag).
+    candidates: Vec<Mbid>,
+}
+
+/// An AcoustID pick with only the track's length: asked last.
+struct LengthOnly {
+    candidates: Vec<Mbid>,
+    extra: Value,
+}
+
+fn acoustid_evidence(p: &acoustid::Picked) -> Value {
+    json!({
+        "score": p.score,
+        "acoustidId": cut(&p.acoustid_id, MAX_ACOUSTID_ID_CHARS),
+        "fingerprintFrom": "stored",
+    })
+}
+
 async fn walk(
     ctx: &IdentCtx,
     t: &LadderTrack,
@@ -320,122 +359,182 @@ async fn walk(
     let mut w = Walk { asked: Vec::new() };
 
     // Rung 1: the file's own recording id, no identification request.
-    let tagged = t.tag_recording_mbid.map(Mbid);
+    let mut found = t.tag_recording_mbid.map(Mbid).map(|id| Found {
+        recording: id,
+        rung: Rung::FileTag,
+        extra: json!({}),
+        candidates: vec![id],
+    });
 
-    // Rung 2: the album's tracklist (with a tagged id, only for its ISRCs and genres).
+    // Rung 2: AcoustID, for a file whose tags do not name its recording.
+    let mut skipped = None;
+    let mut length_only: Option<LengthOnly> = None;
+    let mut acoustid_failure: Option<StageFailure> = None;
+    if found.is_none() {
+        match gate {
+            AcoustidGate::Skip(reason) => skipped = Some(reason),
+            // Comes first and can be asked when its pause ends: the question waits, uses up no
+            // retry, and no lower source answers in its place.
+            AcoustidGate::Paused { until } => return Ok(LadderResult::Park { until }),
+            AcoustidGate::Ask {
+                key,
+                fingerprint,
+                duration_secs,
+            } => {
+                w.ask(Rung::AcoustIdTitle);
+                let title = (!t.title.trim().is_empty()).then_some(t.title.as_str());
+                let outcome =
+                    acoustid_batch::answer(ctx, &key, &fingerprint, duration_secs, title).await;
+                match settle(outcome) {
+                    Ok(Some(p)) if p.title_agrees => {
+                        found = Some(Found {
+                            recording: p.recording,
+                            rung: Rung::AcoustIdTitle,
+                            extra: acoustid_evidence(&p),
+                            candidates: p.candidates,
+                        });
+                    }
+                    Ok(Some(p)) => {
+                        let mut extra = acoustid_evidence(&p);
+                        extra["match"] = json!("length only: AcoustID's title is not the track's");
+                        length_only = Some(LengthOnly {
+                            candidates: p.candidates,
+                            extra,
+                        });
+                    }
+                    Ok(None) => {}
+                    // AcoustID failing never stops MusicBrainz from answering.
+                    Err(failure) => acoustid_failure = Some(failure),
+                }
+            }
+        }
+    }
+
+    // Rung 3: the album's tracklist (with an answer already found, only for its ISRCs and
+    // genres; one MusicBrainz cannot give does not take the answer back).
+    let mut tracklist: Option<Catalogue> = None;
     if let Some(rg) = t.release_group_mbid.map(Mbid) {
-        if tagged.is_none() {
+        if t.tag_recording_mbid.is_none() {
             w.ask(Rung::Tracklist);
         }
         let fetched = musicbrainz::catalogue(net, rg, t.release_mbid.map(Mbid)).await;
-        let catalogue = match (settle(fetched), tagged) {
+        let catalogue = match (settle(fetched), &found) {
             (Ok(c), _) => c,
-            // A tagged answer stands without its catalogue entry (upstream: no `failedAsk` once
-            // the tag answered); its ISRCs and genres come from the recording itself.
             (Err(_), Some(_)) => None,
             (Err(fail), None) => return Err(fail),
         };
         if let Some(c) = catalogue {
             let rows: Vec<&musicbrainz::Track> = c.release.tracks().collect();
-            let entry = match tagged {
-                Some(id) => rows.iter().copied().find(|r| r.recording.id == id),
+            let entry = match &found {
+                Some(f) => f
+                    .candidates
+                    .iter()
+                    .find_map(|id| rows.iter().copied().find(|r| r.recording.id == *id)),
                 None => match_catalogue_recording(&rows, &expected, expected.isrc.as_deref()),
             };
             if let Some(entry) = entry {
-                let rung = if tagged.is_some() {
-                    Rung::FileTag
-                } else {
-                    Rung::Tracklist
+                let (rung, extra) = match found {
+                    Some(f) => (f.rung, f.extra),
+                    None => (Rung::Tracklist, json!({})),
                 };
-                return Ok(from_catalogue(t, rung, entry, &c, &w));
+                return Ok(from_catalogue(t, rung, entry, &c, &w, extra));
             }
+            tracklist = Some(c);
         }
     }
 
-    let (recording, rung, extra) = if let Some(id) = tagged {
-        (id, Rung::FileTag, json!({}))
-    } else {
-        match lower_rungs(ctx, t, &expected, gate, &mut w).await? {
-            Lower::Found(id, rung, extra) => (id, rung, extra),
-            Lower::Done(r) => return Ok(r),
+    // Rungs 4-5: the ISRC, the name search.
+    if found.is_none() {
+        if let Some(f) = lower_rungs(net, &expected, &mut w).await? {
+            found = Some(f);
         }
+    }
+
+    // Last: AcoustID's pick that agrees only by length.
+    if found.is_none() {
+        if let Some(lo) = length_only {
+            // A candidate on the fetched tracklist brings its ISRCs and genres with it.
+            if let Some(c) = &tracklist {
+                let rows: Vec<&musicbrainz::Track> = c.release.tracks().collect();
+                let entry = lo
+                    .candidates
+                    .iter()
+                    .find_map(|id| rows.iter().copied().find(|r| r.recording.id == *id));
+                if let Some(entry) = entry {
+                    return Ok(from_catalogue(
+                        t,
+                        Rung::AcoustIdLength,
+                        entry,
+                        c,
+                        &w,
+                        lo.extra,
+                    ));
+                }
+            }
+            found = lo.candidates.first().map(|&recording| Found {
+                recording,
+                rung: Rung::AcoustIdLength,
+                extra: lo.extra,
+                candidates: lo.candidates.clone(),
+            });
+        }
+    }
+
+    let Some(found) = found else {
+        // Nothing named it: AcoustID's own failure is the cause of the deferral, else every
+        // source asked said "nothing".
+        if let Some(failure) = acoustid_failure {
+            return Err(failure);
+        }
+        return Ok(LadderResult::NoMatch {
+            asked: w.asked,
+            skipped,
+        });
     };
 
     // The recording's ISRCs, genres and tags: one request (`getRecordingIsrcAndGenres`).
-    let details = settle(musicbrainz::recording_isrcs_and_genres(net, recording).await)?;
+    let details = settle(musicbrainz::recording_isrcs_and_genres(net, found.recording).await)?;
     Ok(from_details(
         t,
-        rung,
-        recording,
+        found.rung,
+        found.recording,
         details.as_ref(),
-        extra,
+        found.extra,
         &w,
     ))
 }
 
-enum Lower {
-    Found(Mbid, Rung, Value),
-    Done(LadderResult),
-}
-
-/// Rungs 3-5, for a track neither its tag nor its tracklist identified.
+/// The ISRC rung, then the name search, for a track neither its tag, AcoustID nor its tracklist
+/// identified.
 async fn lower_rungs(
-    ctx: &IdentCtx,
-    t: &LadderTrack,
+    net: &kima_net::Net,
     expected: &Expected,
-    gate: AcoustidGate,
     w: &mut Walk,
-) -> Result<Lower, StageFailure> {
-    let net = &ctx.net;
+) -> Result<Option<Found>, StageFailure> {
+    let found = |recording: Mbid, rung: Rung| Found {
+        recording,
+        rung,
+        extra: json!({}),
+        candidates: vec![recording],
+    };
 
-    // Rung 3: the ISRC. A value that is not an ISRC is never sent.
+    // The ISRC. A value that is not an ISRC is never sent.
     if let Some(code) = expected.isrc.as_deref() {
         w.ask(Rung::Isrc);
         if let Some(hits) = settle(musicbrainz::isrc_recordings(net, code).await)? {
             let cs: Vec<Candidate> = hits.iter().map(Recording::candidate).collect();
             if let Some(pick) = text::pick_recording(&cs, expected) {
-                return Ok(Lower::Found(pick.id, Rung::Isrc, json!({})));
+                return Ok(Some(found(pick.id, Rung::Isrc)));
             }
         }
     }
 
-    // Rung 4: the name search.
+    // The name search.
     w.ask(Rung::Search);
-    if let Some(rec) = settle(musicbrainz::identify_recording(net, expected).await)? {
-        return Ok(Lower::Found(rec.id, Rung::Search, json!({})));
-    }
-
-    // Rung 5: AcoustID.
-    match gate {
-        AcoustidGate::Skip(reason) => Ok(Lower::Done(LadderResult::NoMatch {
-            asked: w.asked.clone(),
-            skipped: Some(reason),
-        })),
-        AcoustidGate::Paused { until } => Ok(Lower::Done(LadderResult::Park { until })),
-        AcoustidGate::Ask {
-            key,
-            fingerprint,
-            duration_secs,
-        } => {
-            w.ask(Rung::AcoustId);
-            let title = (!t.title.trim().is_empty()).then_some(t.title.as_str());
-            match settle(acoustid::identify(net, &key, &fingerprint, duration_secs, title).await)? {
-                Some(p) => Ok(Lower::Found(
-                    p.recording,
-                    Rung::AcoustId,
-                    json!({
-                        "score": p.score,
-                        "acoustidId": cut(&p.acoustid_id, MAX_ACOUSTID_ID_CHARS),
-                        "fingerprintFrom": "stored",
-                    }),
-                )),
-                None => Ok(Lower::Done(LadderResult::NoMatch {
-                    asked: w.asked.clone(),
-                    skipped: None,
-                })),
-            }
-        }
-    }
+    Ok(
+        settle(musicbrainz::identify_recording(net, expected).await)?
+            .map(|rec| found(rec.id, Rung::Search)),
+    )
 }
 
 fn from_catalogue(
@@ -444,11 +543,15 @@ fn from_catalogue(
     entry: &musicbrainz::Track,
     c: &Catalogue,
     w: &Walk,
+    extra: Value,
 ) -> LadderResult {
     let recording = entry.recording.id;
     let track_genres = top(&entry.recording.genres);
     let reason = match rung {
         Rung::FileTag => "the file's own recording id, found in the album's tracklist",
+        Rung::AcoustIdTitle | Rung::AcoustIdLength => {
+            "AcoustID's recording, found in the album's tracklist"
+        }
         _ => "identified from the album's tracklist",
     };
     let mut evidence = json!({
@@ -458,6 +561,9 @@ fn from_catalogue(
     });
     if !w.asked.is_empty() {
         evidence["asked"] = json!(w.asked);
+    }
+    if let (Value::Object(ev), Value::Object(more)) = (&mut evidence, extra) {
+        ev.extend(more);
     }
     LadderResult::Matched(Answer {
         recording,

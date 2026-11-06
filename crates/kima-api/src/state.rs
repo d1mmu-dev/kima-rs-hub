@@ -213,6 +213,7 @@ impl AppState {
             progress_events: self.progress_events.clone(),
             embedding_runtime: Default::default(),
             analysis_runtime: AnalysisRuntimeCache::default(),
+            acoustid_hold: Default::default(),
         }
     }
 

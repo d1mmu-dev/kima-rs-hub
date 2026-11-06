@@ -38,6 +38,37 @@ pub async fn fingerprint_of(pool: &PgPool, track: Uuid) -> sqlx::Result<Option<(
     Ok(row.map(|r| (r.fingerprint, r.duration_secs)))
 }
 
+/// The AcoustID questions (stored fingerprint, seconds) of the next `limit` tracks the recording
+/// stage will claim, in its order (newest file first): present tracks whose recording question
+/// is due, whose file does not name its recording, with a stored fingerprint and a length.
+pub async fn upcoming_acoustid_questions(
+    pool: &PgPool,
+    limit: i64,
+) -> sqlx::Result<Vec<(String, i32)>> {
+    let rows = sqlx::query!(
+        r#"SELECT a.fingerprint, a.duration_secs
+           FROM tracks t
+           JOIN track_acoustid a ON a.track_id = t.id
+           LEFT JOIN track_stages s ON s.track_id = t.id AND s.stage = 'recording'
+           WHERE t.missing_since IS NULL
+             AND t.tag_recording_mbid IS NULL
+             AND a.duration_secs > 0
+             AND (s.track_id IS NULL
+                  OR (s.status = 'pending'
+                      AND (s.next_attempt_at IS NULL OR s.next_attempt_at <= now()))
+                  OR (s.status IN ('failed', 'working') AND s.next_attempt_at <= now()))
+           ORDER BY t.mtime DESC, t.id
+           LIMIT $1"#,
+        limit
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.fingerprint, r.duration_secs))
+        .collect())
+}
+
 /// `track`'s path (relative to the library root) and `duration_secs`.
 pub async fn track_path_and_duration(
     pool: &PgPool,

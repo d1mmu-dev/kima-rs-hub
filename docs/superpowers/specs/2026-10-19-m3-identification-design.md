@@ -714,6 +714,15 @@ Ported function by function, each with its upstream tests (§24.2):
 
 ### 8.3 The ladder
 
+> **Amended by M-SYNC Task 12 (2026-11-06, owner decision Q6, upstream v1.12.3 `c44b4499`, `64824e08`, `4c4e3f21`, `42ce4154`).**
+> The order below is the 1.11 order. For a file whose tags do not name its recording it is now
+> **file tag, AcoustID, album tracklist, ISRC, name search**: AcoustID is asked first (ten fingerprints
+> per request, the next 100 songs ahead, replies kept in `acoustid_replies`); an AcoustID pick that agrees
+> only by length goes last, after the name search and below the file's ISRC; AcoustID failing never stops
+> MusicBrainz, and a paused `acoustid` source parks the track unless saved replies settle it (no lower
+> source names it in AcoustID's place). With no AcoustID key the ladder is the old four-rung order.
+> D-165 and the amended D-117/D-124/D-109/D-126 rows carry the details; the numbered list is kept as written.
+
 For one track, in order; the first accepted candidate wins. **Any source that fails to answer (rate limited,
 transient or permanent) stops the ladder and defers the stage** (upstream `failedAsk`); only `Absent` falls through.
 

@@ -16,8 +16,8 @@ use tokio_util::sync::CancellationToken;
 
 pub use super::ClaimResult;
 use super::{BatchReport, REDELIVERY_CAP, StageFailure, lost_worker, record_for, run_claims};
-use crate::IdentCtx;
 use crate::matching::{self, Answer, LadderResult, no_match_evidence};
+use crate::{IdentCtx, acoustid_batch};
 
 /// Claims taken per batch.
 pub const BATCH: i64 = 20;
@@ -39,6 +39,21 @@ pub async fn run_batch_until(
 ) -> sqlx::Result<BatchReport> {
     if cancel.is_cancelled() || stop.is_cancelled() {
         return Ok(BatchReport::default());
+    }
+    // Ask AcoustID about the songs coming up in batches before their jobs run (its limit is
+    // per application key), so each answers from its saved reply. A paused source, no key, a
+    // batch that just failed: nothing is read or asked. Cancelled, nothing is claimed.
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Ok(BatchReport::default()),
+        r = acoustid_batch::prefetch_ahead(ctx, acoustid_batch::PREFETCH_AHEAD) => {
+            match r {
+                Ok(0) => {}
+                Ok(n) => tracing::debug!(songs = n, "asked AcoustID about upcoming songs in batches"),
+                // The batch lookup is a head start: a failure leaves each song to ask alone.
+                Err(error) => tracing::warn!(%error, "AcoustID batch lookup skipped"),
+            }
+        }
     }
     let claims = stages::claim(
         &ctx.pool,

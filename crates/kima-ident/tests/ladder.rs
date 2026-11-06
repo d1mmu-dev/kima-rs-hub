@@ -484,7 +484,7 @@ async fn failed_catalogue_defers_without_falling_through(pool: PgPool) {
     entries.extend(no_hits());
     let f = fx(&pool, entries).await;
 
-    let r = matching::identify(&f.ctx, &with_rg(track()), ask()).await;
+    let r = matching::identify(&f.ctx, &with_rg(track()), no_key()).await;
 
     match r {
         LadderResult::Fail(StageFailure::Transient(failure)) => {
@@ -520,7 +520,7 @@ async fn isrc_rung_before_search(pool: PgPool) {
     t.isrc = Some(ISRC.into());
     t.isrc_source = Some("id3".into());
 
-    let a = matched(matching::identify(&f.ctx, &t, ask()).await);
+    let a = matched(matching::identify(&f.ctx, &t, no_key()).await);
 
     assert_eq!((a.rung, a.recording), (Rung::Isrc, mbid(&studio)));
     assert!(f.asked().iter().all(|r| !r.contains("query=")));
@@ -545,7 +545,7 @@ async fn isrc_whose_recordings_are_other_songs_goes_on_down(pool: PgPool) {
 
     match r {
         LadderResult::NoMatch { asked, skipped } => {
-            assert_eq!(asked, vec!["isrc", "search", "acoustid"]);
+            assert_eq!(asked, vec!["acoustid", "isrc", "search"]);
             assert_eq!(skipped, None);
         }
         other => panic!("expected no match, got {other:?}"),
@@ -585,10 +585,10 @@ async fn search_rung(pool: PgPool) {
     )
     .await;
 
-    let a = matched(matching::identify(&f.ctx, &track(), ask()).await);
+    let a = matched(matching::identify(&f.ctx, &track(), no_key()).await);
 
     assert_eq!((a.rung, a.recording), (Rung::Search, mbid(&rec)));
-    // AcoustID is never asked for a track the search answered.
+    // With no key nothing is asked of AcoustID.
     assert!(f.asked().iter().all(|r| !r.contains("/lookup")));
     assert_eq!(a.evidence["asked"], json!(["search"]));
 }
@@ -596,47 +596,30 @@ async fn search_rung(pool: PgPool) {
 // ---- rung 5: AcoustID ----
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn acoustid_rung_last(pool: PgPool) {
+async fn acoustid_rung_answers_before_any_other_request(pool: PgPool) {
     let rec = id(9);
-    let mut entries = no_hits();
-    entries.push(lookup(json!({"status": "ok", "results": [
-        {"id": "a1b2c3d4-0000-4000-8000-0000000000ff", "score": 0.93,
-         "recordings": [{"id": rec, "title": "Cheerleader Effect", "duration": 218}]},
-    ]})));
-    entries.push(details(&rec, &["FRX451500123"]));
+    let entries = vec![
+        lookup(json!({"status": "ok", "results": [
+            {"id": "a1b2c3d4-0000-4000-8000-0000000000ff", "score": 0.93,
+             "recordings": [{"id": rec, "title": "Cheerleader Effect", "duration": 218}]},
+        ]})),
+        details(&rec, &["FRX451500123"]),
+    ];
     let f = fx(&pool, entries).await;
 
     let a = matched(matching::identify(&f.ctx, &track(), ask()).await);
 
-    assert_eq!((a.rung, a.recording), (Rung::AcoustId, mbid(&rec)));
+    assert_eq!((a.rung, a.recording), (Rung::AcoustIdTitle, mbid(&rec)));
     let asked = f.asked();
-    assert_eq!(asked.len(), 4, "{asked:?}");
-    assert!(asked[0].contains("query=recording:"));
-    assert!(asked[1].contains("query=Cheerleader"));
-    assert_eq!(asked[2], "POST /lookup");
-    assert!(asked[3].contains(&format!("/recording/{rec}")));
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(asked[0], "POST /lookup");
+    assert!(asked[1].contains(&format!("/recording/{rec}")));
     assert_eq!(a.evidence["score"], json!(0.93));
     assert_eq!(a.evidence["fingerprintFrom"], json!("stored"));
-    assert_eq!(a.evidence["asked"], json!(["search", "acoustid"]));
+    assert_eq!(a.evidence["asked"], json!(["acoustid"]));
+    assert_eq!(a.rung.as_str(), "acoustid");
     // The key never reaches the evidence.
     assert!(!a.evidence.to_string().contains(KEY));
-}
-
-#[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn acoustid_failure_passes_through(pool: PgPool) {
-    let mut entries = no_hits();
-    entries.push(Entry {
-        status: 500,
-        ..lookup(json!({}))
-    });
-    let f = fx(&pool, entries).await;
-
-    let r = matching::identify(&f.ctx, &track(), ask()).await;
-
-    assert!(
-        matches!(r, LadderResult::Fail(StageFailure::Transient(_))),
-        "{r:?}"
-    );
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -889,7 +872,7 @@ async fn acoustid_skipped_when_fingerprint_terminal(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn acoustid_paused_parks_without_attempt(pool: PgPool) {
+async fn the_question_waits_for_the_pause_to_end_and_uses_up_no_retry(pool: PgPool) {
     let f = fx(&pool, no_hits()).await;
     let ctx = keyed(f.ctx.clone());
     let t = seed_track(&pool).await;
@@ -924,13 +907,17 @@ async fn acoustid_paused_parks_without_attempt(pool: PgPool) {
     assert_eq!(row.get::<i16, _>("attempts"), 0);
     assert_eq!(row.get::<String, _>("error_code"), "RATE_LIMITED");
     assert_eq!(row.get::<time::OffsetDateTime, _>("next_attempt_at"), until);
-    assert!(f.asked().iter().all(|r| !r.contains("/lookup")));
+    // Not a request of any kind: no lower source names the recording in AcoustID's place.
+    assert!(f.asked().is_empty(), "{:?}", f.asked());
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn no_rung_answers_closes_done_no_match(pool: PgPool) {
     let mut entries = no_hits();
-    entries.push(lookup(json!({"status": "ok", "results": []})));
+    // The recording stage asks its songs ahead in one batch; the ladder reads the saved reply.
+    entries.push(lookup(
+        json!({"status": "ok", "fingerprints": [{"index": 0, "results": []}]}),
+    ));
     let f = fx(&pool, entries).await;
     let ctx = keyed(f.ctx.clone());
     let t = seed_track(&pool).await;
@@ -961,24 +948,494 @@ async fn no_rung_answers_closes_done_no_match(pool: PgPool) {
     );
     assert_eq!(
         row.get::<Value, _>("evidence"),
-        json!({"reason": "no match", "asked": ["search", "acoustid"]})
+        json!({"reason": "no match", "asked": ["acoustid", "search"]})
     );
     assert_eq!(row.get::<Option<Uuid>, _>("recording_mbid"), None);
-    // Exactly the two searches and one lookup.
+    // Exactly the one batch lookup and the two searches.
     assert_eq!(f.asked().len(), 3);
+    assert_eq!(f.asked()[0], "POST /lookup");
+}
+
+// ---- AcoustID first (M-SYNC Task 12; unifiedEnrichment.acoustidOrder.test.ts) ----
+
+/// An AcoustID answer: one confident result whose only recording is `rec`.
+fn pick(rec: &str, title: &str, secs: u32) -> Entry {
+    lookup(json!({"status": "ok", "results": [
+        {"id": "a1b2c3d4-0000-4000-8000-0000000000ff", "score": 0.93,
+         "recordings": [{"id": rec, "title": title, "duration": secs}]},
+    ]}))
+}
+
+fn nothing() -> Entry {
+    lookup(json!({"status": "ok", "results": []}))
+}
+
+fn requests(f: &Fx) -> Vec<String> {
+    f.replay.asked()
+}
+
+fn is_search(r: &str) -> bool {
+    r.contains("query=")
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn no_key_ladder_unchanged(pool: PgPool) {
+    // Review Focus 3: with no key every new AcoustID step is skipped without a request, and the
+    // old rungs run in their old order (tracklist, ISRC, search) with the old answers.
+    let mut entries = catalogue(vec![row(&id(5), "Decode", 218_000, "Carpenter Brut", &[])]);
+    entries.push(get(
+        &isrc_url(ISRC),
+        200,
+        json!({"recordings": [recording(&id(2), "Decode", 218_000, "Paramore")]}),
+    ));
+    entries.extend(no_hits());
+    let f = fx(&pool, entries).await;
+    let mut t = with_rg(track());
+    t.isrc = Some(ISRC.into());
+    t.isrc_source = Some("id3".into());
+
+    let r = matching::identify(&f.ctx, &t, no_key()).await;
+
+    match r {
+        LadderResult::NoMatch { asked, skipped } => {
+            assert_eq!(asked, vec!["tracklist", "isrc", "search"]);
+            assert_eq!(skipped, Some(SkipReason::NoKey));
+        }
+        other => panic!("expected no match, got {other:?}"),
+    }
+    assert!(requests(&f).iter().all(|r| !r.contains("/lookup")));
+
+    // And an answer from a lower rung is the same answer it always was.
+    let rec = id(8);
+    let f = fx(
+        &pool,
+        vec![
+            get(
+                Q1,
+                200,
+                json!({"recordings": [
+                    {"id": rec, "title": "Cheerleader Effect", "length": 218_000, "score": 100,
+                     "artist-credit": credit("Carpenter Brut")},
+                ]}),
+            ),
+            details(&rec, &[]),
+        ],
+    )
+    .await;
+    let a = matched(matching::identify(&f.ctx, &track(), no_key()).await);
+    assert_eq!((a.rung, a.recording), (Rung::Search, mbid(&rec)));
+    assert!(requests(&f).iter().all(|r| !r.contains("/lookup")));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn asks_acoustid_before_the_name_search(pool: PgPool) {
+    let mut entries = vec![nothing()];
+    entries.extend(no_hits());
+    let f = fx(&pool, entries).await;
+
+    let r = matching::identify(&f.ctx, &track(), ask()).await;
+
+    match r {
+        LadderResult::NoMatch { asked, skipped } => {
+            assert_eq!(asked, vec!["acoustid", "search"]);
+            assert_eq!(skipped, None);
+        }
+        other => panic!("expected no match, got {other:?}"),
+    }
+    let sent = requests(&f);
+    assert_eq!(sent[0], "POST /lookup");
+    assert!(is_search(&sent[1]), "{sent:?}");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn never_runs_the_name_search_for_a_track_acoustid_answered(pool: PgPool) {
+    let rec = id(9);
+    let mut entries = vec![pick(&rec, "Cheerleader Effect", 218), details(&rec, &[])];
+    entries.extend(no_hits());
+    let f = fx(&pool, entries).await;
+
+    let a = matched(matching::identify(&f.ctx, &track(), ask()).await);
+
+    assert_eq!((a.rung, a.recording), (Rung::AcoustIdTitle, mbid(&rec)));
+    assert!(
+        requests(&f)
+            .iter()
+            .all(|r| !is_search(r) && !r.contains("/isrc/"))
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_file_that_names_its_recording_never_asks_acoustid(pool: PgPool) {
+    let rec = id(1);
+    let f = fx(&pool, vec![nothing(), details(&rec, &[])]).await;
+    let mut t = track();
+    t.tag_recording_mbid = Some(Uuid::parse_str(&rec).unwrap());
+
+    let a = matched(matching::identify(&f.ctx, &t, ask()).await);
+
+    assert_eq!(a.rung, Rung::FileTag);
+    assert!(requests(&f).iter().all(|r| !r.contains("/lookup")));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn an_acoustid_answer_found_in_the_tracklist_takes_its_isrcs_and_the_album_blanks(
+    pool: PgPool,
+) {
+    // The album's tracklist is read for the recording AcoustID named (its row brings the ISRC,
+    // genres and the album's label), as upstream does for `answerSource === "acoustid"`.
+    let rec = id(9);
+    let mut entries = vec![pick(&rec, "Cheerleader Effect", 218)];
+    entries.extend(catalogue(vec![row(
+        &rec,
+        "Cheerleader Effect",
+        218_000,
+        "Carpenter Brut",
+        &["FRX451500123"],
+    )]));
+    let f = fx(&pool, entries).await;
+
+    let a = matched(matching::identify(&f.ctx, &with_rg(track()), ask()).await);
+
+    assert_eq!((a.rung, a.recording), (Rung::AcoustIdTitle, mbid(&rec)));
+    assert_eq!(a.isrc, IsrcWrite::Set("FRX451500123".into()));
+    assert_eq!(a.album_label.as_deref(), Some("No Quarter"));
+    assert_eq!(
+        a.evidence["reason"],
+        json!("AcoustID's recording, found in the album's tracklist")
+    );
+    assert!(requests(&f).iter().all(|r| !is_search(r)));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn an_acoustid_pick_with_only_the_tracks_length_goes_last_the_tracklists_name_match_wins(
+    pool: PgPool,
+) {
+    let by_length = id(9);
+    let on_album = id(2);
+    let mut entries = vec![pick(&by_length, "Something Else Entirely", 218)];
+    entries.extend(catalogue(vec![row(
+        &on_album,
+        "Cheerleader Effect",
+        218_400,
+        "Carpenter Brut",
+        &[],
+    )]));
+    let f = fx(&pool, entries).await;
+
+    let a = matched(matching::identify(&f.ctx, &with_rg(track()), ask()).await);
+
+    assert_eq!((a.rung, a.recording), (Rung::Tracklist, mbid(&on_album)));
+    assert_eq!(a.evidence["asked"], json!(["acoustid", "tracklist"]));
+    assert!(requests(&f).iter().all(|r| !is_search(r)));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_length_only_acoustid_pick_is_taken_when_nothing_else_names_the_recording(pool: PgPool) {
+    let rec = id(9);
+    let mut entries = vec![pick(&rec, "Something Else Entirely", 218)];
+    entries.extend(no_hits());
+    entries.push(details(&rec, &["FRX451500123"]));
+    let f = fx(&pool, entries).await;
+
+    let a = matched(matching::identify(&f.ctx, &track(), ask()).await);
+
+    assert_eq!((a.rung, a.recording), (Rung::AcoustIdLength, mbid(&rec)));
+    assert_eq!(a.evidence["asked"], json!(["acoustid", "search"]));
+    assert_eq!(
+        a.evidence["match"],
+        json!("length only: AcoustID's title is not the track's")
+    );
+    assert_eq!(a.evidence["fingerprintFrom"], json!("stored"));
+    assert_eq!(a.rung.as_str(), "acoustid");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_length_only_pick_loses_to_the_files_isrc(pool: PgPool) {
+    let by_length = id(9);
+    let studio = id(3);
+    let f = fx(
+        &pool,
+        vec![
+            pick(&by_length, "Something Else Entirely", 218),
+            get(
+                &isrc_url(ISRC),
+                200,
+                json!({"recordings": [recording(&studio, "Cheerleader Effect", 218_400, "Carpenter Brut")]}),
+            ),
+            details(&studio, &[]),
+        ],
+    )
+    .await;
+    let mut t = track();
+    t.isrc = Some(ISRC.into());
+    t.isrc_source = Some("id3".into());
+
+    let a = matched(matching::identify(&f.ctx, &t, ask()).await);
+
+    assert_eq!((a.rung, a.recording), (Rung::Isrc, mbid(&studio)));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_musicbrainz_failure_defers_the_track_instead_of_taking_a_length_only_pick(pool: PgPool) {
+    let f = fx(
+        &pool,
+        vec![
+            pick(&id(9), "Something Else Entirely", 218),
+            get(Q1, 500, json!({"error": "boom"})),
+        ],
+    )
+    .await;
+
+    let r = matching::identify(&f.ctx, &track(), ask()).await;
+
+    match r {
+        LadderResult::Fail(StageFailure::Transient(failure)) => {
+            assert_eq!(failure.code, "HTTP_500")
+        }
+        other => panic!("expected MusicBrainz's failure, got {other:?}"),
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn acoustid_failing_does_not_stop_musicbrainz_from_answering(pool: PgPool) {
+    let rec = id(8);
+    let f = fx(
+        &pool,
+        vec![
+            Entry {
+                status: 500,
+                ..lookup(json!({}))
+            },
+            get(
+                Q1,
+                200,
+                json!({"recordings": [
+                    {"id": rec, "title": "Cheerleader Effect", "length": 218_000, "score": 100,
+                     "artist-credit": credit("Carpenter Brut")},
+                ]}),
+            ),
+            details(&rec, &[]),
+        ],
+    )
+    .await;
+
+    let a = matched(matching::identify(&f.ctx, &track(), ask()).await);
+
+    assert_eq!((a.rung, a.recording), (Rung::Search, mbid(&rec)));
+    assert_eq!(a.evidence["asked"], json!(["acoustid", "search"]));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn acoustid_failing_and_musicbrainz_knowing_nothing_the_record_waits_for_acoustid(
+    pool: PgPool,
+) {
+    let mut entries = vec![Entry {
+        status: 500,
+        ..lookup(json!({}))
+    }];
+    entries.extend(no_hits());
+    let f = fx(&pool, entries).await;
+
+    let r = matching::identify(&f.ctx, &track(), ask()).await;
+
+    // AcoustID's own failure is the cause of the deferral, not a no-match.
+    match r {
+        LadderResult::Fail(StageFailure::Transient(failure)) => {
+            assert_eq!(failure.code, "HTTP_500")
+        }
+        other => panic!("expected AcoustID's failure, got {other:?}"),
+    }
+    assert!(requests(&f).iter().any(|r| is_search(r)));
+}
+
+/// Pauses the `acoustid` source for 30 minutes in `ctx`.
+async fn pause_acoustid(pool: &PgPool, ctx: &IdentCtx) {
+    sqlx::query(
+        "INSERT INTO source_pauses (source, paused_until, reason) \
+         VALUES ('acoustid', date_trunc('second', now()) + interval '30 minutes', 'HTTP 429')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    ctx.net.load_pauses().await.unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn paused_acoustid_with_no_saved_reply_a_lower_source_does_not_name_the_recording(
+    pool: PgPool,
+) {
+    // MusicBrainz could name it, but while AcoustID is paused the question waits.
+    let rec = id(8);
+    let f = fx(
+        &pool,
+        vec![
+            get(
+                Q1,
+                200,
+                json!({"recordings": [
+                    {"id": rec, "title": "Cheerleader Effect", "length": 218_000, "score": 100,
+                     "artist-credit": credit("Carpenter Brut")},
+                ]}),
+            ),
+            details(&rec, &[]),
+        ],
+    )
+    .await;
+    let until = time::OffsetDateTime::now_utc() + time::Duration::minutes(30);
+
+    let r = matching::identify(&f.ctx, &track(), AcoustidGate::Paused { until }).await;
+
+    assert_eq!(r, LadderResult::Park { until });
+    assert!(requests(&f).is_empty(), "{:?}", requests(&f));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn paused_acoustid_with_a_saved_reply_answers_from_it(pool: PgPool) {
+    let rec = id(9);
+    let f = fx(&pool, vec![details(&rec, &[])]).await;
+    let ctx = keyed(f.ctx.clone());
+    let t = seed_track(&pool).await;
+    fingerprint_stage(&pool, t, "done").await;
+    store_fp(&pool, t).await;
+    // A reply saved before the pause (by a batch).
+    kima_db::acoustid_replies::put(
+        &pool,
+        &kima_db::acoustid_replies::fingerprint_hash(FINGERPRINT),
+        218,
+        kima_db::acoustid_replies::Status::Matched,
+        &json!([{"id": "a1b2c3d4-0000-4000-8000-0000000000ff", "score": 0.93, "recordings": [
+            {"id": rec, "title": "Cheerleader Effect", "duration": 218.0, "releasegroups": []}]}]),
+    )
+    .await
+    .unwrap();
+    pause_acoustid(&pool, &ctx).await;
+
+    // The gate lets the question through: the saved reply settles it without a request.
+    let gate = acoustid_gate(&ctx, t).await.unwrap();
+    assert!(matches!(gate, AcoustidGate::Ask { .. }), "{gate:?}");
+    let a = matched(matching::identify(&ctx, &track(), gate).await);
+
+    assert_eq!((a.rung, a.recording), (Rung::AcoustIdTitle, mbid(&rec)));
+    assert!(requests(&f).iter().all(|r| !r.contains("/lookup")));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn paused_acoustid_with_a_saved_no_match_lets_the_ladder_go_on_down(pool: PgPool) {
+    // A saved "nothing matched" settles AcoustID's question too: the lower sources may answer.
+    let mut entries = no_hits();
+    entries.push(details(&id(8), &[]));
+    let f = fx(&pool, entries).await;
+    let ctx = keyed(f.ctx.clone());
+    let t = seed_track(&pool).await;
+    fingerprint_stage(&pool, t, "done").await;
+    store_fp(&pool, t).await;
+    kima_db::acoustid_replies::put(
+        &pool,
+        &kima_db::acoustid_replies::fingerprint_hash(FINGERPRINT),
+        218,
+        kima_db::acoustid_replies::Status::Unmatched,
+        &json!([]),
+    )
+    .await
+    .unwrap();
+    pause_acoustid(&pool, &ctx).await;
+
+    let gate = acoustid_gate(&ctx, t).await.unwrap();
+    assert!(matches!(gate, AcoustidGate::Ask { .. }), "{gate:?}");
+    let r = matching::identify(&ctx, &track(), gate).await;
+
+    match r {
+        LadderResult::NoMatch { asked, .. } => assert_eq!(asked, vec!["acoustid", "search"]),
+        other => panic!("expected no match, got {other:?}"),
+    }
+    assert!(requests(&f).iter().all(|r| !r.contains("/lookup")));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn the_recording_stage_asks_the_songs_ahead_in_one_batch_before_it_claims(pool: PgPool) {
+    // Three songs, each with its own fingerprint: one batch request answers them all, and each
+    // song's ladder then reads its saved reply instead of asking alone.
+    let f = fx(
+        &pool,
+        vec![Entry {
+            url: "/lookup".into(),
+            ..lookup(json!({"status": "ok", "fingerprints": [
+                {"index": 0, "results": []},
+                {"index": 1, "results": []},
+                {"index": 2, "results": []},
+            ]}))
+        }],
+    )
+    .await;
+    let ctx = keyed(f.ctx.clone());
+    for i in 0..3 {
+        let t = seed_track(&pool).await;
+        fingerprint_stage(&pool, t, "done").await;
+        let mut conn = pool.acquire().await.unwrap();
+        kima_db::identity::store_fingerprint(&mut conn, t, &format!("AQAAfp{i}"), 218)
+            .await
+            .unwrap();
+    }
+
+    let report = kima_ident::stages::recording::run_batch(&ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(report.claimed, 3);
+    let lookups = f
+        .replay
+        .asked()
+        .iter()
+        .filter(|r| r.contains("/lookup"))
+        .count();
+    assert_eq!(lookups, 1, "{:?}", f.replay.asked());
+    let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM acoustid_replies")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(saved, 3);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn the_recording_stage_without_a_key_asks_nothing_ahead(pool: PgPool) {
+    let f = fx(&pool, no_hits()).await;
+    let t = seed_track(&pool).await;
+    fingerprint_stage(&pool, t, "done").await;
+    store_fp(&pool, t).await;
+
+    let report = kima_ident::stages::recording::run_batch(&f.ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!((report.claimed, report.done), (1, 1));
+    assert!(f.replay.asked().iter().all(|r| !r.contains("/lookup")));
+    let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM acoustid_replies")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(saved, 0);
 }
 
 #[test]
 fn rung_names() {
+    // `stage.source` keeps the name `acoustid` for both AcoustID rungs.
     assert_eq!(
         [
             Rung::FileTag,
+            Rung::AcoustIdTitle,
+            Rung::AcoustIdLength,
             Rung::Tracklist,
             Rung::Isrc,
             Rung::Search,
-            Rung::AcoustId
         ]
         .map(Rung::as_str),
-        ["file_tag", "tracklist", "isrc", "search", "acoustid"]
+        [
+            "file_tag",
+            "acoustid",
+            "acoustid",
+            "tracklist",
+            "isrc",
+            "search"
+        ]
     );
 }

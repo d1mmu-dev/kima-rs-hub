@@ -189,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         progress_events: state.progress_events.clone(),
         embedding_runtime: Default::default(),
         analysis_runtime: Default::default(),
+        acoustid_hold: Default::default(),
     };
     info!(config = ?ident_ctx.config, "identification");
     let clap_status = kima_ident::stages::embedding::initialize(&ident_ctx)

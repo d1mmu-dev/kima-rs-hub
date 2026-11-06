@@ -7,8 +7,8 @@
 
 use std::time::Duration;
 
-use kima_db::identity;
 use kima_db::stages::{self, Claim, Stage};
+use kima_db::{enrichment, identity};
 use kima_library::scan::library_path;
 use kima_net::Failure;
 use time::OffsetDateTime;
@@ -75,8 +75,14 @@ pub async fn run_claim(
             "reason": "fingerprint already stored",
             "characters": fp.chars().count(),
         });
-        let mut conn = pool.acquire().await?;
-        return done(stages::report_done(&mut conn, claim, SOURCE, &evidence).await?);
+        let mut tx = pool.begin().await?;
+        if !stages::report_done(&mut tx, claim, SOURCE, &evidence).await? {
+            tx.rollback().await?;
+            return Ok(ClaimResult::Stale);
+        }
+        enrichment::reopen_unasked_recording(&mut tx, claim.track_id).await?;
+        tx.commit().await?;
+        return Ok(ClaimResult::Done);
     }
 
     // The track is gone; its stage row went with it.
@@ -133,6 +139,8 @@ pub async fn run_claim(
     }
     // tracks.duration_secs, as AcoustID is asked with it (spec §9.1 step 5).
     identity::store_fingerprint(&mut tx, claim.track_id, &fp.encoded, duration_secs).await?;
+    // A recording closed "no match" for want of this fingerprint can ask AcoustID now.
+    enrichment::reopen_unasked_recording(&mut tx, claim.track_id).await?;
     tx.commit().await?;
     Ok(ClaimResult::Done)
 }
@@ -187,14 +195,6 @@ async fn fail(ctx: &IdentCtx, claim: &Claim, f: &StageFailure) -> sqlx::Result<C
 fn closed(accepted: bool) -> sqlx::Result<ClaimResult> {
     Ok(if accepted {
         ClaimResult::Failed
-    } else {
-        ClaimResult::Stale
-    })
-}
-
-fn done(accepted: bool) -> sqlx::Result<ClaimResult> {
-    Ok(if accepted {
-        ClaimResult::Done
     } else {
         ClaimResult::Stale
     })

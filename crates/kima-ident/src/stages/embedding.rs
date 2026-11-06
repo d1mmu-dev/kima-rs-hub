@@ -1361,6 +1361,7 @@ mod tests {
             progress_events: crate::events::ProgressEvents::new(events),
             embedding_runtime: Default::default(),
             analysis_runtime: Default::default(),
+            acoustid_hold: Default::default(),
         };
         assert!(super::cached_status(&ctx).is_none());
         let first = super::initialize(&ctx).await.unwrap();
@@ -1448,6 +1449,7 @@ mod tests {
             progress_events: crate::events::ProgressEvents::new(events),
             embedding_runtime: Default::default(),
             analysis_runtime: Default::default(),
+            acoustid_hold: Default::default(),
         }
     }
 

@@ -397,6 +397,27 @@ pub async fn reopen_skipped_acoustid(
     Ok(r.rows_affected())
 }
 
+/// A fingerprint just landed for `track` (upstream `42ce4154`): its `recording` row closed `done`
+/// as "no match" for want of one (`acoustidReason = no_fingerprint`) goes back to `pending`,
+/// due now, to ask AcoustID. Any other closed answer is left alone. Returns rows reopened.
+pub async fn reopen_unasked_recording(
+    conn: &mut sqlx::PgConnection,
+    track: uuid::Uuid,
+) -> sqlx::Result<u64> {
+    let r = sqlx::query!(
+        "UPDATE track_stages
+         SET status = 'pending', next_attempt_at = NULL, started_at = NULL, finished_at = NULL,
+             updated_at = now()
+         WHERE track_id = $1 AND stage = 'recording' AND status = 'done'
+           AND evidence ->> 'acoustid' = 'skipped'
+           AND evidence ->> 'acoustidReason' = 'no_fingerprint'",
+        track
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(r.rows_affected())
+}
+
 /// Retry failed and blocked: the skipped-AcoustID reopen, then every `failed` row with a retry
 /// scheduled (`next_attempt_at` set) goes to `pending`, due now, its attempts kept. Nothing
 /// `done` or terminal is touched. Returns rows reopened.

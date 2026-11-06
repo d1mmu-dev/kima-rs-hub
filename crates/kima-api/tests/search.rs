@@ -173,11 +173,27 @@ async fn requires_auth(pool: PgPool) {
 /// apply; this pins the outcome.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn search_non_ascii_names_any_case(pool: PgPool) {
-    seed(&pool, Seed::new("Beyoncé", "Lemonade", Some(2016), "Formation")).await;
-    seed(&pool, Seed::new("ДДТ", "Актриса Весна", Some(1992), "Родина")).await;
+    seed(
+        &pool,
+        Seed::new("Beyoncé", "Lemonade", Some(2016), "Formation"),
+    )
+    .await;
+    seed(
+        &pool,
+        Seed::new("ДДТ", "Актриса Весна", Some(1992), "Родина"),
+    )
+    .await;
     seed(&pool, Seed::new("東京事変", "大人", Some(2006), "群青日和")).await;
-    seed(&pool, Seed::new("Guns N’ Roses", "Appetite", Some(1987), "Welcome")).await;
-    seed(&pool, Seed::new("Zoë Keating", "Into the Trees", Some(2010), "Escape")).await;
+    seed(
+        &pool,
+        Seed::new("Guns N’ Roses", "Appetite", Some(1987), "Welcome"),
+    )
+    .await;
+    seed(
+        &pool,
+        Seed::new("Zoë Keating", "Into the Trees", Some(2010), "Escape"),
+    )
+    .await;
     let e = env(pool).await;
     let artist = |v: &Value| -> Vec<String> {
         v["artists"]

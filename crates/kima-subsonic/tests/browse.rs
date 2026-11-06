@@ -717,15 +717,26 @@ fixture_test!(album_list2_junk_paging_is_ok, |server, _pool| {
         let res = alice(
             &server,
             "getAlbumList2",
-            &[("type", "alphabeticalByName"), ("size", size), ("offset", offset)],
+            &[
+                ("type", "alphabeticalByName"),
+                ("size", size),
+                ("offset", offset),
+            ],
         )
         .await;
-        assert_eq!(res["albumList2"], default["albumList2"], "{size:?} {offset:?}");
+        assert_eq!(
+            res["albumList2"], default["albumList2"],
+            "{size:?} {offset:?}"
+        );
     }
     let res = alice(
         &server,
         "getAlbumList2",
-        &[("type", "alphabeticalByName"), ("size", "-3"), ("offset", "-5")],
+        &[
+            ("type", "alphabeticalByName"),
+            ("size", "-3"),
+            ("offset", "-5"),
+        ],
     )
     .await;
     assert!(res.get("error").is_none(), "{res}");

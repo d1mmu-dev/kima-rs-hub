@@ -833,6 +833,7 @@ async fn stream_file_gone_before_the_scan_flags_it_is_70_without_a_path(pool: Pg
     ] {
         let mut params = vec![("id", t2.as_str())];
         params.extend(extra.iter().copied());
-        env.assert_error("stream", &params, 70, "Song not found").await;
+        env.assert_error("stream", &params, 70, "Song not found")
+            .await;
     }
 }

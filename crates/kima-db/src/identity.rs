@@ -1020,3 +1020,25 @@ pub async fn rerun_album_artist(pool: &PgPool, album: Uuid) -> sqlx::Result<()> 
     .await?;
     Ok(())
 }
+
+/// Sets the album's release-group id from an AcoustID vote, source `acoustid` (the weakest:
+/// `acoustid` < `tag` < `autotag` < `user`). Only an album with no id or one AcoustID itself
+/// set takes it; a tag, autotag or user id is never replaced. Returns whether the album now
+/// holds this id from AcoustID.
+pub async fn set_acoustid_group(
+    conn: &mut PgConnection,
+    album: Uuid,
+    group: Uuid,
+) -> sqlx::Result<bool> {
+    let done = sqlx::query!(
+        "UPDATE albums SET release_group_mbid = $2, release_group_mbid_source = 'acoustid'
+         WHERE id = $1
+           AND (release_group_mbid_source = 'acoustid'
+                OR (release_group_mbid_source IS NULL AND release_group_mbid IS NULL))",
+        album,
+        group
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}

@@ -337,7 +337,9 @@ async fn upsert_track_row(
 
 /// Sets the album's `release_mbid` and `release_group_mbid` to the mode of its present tracks'
 /// tag values, ties to the smallest UUID. Each is written (with source `tag`) only while the
-/// stored source is NULL or `tag`: an `autotag` or `user` value wins over tags (R2).
+/// stored source is NULL or `tag`: an `autotag` or `user` value wins over tags (R2). The
+/// release-group id also yields to a tag while its source is `acoustid` (the weakest, Task 11);
+/// with no tag id left an `acoustid` one stays, a `tag` one goes.
 pub async fn refresh_album_mbids(conn: &mut PgConnection, album: Uuid) -> sqlx::Result<()> {
     sqlx::query!(
         r#"WITH rel AS (
@@ -354,13 +356,18 @@ pub async fn refresh_album_mbids(conn: &mut PgConnection, album: Uuid) -> sqlx::
                release_mbid_source = CASE WHEN release_mbid_source IS NULL OR release_mbid_source = 'tag'
                                           THEN CASE WHEN EXISTS (SELECT 1 FROM rel) THEN 'tag' END
                                           ELSE release_mbid_source END,
-               release_group_mbid = CASE WHEN release_group_mbid_source IS NULL
-                                              OR release_group_mbid_source = 'tag'
-                                         THEN (SELECT m FROM rg) ELSE release_group_mbid END,
-               release_group_mbid_source = CASE WHEN release_group_mbid_source IS NULL
-                                                     OR release_group_mbid_source = 'tag'
-                                                THEN CASE WHEN EXISTS (SELECT 1 FROM rg) THEN 'tag' END
-                                                ELSE release_group_mbid_source END
+               release_group_mbid = CASE
+                   WHEN release_group_mbid_source IS NULL OR release_group_mbid_source = 'tag'
+                       THEN (SELECT m FROM rg)
+                   WHEN release_group_mbid_source = 'acoustid'
+                       THEN coalesce((SELECT m FROM rg), release_group_mbid)
+                   ELSE release_group_mbid END,
+               release_group_mbid_source = CASE
+                   WHEN release_group_mbid_source IS NULL OR release_group_mbid_source = 'tag'
+                       THEN CASE WHEN EXISTS (SELECT 1 FROM rg) THEN 'tag' END
+                   WHEN release_group_mbid_source = 'acoustid'
+                       THEN CASE WHEN EXISTS (SELECT 1 FROM rg) THEN 'tag' ELSE 'acoustid' END
+                   ELSE release_group_mbid_source END
            WHERE id = $1"#,
         album
     )

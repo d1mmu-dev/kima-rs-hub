@@ -11,4 +11,5 @@ pub mod scan;
 pub mod tags;
 pub mod tagwrite;
 pub mod transcode;
+pub mod vote;
 pub mod watch;

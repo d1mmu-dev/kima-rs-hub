@@ -196,7 +196,8 @@ pub struct RecentArtist {
 }
 
 /// Album artists the user played most recently (one row each, newest first). Plays of tracks
-/// flagged missing do not count.
+/// flagged missing do not count, nor do plays of Various Artists or Unknown Artist, which name
+/// no one.
 pub async fn recent_artists(
     pool: &PgPool,
     user: Uuid,
@@ -209,7 +210,7 @@ pub async fn recent_artists(
              JOIN tracks t ON t.id = p.track_id AND t.missing_since IS NULL
              JOIN albums al ON al.id = t.album_id
              JOIN artists ar ON ar.id = al.artist_id
-             WHERE p.user_id = $1 GROUP BY ar.id
+             WHERE p.user_id = $1 AND ar.name_key <> ALL($3) GROUP BY ar.id
              ORDER BY max(p.played_at) DESC LIMIT $2)
          SELECT ar.id, ar.name, ar.mbid, ar.display_name,
              (ar.image_path IS NOT NULL) AS has_image,
@@ -225,6 +226,7 @@ pub async fn recent_artists(
     )
     .bind(user)
     .bind(limit)
+    .bind(crate::browse::NO_ONE_KEYS.as_slice())
     .fetch_all(pool)
     .await
 }

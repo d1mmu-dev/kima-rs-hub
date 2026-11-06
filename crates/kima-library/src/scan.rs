@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use kima_core::events::{Event, EventBus};
 use kima_db::genres::{self, GenreSource};
-use kima_db::library::{self, IndexedTrack, ResolvedTrack, TagIds};
+use kima_db::library::{self, IndexedTrack, ResolvedTrack, StoredCredit, TagIds};
 use kima_db::{PgConnection, PgPool, retry_once_on_conflict};
 use kima_db::{lyrics, stages};
 use time::OffsetDateTime;
@@ -21,8 +21,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::resolve::{ArtistFrom, Resolved, parse_credit, resolve};
+use crate::names::canonical_various;
+use crate::resolve::{Resolved, resolve};
 use crate::tags::{self, RawTags, TagOverrides};
+use crate::vote::{self, Candidate, Credit};
 use crate::{fingerprint, names};
 
 /// Tracks missing for longer than this are deleted (spec §4.3).
@@ -172,6 +174,13 @@ struct Prepared {
     raw: RawTags,
     resolved: Resolved,
     fingerprint: [u8; 32],
+    /// The identity key of the artist the file names itself (its vote), before the album's
+    /// election: a track on an autotag-applied album that agrees with it stays there.
+    own_key: String,
+    /// The MusicBrainz id of the artist the file is filed under (D-164).
+    artist_mbid: Option<Uuid>,
+    /// The file's vote, stored with the row (`guessed.credit`).
+    credit: StoredCredit,
     /// The missing track the merge picked for this file (a moved or renamed one), its stored
     /// override, if any, merged into `raw`: the file may only take over exactly that track.
     target: Option<Uuid>,
@@ -210,10 +219,6 @@ fn mode_year(years: impl IntoIterator<Item = Option<i32>>) -> Option<i32> {
 
 fn conflicts(own: Option<i32>, album: Option<i32>) -> bool {
     own.is_some() && own != album
-}
-
-fn folder_of(rel: &str) -> &str {
-    rel.rsplit_once('/').map_or("", |(d, _)| d)
 }
 
 fn dir_prefix(folder: &str) -> String {
@@ -531,13 +536,133 @@ async fn prepare(
         raw.apply_overrides(o);
     }
     let resolved = resolve(&raw, Path::new(&rel));
-    Ok(Prepared {
+    let mut p = Prepared {
         disk,
         raw,
         resolved,
         fingerprint,
+        own_key: String::new(),
+        artist_mbid: None,
+        credit: StoredCredit {
+            album_key: None,
+            name: String::new(),
+            mbid: None,
+            from_album_artist: false,
+            compilation: false,
+        },
         target: None,
-    })
+    };
+    p.file_under(None);
+    Ok(p)
+}
+
+impl Prepared {
+    /// The file's vote for its album's artist.
+    fn vote(&self) -> Credit {
+        vote::credit_of(&self.raw, &self.resolved, &self.disk.rel)
+    }
+
+    /// Files the song under `chosen`, the artist its album elected, or under its own artist
+    /// when none leads (`None`). Sets everything that follows from the artist: the album
+    /// artist, the compilation flag (the album artist is Various Artists), the artist's MBID
+    /// and the stored vote. Safe to repeat: the vote is built from the file's own tags.
+    fn file_under(&mut self, chosen: Option<&Candidate>) {
+        let credit = self.vote();
+        let chosen = chosen.unwrap_or(&credit.candidate);
+        let various = canonical_various(&chosen.name).is_some();
+        self.own_key = names::key(&credit.candidate.name);
+        self.resolved.album_artist = if various {
+            names::VARIOUS_ARTISTS.to_string()
+        } else {
+            chosen.name.clone()
+        };
+        self.resolved.is_compilation = various;
+        self.artist_mbid = if various { None } else { chosen.mbid };
+        self.credit = StoredCredit {
+            album_key: credit.album_key,
+            name: credit.candidate.name,
+            mbid: credit.candidate.mbid,
+            from_album_artist: credit.from_album_artist,
+            compilation: credit.compilation,
+        };
+    }
+}
+
+/// The elections of the albums a folder's files belong to: every changed file of an album and
+/// its unchanged siblings (their stored votes) elect together (D-164).
+struct Election {
+    elected: HashMap<String, Option<Candidate>>,
+}
+
+/// A stored sibling's vote. A row written before the election has none: its album's stored
+/// artist stands in, so an upgraded library neither splits nor merges albums by itself.
+fn stored_vote(s: &IndexedTrack) -> Option<Credit> {
+    let folder = vote::album_folder(&s.path);
+    match &s.credit {
+        Some(c) => {
+            let key = c.album_key.as_ref()?;
+            Some(Credit {
+                group: vote::group_of(folder, key),
+                album_key: Some(key.clone()),
+                candidate: Candidate {
+                    name: c.name.clone(),
+                    mbid: c.mbid,
+                },
+                from_album_artist: c.from_album_artist,
+                compilation: c.compilation,
+            })
+        }
+        None => Some(Credit {
+            group: vote::group_of(folder, &s.album_key),
+            album_key: Some(s.album_key.clone()),
+            candidate: Candidate {
+                name: s.artist_name.clone(),
+                mbid: None,
+            },
+            from_album_artist: false,
+            compilation: false,
+        }),
+    }
+}
+
+impl Election {
+    fn new(prepared: &[Prepared], siblings: &[&IndexedTrack]) -> Self {
+        let mut groups: HashMap<String, Vec<(String, Credit)>> = HashMap::new();
+        for p in prepared {
+            let c = p.vote();
+            groups
+                .entry(c.group.clone())
+                .or_default()
+                .push((p.disk.rel.clone(), c));
+        }
+        for s in siblings {
+            if prepared.iter().any(|p| p.disk.rel == s.path) {
+                continue;
+            }
+            if let Some(c) = stored_vote(s) {
+                groups
+                    .entry(c.group.clone())
+                    .or_default()
+                    .push((s.path.clone(), c));
+            }
+        }
+        let elected = groups
+            .into_iter()
+            .map(|(group, mut votes)| {
+                // By path, byte for byte: a tie never depends on the locale.
+                votes.sort_by(|a, b| a.0.cmp(&b.0));
+                let credits: Vec<Credit> = votes.into_iter().map(|(_, c)| c).collect();
+                (group, vote::elect(&credits))
+            })
+            .collect();
+        Election { elected }
+    }
+
+    fn apply(&self, p: &mut Prepared) {
+        let group = p.vote().group;
+        let chosen = self.elected.get(&group).and_then(Option::as_ref);
+        p.file_under(chosen);
+    }
 }
 
 fn group_key(r: &Resolved) -> GroupKey {
@@ -549,6 +674,7 @@ fn to_track(p: &Prepared, album_year: Option<i32>) -> ResolvedTrack {
     let mut guessed = r.guessed.clone();
     guessed.year_conflict = conflicts(r.year, album_year);
     guessed.via_symlink = p.disk.via_link;
+    guessed.credit = Some(p.credit.clone());
     ResolvedTrack {
         album_artist: r.album_artist.clone(),
         album_artist_key: names::key(&r.album_artist),
@@ -580,30 +706,7 @@ fn to_track(p: &Prepared, album_year: Option<i32>) -> ResolvedTrack {
         isrc: p.raw.isrc.clone(),
         disc_total: p.raw.disc_total.and_then(|n| i32::try_from(n).ok()),
         track_total: p.raw.track_total.and_then(|n| i32::try_from(n).ok()),
-        artist_mbid_candidate: artist_mbid_candidate(&p.raw, r),
-    }
-}
-
-/// The album artist's MBID by spec §8.1 (upstream `primaryArtistMbid`): the single
-/// album-artist id when the album artist came from the AlbumArtist tag; the first artist id
-/// when it came from the Artist tag and there is one id per credited artist. Compilations get
-/// none (Various Artists carries its own).
-fn artist_mbid_candidate(raw: &RawTags, r: &Resolved) -> Option<Uuid> {
-    if r.is_compilation {
-        return None;
-    }
-    match r.album_artist_from {
-        ArtistFrom::AlbumArtistTag => match raw.album_artist_mbids.as_slice() {
-            [one] => Some(*one),
-            _ => None,
-        },
-        ArtistFrom::ArtistTag => {
-            let featured = parse_credit(raw.artist.as_deref()?, None).featured.len();
-            (raw.artist_mbids.len() == 1 + featured)
-                .then(|| raw.artist_mbids.first().copied())
-                .flatten()
-        }
-        ArtistFrom::Path | ArtistFrom::Unknown => None,
+        artist_mbid_candidate: p.artist_mbid,
     }
 }
 
@@ -620,8 +723,11 @@ struct StoreResult {
 
 /// The track agrees with its album's applied identity (spec §19.7): the same artist and title
 /// keys, and its own year equal to the applied one or missing.
-fn agrees(id: &library::AppliedIdentity, t: &ResolvedTrack) -> bool {
-    id.artist_key == t.album_artist_key
+///
+/// The artist agrees when it is the one the album elected or the one the file names itself: a
+/// guest song sitting on an album a person applied stays there (D-164).
+fn agrees(id: &library::AppliedIdentity, t: &ResolvedTrack, own_key: &str) -> bool {
+    (id.artist_key == t.album_artist_key || id.artist_key == own_key)
         && id.title_key == t.album_key
         && (t.track_year.is_none() || t.track_year == id.year)
 }
@@ -637,6 +743,7 @@ async fn store(
     pool: &PgPool,
     t: &ResolvedTrack,
     raw: &RawTags,
+    own_key: &str,
     repoint: Repoint,
     cause: ReadCause,
 ) -> sqlx::Result<Option<StoreResult>> {
@@ -658,7 +765,7 @@ async fn store(
     let pin = match old_album {
         Some(album) => library::autotag_identity(&mut tx, album)
             .await?
-            .filter(|id| agrees(id, t))
+            .filter(|id| agrees(id, t, own_key))
             .map(|id| (album, id)),
         None => None,
     };
@@ -997,7 +1104,14 @@ async fn process_folder(
             Err(e) => out.failed.push((rel, e)),
         }
     }
-    let prepared = merge_moved_overrides(&ctx.pool, prepared, known, &overrides, &mut out).await?;
+    let mut prepared =
+        merge_moved_overrides(&ctx.pool, prepared, known, &overrides, &mut out).await?;
+    // One artist per album, elected from the changed files and the stored votes of their
+    // unchanged siblings (D-164), before the album year groups form.
+    let election = Election::new(&prepared, siblings);
+    for p in &mut prepared {
+        election.apply(p);
+    }
 
     let mut groups: HashMap<GroupKey, Vec<Option<i32>>> = HashMap::new();
     for p in &prepared {
@@ -1026,7 +1140,11 @@ async fn process_folder(
             None if known.contains_key(&rel) => Repoint::No,
             None => Repoint::Any,
         };
-        match retry_once_on_conflict(|| store(&ctx.pool, &track, &p.raw, repoint, cause)).await {
+        match retry_once_on_conflict(|| {
+            store(&ctx.pool, &track, &p.raw, &p.own_key, repoint, cause)
+        })
+        .await
+        {
             Ok(None) => out.failed.push((
                 rel,
                 "the moved track this file was matched to is no longer missing; \
@@ -1074,18 +1192,26 @@ async fn process_folder(
         out.tags_read += 1;
         let mut disk = disk_file(s.path.clone(), &meta);
         disk.via_link = linked;
-        let p = match prepare_with(&ctx.root.get(), disk, &overrides).await {
+        let mut p = match prepare_with(&ctx.root.get(), disk, &overrides).await {
             Ok(p) => p,
             Err(e) => {
                 out.failed.push((s.path.clone(), e));
                 continue;
             }
         };
+        election.apply(&mut p);
         // Re-read tags may have moved it to another group; use that group's year if known.
         let year = years.get(&group_key(&p.resolved)).copied().unwrap_or(year);
         let track = to_track(&p, year);
         match retry_once_on_conflict(|| {
-            store(&ctx.pool, &track, &p.raw, Repoint::No, ReadCause::Scan)
+            store(
+                &ctx.pool,
+                &track,
+                &p.raw,
+                &p.own_key,
+                Repoint::No,
+                ReadCause::Scan,
+            )
         })
         .await
         {
@@ -1160,10 +1286,13 @@ pub async fn reconcile_cancellable(
                 } else {
                     report.unchanged += 1;
                 }
-                settled.entry(folder_of(&row.path)).or_default().push(row);
+                settled
+                    .entry(vote::album_folder(&row.path))
+                    .or_default()
+                    .push(row);
             }
             _ => changed
-                .entry(folder_of(&f.rel).to_string())
+                .entry(vote::album_folder(&f.rel).to_string())
                 .or_default()
                 .push(f.clone()),
         }
@@ -1396,10 +1525,12 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
         Entry::NotAFile => return Ok(PathOutcome::Ignored),
         Entry::Error(e) => return Ok(PathOutcome::Failed(e)),
     };
+    let album_dir = vote::album_folder(&rel);
     let folder: HashMap<String, IndexedTrack> =
-        library::scan_index(&ctx.pool, Some(&dir_prefix(folder_of(&rel))))
+        library::scan_index_album_folder(&ctx.pool, &dir_prefix(album_dir))
             .await?
             .into_iter()
+            .filter(|t| vote::album_folder(&t.path) == album_dir)
             .map(|t| (t.path.clone(), t))
             .collect();
     let mut known = HashMap::new();
@@ -1474,7 +1605,9 @@ pub async fn reread_paths(
     for p in paths {
         match clean_rel(p).filter(|r| tags::is_audio(Path::new(r))) {
             Some(rel) => {
-                let list = folders.entry(folder_of(&rel).to_string()).or_default();
+                let list = folders
+                    .entry(vote::album_folder(&rel).to_string())
+                    .or_default();
                 if !list.contains(&rel) {
                     list.push(rel);
                 }
@@ -1489,9 +1622,10 @@ pub async fn reread_paths(
     let mut album_moved = false;
     for (folder, rels) in folders {
         let index: HashMap<String, IndexedTrack> =
-            library::scan_index(&ctx.pool, Some(&dir_prefix(&folder)))
+            library::scan_index_album_folder(&ctx.pool, &dir_prefix(&folder))
                 .await?
                 .into_iter()
+                .filter(|t| vote::album_folder(&t.path) == folder)
                 .map(|t| (t.path.clone(), t))
                 .collect();
         let mut changed = Vec::new();
@@ -1694,8 +1828,6 @@ mod tests {
 
     #[test]
     fn folders() {
-        assert_eq!(folder_of("A/B/x.mp3"), "A/B");
-        assert_eq!(folder_of("x.mp3"), "");
         assert_eq!(dir_prefix(""), "");
         assert_eq!(dir_prefix("A/B"), "A/B/");
     }

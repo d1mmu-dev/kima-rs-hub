@@ -130,6 +130,38 @@ fn is_public_table() {
     }
 }
 
+/// M-SYNC Task 10 (upstream `c439da2b`, `3ba0ad51`, `0b92f288`): addresses are judged as
+/// numbers, not as text, so an IPv6 spelling of an internal IPv4 address cannot slip through.
+#[test]
+fn ssrf_guard_judges_addresses_as_numbers() {
+    for ip in [
+        // IPv4-mapped, hex-written: 127.0.0.1 and 169.254.169.254.
+        "::ffff:7f00:1",
+        "::ffff:a9fe:a9fe",
+        // NAT64 and 6to4 carrying 127.0.0.1.
+        "64:ff9b::7f00:1",
+        "2002:7f00:1::",
+        // Teredo 2001:0::/32, site-local fec0::/10.
+        "2001:0::1",
+        "2001::abcd",
+        "fec0::1",
+        "feff::1",
+        // IETF protocol assignments, benchmarking, documentation.
+        "192.0.0.1",
+        "192.0.0.255",
+        "198.18.0.1",
+        "198.19.255.254",
+        "192.0.2.1",
+        "192.0.2.254",
+    ] {
+        assert!(!is_public(ip.parse().unwrap()), "{ip} must not be public");
+    }
+    // The neighbours of those ranges are public.
+    for ip in ["198.17.255.255", "198.20.0.1", "192.0.1.1", "2001:4860::1"] {
+        assert!(is_public(ip.parse().unwrap()), "{ip} must be public");
+    }
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn get_bytes_answers_an_image(pool: PgPool) {
     let replay = Replay::start(Recording(vec![image("/a.jpg", "image/jpeg", 1000)])).await;

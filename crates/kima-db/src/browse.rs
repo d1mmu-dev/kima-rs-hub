@@ -262,6 +262,29 @@ pub async fn recent_albums(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<AlbumR
         .await
 }
 
+/// The identity keys of the album-artist rows that name no one: Various Artists and Unknown
+/// Artist (upstream `noOneKeys()`). Home rows of artists leave them out.
+pub const NO_ONE_KEYS: [&str; 2] = ["various artists", "unknown artist"];
+
+/// Artists ordered by their newest album with a present track (`albums.created_at`), one row
+/// each, newest first; Various Artists and Unknown Artist name no one and are left out. Grouped
+/// in the database, so one artist's many new albums never crowd the others out of `limit`.
+pub async fn recent_artists(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT ar.id FROM artists ar
+         JOIN albums al ON al.artist_id = ar.id
+         WHERE ar.name_key <> ALL($1)
+           AND EXISTS (SELECT 1 FROM tracks t WHERE t.album_id = al.id AND t.missing_since IS NULL)
+         GROUP BY ar.id
+         ORDER BY max(al.created_at) DESC, ar.id DESC
+         LIMIT $2",
+    )
+    .bind(NO_ONE_KEYS.as_slice())
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+}
+
 /// Present tracks of the given albums, by disc then track number.
 pub async fn tracks_of_albums(pool: &PgPool, albums: &[Uuid]) -> sqlx::Result<Vec<TrackRow>> {
     let sql = format!(

@@ -5,14 +5,18 @@
 // Index loops mirror the TypeScript line for line: the port is checked bit for bit against it.
 #![allow(clippy::needless_range_loop)]
 
+use serde::{Deserialize, Serialize};
+
 use crate::exact_math::atan2;
 use crate::pca::symmetric_eigen;
 
 /// A track's colour is its area's: the mean over its nearest tracks on the map, the map gate's k'.
 const AREA_NEIGHBOURS: usize = 50;
 
-/// The rigid turn of the map onto the colour plane, kept so placed tracks are coloured on the same field.
-#[derive(Debug, Clone, PartialEq)]
+/// The rigid turn of the map onto the colour plane, kept so placed tracks are coloured on the same field. Stored as
+/// JSON (`matching_state.map_frame`) with upstream's camelCase keys.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ColourFrame {
     pub centre: [f64; 3],
     pub scale: f64,

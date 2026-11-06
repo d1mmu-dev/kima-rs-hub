@@ -4,6 +4,7 @@
 //! `track_embeddings` mention anywhere else in this module.
 
 mod eligible;
+pub mod map;
 pub mod path;
 pub mod rank;
 pub mod state;

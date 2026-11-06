@@ -102,6 +102,13 @@ async fn acoustid_now(ctx: &IdentCtx) -> AcoustidNow {
 /// longer holds, then every failed row with a retry scheduled, due now; kicks. Nothing `done`
 /// or terminal is touched. Returns rows reopened (`queued`).
 pub async fn retry_failed_and_blocked(ctx: &IdentCtx) -> sqlx::Result<u64> {
+    // The scan goes first; the next cycle after it offers the same work. A queue that cannot
+    // be read does not stop the control (as with the kick).
+    match enrichment::library_scan_running(&ctx.pool).await {
+        Ok(true) => return Ok(0),
+        Ok(false) => {}
+        Err(error) => warn!(%error, "scan check failed; retrying anyway"),
+    }
     let n = enrichment::retry_failed(&ctx.pool, acoustid_now(ctx).await).await?;
     kick(&ctx.pool).await;
     Ok(n)
@@ -121,6 +128,93 @@ pub async fn wipe_and_rerun(pool: &PgPool) -> sqlx::Result<WipeCounts> {
     let counts = enrichment::wipe(pool).await?;
     kick(pool).await;
     Ok(counts)
+}
+
+/// The six steps of the enrichment (`RerunStep`, `services/enrichmentRestart.ts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Identification,
+    Artists,
+    Analysis,
+    Vectors,
+    Moods,
+    Similarity,
+}
+
+impl Step {
+    pub const ALL: [Step; 6] = [
+        Step::Identification,
+        Step::Artists,
+        Step::Analysis,
+        Step::Vectors,
+        Step::Moods,
+        Step::Similarity,
+    ];
+
+    /// The step's id, as the route takes it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Step::Identification => "identification",
+            Step::Artists => "artists",
+            Step::Analysis => "analysis",
+            Step::Vectors => "vectors",
+            Step::Moods => "moods",
+            Step::Similarity => "similarity",
+        }
+    }
+
+    /// The step's name in a reply: its id, except `STEP_NAMES` (`routes/enrichment.ts`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Step::Analysis => "audio analysis",
+            Step::Vectors => "sound vectors",
+            other => other.id(),
+        }
+    }
+
+    pub fn parse(id: &str) -> Option<Step> {
+        Step::ALL.into_iter().find(|s| s.id() == id)
+    }
+
+    /// Whether the step can be re-run here: `identification` and `artists` reset what they
+    /// own. `analysis` and `vectors` have stages but no reset yet; the mood and similarity
+    /// steps are M5 (plan Task 14, owner question Q3).
+    pub fn available(self) -> bool {
+        matches!(self, Step::Identification | Step::Artists)
+    }
+
+    /// `"identification, artists, …"`, for the refusal text.
+    pub fn list() -> String {
+        Step::ALL.map(Step::id).join(", ")
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RerunError {
+    /// The step's subsystem has no reset here yet.
+    #[error("The {} step is not available yet", .0.id())]
+    Unavailable(Step),
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+}
+
+/// Re-run the enrichment from `step` (upstream `rerunEnrichment`): the step's answers and what
+/// depends on them are cleared in one transaction and worked out again; the coordinator is
+/// kicked after the commit. `identification` is [`wipe_and_rerun`]; `artists` resets only the
+/// artists (`artists` in the counts, `tracks` 0). Answers a person set aside or closed stay.
+pub async fn rerun(pool: &PgPool, step: Step) -> Result<WipeCounts, RerunError> {
+    match step {
+        Step::Identification => Ok(wipe_and_rerun(pool).await?),
+        Step::Artists => {
+            let artists = enrichment::reset_artists(pool).await?;
+            kick(pool).await;
+            Ok(WipeCounts {
+                artists: i64::try_from(artists).unwrap_or(i64::MAX),
+                tracks: 0,
+            })
+        }
+        other => Err(RerunError::Unavailable(other)),
+    }
 }
 
 /// Stores `enrichmentConcurrency` clamped to 1..=5, makes it the cached setting at once and

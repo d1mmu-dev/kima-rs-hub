@@ -41,6 +41,7 @@ pub fn routes() -> Router<AppState> {
             post(redecide_everything),
         )
         .route("/enrichment/wipe-and-rerun", post(wipe_and_rerun))
+        .route("/enrichment/rerun", post(rerun))
         .route("/enrichment/failures", get(failures))
         .route("/enrichment/failures/counts", get(failure_counts))
         .route(
@@ -199,6 +200,48 @@ async fn wipe_and_rerun(
         "artists": wiped.artists,
         "tracks": wiped.tracks,
         "vectors": 0,
+    })))
+}
+
+/// `POST /enrichment/rerun {step}` (upstream `routes/enrichment.ts`, `5d348720`): re-run the
+/// enrichment from one of its six steps. Admin only. A name outside the six is a 400 naming them;
+/// a step whose subsystem has no reset here yet (`analysis`, `vectors`, `moods`, `similarity`) is
+/// a 409 that changes nothing (M-SYNC Task 14, D-112).
+async fn rerun(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let step = body
+        .ok()
+        .and_then(|Json(b)| b.get("step").and_then(Value::as_str).map(str::to_owned))
+        .and_then(|s| control::Step::parse(&s))
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!("step must be one of: {}", control::Step::list()))
+        })?;
+    let wiped = match control::rerun(&state.pool, step).await {
+        Ok(w) => w,
+        Err(control::RerunError::Unavailable(step)) => {
+            return Err(ApiError::ConflictMessage(format!(
+                "The {} step is not available yet",
+                step.id()
+            )));
+        }
+        Err(control::RerunError::Db(error)) => {
+            if kima_db::is_retryable_conflict(&error) {
+                return Err(ApiError::Busy);
+            }
+            tracing::error!(%error, "re-run enrichment failed");
+            return Err(ApiError::Failed("Failed to re-run enrichment"));
+        }
+    };
+    state.invalidate_progress();
+    control::announce(&state.pool, &state.progress_events).await;
+    Ok(Json(json!({
+        "artists": wiped.artists,
+        "tracks": wiped.tracks,
+        "vectors": 0,
+        "message": format!("Re-running from {}", step.name()),
     })))
 }
 

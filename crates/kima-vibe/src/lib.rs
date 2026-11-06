@@ -6,6 +6,7 @@ pub mod exact_math;
 pub mod feel_probe;
 pub mod formula;
 pub mod mood_heads;
+pub mod neighbours;
 pub mod prng;
 pub mod song_path;
 

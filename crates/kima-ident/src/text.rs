@@ -214,6 +214,79 @@ static YEAR_SUFFIX: LazyLock<Regex> =
     LazyLock::new(|| re(&format!("{JS_S}*-{JS_S}*[0-9]{{4}}{JS_S}*$")));
 static JS_SPACE_RUN: LazyLock<Regex> = LazyLock::new(|| re(&format!("{JS_S}+")));
 
+/// The album key that decides whether owning one title covers another: edition markers drop,
+/// so "Antics (Deluxe)" covers "Antics"; compare whole keys, never substrings
+/// (`albumIdentity.ts:editionlessKey`).
+pub fn editionless_key(s: &str) -> String {
+    album_identity_key(&strip_album_edition(s))
+}
+
+/// Strips edition markers from an album title, keeping anything that names a different
+/// recording (`utils/artistNormalization.ts:stripAlbumEdition`):
+/// "Abbey Road - 2019 Remaster" -> "Abbey Road"; "Get Born (Live)" stays.
+pub fn strip_album_edition(title: &str) -> String {
+    // Upstream's ReDoS guard: skip the patterns for an excessively long input.
+    if title.is_empty() || title.chars().count() > 500 {
+        return title.trim_matches(is_js_space).to_string();
+    }
+    let marker_group = |caps: &regex::Captures<'_>| {
+        if is_edition_marker(&caps[1]) {
+            " ".to_string()
+        } else {
+            caps[0].to_string()
+        }
+    };
+    let s = ALBUM_PARENS.replace_all(title, marker_group);
+    let s = ALBUM_BRACKETS.replace_all(&s, marker_group);
+    let s = ALBUM_TAIL.replace(&s, |caps: &regex::Captures<'_>| {
+        if ALBUM_TAIL_WORD.is_match(&caps[1]) && is_edition_marker(&caps[1]) {
+            String::new()
+        } else {
+            caps[0].to_string()
+        }
+    });
+    // A trailing year in parentheses is usually a remaster's.
+    let s = ALBUM_YEAR_PARENS.replace(&s, "");
+    let s = JS_SPACE_RUN.replace_all(&s, " ");
+    s.trim_matches(is_js_space).to_string()
+}
+
+/// Words that mark another edition of the same album, matched as whole words (ASCII word
+/// boundaries, as JavaScript's `\b`).
+static EDITION_WORD: LazyLock<Regex> = LazyLock::new(|| {
+    re(
+        r"(?i-u:\b(?:deluxe|remaster(?:ed)?|expanded|anniversary|bonus|special|limited|collector'?s?|platinum|edition|version|original|soundtrack|motion picture|explicit|clean|mono|stereo|recording|import|japan(?:ese)?|uk|us)\b)",
+    )
+});
+/// Words that mark a different recording, which is a different album even when an edition word
+/// sits beside them: "(Live Edition)", "(Acoustic Version)".
+static OTHER_RECORDING: LazyLock<Regex> = LazyLock::new(|| {
+    re(
+        r"(?i-u:\b(?:live|remix(?:es|ed)?|mix|radio|acoustic|unplugged|sessions?|demos?|instrumentals?|karaoke|covers?|reworked|reimagined|orchestral|symphonic|stripped)\b)",
+    )
+});
+
+fn is_edition_marker(text: &str) -> bool {
+    EDITION_WORD.is_match(text) && !OTHER_RECORDING.is_match(text)
+}
+
+static ALBUM_PARENS: LazyLock<Regex> = LazyLock::new(|| re(&format!(r"{JS_S}*\(([^)]*)\){JS_S}*")));
+static ALBUM_BRACKETS: LazyLock<Regex> =
+    LazyLock::new(|| re(&format!(r"{JS_S}*\[([^\]]*)\]{JS_S}*")));
+/// ` - 2019 Remaster`, `: Special Edition`: the last separator and what follows it.
+static ALBUM_TAIL: LazyLock<Regex> = LazyLock::new(|| {
+    re(&format!(
+        "{JS_S}*[-–—:]{JS_S}*((?:[0-9]{{4}}{JS_S}+)?[^-–—:]*)$"
+    ))
+});
+static ALBUM_TAIL_WORD: LazyLock<Regex> = LazyLock::new(|| {
+    re(&format!(
+        "^(?:[0-9]{{4}}{JS_S}+)?(?i-u:(?:deluxe|remaster|expanded|anniversary|bonus|special|limited|collector|platinum|edition|version|original|mono|stereo))"
+    ))
+});
+static ALBUM_YEAR_PARENS: LazyLock<Regex> =
+    LazyLock::new(|| re(&format!(r"{JS_S}*\([0-9]{{4}}\){JS_S}*$")));
+
 /// The title without edition markers, for matching only (`musicbrainz.ts:555-568`).
 pub fn normalize_for_search(s: &str) -> String {
     let s = PARENS.replace_all(s, " ");

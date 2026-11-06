@@ -84,6 +84,26 @@ pub async fn fill_for_artist(ctx: &IdentCtx, artist: Uuid) -> Outcome<usize> {
     }
 }
 
+/// Fills the cover of one album that has none (an album that was just identified, so its release
+/// group can be asked for art). Answers like [`fill_for_artist`]; the caller treats a cover as
+/// optional.
+pub async fn fill_album(ctx: &IdentCtx, album: Uuid) -> Outcome<usize> {
+    let album = match identity::album_for_cover(&ctx.pool, album).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return Outcome::Answered(0),
+        Err(e) => return Outcome::Transient(Failure::new("DB", e.to_string())),
+    };
+    let fanart_key = ctx.fanart_key().await;
+    match fill_one(ctx, &album, fanart_key.as_deref()).await {
+        Filled::Stored => Outcome::Answered(1),
+        Filled::Nothing => Outcome::Answered(0),
+        Filled::Waiting(until) => Outcome::RateLimited { until },
+        Filled::Retry(code) => {
+            Outcome::Transient(Failure::new(code, "the album cover could not be fetched"))
+        }
+    }
+}
+
 /// Whether the M1 lookup finds embedded or folder art for the album: `find_cover` on its one
 /// probed track. A path that would leave the root counts as no art.
 async fn has_library_cover(ctx: &IdentCtx, track_path: Option<&str>) -> bool {

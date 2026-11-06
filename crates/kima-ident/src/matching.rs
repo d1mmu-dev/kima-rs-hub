@@ -212,7 +212,7 @@ fn cut(s: &str, max: usize) -> String {
 }
 
 /// The top voted names, each cut to [`MAX_NAME_CHARS`].
-fn top(gs: &[Genre]) -> Vec<String> {
+pub(crate) fn top(gs: &[Genre]) -> Vec<String> {
     top_genres(gs, TOP_GENRES)
         .iter()
         .map(|n| cut(n, MAX_NAME_CHARS))
@@ -220,7 +220,7 @@ fn top(gs: &[Genre]) -> Vec<String> {
 }
 
 /// The first named label of the release.
-fn label_of(c: &Catalogue) -> Option<String> {
+pub(crate) fn label_of(c: &Catalogue) -> Option<String> {
     c.release
         .label_info
         .iter()

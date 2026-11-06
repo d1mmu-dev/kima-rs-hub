@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH c AS (\n             SELECT a.id, a.title, a.artist_id, ar.name AS artist,\n                    (SELECT encode(sha256(convert_to(string_agg(\n                                t.id::text || ':'\n                                || COALESCE(encode(sha256(convert_to(ta.fingerprint, 'UTF8')), 'hex'), '-')\n                                || ':' || (extract(epoch FROM t.mtime) * 1000)::bigint::text,\n                                '|' ORDER BY t.id), 'UTF8')), 'hex')\n                     FROM tracks t LEFT JOIN track_acoustid ta ON ta.track_id = t.id\n                     WHERE t.album_id = a.id AND t.missing_since IS NULL) AS signature\n             FROM albums a JOIN artists ar ON ar.id = a.artist_id\n             WHERE a.release_group_mbid IS NULL AND a.release_group_mbid_source IS NULL\n               AND (a.id = ANY($1)) = $2\n               AND EXISTS (SELECT 1 FROM tracks t\n                           WHERE t.album_id = a.id AND t.missing_since IS NULL)\n               AND (NOT $3 OR NOT EXISTS (\n                     SELECT 1 FROM tracks t\n                     WHERE t.album_id = a.id AND t.missing_since IS NULL\n                       AND NOT EXISTS (SELECT 1 FROM track_stages f\n                                       WHERE f.track_id = t.id AND f.stage = 'fingerprint'\n                                         AND (f.status = 'done'\n                                              OR (f.status = 'failed' AND f.next_attempt_at IS NULL))))))\n           SELECT c.id, c.title, c.artist_id, c.artist, c.signature AS \"signature!\"\n           FROM c LEFT JOIN album_votes v ON v.album_id = c.id\n           WHERE v.album_id IS NULL OR v.signature IS DISTINCT FROM c.signature\n                 OR v.expires_at <= now()\n           ORDER BY CASE WHEN $2 THEN array_position($1::uuid[], c.id) END, c.id\n           LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "artist_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "artist",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "signature!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Bool",
+        "Bool",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "475dea672c96ce852593c7c426e4f01e04bf50b75f4ad2b670d0399d2a661c83"
+}

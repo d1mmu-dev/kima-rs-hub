@@ -69,6 +69,30 @@ pub async fn upcoming_acoustid_questions(
         .collect())
 }
 
+/// The albums of the next `limit` tracks the recording stage will claim, in the order their
+/// songs go out (each album once).
+pub async fn upcoming_albums(pool: &PgPool, limit: i64) -> sqlx::Result<Vec<Uuid>> {
+    let rows = sqlx::query_scalar!(
+        r#"SELECT t.album_id AS "album_id!"
+           FROM (SELECT t.album_id, t.mtime, t.id
+                 FROM tracks t
+                 LEFT JOIN track_stages s ON s.track_id = t.id AND s.stage = 'recording'
+                 WHERE t.missing_since IS NULL
+                   AND (s.track_id IS NULL
+                        OR (s.status = 'pending'
+                            AND (s.next_attempt_at IS NULL OR s.next_attempt_at <= now()))
+                        OR (s.status IN ('failed', 'working') AND s.next_attempt_at <= now()))
+                 ORDER BY t.mtime DESC, t.id
+                 LIMIT $1) t
+           ORDER BY t.mtime DESC, t.id"#,
+        limit
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut seen = std::collections::HashSet::new();
+    Ok(rows.into_iter().filter(|a| seen.insert(*a)).collect())
+}
+
 /// `track`'s path (relative to the library root) and `duration_secs`.
 pub async fn track_path_and_duration(
     pool: &PgPool,
@@ -651,6 +675,31 @@ pub async fn albums_without_cover(pool: &PgPool, artist: Uuid) -> sqlx::Result<V
         .collect())
 }
 
+/// One album as [`albums_without_cover`] lists it, if it has no stored image and a present
+/// track.
+pub async fn album_for_cover(pool: &PgPool, album: Uuid) -> sqlx::Result<Option<AlbumForCover>> {
+    let row = sqlx::query!(
+        r#"SELECT al.id, al.title, ar.name AS artist_name, al.release_group_mbid,
+                  (SELECT t.path FROM tracks t
+                   WHERE t.album_id = al.id AND t.missing_since IS NULL
+                   ORDER BY t.disc, t.track_no, t.path LIMIT 1) AS track_path
+           FROM albums al JOIN artists ar ON ar.id = al.artist_id
+           WHERE al.id = $1 AND al.image_path IS NULL
+             AND EXISTS (SELECT 1 FROM tracks t
+                         WHERE t.album_id = al.id AND t.missing_since IS NULL)"#,
+        album
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| AlbumForCover {
+        id: r.id,
+        title: r.title,
+        artist_name: r.artist_name,
+        release_group_mbid: r.release_group_mbid,
+        track_path: r.track_path,
+    }))
+}
+
 /// Records a fallback cover (`path` relative to `<data_dir>/album-images`, `source` one of
 /// `deezer`, `coverartarchive`, `fanart`) on the caller's connection. Never over a `user`
 /// image. The update locks the album row (album only, as every writer of albums does after
@@ -801,6 +850,12 @@ async fn lock_mbid(conn: &mut PgConnection, kind: &str, mbid: Uuid) -> sqlx::Res
     .fetch_one(&mut *conn)
     .await?;
     Ok(())
+}
+
+/// Takes the advisory lock the editor takes before it checks that no other album holds a
+/// release-group id, so a vote and an edit racing for one id cannot both pass (D-118).
+pub async fn lock_album_group(conn: &mut PgConnection, group: Uuid) -> sqlx::Result<()> {
+    lock_mbid(conn, "album", group).await
 }
 
 /// Applies an artist edit on the caller's transaction (spec §16.3): the row is locked first,

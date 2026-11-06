@@ -5,6 +5,7 @@ use sqlx::postgres::PgPoolOptions;
 pub use sqlx::{PgConnection, PgPool};
 
 pub mod acoustid_replies;
+pub mod album_votes;
 pub mod analysis;
 pub mod analysis_claim;
 pub mod api_keys;

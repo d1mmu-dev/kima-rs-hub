@@ -558,6 +558,9 @@ pub async fn wipe(pool: &PgPool) -> sqlx::Result<WipeCounts> {
     )
     .execute(&mut *tx)
     .await?;
+    // The remembered album verdicts go too, so every untagged album votes again; the saved
+    // AcoustID replies stay (upstream `forgetAlbumVerdicts`).
+    crate::album_votes::forget_all(&mut tx).await?;
     tx.commit().await?;
     Ok(WipeCounts {
         artists: i64::try_from(artists).unwrap_or(i64::MAX),

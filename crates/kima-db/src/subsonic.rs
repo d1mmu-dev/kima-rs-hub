@@ -174,11 +174,25 @@ pub async fn track(pool: &PgPool, user: Uuid, id: Uuid) -> sqlx::Result<Option<S
 }
 
 /// `AND`-able condition: the entity (`$col`) has the genre whose key is bound at `$n`, among its
-/// effective genres of `$view`.
-fn has_genre(view: &str, col: &str, entity: &str, n: u8) -> String {
+/// effective genres of `$view` or in its album artist's own genre list (`artist_own_genres`:
+/// the person's list on the artist, owner decision 2026-11-06). `artist` is the SQL for the
+/// entity's artist id.
+fn has_genre(view: &str, col: &str, entity: &str, artist: &str, n: u8) -> String {
     format!(
-        "EXISTS (SELECT 1 FROM {view} e JOIN genres g ON g.id = e.genre_id
-                 WHERE e.{col} = {entity} AND g.key = ${n})"
+        "(EXISTS (SELECT 1 FROM {view} e JOIN genres g ON g.id = e.genre_id
+                  WHERE e.{col} = {entity} AND g.key = ${n})
+          OR EXISTS (SELECT 1 FROM artist_own_genres o WHERE o.artist_id = {artist} AND o.key = ${n}))"
+    )
+}
+
+/// [`has_genre`] for a track `t`: the artist is its album's.
+fn track_has_genre(n: u8) -> String {
+    has_genre(
+        "track_genres_effective",
+        "track_id",
+        "t.id",
+        "(SELECT ab.artist_id FROM albums ab WHERE ab.id = t.album_id)",
+        n,
     )
 }
 
@@ -281,7 +295,13 @@ pub async fn album_list(
             String::new(),
             format!(
                 "WHERE {}",
-                has_genre("album_genres_effective", "album_id", "al.id", 4)
+                has_genre(
+                    "album_genres_effective",
+                    "album_id",
+                    "al.id",
+                    "al.artist_id",
+                    4
+                )
             ),
             "",
             "al.sort_name ASC, al.id ASC".to_owned(),
@@ -318,12 +338,7 @@ pub async fn random_tracks(
         })
         .unwrap_or_default();
     let by_genre = genre
-        .map(|_| {
-            format!(
-                "AND {}",
-                has_genre("track_genres_effective", "track_id", "t.id", 3)
-            )
-        })
+        .map(|_| format!("AND {}", track_has_genre(3)))
         .unwrap_or_default();
     let sql = format!(
         "{SONG_SELECT} WHERE t.missing_since IS NULL {years} {by_genre} ORDER BY random() LIMIT $2"
@@ -347,7 +362,7 @@ pub async fn songs_by_genre(
     let sql = format!(
         "{SONG_SELECT} WHERE t.missing_since IS NULL AND {}
          ORDER BY lower(t.title) ASC, t.title ASC, t.id ASC LIMIT $3 OFFSET $4",
-        has_genre("track_genres_effective", "track_id", "t.id", 2)
+        track_has_genre(2)
     );
     sqlx::query_as(&sql)
         .bind(user)
@@ -358,24 +373,45 @@ pub async fn songs_by_genre(
         .await
 }
 
-/// Every genre with a present track among its effective track genres, with the distinct present
-/// tracks and the distinct albums (with a present track) that carry it among their effective
-/// genres, by name.
+/// Every genre carried by a present track, with the distinct present tracks and the distinct
+/// albums (with a present track) that carry it, by name. A track carries a genre among its
+/// effective track genres or in its album artist's own list; an album likewise among its
+/// effective album genres. Genres group by `genres.key`; the name is the `genres` row's, else
+/// the person's spelling. A person's tag equal to the artist's name is dropped (as upstream).
 pub async fn genre_counts(pool: &PgPool) -> sqlx::Result<Vec<(String, i64, i64)>> {
     let rows = sqlx::query!(
-        r#"SELECT g.name,
-               (SELECT count(DISTINCT t.id) FROM track_genres_effective e
-                 JOIN tracks t ON t.id = e.track_id AND t.missing_since IS NULL
-                 WHERE e.genre_id = g.id) AS "songs!",
-               (SELECT count(DISTINCT e.album_id) FROM album_genres_effective e
-                 WHERE e.genre_id = g.id
-                   AND EXISTS (SELECT 1 FROM tracks t
-                               WHERE t.album_id = e.album_id AND t.missing_since IS NULL)) AS "albums!"
-           FROM genres g
-           WHERE EXISTS (SELECT 1 FROM track_genres_effective e
-                         JOIN tracks t ON t.id = e.track_id AND t.missing_since IS NULL
-                         WHERE e.genre_id = g.id)
-           ORDER BY lower(g.name), g.name, g.id"#
+        r#"WITH tg AS (
+               SELECT t.id AS track_id, t.album_id, g.key, g.name, 0 AS pri
+               FROM track_genres_effective e
+               JOIN genres g ON g.id = e.genre_id
+               JOIN tracks t ON t.id = e.track_id AND t.missing_since IS NULL
+               UNION ALL
+               SELECT t.id, t.album_id, o.key, o.name, 1
+               FROM tracks t
+               JOIN albums al ON al.id = t.album_id
+               JOIN artists ar ON ar.id = al.artist_id
+               JOIN artist_own_genres o ON o.artist_id = al.artist_id
+               WHERE t.missing_since IS NULL
+                 AND o.key <> lower(regexp_replace(btrim(ar.name), '\s+', ' ', 'g'))),
+           ag AS (
+               SELECT e.album_id, g.key
+               FROM album_genres_effective e JOIN genres g ON g.id = e.genre_id
+               UNION
+               SELECT al.id, o.key
+               FROM albums al
+               JOIN artists ar ON ar.id = al.artist_id
+               JOIN artist_own_genres o ON o.artist_id = al.artist_id
+               WHERE o.key <> lower(regexp_replace(btrim(ar.name), '\s+', ' ', 'g'))),
+           names AS (
+               SELECT DISTINCT ON (key) key, name FROM tg ORDER BY key, pri, name)
+           SELECT n.name AS "name!",
+                  (SELECT count(DISTINCT tg.track_id) FROM tg WHERE tg.key = n.key) AS "songs!",
+                  (SELECT count(DISTINCT ag.album_id) FROM ag
+                    WHERE ag.key = n.key
+                      AND EXISTS (SELECT 1 FROM tracks t
+                                  WHERE t.album_id = ag.album_id AND t.missing_since IS NULL)) AS "albums!"
+           FROM names n
+           ORDER BY lower(n.name), n.name, n.key"#
     )
     .fetch_all(pool)
     .await?;

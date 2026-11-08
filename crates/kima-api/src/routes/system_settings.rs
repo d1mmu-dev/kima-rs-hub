@@ -24,9 +24,11 @@ pub fn routes() -> Router<AppState> {
         .route("/system-settings/test-fanart", post(test_fanart))
 }
 
-/// Any signed-in user. `KIMA_PUBLIC_URL`, empty when unset (D-096).
+/// The key-value state. The frontend's `getPublicConfig()` reads `canAcquire`, which kima-rs
+/// currently answers `false` (the acquisition path is M7 work). `KIMA_PUBLIC_URL`, empty when unset
+/// (D-096).
 async fn public_config(State(state): State<AppState>, _user: AuthUser) -> Json<Value> {
-    Json(json!({ "publicUrl": state.public_url.as_deref().unwrap_or("") }))
+    Json(json!({ "publicUrl": state.public_url.as_deref().unwrap_or(""), "canAcquire": false }))
 }
 
 fn body(settings: SystemSettings) -> Json<Value> {

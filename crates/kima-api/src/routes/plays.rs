@@ -21,7 +21,7 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/plays", post(create).get(list))
+        .route("/plays", post(create))
         .route("/library/recently-listened", get(recently_listened))
 }
 
@@ -81,29 +81,6 @@ fn limit_of(params: &LimitParams, fallback: i64, max: i64) -> i64 {
         .filter(|n| *n != 0)
         .unwrap_or(fallback)
         .clamp(1, max)
-}
-
-async fn list(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Query(params): Query<LimitParams>,
-) -> Result<Json<Value>, ApiError> {
-    let rows = plays::recent(&state.pool, user.id, limit_of(&params, 50, 200)).await?;
-    let out: Vec<Value> = rows
-        .iter()
-        .map(|(p, t)| {
-            json!({
-                "id": p.id,
-                "userId": p.user_id,
-                "trackId": p.track_id,
-                "playedAt": iso(p.played_at),
-                "source": p.source,
-                "heard": p.heard,
-                "track": track_json(t),
-            })
-        })
-        .collect();
-    Ok(Json(Value::Array(out)))
 }
 
 async fn recently_listened(

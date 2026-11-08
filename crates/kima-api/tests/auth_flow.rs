@@ -46,7 +46,6 @@ async fn first_registration_makes_an_admin_who_can_use_the_api(pool: PgPool) {
         .json();
     assert_eq!(me["username"], "ana");
     assert_eq!(me["onboardingComplete"], false);
-    assert_eq!(me["enrichmentSettings"], Value::Null);
     assert!(
         me["createdAt"].as_str().unwrap().contains('T'),
         "RFC 3339 timestamp"

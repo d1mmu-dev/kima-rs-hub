@@ -47,6 +47,10 @@ pub enum Phase {
     /// Analysis stage (M4): local DSP + MusiCNN work, independent of the MusicBrainz
     /// switch.
     Analysis,
+    /// The library-wide mood step (M5): scores and statistics. No per-track rows.
+    Mood,
+    /// The library-wide similarity step (M5): feel, matching state, the vibe map.
+    Similarity,
 }
 
 impl Phase {
@@ -57,6 +61,8 @@ impl Phase {
             Phase::Fingerprint => "fingerprint",
             Phase::Embedding => "embedding",
             Phase::Analysis => "analysis",
+            Phase::Mood => "mood",
+            Phase::Similarity => "similarity",
         }
     }
 
@@ -67,6 +73,8 @@ impl Phase {
             "fingerprint" => Some(Phase::Fingerprint),
             "embedding" => Some(Phase::Embedding),
             "analysis" => Some(Phase::Analysis),
+            "mood" => Some(Phase::Mood),
+            "similarity" => Some(Phase::Similarity),
             _ => None,
         }
     }
@@ -551,6 +559,13 @@ pub struct WipeCounts {
 /// report is dropped.
 pub async fn wipe(pool: &PgPool) -> sqlx::Result<WipeCounts> {
     let mut tx = pool.begin().await?;
+    let counts = wipe_in(&mut tx).await?;
+    tx.commit().await?;
+    Ok(counts)
+}
+
+/// [`wipe`] inside the caller's transaction.
+async fn wipe_in(tx: &mut sqlx::PgConnection) -> sqlx::Result<WipeCounts> {
     let locked: Vec<uuid::Uuid> = sqlx::query_scalar!(
         "SELECT t.id FROM tracks t
          JOIN track_stages s ON s.track_id = t.id
@@ -591,14 +606,172 @@ pub async fn wipe(pool: &PgPool) -> sqlx::Result<WipeCounts> {
     .await?;
     // Various Artists is never looked up (spec §6.3): it keeps `completed`. The artists are
     // locked in id order first (final review M2), the order the scanner uses.
-    let artists = reset_artists_in(&mut tx).await?;
+    let artists = reset_artists_in(&mut *tx).await?;
     // The remembered album verdicts go too, so every untagged album votes again; the saved
     // AcoustID replies stay (upstream `forgetAlbumVerdicts`).
-    crate::album_votes::forget_all(&mut tx).await?;
-    tx.commit().await?;
+    crate::album_votes::forget_all(&mut *tx).await?;
     Ok(WipeCounts {
         artists: i64::try_from(artists).unwrap_or(i64::MAX),
         tracks: reopened.len() as i64,
+    })
+}
+
+/// What a re-run from one step clears (upstream `STEP_CLEARS`, `enrichmentRestart.ts`; the matrix itself lives with
+/// the step in `kima_ident::coordinator::control`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Clears {
+    /// The matching state, its feel rows and the stored map (the map is laid out again).
+    pub similarity: bool,
+    /// The mood statistics and scores.
+    pub moods: bool,
+    /// Identification: the `recording` answers (a wipe).
+    pub recording: bool,
+    pub artists: bool,
+    /// The stored analysis and the `analysis` stage.
+    pub analysis: bool,
+    /// The sound vectors and the `embedding` stage.
+    pub vectors: bool,
+}
+
+/// What [`rerun_clears`] reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct RerunCounts {
+    pub artists: i64,
+    /// Tracks asked again: the recording answers reopened by an identification re-run (the count `wipe` has always
+    /// answered), else the stored analyses cleared by an analysis re-run; 0 for the other steps.
+    pub tracks: i64,
+    /// Sound vectors deleted.
+    pub vectors: i64,
+}
+
+/// Upstream's `RERUN_TIMEOUT_MS` (7 min): above the matching build (5 min), below a map write (8 min).
+const RERUN_TIMEOUT: &str = "420s";
+
+/// Re-run from a step, in one transaction, in the engine's lock order: the matching and mood state rows first
+/// (deleting them: a map or score write that finds no state row stores nothing and the next pass builds from the
+/// new data), then the track rows (id order), then the stage rows, then the stage's own rows and the derived rows
+/// they cascade to. A claim in flight finds its stage row reset and its late report refused.
+///
+/// There is no "decided by a person" mark on the `analysis` or `embedding` stage rows here (upstream's `decidedAt`),
+/// so every such row is reset; rows of tracks whose file is missing are left as they are (they wait for the scan).
+pub async fn rerun_clears(pool: &PgPool, c: Clears) -> sqlx::Result<RerunCounts> {
+    debug_assert!(
+        !c.recording || c.artists,
+        "an identification re-run resets the artists too"
+    );
+    let mut tx = pool.begin().await?;
+    sqlx::query(&format!("SET LOCAL statement_timeout = '{RERUN_TIMEOUT}'"))
+        .execute(&mut *tx)
+        .await?;
+    if c.similarity {
+        sqlx::query("DELETE FROM matching_state")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if c.moods {
+        sqlx::query("DELETE FROM mood_state")
+            .execute(&mut *tx)
+            .await?;
+    }
+    let mut stages: Vec<&str> = vec![];
+    if c.analysis {
+        stages.push("analysis");
+    }
+    if c.vectors {
+        stages.push("embedding");
+    }
+    if !stages.is_empty() {
+        // Track rows before stage rows: the analyzers' publish takes a track, then its stage row.
+        sqlx::query("SELECT id FROM tracks ORDER BY id FOR NO KEY UPDATE")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "SELECT 1 FROM track_stages WHERE stage = ANY($1) ORDER BY track_id, stage FOR UPDATE",
+        )
+        .bind(&stages)
+        .execute(&mut *tx)
+        .await?;
+    }
+    let mut counts = RerunCounts::default();
+    if c.recording {
+        let w = wipe_in(&mut tx).await?;
+        counts.artists = w.artists;
+        counts.tracks = w.tracks;
+    } else if c.artists {
+        counts.artists = i64::try_from(reset_artists_in(&mut tx).await?).unwrap_or(i64::MAX);
+    }
+    if c.analysis {
+        let cleared = sqlx::query("DELETE FROM track_analysis")
+            .execute(&mut *tx)
+            .await?;
+        if !c.recording {
+            counts.tracks = i64::try_from(cleared.rows_affected()).unwrap_or(i64::MAX);
+        }
+        reopen_stage(&mut tx, "analysis").await?;
+    }
+    if c.vectors {
+        // The cascade removes feel, map, scores and readings with the vectors.
+        let gone = sqlx::query("DELETE FROM track_embeddings")
+            .execute(&mut *tx)
+            .await?;
+        counts.vectors = i64::try_from(gone.rows_affected()).unwrap_or(i64::MAX);
+        reopen_stage(&mut tx, "embedding").await?;
+    }
+    if c.moods {
+        sqlx::query("DELETE FROM track_moods")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if c.similarity {
+        sqlx::query("DELETE FROM matching_map")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM matching_feel")
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(counts)
+}
+
+/// The stage's rows of present tracks asked again, with no memory of earlier attempts.
+async fn reopen_stage(conn: &mut sqlx::PgConnection, stage: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE track_stages s
+         SET status = 'pending', attempts = 0, redelivered = 0, next_attempt_at = NULL,
+             started_at = NULL, finished_at = NULL, last_error = NULL, error_code = NULL,
+             error_class = NULL, source = NULL, evidence = NULL, updated_at = now()
+         FROM tracks t
+         WHERE t.id = s.track_id AND t.missing_since IS NULL AND s.stage = $1",
+    )
+    .bind(stage)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// What the library-wide M5 steps wait for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VibeInputs {
+    /// Nothing that feeds the moods is still being answered: no analysis open, working or retrying, and no sound
+    /// vector open, working or retrying (`moodInputsSettled`).
+    pub settled: bool,
+    /// Artists still to answer: the first map layout waits for the genres the formula reads.
+    pub artists_owed: i64,
+}
+
+/// `inputs_settled` of spec 9.1. `analysis`: whether the analysis step is part of the pipeline.
+pub async fn vibe_inputs(pool: &PgPool, analysis: bool) -> sqlx::Result<VibeInputs> {
+    let emb = stage_counts(pool, "embedding", false).await?;
+    let an = if analysis {
+        stage_counts(pool, "analysis", false).await?
+    } else {
+        StageCounts::default()
+    };
+    let calm = |c: &StageCounts| c.open == 0 && c.working == 0 && c.retrying == 0;
+    Ok(VibeInputs {
+        settled: calm(&emb) && calm(&an),
+        artists_owed: artist_progress(pool).await?.owed,
     })
 }
 
@@ -623,6 +796,7 @@ pub struct Progress {
     pub audio_analysis: AudioAnalysisProgress,
     pub clap_embeddings: ClapProgress,
     pub fingerprints: FingerprintProgress,
+    pub moods: MoodProgress,
     pub similarity: SimilarityProgress,
     pub core_complete: bool,
     pub is_fully_complete: bool,
@@ -738,7 +912,8 @@ pub struct FingerprintProgress {
     pub is_background: bool,
 }
 
-/// M5's similarity: all zero in M3.
+/// A library-wide M5 step over the eligible vectors: how many there are and how many the step has done
+/// (`moods`: current scores; `similarity`: feel and a map place). All zero while the step's asset is unavailable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SimilarityProgress {
@@ -747,6 +922,27 @@ pub struct SimilarityProgress {
     pub pending: i64,
     pub progress: i64,
     pub is_background: bool,
+}
+
+/// The mood step's progress: the same five keys as [`SimilarityProgress`].
+pub type MoodProgress = SimilarityProgress;
+
+impl SimilarityProgress {
+    /// `pending = total - completed`, `progress` a rounded percentage (upstream `moodProgress`/`matchingProgress`).
+    pub fn from_counts(total: i64, completed: i64) -> Self {
+        Self {
+            total,
+            completed,
+            pending: total - completed,
+            progress: percent(completed, total),
+            is_background: true,
+        }
+    }
+
+    /// Nothing is owed (all counted done).
+    pub fn is_complete(&self) -> bool {
+        self.completed == self.total
+    }
 }
 
 impl Default for SimilarityProgress {
@@ -855,6 +1051,24 @@ async fn artist_progress(pool: &PgPool) -> sqlx::Result<ArtistProgress> {
 /// Embedding remains independently owed while unavailable/disabled; only settled
 /// embedding work permits full completion. `coreComplete` stays metadata-only.
 pub async fn progress(pool: &PgPool, fingerprinting: bool) -> sqlx::Result<Progress> {
+    progress_with(pool, fingerprinting, VibeProgress::default()).await
+}
+
+/// What the M5 steps have done, as `(total, completed)`; `Default` is a step whose asset is unavailable (nothing is
+/// owed, so it holds `isFullyComplete` back by nothing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VibeProgress {
+    pub moods: Option<(i64, i64)>,
+    pub similarity: Option<(i64, i64)>,
+}
+
+/// [`progress`] with the mood and similarity counts the caller has (they need the heads and the feel probe, which
+/// the database layer does not hold).
+pub async fn progress_with(
+    pool: &PgPool,
+    fingerprinting: bool,
+    vibe: VibeProgress,
+) -> sqlx::Result<Progress> {
     let artists = artist_progress(pool).await?;
     let rec = stage_counts(pool, "recording", fingerprinting).await?;
     let fp = stage_counts(pool, "fingerprint", false).await?;
@@ -879,6 +1093,12 @@ pub async fn progress(pool: &PgPool, fingerprinting: bool) -> sqlx::Result<Progr
         is_background: true,
     };
     let core_complete = artists.owed == 0 && track_tags.pending == 0 && track_tags.waiting == 0;
+    let step = |c: Option<(i64, i64)>| {
+        c.map_or_else(SimilarityProgress::default, |(t, d)| {
+            SimilarityProgress::from_counts(t, d)
+        })
+    };
+    let (moods, similarity) = (step(vibe.moods), step(vibe.similarity));
     let fingerprints_settled =
         !fingerprinting || (fp.open == 0 && fp.working == 0 && fp.retrying == 0);
     Ok(Progress {
@@ -901,13 +1121,16 @@ pub async fn progress(pool: &PgPool, fingerprinting: bool) -> sqlx::Result<Progr
             }
         },
         fingerprints,
-        similarity: SimilarityProgress::default(),
+        moods,
+        similarity,
         core_complete,
         is_fully_complete: core_complete
             && fingerprints_settled
             && emb.open == 0
             && emb.working == 0
-            && emb.retrying == 0,
+            && emb.retrying == 0
+            && moods.is_complete()
+            && similarity.is_complete(),
     })
 }
 

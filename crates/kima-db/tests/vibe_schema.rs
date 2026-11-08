@@ -294,7 +294,7 @@ async fn eligible_requires_model_gate_dims_norm_and_presence(pool: PgPool) {
 
     let sql = format!(
         "SELECT te.track_id FROM {} ORDER BY te.track_id",
-        &*ELIGIBLE
+        *ELIGIBLE
     );
     let eligible: Vec<uuid::Uuid> = sqlx::query_scalar(&sql).fetch_all(&pool).await.unwrap();
     assert_eq!(

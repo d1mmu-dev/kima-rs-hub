@@ -10,6 +10,7 @@ pub mod embedding;
 pub mod fingerprint;
 pub mod moods;
 pub mod recording;
+pub mod similarity;
 pub mod vibe_assets;
 
 use std::sync::{Arc, LazyLock};

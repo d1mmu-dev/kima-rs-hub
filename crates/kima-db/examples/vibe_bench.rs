@@ -130,7 +130,7 @@ async fn main() -> sqlx::Result<()> {
             "-- seeded {target} tracks in {:.0} s",
             t.elapsed().as_secs_f64()
         );
-        let eligible: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {}", &*ELIGIBLE))
+        let eligible: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {}", *ELIGIBLE))
             .fetch_one(&pool)
             .await?;
         let s = stats(exact_search(&pool, &mut rng, 30).await?);
@@ -159,7 +159,7 @@ async fn main() -> sqlx::Result<()> {
 
             let seeds: Vec<Uuid> = sqlx::query_scalar(&format!(
                 "SELECT te.track_id FROM {} ORDER BY te.track_id LIMIT 24",
-                &*ELIGIBLE
+                *ELIGIBLE
             ))
             .fetch_all(&pool)
             .await?;

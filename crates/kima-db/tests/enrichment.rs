@@ -872,3 +872,131 @@ async fn counts_shape(pool: PgPool) {
         json!({"artist":1,"track":2,"audio":0,"vibe":0,"scan":1,"podcast":0,"total":4})
     );
 }
+
+/// A present track with the recording and embedding stages done: core and embedding are settled.
+async fn settled_track(pool: &PgPool) -> Uuid {
+    let t = lone_track(pool).await;
+    put(pool, t, "recording", "done", "NULL", None).await;
+    put(pool, t, "embedding", "done", "NULL", None).await;
+    put(pool, t, "analysis", "done", "NULL", None).await;
+    t
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn progress_has_moods_and_similarity_with_five_keys(pool: PgPool) {
+    use kima_db::enrichment::{VibeProgress, progress_with};
+    settled_track(&pool).await;
+    // No asset behind either step: zeros, nothing owed.
+    let p = enrichment::progress(&pool, false).await.unwrap();
+    let zero = json!({"total":0,"completed":0,"pending":0,"progress":0,"isBackground":true});
+    assert_eq!(serde_json::to_value(p.moods).unwrap(), zero);
+    assert_eq!(serde_json::to_value(p.similarity).unwrap(), zero);
+
+    let vibe = VibeProgress {
+        moods: Some((8, 3)),
+        similarity: Some((8, 8)),
+    };
+    let p = progress_with(&pool, false, vibe).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(p.moods).unwrap(),
+        json!({"total":8,"completed":3,"pending":5,"progress":38,"isBackground":true})
+    );
+    assert_eq!(
+        serde_json::to_value(p.similarity).unwrap(),
+        json!({"total":8,"completed":8,"pending":0,"progress":100,"isBackground":true})
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn is_fully_complete_requires_moods_and_similarity_complete(pool: PgPool) {
+    use kima_db::enrichment::{VibeProgress, progress_with};
+    settled_track(&pool).await;
+    let full = |m: (i64, i64), s: (i64, i64)| {
+        let pool = pool.clone();
+        async move {
+            progress_with(
+                &pool,
+                false,
+                VibeProgress {
+                    moods: Some(m),
+                    similarity: Some(s),
+                },
+            )
+            .await
+            .unwrap()
+            .is_fully_complete
+        }
+    };
+    assert!(full((4, 4), (4, 4)).await);
+    assert!(!full((4, 3), (4, 4)).await, "a mood score is owed");
+    assert!(!full((4, 4), (4, 3)).await, "feel or a map place is owed");
+    assert!(
+        enrichment::progress(&pool, false)
+            .await
+            .unwrap()
+            .is_fully_complete
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn current_phase_reports_mood_and_similarity(pool: PgPool) {
+    for phase in [Phase::Mood, Phase::Similarity] {
+        enrichment::set_phase(&pool, Some(phase), false)
+            .await
+            .unwrap();
+        let st = enrichment::state(&pool).await.unwrap();
+        assert_eq!(st.current_phase, Some(phase));
+    }
+    assert_eq!(Phase::Mood.as_str(), "mood");
+    assert_eq!(Phase::Similarity.as_str(), "similarity");
+    // The embedding phase keeps kima-rs's name where upstream says `vibe` (spec 5.8).
+    assert_eq!(Phase::Embedding.as_str(), "embedding");
+}
+
+/// [`put`] over a row that exists.
+async fn reput(pool: &PgPool, t: Uuid, stage: &str, status: &str, next: &str, class: Option<&str>) {
+    sqlx::query("DELETE FROM track_stages WHERE track_id = $1 AND stage = $2")
+        .bind(t)
+        .bind(stage)
+        .execute(pool)
+        .await
+        .unwrap();
+    put(pool, t, stage, status, next, class).await;
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn vibe_inputs_settle_when_embedding_and_analysis_do(pool: PgPool) {
+    let t = lone_track(&pool).await;
+    let a = artist(&pool, "Owed", "pending").await;
+    sqlx::query(
+        "UPDATE albums SET artist_id = $1 WHERE id = (SELECT album_id FROM tracks WHERE id = $2)",
+    )
+    .bind(a)
+    .bind(t)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // No stage rows: both are open.
+    let i = enrichment::vibe_inputs(&pool, true).await.unwrap();
+    assert!(!i.settled);
+    assert_eq!(i.artists_owed, 1);
+    put(&pool, t, "embedding", "done", "NULL", None).await;
+    assert!(
+        !enrichment::vibe_inputs(&pool, true).await.unwrap().settled,
+        "analysis is open"
+    );
+    assert!(
+        enrichment::vibe_inputs(&pool, false).await.unwrap().settled,
+        "analysis is not part of the pipeline"
+    );
+    reput(&pool, t, "analysis", "failed", RETRY, Some("INCONCLUSIVE")).await;
+    assert!(
+        !enrichment::vibe_inputs(&pool, true).await.unwrap().settled,
+        "a retry is owed"
+    );
+    reput(&pool, t, "analysis", "done", "NULL", None).await;
+    assert!(enrichment::vibe_inputs(&pool, true).await.unwrap().settled);
+    // A terminal failure is settled (nothing is waiting for it).
+    reput(&pool, t, "embedding", "failed", "NULL", Some("DAMAGED")).await;
+    assert!(enrichment::vibe_inputs(&pool, true).await.unwrap().settled);
+}

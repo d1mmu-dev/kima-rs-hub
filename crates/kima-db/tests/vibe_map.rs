@@ -1,8 +1,9 @@
 //! The map service (M5 Task 10, spec 7): first layout, placement, single flight and the rebuild races, against a real
-//! Postgres. The re-run of Task 12 does not exist yet; `rerun` below is a stand-in that takes the locks in the order
-//! the engine fixes (state row first, then map/feel rows, then track rows) and must be replaced by the real one then.
+//! Postgres. `rerun` below is the real re-run of Task 12 (`kima_db::enrichment::rerun_clears`): `false` is the
+//! `similarity` step's clears, `true` the `vectors` step's.
 mod vibe_common;
 use kima_db::PgPool;
+use kima_db::enrichment::{Clears, rerun_clears};
 use kima_db::ml::{self, Provenance};
 use kima_db::vibe::MATCHING_SOUND;
 use kima_db::vibe::map::{
@@ -13,7 +14,6 @@ use kima_db::vibe::state::build_matching;
 use kima_vibe::feel_probe::{FeelProbe, ProbeAxis};
 use kima_vibe::formula::{self, MatchTrack};
 use kima_vibe::map_compute::layout_library;
-use sqlx::Executor;
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -190,25 +190,18 @@ async fn waiting_on_locks(pool: &PgPool, n: i64) {
     panic!("{n} backend(s) never waited on a lock");
 }
 
-/// Stand-in for the Task 12 re-run: the state row first (deleting it), then the map, then, for `vectors`, the sound
-/// vectors (whose cascade reaches the map and feel rows).
+/// The real re-run from the `similarity` step (`vectors = false`) or the `vectors` step (`vectors = true`, which also
+/// clears the moods and deletes the sound vectors with their map rows).
 async fn rerun(pool: &PgPool, vectors: bool) {
-    let mut tx = pool.begin().await.unwrap();
-    sqlx::query("DELETE FROM matching_state")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM matching_map")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    if vectors {
-        sqlx::query("DELETE FROM track_embeddings")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-    }
-    tx.commit().await.unwrap();
+    let clears = Clears {
+        similarity: true,
+        moods: vectors,
+        recording: false,
+        artists: false,
+        analysis: false,
+        vectors,
+    };
+    rerun_clears(pool, clears).await.unwrap();
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -707,16 +700,12 @@ async fn no_deadlock_with_embedding_publish_during_rerun(pool: PgPool) {
     .unwrap();
     let claim = ml::embedding_claim(&pool, id).await.unwrap().unwrap();
 
-    // The re-run holds the state row and the track row (state, then tracks, then stages: the engine's order); the
-    // analyzer's publish queues on the track row.
-    let mut tx = pool.begin().await.unwrap();
-    sqlx::query("DELETE FROM matching_state")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
+    // The track row is held, so the analyzer's publish (track row, then its stage row) and the real re-run (state
+    // row, then every track row in id order, then the stage rows) both queue on it, then proceed in either order.
+    let mut holder = pool.begin().await.unwrap();
     sqlx::query("SELECT id FROM tracks WHERE id = $1 FOR UPDATE")
         .bind(id)
-        .execute(&mut *tx)
+        .execute(&mut *holder)
         .await
         .unwrap();
     let publish = {
@@ -726,26 +715,29 @@ async fn no_deadlock_with_embedding_publish_during_rerun(pool: PgPool) {
         )
     };
     waiting_on_locks(&pool, 1).await;
-    // The re-run goes on: map and vectors cleared, the stage reset, then it commits.
-    tx.execute("DELETE FROM matching_map").await.unwrap();
-    tx.execute(
-        "UPDATE track_stages SET status = 'pending', started_at = NULL WHERE stage = 'embedding'",
-    )
-    .await
-    .unwrap();
-    tx.execute("DELETE FROM track_embeddings").await.unwrap();
-    tx.commit().await.unwrap();
+    let rerunning = {
+        let pool = pool.clone();
+        tokio::spawn(async move { rerun(&pool, true).await })
+    };
+    waiting_on_locks(&pool, 2).await;
+    holder.commit().await.unwrap();
     let published = tokio::time::timeout(Duration::from_secs(30), publish)
         .await
         .expect("no deadlock")
-        .unwrap()
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), rerunning)
+        .await
+        .expect("no deadlock")
+        .unwrap();
+    // Whichever went first, nothing of the old library survives: a publish that came after the re-run found its
+    // stage reset and stored nothing; one that came before was deleted with the other vectors.
     assert!(
-        !published,
-        "the publish found its stage reset and stored nothing"
+        published.is_ok(),
+        "the publish ended cleanly: {published:?}"
     );
     assert_eq!(count(&pool, "track_embeddings").await, 0);
     assert_eq!(count(&pool, "matching_map").await, 0);
+    assert_eq!(count(&pool, "matching_state").await, 0);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

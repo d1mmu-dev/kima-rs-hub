@@ -12,6 +12,7 @@ use std::time::Duration;
 use kima_db::PgPool;
 use kima_db::vibe::moods::{MoodBuild, MoodBuilder, MoodSnapshot, MoodSnapshots};
 use kima_vibe::mood_heads::MoodHeads;
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -26,6 +27,8 @@ pub const SNAPSHOT_REFRESH_EVERY: Duration = Duration::from_secs(30);
 pub struct MoodRuntime {
     pub builder: MoodBuilder,
     pub snapshots: MoodSnapshots,
+    /// Fired when scores or statistics changed (M5b drops its cached mixes on it).
+    changed: broadcast::Sender<()>,
 }
 
 impl MoodRuntime {
@@ -33,6 +36,7 @@ impl MoodRuntime {
         Self {
             builder: MoodBuilder::new(heads),
             snapshots: MoodSnapshots::new(),
+            changed: broadcast::channel(16).0,
         }
     }
 
@@ -80,11 +84,21 @@ pub async fn run_pass(ctx: &IdentCtx) -> sqlx::Result<MoodPass> {
 /// [`run_pass`] on a given runtime.
 pub async fn run_with(pool: &PgPool, rt: &MoodRuntime) -> sqlx::Result<MoodPass> {
     let build = rt.builder.build(pool).await?;
+    if build.scored > 0 || build.state_changed {
+        // No receiver is not an error.
+        let _ = rt.changed.send(());
+    }
     let (_, snapshot_changed) = rt.snapshots.refresh(pool, rt.heads()).await?;
     Ok(MoodPass::Ran {
         build,
         snapshot_changed,
     })
+}
+
+/// A receiver of the "moods changed" event: one `()` per pass that wrote scores or statistics. `None` while the mood
+/// heads are unavailable.
+pub async fn subscribe_changes(ctx: &IdentCtx) -> Option<broadcast::Receiver<()>> {
+    runtime(ctx).await.map(|rt| rt.changed.subscribe())
 }
 
 /// The last built mood snapshot, without touching the database.

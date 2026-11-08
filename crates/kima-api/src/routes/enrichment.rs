@@ -91,7 +91,12 @@ async fn progress(State(state): State<AppState>, _user: AuthUser) -> Result<Json
             return Ok(Json(answer.clone()));
         }
     }
-    let p = enrichment::progress(&state.pool, state.fpcalc).await?;
+    // The mood and similarity counts need the heads and the feel probe the ident context holds.
+    let vibe = match &state.ident {
+        Some(ctx) => kima_ident::stages::similarity::vibe_progress(ctx).await?,
+        None => enrichment::VibeProgress::default(),
+    };
+    let p = enrichment::progress_with(&state.pool, state.fpcalc, vibe).await?;
     let answer = json!({
         "source": p.source,
         "artists": p.artists,
@@ -99,6 +104,7 @@ async fn progress(State(state): State<AppState>, _user: AuthUser) -> Result<Json
         "audioAnalysis": p.audio_analysis,
         "clapEmbeddings": p.clap_embeddings,
         "fingerprints": p.fingerprints,
+        "moods": p.moods,
         "similarity": p.similarity,
         "coreComplete": p.core_complete,
         "isFullyComplete": p.is_fully_complete,
@@ -199,14 +205,13 @@ async fn wipe_and_rerun(
     Ok(Json(json!({
         "artists": wiped.artists,
         "tracks": wiped.tracks,
-        "vectors": 0,
+        "vectors": wiped.vectors,
     })))
 }
 
 /// `POST /enrichment/rerun {step}` (upstream `routes/enrichment.ts`, `5d348720`): re-run the
-/// enrichment from one of its six steps. Admin only. A name outside the six is a 400 naming them;
-/// a step whose subsystem has no reset here yet (`analysis`, `vectors`, `moods`, `similarity`) is
-/// a 409 that changes nothing (M-SYNC Task 14, D-112).
+/// enrichment from one of its six steps. Admin only. A name outside the six is a 400 naming them.
+/// Every step is real since M5 (D-188): what each clears is `control::Step::clears`.
 async fn rerun(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -221,12 +226,6 @@ async fn rerun(
         })?;
     let wiped = match control::rerun(&state.pool, step).await {
         Ok(w) => w,
-        Err(control::RerunError::Unavailable(step)) => {
-            return Err(ApiError::ConflictMessage(format!(
-                "The {} step is not available yet",
-                step.id()
-            )));
-        }
         Err(control::RerunError::Db(error)) => {
             if kima_db::is_retryable_conflict(&error) {
                 return Err(ApiError::Busy);
@@ -240,7 +239,7 @@ async fn rerun(
     Ok(Json(json!({
         "artists": wiped.artists,
         "tracks": wiped.tracks,
-        "vectors": 0,
+        "vectors": wiped.vectors,
         "message": format!("Re-running from {}", step.name()),
     })))
 }

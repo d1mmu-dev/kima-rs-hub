@@ -97,9 +97,25 @@ pub fn ident_ctx_with_embedding_and_analysis(
     }
 }
 
-/// Bases nobody listens on: the stages under test never call out.
+/// Bases nobody listens on: the stages under test never call out. `Bases::production` only
+/// overrides the MusicBrainz base and leaves every other host at its real production URL, so
+/// override every field explicitly here: a stage that reaches out to e.g. Deezer would otherwise
+/// hit the real internet (and panic through the `deny_real` guard this crate's test `Net` sets).
 pub fn dead_bases() -> Bases {
-    Bases::production("http://127.0.0.1:9")
+    let dead = || "http://127.0.0.1:9".to_string();
+    Bases {
+        musicbrainz: dead(),
+        acoustid: dead(),
+        wikidata_sparql: dead(),
+        wikidata: dead(),
+        wikipedia: dead(),
+        fanart: dead(),
+        deezer: dead(),
+        listenbrainz: dead(),
+        lrclib: dead(),
+        coverartarchive: dead(),
+        commons: dead(),
+    }
 }
 
 /// Inserts a present track at `path` (relative to the root) with `duration_secs`. Its artist

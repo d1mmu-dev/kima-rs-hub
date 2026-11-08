@@ -245,6 +245,7 @@ async fn progress_shape_exact(pool: PgPool) {
             "audioAnalysis",
             "clapEmbeddings",
             "fingerprints",
+            "moods",
             "similarity",
             "coreComplete",
             "isFullyComplete"
@@ -315,10 +316,14 @@ async fn progress_shape_exact(pool: PgPool) {
             "isBackground"
         ])
     );
-    assert_eq!(
-        keys(&p["similarity"]),
-        sorted(&["total", "completed", "pending", "progress", "isBackground"])
-    );
+    for step in ["moods", "similarity"] {
+        assert_eq!(
+            keys(&p[step]),
+            sorted(&["total", "completed", "pending", "progress", "isBackground"]),
+            "{step}"
+        );
+        assert_eq!(p[step]["isBackground"], true);
+    }
     assert_eq!(p["fingerprints"]["isBackground"], true);
     assert_eq!(p["audioAnalysis"]["isBackground"], true);
     assert_eq!(p["similarity"]["isBackground"], true);
@@ -881,24 +886,96 @@ async fn identification_step_equals_wipe_and_rerun(pool: PgPool) {
     assert_eq!(by_rerun["message"], "Re-running from identification");
 }
 
+/// A vector, scores and statistics, feel and a state, a stored analysis and its stage rows for `t`.
+async fn vibe_rows(pool: &PgPool, t: Uuid) {
+    sqlx::query(
+        "INSERT INTO track_embeddings (track_id, file_generation, model_id, model_sha256, pipeline_version, embedding)
+         VALUES ($1, 0, 'm', decode(repeat('ab', 32), 'hex'), 'p', ('[1' || repeat(',0', 511) || ']')::vector)",
+    )
+    .bind(t)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO track_analysis (track_id, file_generation) VALUES ($1, 0)")
+        .bind(t)
+        .execute(pool)
+        .await
+        .unwrap();
+    for stage in ["analysis", "embedding"] {
+        sqlx::query(
+            "INSERT INTO track_stages (track_id, stage, status) VALUES ($1, $2, 'done')
+             ON CONFLICT (track_id, stage) DO UPDATE SET status = 'done'",
+        )
+        .bind(t)
+        .bind(stage)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("INSERT INTO matching_feel (track_id, embedded_at, probe, valence, arousal) SELECT track_id, created_at, 'p', 0.5, 0.5 FROM track_embeddings")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO matching_state (version, fingerprint, track_count, feel_mean_valence, feel_mean_arousal, feel_sd_valence, feel_sd_arousal, sound_spread, genre_spread, genre_weight, genres) VALUES ('v', 'f', 1, 0.5, 0.5, 0.1, 0.1, 0.5, 0.5, 0.5, '{}')")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn tables(pool: &PgPool) -> Vec<i64> {
+    let mut out = vec![];
+    for table in [
+        "track_embeddings",
+        "track_analysis",
+        "matching_feel",
+        "matching_state",
+    ] {
+        let n: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        out.push(n);
+    }
+    out
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn unavailable_step_is_409_and_changes_nothing(pool: PgPool) {
+async fn the_m5_steps_re_run_what_the_matrix_says(pool: PgPool) {
     let (srv, admin, _) = server(pool.clone()).await;
     let t = identified_track(&pool, 1).await;
     let a = enriched_artist(&pool, "Low").await;
 
-    for step in ["analysis", "vectors", "moods", "similarity"] {
+    // (step, name in the reply, [vectors, analysis, feel, state] left afterwards, vectors reported)
+    let cases: [(&str, &str, [i64; 4], i64); 4] = [
+        ("similarity", "similarity", [1, 1, 0, 0], 0),
+        ("moods", "moods", [1, 1, 1, 1], 0),
+        ("vectors", "sound vectors", [0, 1, 0, 0], 1),
+        ("analysis", "audio analysis", [0, 0, 0, 0], 1),
+    ];
+    for (step, name, left, vectors) in cases {
+        sqlx::query("DELETE FROM track_embeddings")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM track_analysis")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM matching_state")
+            .execute(&pool)
+            .await
+            .unwrap();
+        vibe_rows(&pool, t).await;
         let res = rerun_as(&srv, &admin, json!({ "step": step })).await;
-        res.assert_status(StatusCode::CONFLICT);
-        assert_eq!(
-            res.json::<Value>(),
-            json!({"error": format!("The {step} step is not available yet")})
-        );
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["message"], format!("Re-running from {name}"), "{step}");
+        assert_eq!(body["vectors"], vectors, "{step}");
+        assert_eq!(tables(&pool).await, left, "{step}");
     }
-
+    // None of them touches identification or the artists.
     assert_eq!(recording_status(&pool, t).await, "done");
     assert_eq!(artist_state(&pool, a).await.0, "completed");
-    assert_eq!(enrich_jobs(&pool).await, 0);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

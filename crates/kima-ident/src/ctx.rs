@@ -37,6 +37,8 @@ pub struct EmbeddingRuntimeState {
     pub(crate) vibe_assets: Mutex<Option<Arc<crate::stages::vibe_assets::VibeAssets>>>,
     /// The mood step's per-process state (the heads, the last full hash, the mood snapshot).
     pub(crate) vibe_moods: Mutex<Option<Arc<crate::stages::moods::MoodRuntime>>>,
+    /// The similarity step's per-process state (the feel probe, the single-flight map service).
+    pub(crate) vibe_similarity: Mutex<Option<Arc<crate::stages::similarity::SimilarityRuntime>>>,
 }
 
 pub type EmbeddingRuntimeCache = Arc<EmbeddingRuntimeState>;

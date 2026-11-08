@@ -180,7 +180,8 @@ pub fn cached(ctx: &IdentCtx) -> Option<Arc<VibeAssets>> {
         .clone()
 }
 
-/// Replaces the cached assets (a test, or a caller that already holds them) and returns what is now cached.
+/// Replaces the cached assets (a test, or a caller that already holds them) and returns what is now cached. The mood
+/// and similarity steps were built from the previous assets and start over (a running layout is stopped).
 pub fn install(ctx: &IdentCtx, assets: VibeAssets) -> Arc<VibeAssets> {
     let assets = Arc::new(assets);
     *ctx.embedding_runtime
@@ -192,5 +193,14 @@ pub fn install(ctx: &IdentCtx, assets: VibeAssets) -> Arc<VibeAssets> {
         .vibe_moods
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    if let Some(old) = ctx
+        .embedding_runtime
+        .vibe_similarity
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        old.map.cancel();
+    }
     assets
 }

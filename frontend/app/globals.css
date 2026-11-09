@@ -16,6 +16,9 @@
 /* A phone on its side: the app's bars and the mini player take less height. */
 @custom-variant landscape-short (@media (orientation: landscape) and (max-height: 480px));
 
+/* Upstream hover-only row controls must remain visible on touch devices. */
+@custom-variant can-hover (@media (hover: hover));
+
 @theme {
     /* The smallest text size, for eyebrows, counts and status chips.
      * Tailwind's named scale stops at 12px; nothing goes below this. */
@@ -139,6 +142,7 @@
     --z-panel-backdrop: 75;    /* activity panel scrim */
     --z-panel: 76;             /* activity panel, below any dialog it opens */
     --z-overlay: 200;          /* full-screen player */
+    --z-tooltip: 210;          /* icon-label tooltip above overlays */
 }
 
 * {
@@ -234,19 +238,23 @@ code {
     font-variant-numeric: tabular-nums;
 }
 
-/* ── The media grid ───────────────────────────────────────────────────────
- * Every wall of artwork cards uses this grid. auto-fill keeps a short library
- * at normal card size instead of stretching it; the gap grows with the
- * viewport from 12px on a phone to 20px on a desktop. */
+/* Upstream cards share a width and gap between the grid and shelves. */
+:root {
+    --card-w: 11.25rem;
+    --card-gap: clamp(0.75rem, 1.6vw, 1.25rem);
+}
+
+/* ── The media grid ─────────────────────────────────────────────────────── */
 @layer components {
     .grid-media {
-        /* Fluid card floor: extra width goes to bigger artwork, not more columns.
-         * 152px still fits two cards on a 388px phone; 14vw keeps titles
-         * readable in the column left beside the sidebar and activity rail. */
-        --card-min: clamp(9.5rem, 14vw, 12rem);
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(var(--card-min), 1fr));
-        gap: clamp(0.75rem, 1.6vw, 1.25rem);
+        grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+        gap: var(--card-gap);
+    }
+    @media (min-width: 48rem) {
+        .grid-media {
+            grid-template-columns: repeat(auto-fill, minmax(min(var(--card-w), 100%), 1fr));
+        }
     }
 }
 

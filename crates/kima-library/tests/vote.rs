@@ -459,6 +459,103 @@ async fn existing_album_not_resplit(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_rereads_unchanged_files_and_merges_stray_guest(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    legacy_stray(&pool, root).await;
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(report.tags_read, 4);
+    assert_eq!(report.unchanged, 0);
+    assert_eq!(albums(&pool, "Hist").await, row("Mike", 4));
+    assert_eq!(artist_count(&pool, "Janet").await, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn reread_all_job_dispatches_forced_scan(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    legacy_stray(&pool, root).await;
+    let changed = kima_library::jobs::run(
+        &ctx(&pool, root),
+        &serde_json::json!({"kind": "reread_all"}),
+        &Default::default(),
+    )
+    .await
+    .unwrap();
+    assert!(changed);
+    assert_eq!(albums(&pool, "Hist").await, row("Mike", 4));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_keeps_person_applied_album(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let stray = legacy_stray(&pool, root).await;
+    sqlx::query("UPDATE albums SET identity_source = 'autotag', applied_identity = '{\"artistKey\":\"janet\",\"titleKey\":\"hist\",\"year\":null}' WHERE id = $1")
+        .bind(stray).execute(&pool).await.unwrap();
+    scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        albums(&pool, "Hist").await,
+        vec![("Janet".to_string(), 1), ("Mike".to_string(), 3)]
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_preserves_display_edits_and_unreadable_song(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    song(root, "Mike/Hist/01.flac", "Hist", Some("Mike"), "Mike");
+    song(root, "Mike/Hist/02.flac", "Hist", Some("Mike"), "Mike");
+    rescan(&pool, root).await;
+    sqlx::query("UPDATE artists SET display_name = 'My Artist' WHERE name = 'Mike'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE albums SET display_title = 'My Album' WHERE title = 'Hist'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before: (Uuid, Uuid) =
+        sqlx::query_as("SELECT t.id, t.album_id FROM tracks t WHERE t.path = 'Mike/Hist/02.flac'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    std::fs::write(root.join("Mike/Hist/02.flac"), b"not audio anymore").unwrap();
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(report.tags_read, 2);
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    let after: (Uuid, Uuid) =
+        sqlx::query_as("SELECT t.id, t.album_id FROM tracks t WHERE t.path = 'Mike/Hist/02.flac'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after, before);
+    assert_eq!(albums(&pool, "Hist").await, row("Mike", 2));
+    let edits: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT ar.display_name, al.display_title FROM albums al JOIN artists ar ON ar.id = al.artist_id WHERE al.id = $1"
+    ).bind(before.1).fetch_one(&pool).await.unwrap();
+    assert_eq!(edits, (Some("My Artist".into()), Some("My Album".into())));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn edited_album_is_never_merged_into(pool: PgPool) {
     if !require_ffmpeg() {
         return;

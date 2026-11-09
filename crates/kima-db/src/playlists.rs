@@ -502,7 +502,12 @@ async fn add_locked(
     let requested: Vec<Uuid> = tracks.iter().copied().filter(|t| seen.insert(*t)).collect();
 
     let present: HashSet<Uuid> =
-        sqlx::query_scalar("SELECT id FROM tracks WHERE id = ANY($1) AND missing_since IS NULL")
+        // Keep playable rows stable through the insert and commit. Unlike the FK's
+        // KEY SHARE lock, SHARE conflicts with a scanner's missing_since UPDATE.
+        // Lock multiple tracks in id order to avoid opposing playlist requests.
+        sqlx::query_scalar(
+            "SELECT id FROM tracks WHERE id = ANY($1) AND missing_since IS NULL ORDER BY id FOR SHARE",
+        )
             .bind(&requested)
             .fetch_all(&mut **tx)
             .await?

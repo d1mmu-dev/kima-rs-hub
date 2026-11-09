@@ -509,6 +509,71 @@ fixture_test!(concurrent_missing_song_rolls_back_update, |server, pool| {
     assert_eq!(rows(&pool, &PRIVATE_MIX.to_string()).await, before);
 });
 
+fixture_test!(
+    missing_update_waits_for_playlist_insert_commit,
+    |server, pool| {
+        let id = make(&server, "Race gate", &[]).await;
+        // BEFORE INSERT runs after add_locked's final presence check.
+        sqlx::query("CREATE FUNCTION pause_playlist_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(71318); RETURN NEW; END $$")
+        .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER pause_insert BEFORE INSERT ON playlist_items FOR EACH ROW EXECUTE FUNCTION pause_playlist_insert()")
+        .execute(&pool).await.unwrap();
+        let mut gate = pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock(71318)")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        let request = update(&id, vec![("songIdToAdd", tid(3))]);
+        let (result, (blocked, update_task)) = tokio::join!(
+            call(&server, "updatePlaylist", &request),
+            async {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event = 'advisory' AND query ILIKE '%INSERT INTO playlist_items%' AND pid <> pg_backend_pid())")
+                            .fetch_one(&pool).await.unwrap();
+                        if waiting { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                }).await.expect("request reached INSERT after final check");
+                let update_pool = pool.clone();
+                let update_task = tokio::spawn(async move {
+                    sqlx::query("UPDATE tracks SET missing_since = now() WHERE id = $1")
+                        .bind(track_id(3))
+                        .execute(&update_pool)
+                        .await
+                        .unwrap()
+                });
+                // Observe either a real PostgreSQL row-lock wait or a completed update.
+                let blocked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        if update_task.is_finished() { break false; }
+                        let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE 'UPDATE tracks SET missing_since%' AND pid <> pg_backend_pid())")
+                            .fetch_one(&pool).await.unwrap();
+                        if waiting { break true; }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                }).await.expect("updater either waited or finished");
+                sqlx::query("SELECT pg_advisory_unlock(71318)")
+                    .execute(&mut *gate)
+                    .await
+                    .unwrap();
+                (blocked, update_task)
+            }
+        );
+        ok(&result);
+        let updated = tokio::time::timeout(std::time::Duration::from_secs(10), update_task)
+            .await
+            .expect("missing update finished")
+            .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+        assert!(
+            blocked,
+            "missing update passed final check before INSERT committed"
+        );
+        assert_eq!(rows(&pool, &id).await, vec![(track_id(3), 0)]);
+    }
+);
+
 #[sqlx::test(
     migrator = "kima_db::MIGRATOR",
     fixtures(path = "fixtures", scripts("subsonic"))

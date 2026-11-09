@@ -730,6 +730,64 @@ fixture_test!(similar_songs_missing_id_10_else_empty, |server, _pool| {
     assert_eq!(res["similarSongs"]["song"], serde_json::json!([]));
 });
 
+fixture_test!(search_page_fills_past_missing_top_hit, |server, pool| {
+    seed_extra(&pool, 3, 3).await;
+    let ordered: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM tracks WHERE title = 'Twin' ORDER BY lower(title), id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ordered.len(), 3);
+    sqlx::query("UPDATE tracks SET missing_since = now() WHERE id = $1")
+        .bind(ordered[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let res = alice(&server, "search3", &[("query", "twin"), ("songCount", "2")]).await;
+    assert_eq!(
+        ids(&res["searchResult3"]["song"]),
+        ordered[1..]
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    );
+    let next = alice(
+        &server,
+        "search3",
+        &[("query", "twin"), ("songCount", "1"), ("songOffset", "1")],
+    )
+    .await;
+    assert_eq!(
+        ids(&next["searchResult3"]["song"]),
+        vec![ordered[2].to_string()]
+    );
+});
+
+fixture_test!(
+    shared_song_shape_across_search_and_browse,
+    |server, _pool| {
+        let id = track_id(1).to_string();
+        let song = alice(&server, "getSong", &[("id", &id)]).await;
+        let search = alice(&server, "search3", &[("query", "come together")]).await;
+        assert_eq!(song["song"], search["searchResult3"]["song"][0]);
+    }
+);
+
+fixture_test!(
+    similar_songs2_unknown_id_has_own_empty_element,
+    |server, _pool| {
+        let res = alice(
+            &server,
+            "getSimilarSongs2",
+            &[("id", &Uuid::now_v7().to_string())],
+        )
+        .await;
+        assert_eq!(res["status"], "ok");
+        assert_eq!(res["similarSongs2"]["song"], serde_json::json!([]));
+        assert!(res.get("similarSongs").is_none());
+    }
+);
+
 fixture_test!(similar_songs2_empty, |server, _pool| {
     let res = alice(
         &server,

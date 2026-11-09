@@ -92,6 +92,7 @@ impl AlbumRow {
 pub struct TrackRow {
     pub id: Uuid,
     pub title: String,
+    pub display_title: Option<String>,
     pub artist_name: String,
     pub duration_secs: i32,
     pub disc: i32,
@@ -108,7 +109,7 @@ pub struct TrackRow {
     pub isrc: Option<String>,
 }
 
-pub(crate) const TRACK_SELECT: &str = "SELECT t.id, t.title, t.artist_name, t.duration_secs, t.disc, t.track_no,
+pub(crate) const TRACK_SELECT: &str = "SELECT t.id, t.title, t.display_title, t.artist_name, t.duration_secs, t.disc, t.track_no,
         t.codec, t.bitrate, t.year, al.id AS album_id, al.title AS album_title, al.year AS album_year,
         ar.id AS album_artist_id, ar.name AS album_artist_name, t.recording_mbid, t.isrc
     FROM tracks t

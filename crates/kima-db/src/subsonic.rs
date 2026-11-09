@@ -56,7 +56,8 @@ pub struct SongItem {
 }
 
 /// `$1` is the calling user in every query below.
-const ARTIST_SELECT: &str = "SELECT ar.id, ar.name, ar.sort_name,
+const ARTIST_SELECT: &str =
+    "SELECT ar.id, COALESCE(NULLIF(ar.display_name, ''), ar.name) AS name, ar.sort_name,
         count(DISTINCT al.id) AS album_count, s.starred_at, r.rating, ar.mbid
     FROM artists ar
     JOIN albums al ON al.artist_id = ar.id
@@ -65,8 +66,9 @@ const ARTIST_SELECT: &str = "SELECT ar.id, ar.name, ar.sort_name,
     LEFT JOIN ratings r ON r.user_id = $1 AND r.artist_id = ar.id";
 const ARTIST_GROUP: &str = "GROUP BY ar.id, s.starred_at, r.rating";
 
-const ALBUM_SELECT: &str = "SELECT al.id, al.title, al.year, al.created_at,
-        ar.id AS artist_id, ar.name AS artist_name,
+const ALBUM_SELECT: &str =
+    "SELECT al.id, COALESCE(NULLIF(al.display_title, ''), al.title) AS title, al.year, al.created_at,
+        ar.id AS artist_id, COALESCE(NULLIF(ar.display_name, ''), ar.name) AS artist_name,
         count(t.id) AS song_count, COALESCE(sum(t.duration_secs), 0)::bigint AS duration_secs,
         s.starred_at, r.rating, al.release_mbid,
         COALESCE(
@@ -84,9 +86,9 @@ const ALBUM_SELECT: &str = "SELECT al.id, al.title, al.year, al.created_at,
     LEFT JOIN ratings r ON r.user_id = $1 AND r.album_id = al.id";
 const ALBUM_GROUP: &str = "GROUP BY al.id, ar.id, s.starred_at, r.rating";
 
-const SONG_SELECT: &str = "SELECT t.id, t.title, t.artist_name, t.duration_secs, t.disc, t.track_no,
-        t.codec, t.bitrate, t.year, al.id AS album_id, al.title AS album_title, al.year AS album_year,
-        ar.id AS album_artist_id, ar.name AS album_artist_name, t.recording_mbid, t.isrc,
+const SONG_SELECT: &str = "SELECT t.id, COALESCE(NULLIF(t.display_title, ''), t.title) AS title, t.display_title, t.artist_name AS artist_name, t.duration_secs, t.disc, t.track_no,
+        t.codec, t.bitrate, t.year, al.id AS album_id, COALESCE(NULLIF(al.display_title, ''), al.title) AS album_title, al.year AS album_year,
+        ar.id AS album_artist_id, COALESCE(NULLIF(ar.display_name, ''), ar.name) AS album_artist_name, t.recording_mbid, t.isrc,
         t.path, t.size, t.created_at, s.starred_at, r.rating,
         COALESCE(
             (SELECT g.name FROM track_genres_effective e JOIN genres g ON g.id = e.genre_id

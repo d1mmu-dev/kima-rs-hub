@@ -9,6 +9,7 @@ use axum_test::TestServer;
 use common::*;
 use kima_db::PgPool;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 fn app(pool: PgPool) -> TestServer {
     let peer: SocketAddr = "10.0.0.1:4000".parse().unwrap();
@@ -741,4 +742,126 @@ fixture_test!(album_list2_junk_paging_is_ok, |server, _pool| {
     .await;
     assert!(res.get("error").is_none(), "{res}");
     assert_eq!(ids(&res["albumList2"]["album"]).len(), 0);
+});
+
+// A MetadataEditor override (the edited names) reaches every Subsonic list and view: `title = displayTitle || title`,
+// `name = displayName || name`, `name = display_title || title`.
+fixture_test!(edited_names_reach_subsonic_views, |server, pool| {
+    sqlx::query("UPDATE artists SET display_name = $1 WHERE id = $2")
+        .bind::<String>("Shown Artist".to_string())
+        .bind::<Uuid>(artist_id(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE albums SET display_title = $1 WHERE id = $2")
+        .bind::<String>("Shown Album".to_string())
+        .bind::<Uuid>(album_id(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tracks SET display_title = $1 WHERE id = $2")
+        .bind::<String>("Shown Song".to_string())
+        .bind::<Uuid>(track_id(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let res = alice(&server, "getAlbum", &[("id", &(album_id(1)).to_string())]).await;
+    assert_eq!(res["status"], "ok");
+    assert_eq!(res["album"]["name"], "Shown Album");
+    assert_eq!(res["album"]["artist"], "Shown Artist");
+
+    let res = alice(
+        &server,
+        "getMusicDirectory",
+        &[("id", &(album_id(1)).to_string())],
+    )
+    .await;
+    assert_eq!(res["directory"]["name"], "Shown Album");
+    assert_eq!(res["directory"]["child"][0]["title"], "Shown Song");
+    assert_eq!(res["directory"]["child"][0]["artist"], "The Beatles");
+
+    let res = alice(&server, "getArtist", &[("id", &(artist_id(1)).to_string())]).await;
+    assert_eq!(res["artist"]["name"], "Shown Artist", "artist name");
+    assert_eq!(res["artist"]["album"][0]["name"], "Shown Album");
+
+    let res = alice(
+        &server,
+        "getTopSongs",
+        &[("artist", "The Beatles"), ("count", "10")],
+    )
+    .await;
+    assert_eq!(res["topSongs"]["song"][0]["title"], "Shown Song");
+
+    let res = alice(&server, "search3", &[("query", ""), ("songCount", "10")]).await;
+    assert!(
+        res["searchResult3"]["song"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["title"] == "Shown Song")
+    );
+    assert!(
+        res["searchResult3"]["album"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["name"] == "Shown Album")
+    );
+});
+
+fixture_test!(
+    editor_title_is_read_by_get_song_and_reset,
+    |server, pool| {
+        let state = fixture_state(pool.clone());
+        let admin_user = kima_db::users::find_by_id(&pool, ADMIN_ID)
+            .await
+            .unwrap()
+            .unwrap();
+        let jwt = state.jwt.issue_access(
+            admin_user.id,
+            &admin_user.username,
+            &admin_user.role,
+            admin_user.token_version,
+        );
+        let api = TestServer::new(kima_api::router(state)).unwrap();
+        let track = track_id(1).to_string();
+        let res = api
+            .put(&format!("/api/enrichment/tracks/{track}/metadata"))
+            .authorization_bearer(&jwt)
+            .json(&json!({"title":"Editor song"}))
+            .await;
+        res.assert_status_ok();
+        let song = alice(&server, "getSong", &[("id", &track)]).await;
+        assert_eq!(song["song"]["title"], "Editor song", "{song}");
+        let res = api
+            .post(&format!("/api/enrichment/tracks/{track}/reset"))
+            .authorization_bearer(&jwt)
+            .await;
+        res.assert_status_ok();
+        let song = alice(&server, "getSong", &[("id", &track)]).await;
+        assert_ne!(song["song"]["title"], "Editor song", "{song}");
+    }
+);
+
+fixture_test!(empty_edited_names_fall_back_to_original, |server, pool| {
+    sqlx::query("UPDATE artists SET display_name = '' WHERE id = $1")
+        .bind(artist_id(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE albums SET display_title = '' WHERE id = $1")
+        .bind(album_id(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tracks SET display_title = '' WHERE id = $1")
+        .bind(track_id(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let res = alice(&server, "getAlbum", &[("id", &album_id(1).to_string())]).await;
+    assert_eq!(res["album"]["artist"], "The Beatles");
+    assert_ne!(res["album"]["name"], "");
+    assert_ne!(res["album"]["song"][0]["title"], "");
 });

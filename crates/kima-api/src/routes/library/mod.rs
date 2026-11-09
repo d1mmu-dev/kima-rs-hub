@@ -93,15 +93,15 @@ pub(super) fn track_json(t: &TrackRow) -> Value {
     let cover = cover(t.album_id);
     json!({
         "id": t.id,
-        "title": t.title,
+        "title": t.display_title.as_deref().filter(|s| !s.is_empty()).unwrap_or(&t.title),
         "duration": t.duration_secs,
         "trackNo": t.track_no,
         "trackNumber": t.track_no,
         "discNumber": t.disc,
         "discSubtitle": null,
-        "displayTitle": null,
+        "displayTitle": t.display_title,
         "displayTrackNo": null,
-        "hasUserOverrides": false,
+        "hasUserOverrides": t.display_title.as_ref().is_some_and(|s| !s.is_empty()),
         "isMissing": false,
         "previewUrl": null,
         "playCount": 0,

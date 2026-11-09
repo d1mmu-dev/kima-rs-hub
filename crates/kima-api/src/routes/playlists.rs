@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use kima_core::events::Event;
 use kima_db::playlists::{self, ItemRow, MoveError, Playlist, PlaylistSummary};
@@ -36,7 +36,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/playlists/{id}/items/batch", post(add_batch))
         .route("/playlists/{id}/items/{track_id}", delete(remove_item))
-        .route("/playlists/{id}/items/{item_id}/move", patch(move_item))
+        .route("/playlists/{id}/items/{item_id}/move", post(move_item))
 }
 
 const NOT_FOUND: &str = "Playlist not found";

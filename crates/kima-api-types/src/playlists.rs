@@ -1,10 +1,8 @@
 //! Playlist API DTOs used by kima-api-types.
-//!
-//! TODO: reconsider serde defaults (camelCase vs snake_case) after resolving
-//! crate-level indentation drift in migrated DTO tests.
 
 use crate::library::Track;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt;
 use uuid::Uuid;
 
@@ -82,12 +80,11 @@ impl AddItemBody {
     }
 }
 
-/// Single replacement of a playlist item.
+/// Body of `POST /playlists/:id/items/:itemId/move` (per-item patch-body contract).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReplaceItemBody {
-    pub item_id: Uuid,
-    pub track_id: Uuid,
+pub struct MoveItemBody {
+    pub after_item_id: Option<Uuid>,
 }
 
 /// Answer of `POST /playlists/:id/items`. A track already in the playlist is not added again
@@ -100,13 +97,6 @@ pub struct AddItemsResponse {
     pub duplicates: i64,
     pub rejected: Vec<Uuid>,
     pub updated: Vec<Uuid>,
-}
-
-/// Body of `POST /playlists/:id/items/:itemId/move` (per-item patch contract).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MoveItemBody {
-    pub after_item_id: Option<Uuid>,
 }
 
 /// Answer of `POST /playlists/:id/items/:itemId/move`.
@@ -133,41 +123,6 @@ pub struct PlaylistListEntry {
     pub summary: PlaylistSummary,
     #[serde(default)]
     pub items: Vec<PlaylistItem>,
-}
-
-/// Wire fixtures for playlist-related API captures.
-impl PlaylistSummary {
-    pub fn playlist_detached_owner() -> Self {
-        Self {
-            id: Uuid::nil(),
-            name: "Road trip".into(),
-            owner_id: Uuid::nil(),
-            is_public: false,
-            is_hidden: false,
-            item_count: 2,
-            track_count: 2,
-            is_playlist_visible: true,
-            create_time: 1_700_000_000,
-            update_time: 1_700_000_120,
-            reverse_order: false,
-        }
-    }
-
-    pub fn playlist_hidden_owner() -> Self {
-        Self {
-            id: Uuid::nil(),
-            name: "Road trip".into(),
-            owner_id: Uuid::nil(),
-            is_public: false,
-            is_hidden: true,
-            item_count: 2,
-            track_count: 2,
-            is_playlist_visible: true,
-            create_time: 1_700_000_000,
-            update_time: 1_700_000_120,
-            reverse_order: false,
-        }
-    }
 }
 
 /// Create/parse payload consumed by API playlist fixtures.

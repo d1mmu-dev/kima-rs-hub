@@ -459,6 +459,56 @@ fixture_test!(
     }
 );
 
+fixture_test!(concurrent_missing_song_rolls_back_update, |server, pool| {
+    let before = rows(&pool, &PRIVATE_MIX.to_string()).await;
+    // Pause the request after its presence check and before its second add check.
+    sqlx::query("CREATE FUNCTION pause_playlist_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(71317); RETURN OLD; END $$")
+        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER pause_delete BEFORE DELETE ON playlist_items FOR EACH ROW EXECUTE FUNCTION pause_playlist_delete()")
+        .execute(&pool).await.unwrap();
+    let mut gate = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(71317)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let request = update(
+        &PRIVATE_MIX.to_string(),
+        vec![
+            ("name", "Must Roll Back".into()),
+            ("public", "true".into()),
+            ("songIndexToRemove", "0".into()),
+            ("songIdToAdd", tid(3)),
+        ],
+    );
+    let (result, ()) = tokio::join!(call(&server, "updatePlaylist", &request), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event = 'advisory' AND query ILIKE '%DELETE FROM playlist_items%' AND pid <> pg_backend_pid())")
+                    .fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.expect("request reached delete after validation");
+        sqlx::query("UPDATE tracks SET missing_since = now() WHERE id = $1")
+            .bind(track_id(3))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_unlock(71317)")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+    });
+    failed(&result, 70);
+    let playlist = kima_db::playlists::find(&pool, PRIVATE_MIX)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(playlist.name, "Private Mix");
+    assert!(!playlist.is_public);
+    assert_eq!(rows(&pool, &PRIVATE_MIX.to_string()).await, before);
+});
+
 #[sqlx::test(
     migrator = "kima_db::MIGRATOR",
     fixtures(path = "fixtures", scripts("subsonic"))

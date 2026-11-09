@@ -86,7 +86,9 @@ const ALBUM_SELECT: &str =
     LEFT JOIN ratings r ON r.user_id = $1 AND r.album_id = al.id";
 const ALBUM_GROUP: &str = "GROUP BY al.id, ar.id, s.starred_at, r.rating";
 
-const SONG_SELECT: &str = "SELECT t.id, COALESCE(NULLIF(t.display_title, ''), t.title) AS title, t.display_title, t.artist_name AS artist_name, t.duration_secs, t.disc, t.track_no,
+const SONG_SELECT: &str = "SELECT t.id, COALESCE(NULLIF(t.display_title, ''), t.title) AS title, t.display_title,
+        CASE WHEN t.artist_name = ar.name THEN COALESCE(NULLIF(ar.display_name, ''), ar.name)
+             ELSE t.artist_name END AS artist_name, t.duration_secs, t.disc, t.track_no,
         t.codec, t.bitrate, t.year, al.id AS album_id, COALESCE(NULLIF(al.display_title, ''), al.title) AS album_title, al.year AS album_year,
         ar.id AS album_artist_id, COALESCE(NULLIF(ar.display_name, ''), ar.name) AS album_artist_name, t.recording_mbid, t.isrc,
         t.path, t.size, t.created_at, s.starred_at, r.rating,
@@ -437,8 +439,9 @@ pub async fn top_tracks(
         "{SONG_SELECT} LEFT JOIN (SELECT track_id, count(*) AS plays FROM plays GROUP BY track_id) pc
          ON pc.track_id = t.id WHERE t.missing_since IS NULL AND "
     );
-    let exact =
-        format!("{base} (lower(ar.name) = lower($2) OR lower(t.artist_name) = lower($2)) {tail}");
+    let exact = format!(
+        "{base} (lower(ar.name) = lower($2) OR lower(COALESCE(NULLIF(ar.display_name, ''), ar.name)) = lower($2) OR lower(t.artist_name) = lower($2)) {tail}"
+    );
     let songs: Vec<SongItem> = sqlx::query_as(&exact)
         .bind(user)
         .bind(artist)
@@ -448,7 +451,9 @@ pub async fn top_tracks(
     if !songs.is_empty() {
         return Ok(songs);
     }
-    let fuzzy = format!("{base} (ar.name ILIKE $2 OR t.artist_name ILIKE $2) {tail}");
+    let fuzzy = format!(
+        "{base} (ar.name ILIKE $2 OR COALESCE(NULLIF(ar.display_name, ''), ar.name) ILIKE $2 OR t.artist_name ILIKE $2) {tail}"
+    );
     sqlx::query_as(&fuzzy)
         .bind(user)
         .bind(crate::browse::like_pattern(artist))

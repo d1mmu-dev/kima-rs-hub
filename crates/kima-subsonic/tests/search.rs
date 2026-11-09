@@ -683,6 +683,24 @@ fixture_test!(
     }
 );
 
+fixture_test!(top_songs_accepts_edited_artist_name, |server, pool| {
+    sqlx::query("UPDATE artists SET display_name = 'Shown Beatles' WHERE id = $1")
+        .bind(artist_id(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let exact = alice(&server, "getTopSongs", &[("artist", "Shown Beatles")]).await;
+    assert_eq!(
+        ids(&exact["topSongs"]["song"]),
+        track_ids(&[1, 6, 8, 7, 9, 5, 3, 4, 2])
+    );
+    let fuzzy = alice(&server, "getTopSongs", &[("artist", "shown beat")]).await;
+    assert_eq!(
+        ids(&fuzzy["topSongs"]["song"]),
+        track_ids(&[1, 6, 8, 7, 9, 5, 3, 4, 2])
+    );
+});
+
 fixture_test!(top_songs_unknown_artist_empty, |server, _pool| {
     let res = alice(&server, "getTopSongs", &[("artist", "Nobody At All")]).await;
     assert_eq!(res["status"], "ok");

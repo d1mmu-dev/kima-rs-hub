@@ -779,7 +779,16 @@ fixture_test!(edited_names_reach_subsonic_views, |server, pool| {
     .await;
     assert_eq!(res["directory"]["name"], "Shown Album");
     assert_eq!(res["directory"]["child"][0]["title"], "Shown Song");
-    assert_eq!(res["directory"]["child"][0]["artist"], "The Beatles");
+    assert_eq!(res["directory"]["child"][0]["artist"], "Shown Artist");
+    let song = alice(&server, "getSong", &[("id", &track_id(1).to_string())]).await;
+    assert_eq!(song["song"]["artist"], "Shown Artist");
+    let playlist = alice(
+        &server,
+        "getPlaylist",
+        &[("id", &fixture_id(5, 1).to_string())],
+    )
+    .await;
+    assert_eq!(playlist["playlist"]["entry"][0]["artist"], "Shown Artist");
 
     let res = alice(&server, "getArtist", &[("id", &(artist_id(1)).to_string())]).await;
     assert_eq!(res["artist"]["name"], "Shown Artist", "artist name");
@@ -841,6 +850,20 @@ fixture_test!(
         res.assert_status_ok();
         let song = alice(&server, "getSong", &[("id", &track)]).await;
         assert_ne!(song["song"]["title"], "Editor song", "{song}");
+    }
+);
+
+fixture_test!(
+    compilation_song_keeps_track_artist_after_album_artist_edit,
+    |server, pool| {
+        sqlx::query("UPDATE artists SET display_name = 'Shown Various' WHERE id = $1")
+            .bind(artist_id(3))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let song = alice(&server, "getSong", &[("id", &track_id(13).to_string())]).await;
+        assert_eq!(song["song"]["artist"], "Kesha");
+        assert_eq!(song["song"]["artistId"], artist_id(3).to_string());
     }
 );
 

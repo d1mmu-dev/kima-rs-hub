@@ -265,7 +265,9 @@ pub async fn subsonic_create(
         .bind(name)
         .execute(&mut *tx)
         .await?;
-    add_locked(&mut tx, id, tracks).await?;
+    if !add_locked(&mut tx, id, tracks).await?.rejected.is_empty() {
+        return Ok(false);
+    }
     tx.commit().await?;
     Ok(true)
 }
@@ -305,7 +307,13 @@ pub async fn subsonic_edit(
                 .bind(playlist)
                 .execute(&mut *tx)
                 .await?;
-            add_locked(&mut tx, playlist, &wanted).await?;
+            if !add_locked(&mut tx, playlist, &wanted)
+                .await?
+                .rejected
+                .is_empty()
+            {
+                return Ok(SubsonicWrite::UnknownSong);
+            }
             if wanted.is_empty() {
                 touch(&mut tx, playlist).await?;
             }
@@ -316,6 +324,9 @@ pub async fn subsonic_edit(
     } else {
         let removed = remove_locked(&mut tx, playlist, remove).await?;
         let added = add_locked(&mut tx, playlist, add).await?;
+        if !added.rejected.is_empty() {
+            return Ok(SubsonicWrite::UnknownSong);
+        }
         removed > 0 || added.added > 0
     };
     let metadata = sqlx::query(

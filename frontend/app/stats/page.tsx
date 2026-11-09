@@ -320,9 +320,9 @@ function Overview({
                     hours of music{window ? ` ${window}` : ""}
                 </h1>
 
-                {/* The hours are an estimate and say so; these four counts are exact.
-                    Under 480px four columns cannot hold their labels, so phones get two. */}
-                <dl className="grid grid-cols-2 min-[480px]:grid-cols-4 gap-x-4 gap-y-6 sm:gap-x-8 lg:max-w-[42rem]">
+                {/* The hours are an estimate and say so; these four counts are exact. The columns follow the
+                    room this block has, not the screen: open sidebars can leave it narrow on a wide one. */}
+                <dl className="grid grid-cols-2 min-[480px]:grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-x-4 gap-y-6 sm:gap-x-8 lg:max-w-[42rem]">
                     <Reading value={listening.plays.toLocaleString()} label="plays" />
                     <Reading value={listening.distinctArtists.toLocaleString()} label="artists" />
                     <Reading value={listening.distinctAlbums.toLocaleString()} label="albums" />
@@ -489,8 +489,7 @@ function Frame({
 }) {
     return (
         <div className="page-shell relative flex h-full flex-col pt-6 pb-[var(--stats-under)] compact:pt-1">
-            <div className="compact:hidden flex flex-wrap items-baseline justify-between gap-x-6 gap-y-2 pb-3">
-                <p className="t-eyebrow">your listening</p>
+            <div className="compact:hidden flex flex-wrap items-baseline gap-x-6 gap-y-2 pb-3">
                 <div className="flex items-baseline gap-4">{controls}</div>
             </div>
             {status}

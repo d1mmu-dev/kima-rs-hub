@@ -64,6 +64,36 @@ fn playlist_shapes_round_trip() {
     assert!(detail.summary.playlist.reverse_order);
     assert_eq!(detail.items[0].sort, 1);
     assert_eq!(detail.items[0].track.id, detail.items[0].track_id);
+    // Captured in one run: dynamic UUIDs vary across runs, but must join up.
+    assert_eq!(created.id, detail.summary.playlist.id);
+    assert_eq!(created.user_id, detail.summary.playlist.user_id);
+    assert!(!created.reverse_order);
+    assert_eq!(detail.summary.playlist.created_at, created.created_at);
+    let updated: Playlist =
+        serde_json::from_str(include_str!("fixtures/playlist_update_response.json")).unwrap();
+    assert_eq!(updated.id, created.id);
+    assert_eq!(updated.user_id, created.user_id);
+    assert!(updated.reverse_order);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].summary.playlist.id, created.id);
+    assert_eq!(list[0].summary.playlist.user_id, created.user_id);
+    assert_eq!(
+        list[0].summary.playlist.reverse_order,
+        updated.reverse_order
+    );
+    assert_eq!(list[0].summary.playlist.updated_at, updated.updated_at);
+    assert_eq!(detail.summary.playlist.updated_at, updated.updated_at);
+    assert_eq!(detail.items, detail.merged_items);
+    for item in &detail.items {
+        assert_eq!(item.playlist_id, created.id);
+        assert_eq!(item.track_id, item.track.id);
+        assert!(
+            list[0]
+                .items
+                .iter()
+                .any(|preview| preview.id == item.id && preview.track.id == item.track_id)
+        );
+    }
     let added: AddItemsResponse = round_trip(
         "add",
         include_str!("fixtures/playlist_add_items_response.json"),
@@ -163,5 +193,14 @@ fn captured_sync_routes_have_the_expected_wire_contract() {
     assert_eq!(removals, json!({"count":0, "removals":[]}));
     let rerun: Value =
         serde_json::from_str(include_str!("fixtures/enrichment_rerun_response.json")).unwrap();
-    assert!(rerun.is_object());
+    assert_eq!(
+        rerun,
+        json!({
+            "artists": 3,
+            "tracks": 0,
+            "vectors": 0,
+            "message": "Re-running from identification"
+        }),
+        "identification reset on this fresh captured library changed its wire contract"
+    );
 }

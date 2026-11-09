@@ -17,9 +17,12 @@ container_name="msync18-capture-${run}"
 tmp="$(mktemp -d "${TMPDIR:-$HOME/.hermes/cache/scratch}/msync18-capture.XXXXXXXX")"
 server_pid=''
 cleanup() {
-  # Remove the isolated DB first even if the server takes time to stop.
+  # The server must release all database connections before its DB disappears.
+  if [[ -n "$server_pid" ]]; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
   docker rm -f -v "$container_name" >/dev/null 2>&1 || true
-  [[ -z "$server_pid" ]] || kill "$server_pid" 2>/dev/null || true
   rm -rf "$tmp"
 }
 trap cleanup EXIT

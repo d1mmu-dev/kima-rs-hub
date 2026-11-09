@@ -271,7 +271,7 @@ async fn item_ids(e: &Env, id: &str) -> Vec<String> {
 
 async fn mv(e: &Env, id: &str, item: &str, after: Option<&str>) -> axum_test::TestResponse {
     e.server
-        .patch(&format!("/api/playlists/{id}/items/{item}/move"))
+        .post(&format!("/api/playlists/{id}/items/{item}/move"))
         .authorization_bearer(&e.ana)
         .json(&json!({ "afterItemId": after }))
         .await
@@ -332,6 +332,47 @@ async fn move_reorders(pool: PgPool) {
         .map(|i| i["sort"].as_i64().unwrap())
         .collect();
     assert_eq!(sorts, [0, 1, 2]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn move_item_uses_post(pool: PgPool) {
+    let t = tracks(&pool, 2).await;
+    let e = env(pool).await;
+    let id = create(&e, &e.ana, "Move", false).await;
+    add(&e, &e.ana, &id, json!({ "trackIds": t }))
+        .await
+        .assert_status_ok();
+    let ids = item_ids(&e, &id).await;
+
+    // Old PATCH route is gone: 405 Method Not Allowed.
+    e.server
+        .patch(&format!("/api/playlists/{id}/items/{}/move", ids[0]))
+        .authorization_bearer(&e.ana)
+        .json(&json!({ "afterItemId": null }))
+        .await
+        .assert_status(StatusCode::METHOD_NOT_ALLOWED);
+
+    // POST move: last item to the front (null anchor) — 200 with updated rank.
+    let res = e
+        .server
+        .post(&format!("/api/playlists/{id}/items/{}/move", ids[1]))
+        .authorization_bearer(&e.ana)
+        .json(&json!({ "afterItemId": null }))
+        .await;
+    res.assert_status_ok();
+    let v: Value = res.json();
+    assert_eq!(v["success"], true);
+    assert!(v["rank"].is_string());
+    assert_eq!(titles(&detail(&e, &e.ana, &id).await), ["Song 1", "Song 0"]);
+
+    // Dense order preserved after a move to an anchor.
+    e.server
+        .post(&format!("/api/playlists/{id}/items/{}/move", ids[1]))
+        .authorization_bearer(&e.ana)
+        .json(&json!({ "afterItemId": ids[0] }))
+        .await
+        .assert_status_ok();
+    assert_eq!(titles(&detail(&e, &e.ana, &id).await), ["Song 0", "Song 1"]);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -468,7 +509,7 @@ async fn public_playlist_readable_not_writable(pool: PgPool) {
         .assert_status(StatusCode::FORBIDDEN);
     let res = e
         .server
-        .patch(&format!("{url}/items/{}/move", Uuid::now_v7()))
+        .post(&format!("{url}/items/{}/move", Uuid::now_v7()))
         .authorization_bearer(&e.ben)
         .json(&json!({ "afterItemId": null }))
         .await;

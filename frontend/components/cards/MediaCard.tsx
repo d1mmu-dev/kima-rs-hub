@@ -40,6 +40,7 @@ interface MediaCardProps {
     action?: MediaCardAction;
     /** One of the five mood keys; marks the card's meta with a dot in its map colour. */
     moodKey?: string | null;
+    /** Local library organizer keeps the explicit delete control. */
     onDelete?: () => void;
     className?: string;
 }
@@ -52,7 +53,12 @@ function stop(handler: () => void) {
     };
 }
 
-function Cover({
+/**
+ * A card's artwork: one cover, or for a list of covers (a mix, a playlist) each different cover once, the tile fitted
+ * to how many there are: two side by side, three as one tall and two small, four in a 2x2 grid. The sidebar's mix
+ * tiles and the mix and playlist pages draw the same one, so a mix looks the same wherever it is.
+ */
+export function CoverArt({
     imageUrl,
     title,
     sizes,
@@ -63,37 +69,53 @@ function Cover({
     sizes: string;
     FallbackIcon: LucideIcon;
 }) {
-    const [broken, setBroken] = useState(false);
-    const urls = (Array.isArray(imageUrl) ? imageUrl : [imageUrl]).filter(
-        (url): url is string => !!url,
-    );
+    // A cover that fails to load drops out and the tile refits; with none left, the icon. Remembered by address, so
+    // another mix's covers start fresh.
+    const [failed, setFailed] = useState<ReadonlySet<string>>(new Set());
+    const fail = (url: string) => setFailed((prev) => new Set(prev).add(url));
+    const urls = [
+        ...new Set((Array.isArray(imageUrl) ? imageUrl : [imageUrl]).filter((url): url is string => !!url)),
+    ]
+        .filter((url) => !failed.has(url))
+        .slice(0, 4);
 
-    if (urls.length === 0 || broken) {
+    if (urls.length === 0) {
         return <FallbackIcon className="w-10 h-10 text-[var(--text-muted)]" />;
     }
 
     if (urls.length === 1) {
         return (
             <CachedImage
+                key={urls[0]}
                 src={urls[0]}
                 alt={title}
                 fill
                 sizes={sizes}
                 className="object-cover cover-zoom"
-                onError={() => setBroken(true)}
+                onError={() => fail(urls[0])}
             />
         );
     }
 
     return (
-        <div className="grid grid-cols-2 w-full h-full cover-zoom">
-            {Array.from({ length: 4 }, (_, i) => (
-                <div key={i} className="relative flex items-center justify-center">
-                    {urls[i] ? (
-                        <CachedImage src={urls[i]} alt="" fill sizes="100px" className="object-cover" />
-                    ) : (
-                        <FallbackIcon className="w-6 h-6 text-[var(--text-muted)]" />
-                    )}
+        <div
+            data-cover-count={urls.length}
+            className={cn("grid grid-cols-2 w-full h-full cover-zoom", urls.length > 2 && "grid-rows-2")}
+        >
+            {urls.map((url, i) => (
+                <div
+                    key={url}
+                    data-cover-cell
+                    className={cn("relative bg-[#181818]", urls.length === 3 && i === 0 && "row-span-2")}
+                >
+                    <CachedImage
+                        src={url}
+                        alt=""
+                        fill
+                        sizes={urls.length === 2 || (urls.length === 3 && i === 0) ? sizes : "100px"}
+                        className="object-cover"
+                        onError={() => fail(url)}
+                    />
                 </div>
             ))}
         </div>
@@ -109,7 +131,8 @@ export const MediaCard = memo(function MediaCard({
     type,
     aspect = "square",
     index = 0,
-    sizes = "(max-width: 640px) 50vw, (max-width: 1024px) 25vw, 16vw",
+    // A card is half a phone screen, and 180-225 px from a tablet up (.grid-media and the shelves).
+    sizes = "(max-width: 767px) 50vw, 225px",
     badge,
     corner,
     progress,
@@ -132,7 +155,7 @@ export const MediaCard = memo(function MediaCard({
                     aspect === "portrait" ? "aspect-[2/3]" : "aspect-square",
                 )}
             >
-                <Cover key={String(imageUrl)} imageUrl={imageUrl} title={title} sizes={sizes} FallbackIcon={fallbackIcon} />
+                <CoverArt key={String(imageUrl)} imageUrl={imageUrl} title={title} sizes={sizes} FallbackIcon={fallbackIcon} />
 
                 {badge && <div className="absolute top-2 left-2">{badge}</div>}
                 {corner && <div className="absolute top-2 right-2">{corner}</div>}
@@ -164,15 +187,10 @@ export const MediaCard = memo(function MediaCard({
                         </button>
                     </>
                 )}
-
                 {onDelete && (
-                    <button
-                        type="button"
-                        onClick={stop(onDelete)}
-                        aria-label={`Delete ${title}`}
+                    <button type="button" onClick={stop(onDelete)} aria-label={`Delete ${title}`}
                         title={`Delete ${title}`.toLowerCase()}
-                        className="absolute top-2 right-2 w-8 h-8 rounded-full bg-black/80 border border-white/20 hidden md:flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-danger/90 transition-opacity duration-150"
-                    >
+                        className="absolute top-2 right-2 w-8 h-8 rounded-full bg-black/80 border border-white/20 hidden md:flex items-center justify-center opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-danger/90 transition-opacity duration-150">
                         <Trash2 className="w-4 h-4 text-white" />
                     </button>
                 )}

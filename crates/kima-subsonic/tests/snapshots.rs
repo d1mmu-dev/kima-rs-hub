@@ -1183,7 +1183,6 @@ snap_mut!(playlist_writes_xml, playlist_writes_json, |s| {
             ("songId", &t1),
             ("songId", &t13),
             ("songId", &t1),
-            ("songId", UNKNOWN),
         ]),
         fresh,
     )

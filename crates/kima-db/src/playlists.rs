@@ -226,6 +226,119 @@ async fn touch(tx: &mut Transaction<'_, Postgres>, playlist: Uuid) -> sqlx::Resu
     Ok(())
 }
 
+/// Subsonic writes reject an entire request containing any unknown or missing track.
+async fn all_present(tx: &mut Transaction<'_, Postgres>, tracks: &[Uuid]) -> sqlx::Result<bool> {
+    let requested: HashSet<Uuid> = tracks.iter().copied().collect();
+    let found: HashSet<Uuid> =
+        sqlx::query_scalar("SELECT id FROM tracks WHERE id = ANY($1) AND missing_since IS NULL")
+            .bind(tracks)
+            .fetch_all(&mut **tx)
+            .await?
+            .into_iter()
+            .collect();
+    Ok(requested == found)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SubsonicWrite {
+    MissingPlaylist,
+    UnknownSong,
+    Unchanged,
+    Changed,
+}
+
+/// Creates the playlist and its songs in one commit; false means an unknown song.
+pub async fn subsonic_create(
+    pool: &PgPool,
+    id: Uuid,
+    user: Uuid,
+    name: &str,
+    tracks: &[Uuid],
+) -> sqlx::Result<bool> {
+    let mut tx = pool.begin().await?;
+    if !all_present(&mut tx, tracks).await? {
+        return Ok(false);
+    }
+    sqlx::query("INSERT INTO playlists (id, user_id, name, is_public) VALUES ($1, $2, $3, false)")
+        .bind(id)
+        .bind(user)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    add_locked(&mut tx, id, tracks).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Serializes metadata and items on the playlist row; identical replacement retains item IDs.
+pub async fn subsonic_edit(
+    pool: &PgPool,
+    playlist: Uuid,
+    name: Option<&str>,
+    public: Option<bool>,
+    replace: Option<&[Uuid]>,
+    remove: &[usize],
+    add: &[Uuid],
+) -> sqlx::Result<SubsonicWrite> {
+    let mut tx = pool.begin().await?;
+    if !lock(&mut tx, playlist).await? {
+        return Ok(SubsonicWrite::MissingPlaylist);
+    }
+    if !all_present(&mut tx, replace.unwrap_or(add)).await? {
+        return Ok(SubsonicWrite::UnknownSong);
+    }
+    let changed = if let Some(tracks) = replace {
+        let mut seen = HashSet::new();
+        let wanted: Vec<Uuid> = tracks
+            .iter()
+            .copied()
+            .filter(|id| seen.insert(*id))
+            .collect();
+        let current: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT track_id FROM playlist_items WHERE playlist_id = $1 ORDER BY sort, id",
+        )
+        .bind(playlist)
+        .fetch_all(&mut *tx)
+        .await?;
+        if current != wanted {
+            sqlx::query("DELETE FROM playlist_items WHERE playlist_id = $1")
+                .bind(playlist)
+                .execute(&mut *tx)
+                .await?;
+            add_locked(&mut tx, playlist, &wanted).await?;
+            if wanted.is_empty() {
+                touch(&mut tx, playlist).await?;
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        let removed = remove_locked(&mut tx, playlist, remove).await?;
+        let added = add_locked(&mut tx, playlist, add).await?;
+        removed > 0 || added.added > 0
+    };
+    let metadata = sqlx::query(
+        "UPDATE playlists SET name = COALESCE($2, name), is_public = COALESCE($3, is_public),
+             updated_at = now() WHERE id = $1 AND
+             (($2::text IS NOT NULL AND name IS DISTINCT FROM $2) OR
+              ($3::bool IS NOT NULL AND is_public IS DISTINCT FROM $3))",
+    )
+    .bind(playlist)
+    .bind(name)
+    .bind(public)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    tx.commit().await?;
+    Ok(if changed || metadata {
+        SubsonicWrite::Changed
+    } else {
+        SubsonicWrite::Unchanged
+    })
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AddResult {
     pub added: usize,

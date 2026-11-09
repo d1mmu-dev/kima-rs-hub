@@ -3,8 +3,10 @@
 
 use axum::Router;
 use axum::extract::State;
-use kima_db::playlists::{self, Playlist, PlaylistSummary};
+use kima_core::events::Event;
+use kima_db::playlists::{self, Playlist, PlaylistSummary, SubsonicWrite};
 use kima_db::subsonic;
+use serde_json::json;
 use uuid::Uuid;
 
 use super::add;
@@ -102,13 +104,29 @@ async fn get_playlist(
     full(&ctx, &user, id).await
 }
 
-/// The valid song ids of a repeated parameter, in order. Anything that is not an id is skipped.
-fn song_ids(params: &Params, key: &str) -> Vec<Uuid> {
+/// Every supplied song id must parse; missing library songs are checked inside the DB transaction.
+fn song_ids(params: &Params, key: &str) -> Result<Vec<Uuid>, SubsonicError> {
     params
         .all(key)
         .iter()
-        .filter_map(|raw| ids::parse(raw, &[]))
+        .map(|raw| ids::parse(raw, &[]).ok_or_else(|| SubsonicError::not_found("Song not found")))
         .collect()
+}
+
+fn announce(ctx: &SubsonicCtx, who: Uuid, playlist: Uuid, deleted: bool) {
+    ctx.app.events.publish(Event {
+        user_id: Some(who),
+        data: json!({"type": "playlist:updated", "playlistId": playlist, "deleted": deleted}),
+    });
+}
+
+fn write_result(result: SubsonicWrite) -> Result<bool, SubsonicError> {
+    match result {
+        SubsonicWrite::MissingPlaylist => Err(not_found()),
+        SubsonicWrite::UnknownSong => Err(SubsonicError::not_found("Song not found")),
+        SubsonicWrite::Unchanged => Ok(false),
+        SubsonicWrite::Changed => Ok(true),
+    }
 }
 
 async fn create_playlist(
@@ -117,17 +135,24 @@ async fn create_playlist(
     params: Params,
 ) -> Result<Answer, SubsonicError> {
     let pool = &ctx.app.pool;
-    let songs = song_ids(&params, "songId");
     let id = if let Some(raw) = params.get("playlistId").filter(|p| !p.is_empty()) {
         let playlist = owned(&ctx, &user, raw).await?;
-        playlists::replace_items(pool, playlist.id, &songs)
-            .await?
-            .ok_or_else(not_found)?;
+        let songs = song_ids(&params, "songId")?;
+        let changed = write_result(
+            playlists::subsonic_edit(pool, playlist.id, None, None, Some(&songs), &[], &[]).await?,
+        )?;
+        if changed {
+            announce(&ctx, user.user.id, playlist.id, false);
+        }
         playlist.id
     } else if let Some(name) = params.get("name").filter(|n| !n.is_empty()) {
-        let playlist = playlists::create(pool, Uuid::now_v7(), user.user.id, name, false).await?;
-        playlists::add_tracks(pool, playlist.id, &songs).await?;
-        playlist.id
+        let songs = song_ids(&params, "songId")?;
+        let id = Uuid::now_v7();
+        if !playlists::subsonic_create(pool, id, user.user.id, name, &songs).await? {
+            return Err(SubsonicError::not_found("Song not found"));
+        }
+        announce(&ctx, user.user.id, id, false);
+        id
     } else {
         return Err(SubsonicError::new(
             10,
@@ -152,18 +177,12 @@ async fn update_playlist(
         .iter()
         .filter_map(|v| v.trim().parse::<usize>().ok())
         .collect();
-    let add = song_ids(&params, "songIdToAdd");
-
-    if name.is_some() || public.is_some() {
-        playlists::update(pool, playlist.id, name, public, None)
-            .await?
-            .ok_or_else(not_found)?;
-    }
-    // The removals and the adds land together or not at all, as upstream's one transaction.
-    if !remove.is_empty() || !add.is_empty() {
-        playlists::edit_items(pool, playlist.id, &remove, &add)
-            .await?
-            .ok_or_else(not_found)?;
+    let add = song_ids(&params, "songIdToAdd")?;
+    let changed = write_result(
+        playlists::subsonic_edit(pool, playlist.id, name, public, None, &remove, &add).await?,
+    )?;
+    if changed {
+        announce(&ctx, user.user.id, playlist.id, false);
     }
     Ok(Answer::ok())
 }
@@ -174,6 +193,8 @@ async fn delete_playlist(
     params: Params,
 ) -> Result<Answer, SubsonicError> {
     let playlist = owned(&ctx, &user, params.required("id")?).await?;
-    playlists::delete(&ctx.app.pool, playlist.id).await?;
+    if playlists::delete(&ctx.app.pool, playlist.id).await? {
+        announce(&ctx, user.user.id, playlist.id, true);
+    }
     Ok(Answer::ok())
 }

@@ -1242,6 +1242,23 @@ pub async fn reconcile_cancellable(
     ctx: &LibraryCtx,
     cancel: &CancellationToken,
 ) -> Result<ScanReport, ScanError> {
+    reconcile_with(ctx, cancel, false).await
+}
+
+/// Re-reads every present file through the same album-artist election as a normal scan.
+/// The library queue serializes this with other library writers.
+pub async fn refile_cancellable(
+    ctx: &LibraryCtx,
+    cancel: &CancellationToken,
+) -> Result<ScanReport, ScanError> {
+    reconcile_with(ctx, cancel, true).await
+}
+
+async fn reconcile_with(
+    ctx: &LibraryCtx,
+    cancel: &CancellationToken,
+    force: bool,
+) -> Result<ScanReport, ScanError> {
     let check = || {
         if cancel.is_cancelled() {
             Err(ScanError::Cancelled)
@@ -1280,7 +1297,7 @@ pub async fn reconcile_cancellable(
     let mut settled: HashMap<&str, Vec<&IndexedTrack>> = HashMap::new();
     for f in &walked.files {
         match index.get(&f.rel) {
-            Some(row) if row.size == f.size && row.mtime == f.mtime => {
+            Some(row) if !force && row.size == f.size && row.mtime == f.mtime => {
                 if row.missing {
                     restore.push(f.rel.clone());
                 } else {

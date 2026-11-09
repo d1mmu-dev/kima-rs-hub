@@ -1,6 +1,7 @@
 //! `POST /api/library/scan` (admin) and `GET /api/library/scan/status/:jobId`.
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kima_db::browse;
@@ -14,6 +15,7 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/library/scan", post(start))
+        .route("/library/refile", post(refile))
         .route("/library/scan/status/{job_id}", get(status))
 }
 
@@ -25,6 +27,22 @@ async fn start(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<
         "jobId": job_id,
         "musicPath": state.library_root().map(|p| p.display().to_string()),
     })))
+}
+
+/// Queue a forced full re-read, rejecting concurrent queued or running re-files.
+async fn refile(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    if !kima_library::jobs::request_refile(&state.pool).await? {
+        return Err(ApiError::Conflict(
+            "Albums are already being re-filed (queued or running)",
+        ));
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"message": "Re-filing albums by their tags"})),
+    ))
 }
 
 /// `{status, progress, result}` with the status names the frontend polls for:

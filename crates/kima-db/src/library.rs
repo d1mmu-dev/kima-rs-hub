@@ -453,10 +453,16 @@ pub async fn mark_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> 
 }
 
 /// [`mark_missing`] on a connection, so it can share a transaction.
+/// Lock by id before updating: an unordered multi-row UPDATE can lock B then A while
+/// a playlist's `add_locked` holds A then waits for B, deadlocking the request.
 pub async fn mark_missing_in(conn: &mut PgConnection, paths: &[String]) -> sqlx::Result<u64> {
     let r = sqlx::query!(
-        "UPDATE tracks SET missing_since = now()
-         WHERE path = ANY($1) AND missing_since IS NULL",
+        "WITH locked AS MATERIALIZED (
+             SELECT id FROM tracks WHERE path = ANY($1) AND missing_since IS NULL
+             ORDER BY id FOR NO KEY UPDATE
+         )
+         UPDATE tracks t SET missing_since = now()
+         FROM locked WHERE t.id = locked.id",
         paths
     )
     .execute(conn)

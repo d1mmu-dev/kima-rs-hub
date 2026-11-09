@@ -299,6 +299,25 @@ fixture_test!(get_private_of_other_70, |server, pool| {
     assert_eq!(entry_ids(&res), [tid(1), tid(10), tid(13)]);
 });
 
+fixture_test!(create_reply_matches_get_playlist, |server, _pool| {
+    for params in [
+        vec![
+            ("name", "Full".to_owned()),
+            ("songId", tid(5)),
+            ("songId", tid(1)),
+        ],
+        vec![("name", "Empty".to_owned())],
+        vec![("playlistId", ROAD_TRIP.to_string()), ("songId", tid(4))],
+    ] {
+        let created = call(&server, "createPlaylist", &params).await;
+        ok(&created);
+        let id = created["playlist"]["id"].as_str().unwrap();
+        let fetched = call(&server, "getPlaylist", &[("id", id.to_owned())]).await;
+        ok(&fetched);
+        assert_eq!(created["playlist"], fetched["playlist"]);
+    }
+});
+
 fixture_test!(create_with_name_private_full_answer, |server, pool| {
     let res = call(
         &server,

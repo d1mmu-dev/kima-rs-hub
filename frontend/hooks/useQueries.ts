@@ -54,10 +54,17 @@ export const queryKeys = {
     audiobooks: () => ["audiobooks"] as const,
     audiobook: (id: string) => ["audiobook", id] as const,
 
-    podcasts: () => ["podcasts"] as const,
-    podcast: (id: string) => ["podcast", id] as const,
     topPodcasts: (limit?: number, genreId?: number) =>
         ["podcasts", "top", limit, genreId] as const,
+    podcasts: () => ["podcasts"] as const,
+    podcast: (id: string) => ["podcast", id] as const,
+    podcastEpisodes: (id: string, order: string) => ["podcast", id, order] as const,
+    podcastsListening: () => ["podcasts", "listening"] as const,
+    podcastsForYou: () => ["podcasts", "for-you"] as const,
+    podcastCategories: () => ["podcasts", "categories"] as const,
+    podcastChart: (category: number | null, limit: number) => ["podcasts", "chart", category ?? "all", limit] as const,
+    podcastChartPages: (category: number | null) => ["podcasts", "chart", category ?? "all", "paged"] as const,
+
 
     // Browse (Deezer playlists)
     browseAll: () => ["browse", "all"] as const,
@@ -181,6 +188,11 @@ export function useRecommendationsQuery(limit: number = 10, enabled: boolean = t
     });
 }
 
+export function refreshFollowedShows(queryClient: QueryClient) {
+    queryClient.invalidateQueries({ queryKey: queryKeys.podcasts() });
+    queryClient.invalidateQueries({ queryKey: ["search"] });
+}
+
 export function useSearchQuery(
     query: string,
     type:
@@ -189,13 +201,15 @@ export function useSearchQuery(
         | "albums"
         | "tracks"
         | "audiobooks"
-        | "podcasts" = "all",
+        | "podcasts"
+        | "episodes" = "all",
     limit: number = 20,
+    enabled = true,
 ) {
     return useQuery({
         queryKey: queryKeys.search(query, type, limit),
         queryFn: ({ signal }) => api.search(query, type, limit, signal),
-        enabled: query.length >= 2, // Only search if query is at least 2 characters
+        enabled: enabled && query.length >= 2,
         staleTime: 5 * 60 * 1000, // 5 minutes
     });
 }
@@ -204,11 +218,12 @@ export function useDiscoverSearchQuery(
     query: string,
     type: "music" | "podcasts" | "all" = "music",
     limit: number = 20,
+    enabled = true,
 ) {
     return useQuery({
         queryKey: queryKeys.discoverSearch(query, type, limit),
         queryFn: ({ signal }) => api.discoverSearch(query, type, limit, signal),
-        enabled: query.length >= 2,
+        enabled: enabled && query.length >= 2,
         staleTime: 5 * 60 * 1000, // 5 minutes
     });
 }
@@ -436,8 +451,8 @@ export function useAddToPlaylistMutation() {
             trackIds?: string[];
         }) =>
             trackIds?.length
-                ? api.addTracksToPlaylist(playlistId, trackIds)
-                : api.addTrackToPlaylist(playlistId, trackId!),
+                ? api.addTracksToPlaylist(playlistId, { trackIds })
+                : api.addTrackToPlaylist(playlistId, { trackId: trackId! }),
         onSettled: (_, __, variables) => invalidatePlaylist(queryClient, variables.playlistId),
     });
 }
@@ -508,7 +523,7 @@ export function useMoveTrackInPlaylistMutation() {
             playlistId: string;
             itemId: string;
             afterItemId: string | null;
-        }) => api.moveTrackInPlaylist(playlistId, itemId, afterItemId),
+        }) => api.moveTrackInPlaylist(playlistId, itemId, { afterItemId }),
         onMutate: (variables) =>
             applyOptimisticPlaylistEdit(queryClient, variables.playlistId, (old) => {
                 if (!old || !Array.isArray(old.items)) return old;
@@ -575,3 +590,44 @@ export function useLibraryDecadesQuery() {
         staleTime: 10 * 60 * 1000,
     });
 }
+
+/** Apple's chart for a category, or the overall chart for null. */
+export function usePodcastChartQuery(category: number | null, limit: number, enabled = true, background = false) {
+    return useQuery({
+        queryKey: queryKeys.podcastChart(category, limit),
+        queryFn: () => api.getPodcastChart(category, limit, 0, background),
+        enabled,
+        staleTime: 60 * 60 * 1000,
+    });
+}
+
+/** Episodes in progress across followed shows, and each show's newest unplayed one. */
+export function usePodcastListeningQuery(enabled = true) {
+    return useQuery({
+        queryKey: queryKeys.podcastsListening(),
+        queryFn: () => api.getPodcastListening(),
+        enabled,
+        staleTime: 30 * 1000,
+    });
+}
+
+/** Rows of shows from the categories of the shows this user follows. */
+export function usePodcastsForYouQuery(enabled = true) {
+    return useQuery({
+        queryKey: queryKeys.podcastsForYou(),
+        queryFn: () => api.getPodcastsForYou(),
+        enabled,
+        staleTime: 10 * 60 * 1000,
+    });
+}
+
+/** Apple's podcast categories, as the server names them. */
+export function usePodcastCategoriesQuery(enabled = true) {
+    return useQuery({
+        queryKey: queryKeys.podcastCategories(),
+        queryFn: () => api.getPodcastCategories(),
+        enabled,
+        staleTime: 60 * 60 * 1000,
+    });
+}
+

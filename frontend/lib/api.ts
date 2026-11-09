@@ -1,5 +1,32 @@
+export interface PodcastShowResult {
+    type: "podcast";
+    id: number;
+    name: string;
+    artist?: string;
+    description?: string;
+    coverUrl?: string;
+    feedUrl?: string;
+    genres: string[];
+    categoryIds: number[];
+    trackCount?: number;
+}
+
+/** An episode of a followed show, as /search?type=episodes answers it (backend services/search.ts). */
+export interface EpisodeSearchResult {
+    id: string;
+    title: string;
+    description: string | null;
+    podcastId: string;
+    podcastTitle: string;
+    publishedAt: string;
+    duration: number;
+    audioUrl: string;
+}
+
+import type { DiscoveryPodcast, ForYouRow, ListeningRow, PodcastCategory } from "@/features/podcast/types";
 import type { Capabilities, Album, Review, Run, RunDetail, Search, Apply } from "@/features/autotag/types";
 import type { MapTrack } from "@/features/vibe/types";
+import type { AddPlaylistItemContractingBody, MovePlaylistItemContractingBody } from "@/lib/playlist-contract";
 import type {
     AttentionAlbum,
     OrganizerCapabilities,
@@ -902,38 +929,36 @@ class ApiClient {
         });
     }
 
-    async addTrackToPlaylist(playlistId: string, trackId: string) {
-        return this.request<ApiData>(`/playlists/${encodeURIComponent(playlistId)}/items`, {
-            method: "POST",
-            body: JSON.stringify({ trackId }),
-        });
+    async addTrackToPlaylist(playlistId: string, body: AddPlaylistItemContractingBody) {
+        return this.request<ApiData>(
+            `/playlists/${encodeURIComponent(playlistId)}/items`,
+            { method: "POST", body: JSON.stringify(body) },
+        );
     }
 
     /** Adds many tracks in one request. */
-    async addTracksToPlaylist(playlistId: string, trackIds: string[]) {
+    async addTracksToPlaylist(playlistId: string, body: AddPlaylistItemContractingBody) {
         return this.request<{
             added: number;
             duplicates: number;
             rejected: string[];
         }>(`/playlists/${encodeURIComponent(playlistId)}/items`, {
             method: "POST",
-            body: JSON.stringify({ trackIds }),
+            body: JSON.stringify(body),
         });
     }
 
     async removeTrackFromPlaylist(playlistId: string, trackId: string) {
-        return this.request<void>(`/playlists/${encodeURIComponent(playlistId)}/items/${encodeURIComponent(trackId)}`, {
-            method: "DELETE",
-        });
+        return this.request<void>(
+            `/playlists/${encodeURIComponent(playlistId)}/items/${encodeURIComponent(trackId)}`,
+            { method: "DELETE" },
+        );
     }
 
-    async moveTrackInPlaylist(playlistId: string, itemId: string, afterItemId: string | null) {
+    async moveTrackInPlaylist(playlistId: string, itemId: string, body: MovePlaylistItemContractingBody) {
         return this.request<{ success: boolean; rank: string }>(
             `/playlists/${encodeURIComponent(playlistId)}/items/${encodeURIComponent(itemId)}/move`,
-            {
-                method: "PATCH",
-                body: JSON.stringify({ afterItemId }),
-            }
+            { method: "POST", body: JSON.stringify(body) },
         );
     }
 
@@ -1497,6 +1522,33 @@ class ApiClient {
         );
     }
 
+    async getPodcastCategories() {
+        return this.request<PodcastCategory[]>("/podcasts/categories");
+    }
+
+    /**
+     * Apple's chart for a category, or the overall chart for `null`. `background`: nobody is waiting on it yet, so the
+     * server asks Apple for it after the requests people are.
+     */
+    async getPodcastChart(category: number | null, limit = 24, offset = 0, background = false) {
+        const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+        if (category !== null) params.set("category", String(category));
+        if (background) params.set("background", "true");
+        return this.request<DiscoveryPodcast[]>(`/podcasts/charts?${params}`);
+    }
+
+    async getPodcastsForYou() {
+        return this.request<ForYouRow[]>("/podcasts/for-you");
+    }
+
+    async getPodcastListening() {
+        return this.request<{ inProgress: ListeningRow[]; newEpisodes: ListeningRow[] }>("/podcasts/listening");
+    }
+
+    getPodcastSnippetUrl(itunesId: string): string {
+        return this.tokenizedUrl(`/api/podcasts/preview/${encodeURIComponent(itunesId)}/snippet`);
+    }
+
     async getSimilarPodcasts(podcastId: string) {
         return this.request<ApiData[]>(`/podcasts/${encodeURIComponent(podcastId)}/similar`);
     }
@@ -1604,7 +1656,8 @@ class ApiClient {
             | "albums"
             | "tracks"
             | "audiobooks"
-            | "podcasts" = "all",
+            | "podcasts"
+            | "episodes" = "all",
         limit: number = 20,
         signal?: AbortSignal
     ) {

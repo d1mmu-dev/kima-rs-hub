@@ -3,32 +3,31 @@
     "_count": {
       "items": 2
     },
-    "createdAt": "2026-11-05T09:11:18.775511Z",
-    "id": "01a1aafa-15f6-769f-b93a-6beb9bcd026c",
+    "createdAt": "2026-11-09T14:51:04.150715Z",
+    "id": "01a1c0ca-9454-76b1-b245-819eab6fbb91",
     "isHidden": false,
     "isOwner": true,
     "isPublic": false,
-    "reverseOrder": false,
     "items": [
       {
-        "id": "01a1aafa-1652-7351-9c34-5765dbc6cee6",
+        "id": "01a1c0ca-9481-743f-95cf-fbe309fe9c3b",
         "track": {
           "album": {
             "artist": {
-              "id": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
+              "id": "01a1c0ca-90e2-73c6-a09f-a8adb29049da",
               "mbid": null,
               "name": "Untagged Artist"
             },
-            "artistId": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
-            "coverArt": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
-            "coverUrl": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
-            "id": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+            "artistId": "01a1c0ca-90e2-73c6-a09f-a8adb29049da",
+            "coverArt": "01a1c0ca-90e3-71b8-a152-90f9fa9eb37c",
+            "coverUrl": "01a1c0ca-90e3-71b8-a152-90f9fa9eb37c",
+            "id": "01a1c0ca-90e3-71b8-a152-90f9fa9eb37c",
             "title": "Plain Album",
             "year": 1999
           },
-          "albumId": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+          "albumId": "01a1c0ca-90e3-71b8-a152-90f9fa9eb37c",
           "artist": {
-            "id": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
+            "id": "01a1c0ca-90e2-73c6-a09f-a8adb29049da",
             "name": "Untagged Artist"
           },
           "audioFeatures": null,
@@ -40,7 +39,7 @@
           "displayTrackNo": null,
           "duration": 900,
           "hasUserOverrides": false,
-          "id": "01a1aaf9-552b-7335-859a-30d1397bd4b3",
+          "id": "01a1c0ca-90e4-716d-907b-4d5a12c758ef",
           "isMissing": false,
           "isrc": null,
           "listeners": 0,
@@ -55,24 +54,24 @@
         }
       },
       {
-        "id": "01a1aafa-168c-7087-af16-40164d2f32cc",
+        "id": "01a1c0ca-9481-743f-95cf-fbe422ba0431",
         "track": {
           "album": {
             "artist": {
-              "id": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
+              "id": "01a1c0ca-90e2-73c6-a09f-a8adb29049da",
               "mbid": null,
               "name": "Untagged Artist"
             },
-            "artistId": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
-            "coverArt": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
-            "coverUrl": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
-            "id": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+            "artistId": "01a1c0ca-90e2-73c6-a09f-a8adb29049da",
+            "coverArt": "01a1c0ca-90e3-71b8-a152-90f9fa9eb37c",
+            "coverUrl": "01a1c0ca-90e3-71b8-a152-90f9fa9eb37c",
+            "id": "01a1c0ca-90e3-71b8-a152-90f9fa9eb37c",
             "title": "Plain Album",
             "year": 1999
           },
-          "albumId": "01a1aaf9-5529-703e-abb7-f6a6ad828e9e",
+          "albumId": "01a1c0ca-90e3-71b8-a152-90f9fa9eb37c",
           "artist": {
-            "id": "01a1aaf9-5528-7779-a6c0-c43ad0c6309e",
+            "id": "01a1c0ca-90e2-73c6-a09f-a8adb29049da",
             "name": "Untagged Artist"
           },
           "audioFeatures": null,
@@ -82,9 +81,9 @@
           "discSubtitle": null,
           "displayTitle": null,
           "displayTrackNo": null,
-          "duration": 20,
+          "duration": 6,
           "hasUserOverrides": false,
-          "id": "01a1aaf9-5539-709b-bb58-6e9e8d0f9a0a",
+          "id": "01a1c0ca-90f4-702b-943a-315ff102d0e6",
           "isMissing": false,
           "isrc": null,
           "listeners": 0,
@@ -101,13 +100,14 @@
     ],
     "mixId": null,
     "name": "Road trip",
+    "reverseOrder": true,
     "spotifyPlaylistId": null,
     "spotifyPlaylistUrl": null,
     "trackCount": 2,
-    "updatedAt": "2026-11-05T09:11:18.919346Z",
+    "updatedAt": "2026-11-09T14:51:04.215822Z",
     "user": {
-      "username": "admin"
+      "username": "fixtureadmin"
     },
-    "userId": "01a1aaf9-d461-77bd-9614-d92dbc4cefe8"
+    "userId": "01a1c0ca-8f7d-7473-900a-82f1ec3f6f55"
   }
 ]

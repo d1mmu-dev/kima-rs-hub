@@ -1,12 +1,12 @@
 {
-  "createdAt": "2026-11-05T09:11:18.775511Z",
-  "id": "01a1aafa-15f6-769f-b93a-6beb9bcd026c",
+  "createdAt": "2026-11-09T14:51:04.150715Z",
+  "id": "01a1c0ca-9454-76b1-b245-819eab6fbb91",
   "isPublic": false,
-  "reverseOrder": false,
   "mixId": null,
   "name": "Road trip",
+  "reverseOrder": false,
   "spotifyPlaylistId": null,
   "spotifyPlaylistUrl": null,
-  "updatedAt": "2026-11-05T09:11:18.775511Z",
-  "userId": "01a1aaf9-d461-77bd-9614-d92dbc4cefe8"
+  "updatedAt": "2026-11-09T14:51:04.150715Z",
+  "userId": "01a1c0ca-8f7d-7473-900a-82f1ec3f6f55"
 }

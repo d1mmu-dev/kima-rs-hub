@@ -17,6 +17,30 @@ For fanart, put a throwaway key in place of `<throwaway key>`; the recorder writ
 which is what the hand-written entries use (the tests pass the key `REDACTED`). The 404 and 429 entries
 in `fanart/beatles.json` are hand-written on purpose and stay so.
 
+# M-SYNC AcoustID examples
+
+`acoustid/batch-3.json` and `acoustid/album-vote.json` are **hand-written synthetic**
+examples, shaped after upstream v1.12.3's `batch-lookup-3.json`. IDs, durations,
+short `SYNTHETIC_*` fingerprints, titles, scores and vote outcomes are illustrative;
+**nothing was copied from that recording or sent to AcoustID**. `batch-3.json`
+illustrates a batch request and response; `album-vote.json` is an example of
+three song candidates and a two-to-one release-group vote, **not** an AcoustID
+HTTP envelope and not production vote-test evidence.
+
+`acoustid/requests.json` lists two POST requests in `record-fixtures` format, one
+per example. The form bodies are deliberately invalid placeholders: before an
+operator records anything, replace `REPLACE_WITH_OWN_KEY` with a key they own,
+and replace every `SYNTHETIC_*` fingerprint and corresponding duration with
+real consented audio fingerprints. The recorder sends to the **real** service
+and refuses `KIMA_NET_DENY_REAL`; it writes an independent recording, never
+silently overwrites these synthetic files:
+
+```sh
+env -u KIMA_NET_DENY_REAL cargo run -p record-fixtures -- crates/kima-ident/tests/fixtures/acoustid/requests.json /tmp/acoustid.json
+```
+
+Do not run that example with the placeholders or a third party's API key.
+
 # LRCLIB fixtures (Task 24)
 
 `lrclib/lyrics.json` is **hand-written** too, from LRCLIB's documented `GET /api/get` answer

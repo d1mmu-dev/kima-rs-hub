@@ -61,7 +61,8 @@ fn playlist_shapes_round_trip() {
         include_str!("fixtures/playlist_detail_response.json"),
     );
     assert_eq!(detail.items.len(), 2);
-    assert_eq!(detail.items[0].sort, 0);
+    assert!(detail.summary.playlist.reverse_order);
+    assert_eq!(detail.items[0].sort, 1);
     assert_eq!(detail.items[0].track.id, detail.items[0].track_id);
     let added: AddItemsResponse = round_trip(
         "add",
@@ -150,4 +151,17 @@ fn settings_and_change_password_round_trip() {
     })
     .unwrap();
     assert_eq!(body, json!({ "currentPassword": "a", "newPassword": "b" }));
+}
+
+#[test]
+fn captured_sync_routes_have_the_expected_wire_contract() {
+    let public: Value =
+        serde_json::from_str(include_str!("fixtures/public_config_response.json")).unwrap();
+    assert_eq!(public, json!({"publicUrl":"", "canAcquire":false}));
+    let removals: Value =
+        serde_json::from_str(include_str!("fixtures/library_removals_response.json")).unwrap();
+    assert_eq!(removals, json!({"count":0, "removals":[]}));
+    let rerun: Value =
+        serde_json::from_str(include_str!("fixtures/enrichment_rerun_response.json")).unwrap();
+    assert!(rerun.is_object());
 }

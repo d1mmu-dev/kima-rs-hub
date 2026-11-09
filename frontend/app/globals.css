@@ -151,6 +151,21 @@
  * is only for machine strings (codes, tokens, URLs); aligned digits use tabular
  * figures instead. */
 @layer components {
+    /* A page's title: one size on every page, 28px on a phone and 32px from a
+     * tablet up. A section heading under it is 20px. */
+    .t-page-title {
+        font-size: 1.75rem;
+        line-height: 1.1;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+        color: #fff;
+    }
+    @media (min-width: 48rem) {
+        .t-page-title {
+            font-size: 2rem;
+        }
+    }
+
     /* The short status kicker above a page title. */
     .t-eyebrow {
         font-size: var(--text-micro);

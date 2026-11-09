@@ -1083,6 +1083,7 @@ async fn process_folder(
     siblings: &[&IndexedTrack],
     known: &HashMap<String, IndexedTrack>,
     cause: ReadCause,
+    refile: bool,
 ) -> Result<FolderResult, ScanError> {
     let mut out = FolderResult::default();
     let mut touched = Touched::default();
@@ -1095,6 +1096,7 @@ async fn process_folder(
             .collect(),
     )
     .await?;
+    let paths: Vec<String> = changed.iter().map(|d| d.rel.clone()).collect();
     let mut prepared = Vec::with_capacity(changed.len());
     for disk in changed {
         out.tags_read += 1;
@@ -1104,8 +1106,77 @@ async fn process_folder(
             Err(e) => out.failed.push((rel, e)),
         }
     }
+    // A re-file is a repair, not a normal incremental scan: never make an election from
+    // incomplete votes, or remove a source album/artist carrying a person's edits. The
+    // folder is the election boundary (including its disc subfolders), so protect it whole.
+    if refile {
+        let edited: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM tracks t
+             JOIN albums al ON al.id = t.album_id
+             JOIN artists ar ON ar.id = al.artist_id
+             WHERE t.path = ANY($1) AND (
+                 al.identity_source = 'autotag' OR al.display_title IS NOT NULL
+                 OR al.display_year IS NOT NULL OR al.user_genres IS NOT NULL
+                 OR al.image_source = 'user' OR al.release_mbid_source = 'user'
+                 OR al.release_group_mbid_source = 'user'
+                 OR ar.display_name IS NOT NULL OR ar.user_bio IS NOT NULL
+                 OR ar.user_genres IS NOT NULL OR ar.image_source = 'user'
+                 OR ar.mbid_source = 'user'))",
+        )
+        .bind(&paths)
+        .fetch_one(&ctx.pool)
+        .await?;
+        if edited || !out.failed.is_empty() {
+            return Ok(out);
+        }
+    }
     let mut prepared =
         merge_moved_overrides(&ctx.pool, prepared, known, &overrides, &mut out).await?;
+    if refile && !out.failed.is_empty() {
+        return Ok(out);
+    }
+    if refile {
+        // A renamed last song has no row at its new path. Its fingerprint target still
+        // belongs to the edited source album: restore its path without re-electing or
+        // upserting its album identity (which would discard the person's edits).
+        let targets: Vec<Uuid> = prepared.iter().filter_map(|p| p.target).collect();
+        let edited_targets: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT t.id FROM tracks t JOIN albums al ON al.id = t.album_id
+             JOIN artists ar ON ar.id = al.artist_id
+             WHERE t.id = ANY($1) AND (
+                 al.identity_source = 'autotag' OR al.display_title IS NOT NULL
+                 OR al.display_year IS NOT NULL OR al.user_genres IS NOT NULL
+                 OR al.image_source = 'user' OR al.release_mbid_source = 'user'
+                 OR al.release_group_mbid_source = 'user'
+                 OR ar.display_name IS NOT NULL OR ar.user_bio IS NOT NULL
+                 OR ar.user_genres IS NOT NULL OR ar.image_source = 'user'
+                 OR ar.mbid_source = 'user')",
+        )
+        .bind(&targets)
+        .fetch_all(&ctx.pool)
+        .await?;
+        if !edited_targets.is_empty() {
+            for p in &prepared {
+                if let Some(id) = p.target.filter(|id| edited_targets.contains(id)) {
+                    let mut tx = ctx.pool.begin().await?;
+                    if library::repoint_exact_in(&mut tx, id, &p.disk.rel)
+                        .await?
+                        .is_some()
+                    {
+                        stages::reopen_file_missing(&mut tx, id).await?;
+                        tx.commit().await?;
+                        out.stored.push((p.disk.rel.clone(), Stored::Repointed(id)));
+                    } else {
+                        out.failed.push((
+                            p.disk.rel.clone(),
+                            "the moved edited track is no longer missing".into(),
+                        ));
+                    }
+                }
+            }
+            return Ok(out);
+        }
+    }
     // One artist per album, elected from the changed files and the stored votes of their
     // unchanged siblings (D-164), before the album year groups form.
     let election = Election::new(&prepared, siblings);
@@ -1381,8 +1452,20 @@ async fn reconcile_with(
     for (folder, files) in changed {
         check()?;
         let n = files.len();
+        if force
+            && walked.unreadable.iter().any(|dir| {
+                dir == &folder
+                    || vote::album_folder(dir) == folder
+                    || dir.starts_with(&format!("{folder}/"))
+            })
+        {
+            // The walker did not see all the votes in this album (possibly a CD
+            // subfolder); leave the whole group untouched until it can be read.
+            progress.advance(n);
+            continue;
+        }
         let siblings = settled.get(folder.as_str()).map_or(&[][..], Vec::as_slice);
-        let result = process_folder(ctx, files, siblings, &index, ReadCause::Scan).await?;
+        let result = process_folder(ctx, files, siblings, &index, ReadCause::Scan, force).await?;
         report.tags_read += result.tags_read;
         report.failed.extend(result.failed);
         for (_, stored) in result.stored {
@@ -1584,7 +1667,7 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
         .filter(|t| t.path != rel && !t.missing)
         .collect();
 
-    let result = process_folder(ctx, vec![disk], &siblings, &known, ReadCause::Scan).await?;
+    let result = process_folder(ctx, vec![disk], &siblings, &known, ReadCause::Scan, false).await?;
     let mine = result
         .stored
         .iter()
@@ -1689,7 +1772,7 @@ pub async fn reread_paths(
             .values()
             .filter(|t| !t.missing && !rels.contains(&t.path))
             .collect();
-        let result = process_folder(ctx, changed, &siblings, &known, cause).await?;
+        let result = process_folder(ctx, changed, &siblings, &known, cause, false).await?;
         report.tags_read += result.tags_read;
         report.failed.extend(result.failed);
         album_moved |= result.album_moved;

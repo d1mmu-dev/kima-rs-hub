@@ -473,6 +473,24 @@ async fn refile_rereads_unchanged_files_and_merges_stray_guest(pool: PgPool) {
     assert_eq!(report.unchanged, 0);
     assert_eq!(albums(&pool, "Hist").await, row("Mike", 4));
     assert_eq!(artist_count(&pool, "Janet").await, 0);
+    let before: Vec<(String, Uuid, Uuid)> =
+        sqlx::query_as("SELECT t.path, t.id, t.album_id FROM tracks t ORDER BY t.path")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let again = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(again.failed.is_empty(), "{again:?}");
+    let after: Vec<(String, Uuid, Uuid)> =
+        sqlx::query_as("SELECT t.path, t.id, t.album_id FROM tracks t ORDER BY t.path")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after, before,
+        "a second re-file keeps row identities and filing"
+    );
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -553,6 +571,254 @@ async fn refile_preserves_display_edits_and_unreadable_song(pool: PgPool) {
         "SELECT ar.display_name, al.display_title FROM albums al JOIN artists ar ON ar.id = al.artist_id WHERE al.id = $1"
     ).bind(before.1).fetch_one(&pool).await.unwrap();
     assert_eq!(edits, (Some("My Artist".into()), Some("My Album".into())));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_keeps_last_song_and_edits_on_edited_source_album(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let source = legacy_stray(&pool, root).await;
+    sqlx::query(
+        "UPDATE albums SET display_title = 'My Hist', display_year = 1995,
+        user_genres = ARRAY['Jazz'], image_source = 'user', image_path = 'my-cover' WHERE id = $1",
+    )
+    .bind(source)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before: Uuid = sqlx::query_scalar("SELECT id FROM tracks WHERE path = 'Mike/Hist/04.flac'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    let filing: (Uuid, Uuid, String) = sqlx::query_as(
+        "SELECT t.id, al.id, ar.name FROM tracks t
+         JOIN albums al ON al.id = t.album_id JOIN artists ar ON ar.id = al.artist_id
+         WHERE t.path = 'Mike/Hist/04.flac'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(filing, (before, source, "Janet".into()));
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct Edits {
+        display_title: Option<String>,
+        display_year: Option<i32>,
+        user_genres: Option<Vec<String>>,
+        image_source: Option<String>,
+        image_path: Option<String>,
+    }
+    let edits: Edits = sqlx::query_as(
+        "SELECT display_title, display_year, user_genres, image_source, image_path FROM albums WHERE id = $1",
+    ).bind(source).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        edits,
+        Edits {
+            display_title: Some("My Hist".into()),
+            display_year: Some(1995),
+            user_genres: Some(vec!["Jazz".into()]),
+            image_source: Some("user".into()),
+            image_path: Some("my-cover".into()),
+        }
+    );
+    assert_eq!(
+        albums(&pool, "Hist").await,
+        vec![("Janet".into(), 1), ("Mike".into(), 3)]
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_keeps_moved_last_song_on_edited_source_album(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let source = legacy_stray(&pool, root).await;
+    sqlx::query(
+        "UPDATE albums SET display_title = 'My Hist', user_genres = ARRAY['Jazz'] WHERE id = $1",
+    )
+    .bind(source)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before: Uuid = sqlx::query_scalar("SELECT id FROM tracks WHERE path = 'Mike/Hist/04.flac'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    std::fs::rename(
+        root.join("Mike/Hist/04.flac"),
+        root.join("Mike/Hist/05.flac"),
+    )
+    .unwrap();
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    let (id, album): (Uuid, Uuid) =
+        sqlx::query_as("SELECT id, album_id FROM tracks WHERE path = 'Mike/Hist/05.flac'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (id, album),
+        (before, source),
+        "the moved row must retain its edited source album"
+    );
+    let edits: (Option<String>, Option<Vec<String>>) =
+        sqlx::query_as("SELECT display_title, user_genres FROM albums WHERE id = $1")
+            .bind(source)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(edits, (Some("My Hist".into()), Some(vec!["Jazz".into()])));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_does_not_elect_from_incomplete_unreadable_folder(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (n, artist) in [(1, "Mike"), (2, "Mike"), (3, "Janet"), (4, "Janet")] {
+        song(
+            root,
+            &format!("Mike/Hist/0{n}.flac"),
+            "Hist",
+            Some(artist),
+            artist,
+        );
+    }
+    rescan(&pool, root).await;
+    // A legacy split: without unreadable Mike's vote Janet wins 2:1.
+    let (artist, stray) = (Uuid::now_v7(), Uuid::now_v7());
+    sqlx::query("INSERT INTO artists (id, name, name_key) VALUES ($1, 'Janet', 'janet')")
+        .bind(artist)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO albums (id, artist_id, title, title_key) VALUES ($1, $2, 'Hist', 'hist')",
+    )
+    .bind(stray)
+    .bind(artist)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE tracks SET album_id = $1 WHERE path IN ('Mike/Hist/03.flac', 'Mike/Hist/04.flac')",
+    )
+    .bind(stray)
+    .execute(&pool)
+    .await
+    .unwrap();
+    std::fs::write(root.join("Mike/Hist/01.flac"), b"unreadable tags").unwrap();
+    let before: Vec<(String, Uuid)> =
+        sqlx::query_as("SELECT path, album_id FROM tracks ORDER BY path")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert_eq!(report.failed[0].0, "Mike/Hist/01.flac");
+    let after: Vec<(String, Uuid)> =
+        sqlx::query_as("SELECT path, album_id FROM tracks ORDER BY path")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after, before,
+        "an incomplete vote must not re-file the folder"
+    );
+    assert_eq!(
+        albums(&pool, "Hist").await,
+        vec![("Janet".into(), 2), ("Mike".into(), 2)]
+    );
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_does_not_elect_when_disc_folder_cannot_be_walked(pool: PgPool) {
+    use std::os::unix::fs::PermissionsExt;
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (n, artist) in [
+        (1, "Mike"),
+        (2, "Mike"),
+        (3, "Mike"),
+        (4, "Janet"),
+        (5, "Janet"),
+    ] {
+        let disc = if n <= 2 { "CD 1" } else { "CD 2" };
+        song(
+            root,
+            &format!("Mike/Hist/{disc}/0{n}.flac"),
+            "Hist",
+            Some(artist),
+            artist,
+        );
+    }
+    rescan(&pool, root).await;
+    let (artist, stray) = (Uuid::now_v7(), Uuid::now_v7());
+    sqlx::query("INSERT INTO artists (id, name, name_key) VALUES ($1, 'Janet', 'janet')")
+        .bind(artist)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO albums (id, artist_id, title, title_key) VALUES ($1, $2, 'Hist', 'hist')",
+    )
+    .bind(stray)
+    .bind(artist)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE tracks SET album_id = $1 WHERE path IN ('Mike/Hist/CD 2/04.flac', 'Mike/Hist/CD 2/05.flac')")
+        .bind(stray).execute(&pool).await.unwrap();
+    let before: Vec<(String, Uuid, Uuid)> =
+        sqlx::query_as("SELECT path, id, album_id FROM tracks ORDER BY path")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let disc = root.join("Mike/Hist/CD 1");
+    let original = std::fs::metadata(&disc).unwrap().permissions();
+    std::fs::set_permissions(&disc, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&disc).is_ok() {
+        std::fs::set_permissions(&disc, original).unwrap();
+        eprintln!("SKIPPED: this process can still read chmod 000 (root/capability)");
+        return;
+    }
+    let result = scan::refile_cancellable(&ctx(&pool, root), &Default::default()).await;
+    std::fs::set_permissions(&disc, original).unwrap();
+    let report = result.unwrap();
+    assert!(
+        report
+            .failed
+            .iter()
+            .any(|(path, _)| path == "Mike/Hist/CD 1"),
+        "{report:?}"
+    );
+    let after: Vec<(String, Uuid, Uuid)> =
+        sqlx::query_as("SELECT path, id, album_id FROM tracks ORDER BY path")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after, before,
+        "an unreadable disc's missing votes must not change the album"
+    );
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

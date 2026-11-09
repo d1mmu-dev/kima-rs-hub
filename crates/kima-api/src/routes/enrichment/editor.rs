@@ -18,6 +18,7 @@ use kima_db::identity::{self, AlbumOverrides, Applied, ArtistOverrides, ResetDon
 use kima_library::artwork::{self, StagedImage};
 use kima_net::Outcome;
 use serde_json::{Map, Value, json};
+use sqlx::Row;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -384,6 +385,62 @@ fn place_image(
         warn!(%error, "could not delete a removed user image");
     }
     Ok(())
+}
+
+/// Admin-only track title override; the file title stays untouched for rescans.
+pub(super) async fn put_track(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let not_found = || ApiError::NotFound("Track not found");
+    let id: Uuid = id.parse().map_err(|_| not_found())?;
+    let body = object(body)?;
+    let title = text(&body, "title", MAX_NAME_CHARS)?;
+    let mut tx = state.pool.begin().await?;
+    let row = sqlx::query("SELECT title, display_title FROM tracks WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(not_found)?;
+    let original: String = row.try_get("title")?;
+    let current: Option<String> = row.try_get("display_title")?;
+    let next = unless_original(title, Some(&original))
+        .into_change()
+        .unwrap_or(current);
+    sqlx::query(
+        "UPDATE tracks SET display_title = $2 WHERE id = $1 AND display_title IS DISTINCT FROM $2",
+    )
+    .bind(id)
+    .bind(next.as_deref())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let track = browse::track(&state.pool, id)
+        .await?
+        .ok_or_else(not_found)?;
+    Ok(Json(
+        json!({"id": id, "title": track.display_title.as_deref().filter(|s| !s.is_empty()).unwrap_or(&track.title), "displayTitle": track.display_title}),
+    ))
+}
+
+pub(super) async fn reset_track(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let not_found = || ApiError::NotFound("Track not found");
+    let id: Uuid = id.parse().map_err(|_| not_found())?;
+    let row = sqlx::query("UPDATE tracks SET display_title = NULL WHERE id = $1 RETURNING title")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(not_found)?;
+    let title: String = row.try_get("title")?;
+    Ok(Json(
+        json!({"message": "Track metadata reset to original values", "track": {"id": id, "title": title, "displayTitle": null}}),
+    ))
 }
 
 pub(super) async fn put_artist(

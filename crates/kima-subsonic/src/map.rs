@@ -215,6 +215,7 @@ mod tests {
 
     fn track(bitrate: Option<i32>, codec: &str) -> TrackRow {
         TrackRow {
+            display_title: None,
             id: Uuid::from_u128(3),
             title: "Come Together".into(),
             artist_name: "Track Artist".into(),

@@ -43,31 +43,40 @@ async fn get(e: &Env, token: &str, path: &str) -> Value {
     res.json()
 }
 
+async fn stored_plays(pool: &PgPool, user: Uuid) -> Vec<(Uuid, bool, String)> {
+    sqlx::query_as(
+        "SELECT track_id, heard, source FROM plays WHERE user_id = $1 ORDER BY played_at DESC",
+    )
+    .bind(user)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn play_recorded_and_listed(pool: PgPool) {
     let s = seed(&pool, Seed::new("Alpha", "A1", Some(2000), "Song")).await;
-    let e = env(pool).await;
+    let e = env(pool.clone()).await;
 
     // The seeded track is 180 s: half of it (90 s) is required.
     let out = play(&e, &e.ana, s.track, 90.0).await;
     assert_eq!(out["recorded"], true);
     assert!(out["playId"].is_string());
 
-    let plays = get(&e, &e.ana, "/api/plays").await;
-    assert_eq!(plays.as_array().unwrap().len(), 1);
-    let p = &plays[0];
-    for k in [
-        "id", "userId", "trackId", "playedAt", "source", "heard", "track",
-    ] {
-        assert!(p.get(k).is_some(), "missing {k}");
-    }
-    assert_eq!(p["trackId"], json!(s.track));
-    assert_eq!(p["heard"], true);
-    assert_eq!(p["track"]["title"], "Song");
-    assert_eq!(p["track"]["album"]["artist"]["name"], "Alpha");
-
-    // Plays are per user.
-    assert_eq!(get(&e, &e.ben, "/api/plays").await, json!([]));
+    assert_eq!(
+        stored_plays(&pool, e.ana_id).await,
+        vec![(s.track, true, "LIBRARY".into())]
+    );
+    let ben_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = 'ben'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(stored_plays(&pool, ben_id).await.is_empty());
+    e.server
+        .get("/api/plays")
+        .authorization_bearer(&e.ana)
+        .await
+        .assert_status(StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -79,7 +88,7 @@ async fn listening_rules_and_errors(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let e = env(pool).await;
+    let e = env(pool.clone()).await;
 
     assert_eq!(
         play(&e, &e.ana, s.track, 89.9).await,
@@ -97,7 +106,7 @@ async fn listening_rules_and_errors(pool: PgPool) {
         .json(&json!({ "trackId": s.track }))
         .await;
     assert_eq!(res.json::<Value>()["reason"], "not-enough-listened");
-    assert_eq!(get(&e, &e.ana, "/api/plays").await, json!([]));
+    assert!(stored_plays(&pool, e.ana_id).await.is_empty());
 
     for body in [
         json!({ "trackId": Uuid::now_v7() }),
@@ -132,7 +141,7 @@ async fn listening_rules_and_errors(pool: PgPool) {
     e.server
         .get("/api/plays")
         .await
-        .assert_status(StatusCode::UNAUTHORIZED);
+        .assert_status(StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -147,14 +156,7 @@ async fn duplicate_within_window_not_double_counted(pool: PgPool) {
     );
     // Another user's listen of the same track is their own.
     assert_eq!(play(&e, &e.ben, s.track, 100.0).await["recorded"], true);
-    assert_eq!(
-        get(&e, &e.ana, "/api/plays")
-            .await
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(stored_plays(&pool, e.ana_id).await.len(), 1);
 
     // A play older than one track length (180 s) is a different listen.
     sqlx::query("UPDATE plays SET played_at = now() - interval '181 seconds' WHERE user_id = $1")
@@ -163,20 +165,13 @@ async fn duplicate_within_window_not_double_counted(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(play(&e, &e.ana, s.track, 100.0).await["recorded"], true);
-    assert_eq!(
-        get(&e, &e.ana, "/api/plays")
-            .await
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(stored_plays(&pool, e.ana_id).await.len(), 2);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn concurrent_reports_store_one_row(pool: PgPool) {
     let s = seed(&pool, Seed::new("Alpha", "A1", None, "Song")).await;
-    let e = env(pool).await;
+    let e = env(pool.clone()).await;
     let (r1, r2, r3, r4) = tokio::join!(
         play(&e, &e.ana, s.track, 100.0),
         play(&e, &e.ana, s.track, 100.0),
@@ -188,14 +183,7 @@ async fn concurrent_reports_store_one_row(pool: PgPool) {
         .filter(|o| o["recorded"] == true)
         .count();
     assert_eq!(recorded, 1);
-    assert_eq!(
-        get(&e, &e.ana, "/api/plays")
-            .await
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(stored_plays(&pool, e.ana_id).await.len(), 1);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -249,15 +237,8 @@ async fn recently_listened_orders_by_last_play(pool: PgPool) {
         get(&e, &e.ben, "/api/library/recently-listened").await,
         json!({ "items": [] })
     );
-    // And the plays list hides the missing track's play.
-    assert_eq!(
-        get(&e, &e.ana, "/api/plays")
-            .await
-            .as_array()
-            .unwrap()
-            .len(),
-        3
-    );
+    // Historical rows remain persisted even when a track becomes unplayable.
+    assert_eq!(stored_plays(&pool, e.ana_id).await.len(), 4);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -282,12 +263,10 @@ async fn api_plays_returns_stored_source(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let plays = get(&e, &e.ana, "/api/plays").await;
-    let sources: Vec<&str> = plays
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p["source"].as_str().unwrap())
+    let sources: Vec<String> = stored_plays(&pool, e.ana_id)
+        .await
+        .into_iter()
+        .map(|p| p.2)
         .collect();
     assert_eq!(sources, ["LIBRARY", "SUBSONIC"]);
 }

@@ -13,7 +13,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use super::library::artists::artist_json;
-use super::library::{parse_int, track_json};
+use super::library::parse_int;
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::extract::ApiJson;

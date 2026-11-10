@@ -159,8 +159,6 @@ function PodcastDetailPageInner() {
                         <div>
                             <PreviewEpisodes
                                 previewData={previewData}
-                                isSubscribing={isSubscribing}
-                                onSubscribe={() => handleSubscribe(previewData)}
                             />
                         </div>
                     )}

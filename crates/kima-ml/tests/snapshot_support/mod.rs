@@ -4,7 +4,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 pub fn private_dir() -> tempfile::TempDir {
-    let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let dir = tempfile::tempdir_in(kima_test_support::reflink_test_dir(env!(
+        "CARGO_MANIFEST_DIR"
+    )))
+    .unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     dir
 }

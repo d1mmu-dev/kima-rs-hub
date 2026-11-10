@@ -1,26 +1,70 @@
-//! Playlist API DTOs used by kima-api-types.
+//! `/api/playlists` shapes (the Spotify and mix fields are always `null` / empty in kima-rs).
 
-use crate::library::Track;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fmt;
 use uuid::Uuid;
 
-/// The playlist summary returned by list/detail views and saved fixtures.
+use crate::library::Track;
+
+/// A playlist row: the answer of create and update, and the base of list and detail entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Playlist {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub mix_id: Option<Value>,
+    pub name: String,
+    pub is_public: bool,
+    /// Shown newest first. Absent in answers of a server older than the 1.12 base.
+    #[serde(default)]
+    pub reverse_order: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub spotify_playlist_id: Option<String>,
+    pub spotify_playlist_url: Option<String>,
+}
+
+/// `{ "username": ... }`: the owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistUser {
+    pub username: String,
+}
+
+/// `_count`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemCount {
+    pub items: i64,
+}
+
+/// What list and detail add to a [`Playlist`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaylistSummary {
-    pub id: Uuid,
-    pub name: String,
-    pub owner_id: Uuid,
-    pub is_public: bool,
-    pub is_hidden: bool,
-    pub item_count: i64,
+    #[serde(flatten)]
+    pub playlist: Playlist,
+    pub user: PlaylistUser,
     pub track_count: i64,
-    pub is_playlist_visible: bool,
-    pub create_time: i64,
-    pub update_time: i64,
-    pub reverse_order: bool,
+    #[serde(rename = "_count")]
+    pub count: ItemCount,
+    pub is_owner: bool,
+    pub is_hidden: bool,
+}
+
+/// One of the first items shown in a list entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreviewItem {
+    /// The playlist item id (not the track id).
+    pub id: Uuid,
+    pub track: Track,
+}
+
+/// One entry of `GET /playlists` (a bare JSON array).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlaylistListEntry {
+    #[serde(flatten)]
+    pub summary: PlaylistSummary,
+    /// The first few items, for a cover mosaic.
+    pub items: Vec<PreviewItem>,
 }
 
 /// One track of a playlist. `type` is only present in the detail answer.
@@ -34,12 +78,8 @@ pub struct PlaylistItem {
     /// Zero-padded position; compares as a string in item order.
     pub rank: String,
     pub track: Track,
-}
-
-impl fmt::Display for PlaylistItem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{} ({})", self.playlist_id, self.track_id, self.rank)
-    }
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// `GET /playlists/:id`. `items` and `mergedItems` are identical in kima-rs (no pending tracks).
@@ -54,92 +94,82 @@ pub struct PlaylistDetail {
     pub items: Vec<PlaylistItem>,
 }
 
-/// Body of `POST /playlists/:id/items` (exactly one of `trackId` / `trackIds`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Body of `POST /playlists`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AddItemBody {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub track_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub track_ids: Option<Vec<Uuid>>,
+pub struct CreatePlaylist {
+    pub name: String,
+    #[serde(default)]
+    pub is_public: bool,
 }
 
-impl AddItemBody {
-    pub fn one(track_id: Uuid) -> Self {
+/// Body of `PUT` / `PATCH /playlists/:id`; absent fields are left alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdatePlaylist {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_public: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse_order: Option<bool>,
+}
+
+/// Body of `POST /playlists/:id/items` (exactly one of `trackId` / `trackIds`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddItems {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_ids: Option<Vec<String>>,
+}
+
+impl AddItems {
+    pub fn one(track_id: impl Into<String>) -> Self {
         Self {
-            track_id: Some(track_id),
+            track_id: Some(track_id.into()),
             track_ids: None,
         }
     }
-
-    pub fn many(track_ids: Vec<Uuid>) -> Self {
-        Self {
-            track_id: None,
-            track_ids: Some(track_ids),
-        }
-    }
-}
-
-/// Body of `POST /playlists/:id/items/:itemId/move` (per-item patch-body contract).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MoveItemBody {
-    pub after_item_id: Option<Uuid>,
 }
 
 /// Answer of `POST /playlists/:id/items`. A track already in the playlist is not added again
-/// and the accepted set is still reported as `updated` so callers do not treat it as an error.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// (`duplicates`), which still answers 200.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddItemsResponse {
-    pub status: String,
     pub added: i64,
+    pub duplicated: bool,
     pub duplicates: i64,
-    pub rejected: Vec<Uuid>,
-    pub updated: Vec<Uuid>,
+    pub rejected: Vec<String>,
+}
+
+/// Answer of `DELETE /playlists/:id/items/:trackId`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoveItemResponse {
+    pub success: bool,
+    pub removed: i64,
+}
+
+/// Answer of `DELETE /playlists/:id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageResponse {
+    pub message: String,
+}
+
+/// Body of `POST /playlists/:id/items/:itemId/move`; malformed anchors reach handler validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveItemBody {
+    pub after_item_id: Option<String>,
 }
 
 /// Answer of `POST /playlists/:id/items/:itemId/move`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveItemResponse {
     pub success: bool,
     pub rank: String,
 }
 
-/// Answer of `DELETE /playlists/:id/items/:trackId`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoveItemResponse {
-    pub success: bool,
-    pub rank: String,
-}
-
-/// One entry of `GET /playlists` (a bare JSON array).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlaylistListEntry {
-    #[serde(flatten)]
-    pub summary: PlaylistSummary,
-    #[serde(default)]
-    pub items: Vec<PlaylistItem>,
-}
-
-/// Create/parse payload consumed by API playlist fixtures.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlaylistCreate {
-    pub name: String,
-    pub is_public: Option<bool>,
-    pub is_hidden: Option<bool>,
-}
-
-impl PlaylistCreate {
-    pub fn new(name: &str, is_public: bool) -> Self {
-        Self {
-            name: name.into(),
-            is_public: Some(is_public),
-            is_hidden: None,
-        }
-    }
-}
+/// Compatibility name for the add-items request.
+pub type AddItemBody = AddItems;

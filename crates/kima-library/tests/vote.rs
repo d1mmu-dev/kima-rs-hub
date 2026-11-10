@@ -1272,3 +1272,114 @@ async fn refile_restores_returned_track_on_autotag_only_album(pool: PgPool) {
         )
     );
 }
+
+/// Marks the row at `path` missing for longer than the grace period (its file stays on disk)
+/// and returns its id.
+async fn expire_missing(pool: &PgPool, path: &str) -> Uuid {
+    let grace = scan::MISSING_GRACE.as_secs() as f64 + 24.0 * 3600.0;
+    sqlx::query_scalar(
+        "UPDATE tracks SET missing_since = now() - make_interval(secs => $2)
+         WHERE path = $1 RETURNING id",
+    )
+    .bind(path)
+    .bind(grace)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The row at `path` is still `id` and present: a re-file never retires a file it walked.
+async fn assert_survives(pool: &PgPool, report: &scan::ScanReport, path: &str, id: Uuid) {
+    assert_eq!(
+        report.purged, 0,
+        "a present file must not be retired: {report:?}"
+    );
+    let row: Option<(Uuid, bool)> =
+        sqlx::query_as("SELECT id, missing_since IS NULL FROM tracks WHERE path = $1")
+            .bind(path)
+            .fetch_optional(pool)
+            .await
+            .unwrap();
+    assert_eq!(row, Some((id, true)), "{report:?}");
+    assert_eq!(report.restored, 1, "{report:?}");
+}
+
+/// Present rows outside the album under test, so the mass-missing guard stays off.
+fn keep_album(root: &Path) {
+    for n in 1..=3 {
+        song(
+            root,
+            &format!("Keep/K/0{n}.flac"),
+            "K",
+            Some("Keep"),
+            "Keep",
+        );
+    }
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_restores_returned_track_when_sibling_disc_cannot_be_walked(pool: PgPool) {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(require_ffmpeg(), "real audio fixtures require ffmpeg");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for n in 1..=4 {
+        let disc = if n <= 2 { "CD1" } else { "CD2" };
+        song(
+            root,
+            &format!("Band/Album/{disc}/0{n}.flac"),
+            "Album",
+            Some("Band"),
+            "Band",
+        );
+    }
+    keep_album(root);
+    rescan(&pool, root).await;
+    let back = expire_missing(&pool, "Band/Album/CD1/01.flac").await;
+    let disc = root.join("Band/Album/CD2");
+    let original = std::fs::metadata(&disc).unwrap().permissions();
+    std::fs::set_permissions(&disc, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&disc).is_ok() {
+        std::fs::set_permissions(&disc, original).unwrap();
+        eprintln!("SKIPPED: this process can still read chmod 000 (root/capability)");
+        return;
+    }
+    let result = scan::refile_cancellable(&ctx(&pool, root), &Default::default()).await;
+    std::fs::set_permissions(&disc, original).unwrap();
+    let report = result.unwrap();
+    assert!(
+        report
+            .failed
+            .iter()
+            .any(|(path, _)| path == "Band/Album/CD2"),
+        "{report:?}"
+    );
+    assert_survives(&pool, &report, "Band/Album/CD1/01.flac", back).await;
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_restores_returned_track_when_a_group_file_is_unreadable(pool: PgPool) {
+    assert!(require_ffmpeg(), "real audio fixtures require ffmpeg");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for n in 1..=3 {
+        song(
+            root,
+            &format!("Band/Album/0{n}.flac"),
+            "Album",
+            Some("Band"),
+            "Band",
+        );
+    }
+    keep_album(root);
+    rescan(&pool, root).await;
+    let back = expire_missing(&pool, "Band/Album/01.flac").await;
+    std::fs::write(root.join("Band/Album/02.flac"), b"unreadable tags").unwrap();
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert_eq!(report.failed[0].0, "Band/Album/02.flac");
+    assert_survives(&pool, &report, "Band/Album/01.flac", back).await;
+}

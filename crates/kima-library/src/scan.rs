@@ -1003,8 +1003,6 @@ struct FolderResult {
     stored: Vec<(String, Stored)>,
     failed: Vec<(String, String)>,
     tags_read: usize,
-    /// Missing protected rows brought back at their own path (re-file only).
-    restored: usize,
     /// Some existing track changed album.
     album_moved: bool,
 }
@@ -1156,19 +1154,8 @@ async fn process_folder(
         .fetch_all(&ctx.pool)
         .await?;
         if !edited_targets.is_empty() {
-            // A protected row whose file is back at its own path: clear its missing flag
-            // (reopening its file-missing stage) and refresh its album, keeping the album's
-            // identity and edits. Present protected rows are not written.
-            let returned: Vec<String> = prepared
-                .iter()
-                .filter(|p| p.target.is_none())
-                .filter_map(|p| known.get(&p.disk.rel))
-                .filter(|t| t.missing && edited_targets.contains(&t.id))
-                .map(|t| t.path.clone())
-                .collect();
-            if !returned.is_empty() {
-                out.restored += flip_and_refresh(&ctx.pool, &returned, true, true).await? as usize;
-            }
+            // A protected row whose file is back at its own path was already restored by
+            // `reconcile_with`; protected rows are not written here.
             for p in &prepared {
                 if let Some(id) = p.target.filter(|id| edited_targets.contains(id)) {
                     let mut tx = ctx.pool.begin().await?;
@@ -1385,6 +1372,10 @@ async fn reconcile_with(
 
     let on_disk: HashSet<&str> = walked.files.iter().map(|f| f.rel.as_str()).collect();
     let mut restore = Vec::new();
+    // A re-file reads every file again, but one present at its own path is back whether or
+    // not its folder group can be read: restore it up front, so a skipped group cannot
+    // leave it to the grace-period purge.
+    let mut returned = Vec::new();
     let mut changed: BTreeMap<String, Vec<DiskFile>> = BTreeMap::new();
     // Rows that are present, on disk and unchanged after this run, per folder.
     let mut settled: HashMap<&str, Vec<&IndexedTrack>> = HashMap::new();
@@ -1401,10 +1392,15 @@ async fn reconcile_with(
                     .or_default()
                     .push(row);
             }
-            _ => changed
-                .entry(vote::album_folder(&f.rel).to_string())
-                .or_default()
-                .push(f.clone()),
+            row => {
+                if force && row.is_some_and(|r| r.missing) {
+                    returned.push(f.rel.clone());
+                }
+                changed
+                    .entry(vote::album_folder(&f.rel).to_string())
+                    .or_default()
+                    .push(f.clone());
+            }
         }
     }
 
@@ -1470,6 +1466,11 @@ async fn reconcile_with(
         report.restored += flip_and_refresh(&ctx.pool, chunk, true, false).await? as usize;
     }
     progress.advance(report.unchanged + restore.len());
+    // Their files are still read with their folders below (and so counted there). The
+    // autotag identity is kept: its release waits until moved-track matching has finished.
+    for chunk in returned.chunks(MARK_CHUNK) {
+        report.restored += flip_and_refresh(&ctx.pool, chunk, true, true).await? as usize;
+    }
 
     for (folder, files) in changed {
         check()?;
@@ -1489,7 +1490,6 @@ async fn reconcile_with(
         let siblings = settled.get(folder.as_str()).map_or(&[][..], Vec::as_slice);
         let result = process_folder(ctx, files, siblings, &index, ReadCause::Scan, force).await?;
         report.tags_read += result.tags_read;
-        report.restored += result.restored;
         report.failed.extend(result.failed);
         for (_, stored) in result.stored {
             match stored {

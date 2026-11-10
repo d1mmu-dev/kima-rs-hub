@@ -26,7 +26,7 @@ export interface EpisodeSearchResult {
 import type { DiscoveryPodcast, ForYouRow, ListeningRow, PodcastCategory } from "@/features/podcast/types";
 import type { Capabilities, Album, Review, Run, RunDetail, Search, Apply } from "@/features/autotag/types";
 import type { MapTrack } from "@/features/vibe/types";
-import type { AddPlaylistItemContractingBody, MovePlaylistItemContractingBody } from "@/lib/playlist-contract";
+import type { AddPlaylistItemsBody, AddPlaylistItemsResponse, MovePlaylistItemBody } from "@/lib/playlist-contract";
 import type {
     AttentionAlbum,
     OrganizerCapabilities,
@@ -929,23 +929,16 @@ class ApiClient {
         });
     }
 
-    async addTrackToPlaylist(playlistId: string, body: AddPlaylistItemContractingBody) {
-        return this.request<ApiData>(
+    async addTrackToPlaylist(playlistId: string, body: AddPlaylistItemsBody) {
+        return this.request<AddPlaylistItemsResponse>(
             `/playlists/${encodeURIComponent(playlistId)}/items`,
             { method: "POST", body: JSON.stringify(body) },
         );
     }
 
-    /** Adds many tracks in one request. */
-    async addTracksToPlaylist(playlistId: string, body: AddPlaylistItemContractingBody) {
-        return this.request<{
-            added: number;
-            duplicates: number;
-            rejected: string[];
-        }>(`/playlists/${encodeURIComponent(playlistId)}/items`, {
-            method: "POST",
-            body: JSON.stringify(body),
-        });
+    /** Adds many tracks through the same items endpoint and reply contract. */
+    async addTracksToPlaylist(playlistId: string, body: AddPlaylistItemsBody) {
+        return this.addTrackToPlaylist(playlistId, body);
     }
 
     async removeTrackFromPlaylist(playlistId: string, trackId: string) {
@@ -955,7 +948,7 @@ class ApiClient {
         );
     }
 
-    async moveTrackInPlaylist(playlistId: string, itemId: string, body: MovePlaylistItemContractingBody) {
+    async moveTrackInPlaylist(playlistId: string, itemId: string, body: MovePlaylistItemBody) {
         return this.request<{ success: boolean; rank: string }>(
             `/playlists/${encodeURIComponent(playlistId)}/items/${encodeURIComponent(itemId)}/move`,
             { method: "POST", body: JSON.stringify(body) },

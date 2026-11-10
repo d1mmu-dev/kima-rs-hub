@@ -7,6 +7,7 @@
 import { useMemo } from "react";
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import type { AddPlaylistItemsBody } from "@/lib/playlist-contract";
 import type { PlaylistPreview } from "@/features/home/types";
 
 export const queryKeys = {
@@ -441,18 +442,8 @@ export function useAddToPlaylistMutation() {
     return useMutation({
         // Accepts a single trackId or many; pass trackIds to add a whole mix in
         // one request.
-        mutationFn: ({
-            playlistId,
-            trackId,
-            trackIds,
-        }: {
-            playlistId: string;
-            trackId?: string;
-            trackIds?: string[];
-        }) =>
-            trackIds?.length
-                ? api.addTracksToPlaylist(playlistId, { trackIds })
-                : api.addTrackToPlaylist(playlistId, { trackId: trackId! }),
+        mutationFn: ({ playlistId, ...body }: { playlistId: string } & AddPlaylistItemsBody) =>
+            api.addTrackToPlaylist(playlistId, body),
         onSettled: (_, __, variables) => invalidatePlaylist(queryClient, variables.playlistId),
     });
 }

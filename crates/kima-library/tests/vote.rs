@@ -4,7 +4,7 @@ mod common;
 
 use std::path::Path;
 
-use common::{Tags, make_audio, require_ffmpeg};
+use common::{Picard, Tags, make_audio, require_ffmpeg, tag_picard};
 use kima_core::events::EventBus;
 use kima_db::PgPool;
 use kima_library::scan::{self, LibraryCtx, PathOutcome, ReadCause};
@@ -681,6 +681,178 @@ async fn refile_keeps_moved_last_song_on_edited_source_album(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_leaves_edited_albums_alone(pool: PgPool) {
+    assert!(require_ffmpeg(), "real audio fixtures require ffmpeg");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    song(root, "Mike/Hist/01.flac", "Hist", Some("Mike"), "Mike");
+    song(root, "Mike/Hist/02.flac", "Hist", Some("Mike"), "Mike");
+    rescan(&pool, root).await;
+    let before: Vec<(Uuid, Uuid)> = sqlx::query_as("SELECT id, album_id FROM tracks ORDER BY path")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let album = before[0].1;
+    let identity = serde_json::json!({"artistKey": "mike", "titleKey": "hist", "year": null});
+    sqlx::query("UPDATE albums SET identity_source = 'autotag', applied_identity = $1, display_title = 'My Album', display_year = 1995, user_genres = ARRAY['Jazz'], image_source = 'user', image_path = 'my-cover' WHERE id = $2")
+        .bind(&identity).bind(album).execute(&pool).await.unwrap();
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(report.tags_read, 2);
+    assert_eq!(
+        report.unchanged, 0,
+        "forced reads are not incremental skips"
+    );
+    let after: Vec<(Uuid, Uuid)> = sqlx::query_as("SELECT id, album_id FROM tracks ORDER BY path")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+    let edits: serde_json::Value = sqlx::query_scalar("SELECT jsonb_build_object('identity', identity_source, 'applied', applied_identity, 'title', display_title, 'year', display_year, 'genres', user_genres, 'imageSource', image_source, 'imagePath', image_path) FROM albums WHERE id = $1")
+        .bind(album).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        edits,
+        serde_json::json!({
+            "identity": "autotag", "applied": identity, "title": "My Album",
+            "year": 1995, "genres": ["Jazz"], "imageSource": "user", "imagePath": "my-cover"
+        })
+    );
+    assert_eq!(artist_count(&pool, "Mike").await, 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_moved_edited_track_refreshes_album_metadata(pool: PgPool) {
+    assert!(require_ffmpeg(), "real audio fixtures require ffmpeg");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    song(root, "Band/Album/01.flac", "Album", Some("Band"), "Band");
+    tag_picard(
+        &root.join("Band/Album/01.flac"),
+        &Picard {
+            release: Some("12345678-1234-4234-8234-1234567890ab"),
+            genres: vec!["Jazz"],
+            ..Default::default()
+        },
+    );
+    rescan(&pool, root).await;
+    let (id, album): (Uuid, Uuid) = sqlx::query_as("SELECT id, album_id FROM tracks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mbid = Uuid::from_u128(0x123456781234423482341234567890ab);
+    sqlx::query("UPDATE albums SET display_title = 'My Album' WHERE id = $1")
+        .bind(album)
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::rename(
+        root.join("Band/Album/01.flac"),
+        root.join("Band/Album/02.flac"),
+    )
+    .unwrap();
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(report.repointed, 1);
+    let after: (Uuid, Uuid, bool) = sqlx::query_as(
+        "SELECT id, album_id, missing_since IS NULL FROM tracks WHERE path = 'Band/Album/02.flac'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after, (id, album, true));
+    let metadata: (Option<String>, Option<Uuid>) =
+        sqlx::query_as("SELECT display_title, release_mbid FROM albums WHERE id = $1")
+            .bind(album)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(metadata, (Some("My Album".into()), Some(mbid)));
+    let album_genres: Vec<String> = sqlx::query_scalar("SELECT g.name FROM album_genres x JOIN genres g ON g.id = x.genre_id WHERE x.album_id = $1 AND x.source = 'file' ORDER BY x.rank")
+        .bind(album).fetch_all(&pool).await.unwrap();
+    assert_eq!(album_genres, vec!["Jazz"]);
+    let artist_genres: Vec<String> = sqlx::query_scalar("SELECT g.name FROM artist_genres x JOIN genres g ON g.id = x.genre_id JOIN albums al ON al.artist_id = x.artist_id WHERE al.id = $1 AND x.source = 'file' ORDER BY x.rank")
+        .bind(album).fetch_all(&pool).await.unwrap();
+    assert_eq!(artist_genres, vec!["Jazz"]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_moved_autotag_only_identity_is_preserved(pool: PgPool) {
+    assert!(require_ffmpeg(), "real audio fixtures require ffmpeg");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let source = legacy_stray(&pool, root).await;
+    let identity = r#"{"artistKey":"janet","titleKey":"hist","year":null}"#;
+    sqlx::query(
+        "UPDATE albums SET identity_source = 'autotag', applied_identity = $1::jsonb WHERE id = $2",
+    )
+    .bind(identity)
+    .bind(source)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM tracks WHERE path = 'Mike/Hist/04.flac'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    std::fs::rename(
+        root.join("Mike/Hist/04.flac"),
+        root.join("Mike/Hist/05.flac"),
+    )
+    .unwrap();
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    let after: (Uuid, Uuid, String, Option<serde_json::Value>) = sqlx::query_as("SELECT t.id, t.album_id, al.identity_source, al.applied_identity FROM tracks t JOIN albums al ON al.id = t.album_id WHERE t.path = 'Mike/Hist/05.flac'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        after,
+        (
+            id,
+            source,
+            "autotag".into(),
+            Some(serde_json::from_str(identity).unwrap())
+        )
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_processes_unrelated_new_song_beside_moved_edited_track(pool: PgPool) {
+    assert!(require_ffmpeg(), "real audio fixtures require ffmpeg");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let source = legacy_stray(&pool, root).await;
+    sqlx::query("UPDATE albums SET display_title = 'My Hist' WHERE id = $1")
+        .bind(source)
+        .execute(&pool)
+        .await
+        .unwrap();
+    std::fs::rename(
+        root.join("Mike/Hist/04.flac"),
+        root.join("Mike/Hist/05.flac"),
+    )
+    .unwrap();
+    song(
+        root,
+        "Mike/Hist/new.flac",
+        "Unrelated",
+        Some("Other"),
+        "Other",
+    );
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(report.added, 1, "{report:?}");
+    assert_eq!(artist_of(&pool, "Mike/Hist/new.flac").await, "Other");
+    assert_eq!(albums(&pool, "Unrelated").await, row("Other", 1));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn refile_does_not_elect_from_incomplete_unreadable_folder(pool: PgPool) {
     if !require_ffmpeg() {
         return;
@@ -846,5 +1018,85 @@ async fn edited_album_is_never_merged_into(pool: PgPool) {
     assert_eq!(
         albums(&pool, "Hist").await,
         vec![("Janet".to_string(), 1), ("Mike".to_string(), 3)]
+    );
+}
+
+#[cfg(unix)]
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_shields_disc_with_walker_metadata_errors(pool: PgPool) {
+    use std::os::unix::fs::PermissionsExt;
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (n, artist) in [
+        (1, "Mike"),
+        (2, "Mike"),
+        (3, "Mike"),
+        (4, "Janet"),
+        (5, "Janet"),
+    ] {
+        let disc = if n <= 2 { "CD 1" } else { "CD 2" };
+        song(
+            root,
+            &format!("Mike/Hist/{disc}/0{n}.flac"),
+            "Hist",
+            Some(artist),
+            artist,
+        );
+    }
+    rescan(&pool, root).await;
+    let (artist, stray) = (Uuid::now_v7(), Uuid::now_v7());
+    sqlx::query("INSERT INTO artists (id, name, name_key) VALUES ($1, 'Janet', 'janet')")
+        .bind(artist)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO albums (id, artist_id, title, title_key) VALUES ($1, $2, 'Hist', 'hist')",
+    )
+    .bind(stray)
+    .bind(artist)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE tracks SET album_id = $1 WHERE path IN ('Mike/Hist/CD 2/04.flac', 'Mike/Hist/CD 2/05.flac')")
+        .bind(stray).execute(&pool).await.unwrap();
+    let before: Vec<(String, Uuid, Uuid)> =
+        sqlx::query_as("SELECT path, id, album_id FROM tracks ORDER BY path")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let disc = root.join("Mike/Hist/CD 1");
+    let original = std::fs::metadata(&disc).unwrap().permissions();
+    std::fs::set_permissions(&disc, std::fs::Permissions::from_mode(0o400)).unwrap();
+    assert!(
+        std::fs::read_dir(&disc).is_ok(),
+        "directory listing must succeed"
+    );
+    assert!(
+        std::fs::metadata(disc.join("01.flac")).is_err(),
+        "non-root process must be unable to stat the song"
+    );
+    let result = scan::refile_cancellable(&ctx(&pool, root), &Default::default()).await;
+    std::fs::set_permissions(&disc, original).unwrap();
+    let report = result.unwrap();
+    assert!(
+        report
+            .failed
+            .iter()
+            .any(|(path, _)| path == "Mike/Hist/CD 1/01.flac"),
+        "{report:?}"
+    );
+    assert_eq!(report.missing, 0, "{report:?}");
+    let after: Vec<(String, Uuid, Uuid)> =
+        sqlx::query_as("SELECT path, id, album_id FROM tracks ORDER BY path")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after, before,
+        "an unreadable disc's missing votes must not change the album"
     );
 }

@@ -1003,6 +1003,8 @@ struct FolderResult {
     stored: Vec<(String, Stored)>,
     failed: Vec<(String, String)>,
     tags_read: usize,
+    /// Missing protected rows brought back at their own path (re-file only).
+    restored: usize,
     /// Some existing track changed album.
     album_moved: bool,
 }
@@ -1154,6 +1156,19 @@ async fn process_folder(
         .fetch_all(&ctx.pool)
         .await?;
         if !edited_targets.is_empty() {
+            // A protected row whose file is back at its own path: clear its missing flag
+            // (reopening its file-missing stage) and refresh its album, keeping the album's
+            // identity and edits. Present protected rows are not written.
+            let returned: Vec<String> = prepared
+                .iter()
+                .filter(|p| p.target.is_none())
+                .filter_map(|p| known.get(&p.disk.rel))
+                .filter(|t| t.missing && edited_targets.contains(&t.id))
+                .map(|t| t.path.clone())
+                .collect();
+            if !returned.is_empty() {
+                out.restored += flip_and_refresh(&ctx.pool, &returned, true, true).await? as usize;
+            }
             for p in &prepared {
                 if let Some(id) = p.target.filter(|id| edited_targets.contains(id)) {
                     let mut tx = ctx.pool.begin().await?;
@@ -1474,6 +1489,7 @@ async fn reconcile_with(
         let siblings = settled.get(folder.as_str()).map_or(&[][..], Vec::as_slice);
         let result = process_folder(ctx, files, siblings, &index, ReadCause::Scan, force).await?;
         report.tags_read += result.tags_read;
+        report.restored += result.restored;
         report.failed.extend(result.failed);
         for (_, stored) in result.stored {
             match stored {

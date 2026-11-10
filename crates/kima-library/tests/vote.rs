@@ -1100,3 +1100,175 @@ async fn refile_shields_disc_with_walker_metadata_errors(pool: PgPool) {
         "an unreadable disc's missing votes must not change the album"
     );
 }
+
+/// A protected album whose first song was marked missing more than the grace period ago,
+/// although the file is back at its original path. Returns (album, returned track, present
+/// sibling track).
+async fn protected_with_expired_missing(
+    pool: &PgPool,
+    root: &Path,
+    protect: &str,
+) -> (Uuid, Uuid, Uuid) {
+    for n in 1..=3 {
+        song(
+            root,
+            &format!("Band/Album/0{n}.flac"),
+            "Album",
+            Some("Band"),
+            "Band",
+        );
+    }
+    // Other present rows, so the library is not empty and the mass-missing guard stays off.
+    for n in 1..=3 {
+        song(
+            root,
+            &format!("Keep/K/0{n}.flac"),
+            "K",
+            Some("Keep"),
+            "Keep",
+        );
+    }
+    rescan(pool, root).await;
+    let (back, album): (Uuid, Uuid) =
+        sqlx::query_as("SELECT id, album_id FROM tracks WHERE path = 'Band/Album/01.flac'")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let present: Uuid =
+        sqlx::query_scalar("SELECT id FROM tracks WHERE path = 'Band/Album/02.flac'")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    sqlx::query(protect)
+        .bind(album)
+        .execute(pool)
+        .await
+        .unwrap();
+    let grace = scan::MISSING_GRACE.as_secs() as i64 + 24 * 3600;
+    sqlx::query(
+        "UPDATE tracks SET missing_since = now() - make_interval(secs => $2) WHERE id = $1",
+    )
+    .bind(back)
+    .bind(grace as f64)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status, attempts, error_class, last_error)
+         VALUES ($1, 'fingerprint', 'failed', 1, 'FILE_MISSING', 'gone')",
+    )
+    .bind(back)
+    .execute(pool)
+    .await
+    .unwrap();
+    (album, back, present)
+}
+
+/// The returned row survives the re-file: same id and album, present again, its file-missing
+/// stage reopened; the present protected sibling is not written.
+async fn assert_restored(pool: &PgPool, root: &Path, album: Uuid, back: Uuid, present: Uuid) {
+    let stamp = "SELECT updated_at::text FROM tracks WHERE id = $1";
+    let present_before: String = sqlx::query_scalar(stamp)
+        .bind(present)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let report = scan::refile_cancellable(&ctx(pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(
+        report.purged, 0,
+        "a present file must not be retired: {report:?}"
+    );
+    let row: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
+        "SELECT id, album_id, missing_since IS NULL FROM tracks WHERE path = 'Band/Album/01.flac'",
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap();
+    assert_eq!(row, Some((back, album, true)), "{report:?}");
+    assert_eq!(report.restored, 1, "{report:?}");
+    let stage: String = sqlx::query_scalar(
+        "SELECT status FROM track_stages WHERE track_id = $1 AND stage = 'fingerprint'",
+    )
+    .bind(back)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(stage, "pending", "file-missing stage reopened");
+    let present_after: String = sqlx::query_scalar(stamp)
+        .bind(present)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        present_after, present_before,
+        "present protected rows are not written"
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_restores_returned_track_on_edited_album(pool: PgPool) {
+    assert!(require_ffmpeg(), "real audio fixtures require ffmpeg");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (album, back, present) = protected_with_expired_missing(
+        &pool,
+        root,
+        "WITH al AS (
+             UPDATE albums SET display_title = 'My Album', display_year = 1995,
+                 user_genres = ARRAY['Jazz'], image_source = 'user', image_path = 'my-cover'
+             WHERE id = $1 RETURNING artist_id
+         )
+         UPDATE artists SET display_name = 'My Band' FROM al WHERE artists.id = al.artist_id",
+    )
+    .await;
+    assert_restored(&pool, root, album, back, present).await;
+    let edits: serde_json::Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object('title', al.display_title, 'year', al.display_year,
+             'genres', al.user_genres, 'imageSource', al.image_source,
+             'imagePath', al.image_path, 'artist', ar.display_name)
+         FROM albums al JOIN artists ar ON ar.id = al.artist_id WHERE al.id = $1",
+    )
+    .bind(album)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        edits,
+        serde_json::json!({
+            "title": "My Album", "year": 1995, "genres": ["Jazz"],
+            "imageSource": "user", "imagePath": "my-cover", "artist": "My Band"
+        })
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_restores_returned_track_on_autotag_only_album(pool: PgPool) {
+    assert!(require_ffmpeg(), "real audio fixtures require ffmpeg");
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (album, back, present) = protected_with_expired_missing(
+        &pool,
+        root,
+        r#"UPDATE albums SET identity_source = 'autotag',
+               applied_identity = '{"artistKey":"band","titleKey":"album","year":null}'::jsonb
+           WHERE id = $1"#,
+    )
+    .await;
+    assert_restored(&pool, root, album, back, present).await;
+    let identity: (String, serde_json::Value) =
+        sqlx::query_as("SELECT identity_source, applied_identity FROM albums WHERE id = $1")
+            .bind(album)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        identity,
+        (
+            "autotag".into(),
+            serde_json::json!({"artistKey": "band", "titleKey": "album", "year": null})
+        )
+    );
+}

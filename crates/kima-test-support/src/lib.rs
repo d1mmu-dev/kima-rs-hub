@@ -29,6 +29,32 @@ pub fn require_ffmpeg() -> bool {
     ffmpeg_guard(ffmpeg_available(), std::env::var_os("CI").is_some())
 }
 
+/// Where tests that need a reflink (FICLONE) filesystem create their temporary directories,
+/// e.g. the input-snapshot tests: `KIMA_TEST_REFLINK_DIR` when set (CI mounts an XFS
+/// `reflink=1` loop filesystem there, the runner's ext4 has no reflink), otherwise
+/// `manifest_dir` (pass `env!("CARGO_MANIFEST_DIR")`: inside the checkout, Btrfs on the dev
+/// box). Whether the filesystem really supports reflinks is still checked by each test.
+pub fn reflink_test_dir(manifest_dir: &str) -> PathBuf {
+    reflink_test_dir_from(
+        std::env::var_os("KIMA_TEST_REFLINK_DIR").as_deref(),
+        manifest_dir,
+    )
+}
+
+fn reflink_test_dir_from(over: Option<&std::ffi::OsStr>, manifest_dir: &str) -> PathBuf {
+    match over {
+        None => PathBuf::from(manifest_dir),
+        Some(dir) => {
+            let dir = Path::new(dir);
+            assert!(
+                dir.is_absolute(),
+                "KIMA_TEST_REFLINK_DIR must be an absolute path, got {dir:?}"
+            );
+            dir.to_path_buf()
+        }
+    }
+}
+
 /// The plain tags `make_audio` writes through ffmpeg's `-metadata`.
 #[derive(Debug, Clone, Default)]
 pub struct Tags {
@@ -380,5 +406,29 @@ mod tests {
         assert!(!ffmpeg_guard(false, false));
         assert!(ffmpeg_guard(true, false));
         assert!(ffmpeg_guard(true, true));
+    }
+
+    #[test]
+    fn reflink_test_dir_defaults_to_the_crate_and_honours_the_override() {
+        assert_eq!(
+            reflink_test_dir_from(None, "/src/crates/x"),
+            Path::new("/src/crates/x")
+        );
+        assert_eq!(
+            reflink_test_dir_from(Some("/mnt/xfs".as_ref()), "/src/crates/x"),
+            Path::new("/mnt/xfs")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "KIMA_TEST_REFLINK_DIR must be an absolute path")]
+    fn reflink_test_dir_rejects_a_relative_override() {
+        reflink_test_dir_from(Some("rel".as_ref()), "/src/crates/x");
+    }
+
+    #[test]
+    #[should_panic(expected = "KIMA_TEST_REFLINK_DIR must be an absolute path")]
+    fn reflink_test_dir_rejects_an_empty_override() {
+        reflink_test_dir_from(Some("".as_ref()), "/src/crates/x");
     }
 }

@@ -773,7 +773,10 @@ mod tests {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn tmp() -> tempfile::TempDir {
-        tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap()
+        tempfile::tempdir_in(kima_test_support::reflink_test_dir(env!(
+            "CARGO_MANIFEST_DIR"
+        )))
+        .unwrap()
     }
 
     /// Library tree plus a private (0700) snapshot dir on the same filesystem.

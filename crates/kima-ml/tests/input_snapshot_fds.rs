@@ -12,8 +12,14 @@ fn open_fds() -> usize {
 
 #[test]
 fn success_failure_and_drop_close_every_descriptor() {
-    let lib = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-    let snap = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let lib = tempfile::tempdir_in(kima_test_support::reflink_test_dir(env!(
+        "CARGO_MANIFEST_DIR"
+    )))
+    .unwrap();
+    let snap = tempfile::tempdir_in(kima_test_support::reflink_test_dir(env!(
+        "CARGO_MANIFEST_DIR"
+    )))
+    .unwrap();
     std::fs::set_permissions(snap.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     if !snapshot_support::require_reflink(snap.path()) {
         return;

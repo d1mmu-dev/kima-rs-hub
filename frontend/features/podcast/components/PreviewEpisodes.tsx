@@ -1,113 +1,57 @@
 "use client";
 
-import DOMPurify from "dompurify";
-import { Plus } from "lucide-react";
 import { PodcastPreview } from "../types";
 import { formatDuration } from "@/lib/format";
 import { formatDate } from "../utils";
 import { SectionHeader } from "@/components/ui/SectionHeader";
-import { Button } from "@/components/ui/Button";
 
-interface PreviewEpisodesProps {
-    previewData: PodcastPreview;
-    isSubscribing: boolean;
-    onSubscribe: () => void;
+/**
+ * Feed summaries carry markup; the list shows their words only. Read from a parsed document, not sanitised
+ * markup, which still holds escapes (&amp;, &nbsp;) that would show as text. Parsed documents run no scripts;
+ * script and style contents are dropped so their code never shows as words.
+ */
+export function plain(html: string | undefined): string {
+    if (!html) return "";
+    const body = new DOMParser().parseFromString(html, "text/html").body;
+    body.querySelectorAll("script, style, noscript, template").forEach((el) => el.remove());
+    // Text from separate blocks and lines stays separate words; inline markup adds no space.
+    body.querySelectorAll("br").forEach((el) => el.replaceWith(" "));
+    body.querySelectorAll("p, div, ul, ol, li, dl, dt, dd, h1, h2, h3, h4, h5, h6, blockquote, pre, table, tr, td, th, hr").forEach((el) => {
+        el.prepend(" ");
+        el.append(" ");
+    });
+    return (body.textContent ?? "").replace(/\s+/g, " ").trim();
 }
 
-export function PreviewEpisodes({
-    previewData,
-    isSubscribing,
-    onSubscribe,
-}: PreviewEpisodesProps) {
-    const hasEpisodes =
-        previewData.previewEpisodes &&
-        previewData.previewEpisodes.length > 0;
-
+/** A show's newest episodes before following: titles, dates, lengths and what each is about. */
+export function PreviewEpisodes({ previewData }: { previewData: PodcastPreview }) {
+    const episodes = previewData.previewEpisodes ?? [];
     return (
         <section>
-            <SectionHeader title="Latest Episodes" type="podcast" />
-
-            {hasEpisodes ? (
-                // The subscribe fade below covers the episode list only, so the list holds it.
-                <div className="relative">
-                    <div className="space-y-0.5">
-                        {previewData.previewEpisodes!.map((episode, index) => (
-                            <div
-                                key={index}
-                                className="flex items-center gap-4 px-3 py-2 rounded-lg opacity-50 cursor-not-allowed"
-                            >
-                                <div className="w-8 flex items-center justify-center shrink-0">
-                                    <span className="text-xs tabular-nums text-[var(--text-muted)]">
-                                        {index + 1}
-                                    </span>
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                    <h3 className="font-bold truncate text-sm text-white tracking-tight">
-                                        {episode.title}
-                                    </h3>
-                                    <div className="flex items-center gap-2 text-xs tabular-nums text-[var(--text-muted)]">
-                                        <span>{formatDate(episode.publishedAt)}</span>
-                                        {episode.duration > 0 && (
-                                            <>
-                                                <span className="text-[var(--text-muted)]">|</span>
-                                                <span>{formatDuration(episode.duration)}</span>
-                                            </>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-
-                    <div className="absolute inset-0 bg-gradient-to-b from-transparent via-[#0a0a0a]/80 to-[#0a0a0a] flex items-end justify-center pb-8 pointer-events-none">
-                        <Button
-                            variant="primary"
-                            onClick={onSubscribe}
-                            isLoading={isSubscribing}
-                            className="pointer-events-auto"
-                        >
-                            {isSubscribing ? "Subscribing" : (
-                                <>
-                                    <Plus className="w-4 h-4" />
-                                    Subscribe to Unlock All Episodes
-                                </>
-                            )}
-                        </Button>
-                    </div>
-                </div>
+            <SectionHeader title="latest episodes" type="podcast" />
+            {episodes.length === 0 ? (
+                <p className="text-sm text-[var(--text-muted)]">this feed lists no episodes right now</p>
             ) : (
-                <div className="relative overflow-hidden rounded-lg border border-white/10 bg-gradient-to-br from-[#0f0f0f] to-[#0a0a0a] p-8 text-center">
-                    <p className="text-xs text-[var(--text-muted)] mb-4">
-                        No episodes available for preview
-                    </p>
-                    <Button
-                        variant="primary"
-                        onClick={onSubscribe}
-                        isLoading={isSubscribing}
-                        className="mx-auto"
-                    >
-                        {isSubscribing ? "Subscribing" : (
-                            <>
-                                <Plus className="w-4 h-4" />
-                                Subscribe
-                            </>
-                        )}
-                    </Button>
-                </div>
-            )}
-
-            {previewData.description && (
-                <div className="mt-8">
-                    <SectionHeader title="About" type="podcast" />
-                    <div className="relative overflow-hidden rounded-lg border border-white/10 bg-[var(--bg-primary)] p-4">
-                        <div
-                            className="prose prose-invert prose-sm max-w-none text-[var(--text-secondary)] max-w-3xl text-xs leading-relaxed"
-                            dangerouslySetInnerHTML={{
-                                __html: DOMPurify.sanitize(previewData.description || ""),
-                            }}
-                        />
-                    </div>
-                </div>
+                <>
+                    <p className="-mt-2 mb-4 text-xs text-[var(--text-muted)]">follow the show to play these; the first episode plays above.</p>
+                    <ol className="flex flex-col divide-y divide-white/5">
+                        {episodes.map((ep, index) => {
+                            const summary = plain(ep.description);
+                            return (
+                                <li key={`${ep.title}-${index}`} className="py-3">
+                                    <h3 className="text-sm font-semibold text-white">{ep.title}</h3>
+                                    <p className="mt-0.5 text-xs tabular-nums text-[var(--text-muted)]">
+                                        {formatDate(ep.publishedAt)}
+                                        {ep.duration > 0 && ` · ${formatDuration(ep.duration)}`}
+                                    </p>
+                                    {summary && (
+                                        <p className="mt-1.5 line-clamp-2 max-w-[70ch] text-sm leading-relaxed text-[var(--text-secondary)]">{summary}</p>
+                                    )}
+                                </li>
+                            );
+                        })}
+                    </ol>
+                </>
             )}
         </section>
     );

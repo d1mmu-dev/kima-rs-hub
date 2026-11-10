@@ -1,0 +1,98 @@
+"use client";
+
+import { Suspense } from "react";
+import { useSearchParams } from "next/navigation";
+import { parsePodcastCategoryId } from "@/features/podcast/routes";
+import { useInfiniteQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { PageMessage } from "@/components/ui/PageMessage";
+import { LoadingScreen } from "@/components/ui/LoadingScreen";
+import { Button } from "@/components/ui/Button";
+import { CategoryChips } from "@/features/podcast/components/CategoryChips";
+import { PodcastCard } from "@/features/podcast/components/PodcastShelf";
+import { queryKeys, usePodcastCategoriesQuery } from "@/hooks/useQueries";
+
+const PAGE = 48;
+
+/** One category's chart (or the overall chart at /podcasts/category/top), with its sub-categories as tabs. */
+function PodcastCategoryPageInner() {
+    const id = useSearchParams().get("id");
+    const { isAuthenticated } = useAuth();
+    const parsed = parsePodcastCategoryId(id);
+    const categoryId = parsed ?? null;
+    const valid = parsed !== undefined;
+
+    const { data: categories = [], isLoading: loadingCategories, isError: categoriesFailed } = usePodcastCategoriesQuery(isAuthenticated);
+    // A chart is asked for only once its category is known to exist; a made-up id gets "no such category".
+    const known = categoryId === null || categories.some((c) => c.id === categoryId);
+    const chart = useInfiniteQuery({
+        queryKey: queryKeys.podcastChartPages(categoryId),
+        queryFn: ({ pageParam }) => api.getPodcastChart(categoryId, PAGE, pageParam),
+        initialPageParam: 0,
+        // A short page is the chart's end (the server holds where Apple's charts stop).
+        getNextPageParam: (last, pages) => (last.length === PAGE ? pages.reduce((n, p) => n + p.length, 0) : undefined),
+        enabled: isAuthenticated && valid && known,
+        staleTime: 60 * 60 * 1000,
+    });
+
+    const category = categories.find((c) => c.id === categoryId);
+    // Only with nothing to show: a failed background refresh keeps the list it already has.
+    if (categoriesFailed && categoryId !== null && categories.length === 0) {
+        return <PageMessage title="couldn't reach apple podcasts" description="try again in a minute" action={{ label: "podcasts", href: "/podcasts" }} />;
+    }
+    if (!valid || (categoryId !== null && !loadingCategories && !category)) {
+        return <PageMessage title="no such category" action={{ label: "podcasts", href: "/podcasts" }} />;
+    }
+    if (chart.isLoading || loadingCategories) return <LoadingScreen />;
+    if (chart.isError) {
+        return <PageMessage title="couldn't reach apple podcasts" description="try again in a minute" action={{ label: "podcasts", href: "/podcasts" }} />;
+    }
+
+    // The tabs are the category's family: its own sub-categories, or its siblings when it is one.
+    const parentId = category?.parentId ?? category?.id ?? null;
+    const parent = categories.find((c) => c.id === parentId);
+    const family = parentId === null ? [] : categories.filter((c) => c.parentId === parentId);
+    const shows = chart.data?.pages.flat() ?? [];
+
+    return (
+        <div className="min-h-screen">
+            <PageHeader
+                title={category?.name ?? "top shows"}
+                description={category ? `the top ${category.name} shows on apple podcasts` : "the top shows on apple podcasts"}
+            >
+                {parent && family.length > 0 && (
+                    <CategoryChips
+                        className="mt-5"
+                        categories={[{ id: parent.id, name: `all ${parent.name}` }, ...family]}
+                        active={category?.id}
+                    />
+                )}
+            </PageHeader>
+
+            <div className="page-shell relative page-end pt-2 animate-rise">
+                {shows.length === 0 ? (
+                    <p className="py-16 text-center text-sm text-[var(--text-muted)]">apple has no chart for this category right now</p>
+                ) : (
+                    <div className="grid-media">
+                        {shows.map((p, index) => (
+                            <PodcastCard key={p.itunesId} podcast={p} index={index % PAGE} ranked />
+                        ))}
+                    </div>
+                )}
+                {chart.hasNextPage && (
+                    <div className="mt-10 flex justify-center">
+                        <Button variant="secondary" onClick={() => chart.fetchNextPage()} isLoading={chart.isFetchingNextPage}>
+                            show more
+                        </Button>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+export default function PodcastCategoryPage() {
+    return <Suspense fallback={null}><PodcastCategoryPageInner /></Suspense>;
+}

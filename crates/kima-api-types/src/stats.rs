@@ -2,6 +2,31 @@ use serde::Serializer;
 use time::OffsetDateTime;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct PlayableArtist {
+    pub id: String,
+    pub name: String,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayableAlbum {
+    pub id: String,
+    pub title: String,
+    pub cover_art: String,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct PlayableTrack {
+    pub id: String,
+    pub title: String,
+    pub duration: i32,
+    pub artist: PlayableArtist,
+    pub album: PlayableAlbum,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct TracksResponse {
+    pub tracks: Vec<PlayableTrack>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TrackPlays {
     pub plays: i64,
 }

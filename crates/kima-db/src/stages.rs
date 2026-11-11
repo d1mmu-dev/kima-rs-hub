@@ -63,9 +63,12 @@ pub struct Claim {
 /// counts one redelivery. The `recording` stage also waits for the track's fingerprint
 /// to settle (`done`, or terminal `failed`), unless `fingerprinting` is unavailable.
 ///
-/// Concurrent claimers never get the same row: track rows are locked `SKIP LOCKED`, and the
-/// upsert re-checks due-ness against the committed row, so a claim that lost a race to a
-/// claimer that already committed takes nothing.
+/// Concurrent claimers never get the same row: the upsert re-checks due-ness against the
+/// committed row, so a claim that lost a race to a claimer that already committed takes
+/// nothing. Track rows are locked `FOR KEY SHARE ... SKIP LOCKED`: a track being deleted is
+/// skipped (its stage row could not be written), but another stage's claim, failure report or
+/// publication (`FOR NO KEY UPDATE` on the track) does not hide it. The coordinator runs the
+/// stages side by side on the same tracks, and an empty claim ends a phase for the cycle.
 pub async fn claim(
     pool: &PgPool,
     stage: Stage,
@@ -88,7 +91,7 @@ pub async fn claim(
                            OR (f.status = 'failed' AND f.next_attempt_at IS NULL))))
              ORDER BY t.mtime DESC, t.id
              LIMIT $2
-             FOR UPDATE OF t SKIP LOCKED),
+             FOR KEY SHARE OF t SKIP LOCKED),
            claimed AS (
              INSERT INTO track_stages (track_id, stage, status, next_attempt_at, started_at, updated_at)
              SELECT id, $1, 'working', now() + interval '15 minutes', now(), now() FROM due
@@ -202,8 +205,9 @@ pub async fn report_failure(
 ) -> sqlx::Result<bool> {
     if matches!(claim.stage, Stage::Embedding | Stage::Analysis) {
         let mut tx = pool.begin().await?;
-        // Match publication and invalidation: track first, then stage.
-        let track = sqlx::query("SELECT id FROM tracks WHERE id = $1 FOR UPDATE")
+        // Match publication and invalidation: track first, then stage. `NO KEY UPDATE` fences
+        // the scanner's writes and deletes without hiding the track from other stages' claims.
+        let track = sqlx::query("SELECT id FROM tracks WHERE id = $1 FOR NO KEY UPDATE")
             .bind(claim.track_id)
             .fetch_optional(&mut *tx)
             .await?;

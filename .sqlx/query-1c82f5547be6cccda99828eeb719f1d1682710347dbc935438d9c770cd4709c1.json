@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id FROM tracks WHERE id=$1 AND ml_generation=$2 AND missing_since IS NULL FOR UPDATE",
+  "query": "SELECT id FROM tracks WHERE id=$1 AND ml_generation=$2 AND missing_since IS NULL FOR NO KEY UPDATE",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       false
     ]
   },
-  "hash": "09c3b8b1b687cab7e67fef2c3585c822732338dbf4b7d4d08c945e1c6489f9dc"
+  "hash": "1c82f5547be6cccda99828eeb719f1d1682710347dbc935438d9c770cd4709c1"
 }

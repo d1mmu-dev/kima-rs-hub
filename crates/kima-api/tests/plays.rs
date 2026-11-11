@@ -241,6 +241,75 @@ async fn recently_listened_orders_by_last_play(pool: PgPool) {
     assert_eq!(stored_plays(&pool, e.ana_id).await.len(), 4);
 }
 
+/// Routes upstream v1.12.3 removed (plan Appendix C). `GET /api/plays` and the bulk
+/// `DELETE /api/playlists/{id}/items` were served by kima-rs; another method is still routed on
+/// each path (`POST`), so axum answers them 405 (owner decision D-172, applied to D-173). Every
+/// other removed path must stay 404 so a future re-add is caught.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn removed_routes_are_404(pool: PgPool) {
+    let e = env(pool).await;
+    e.server
+        .get("/api/plays")
+        .authorization_bearer(&e.ana)
+        .await
+        .assert_status(StatusCode::METHOD_NOT_ALLOWED);
+    e.server
+        .delete("/api/playlists/x/items")
+        .authorization_bearer(&e.ana)
+        .json(&json!({ "trackIds": [] }))
+        .await
+        .assert_status(StatusCode::METHOD_NOT_ALLOWED);
+
+    let removed: &[(&str, &str)] = &[
+        ("POST", "/api/offline/albums/x/download"),
+        ("POST", "/api/offline/tracks/x/complete"),
+        ("GET", "/api/offline/albums"),
+        ("DELETE", "/api/offline/albums/x"),
+        ("GET", "/api/offline/stats"),
+        ("GET", "/api/downloads"),
+        ("GET", "/api/downloads/x"),
+        ("PATCH", "/api/downloads/x"),
+        ("GET", "/api/recommendations"),
+        ("GET", "/api/recommendations/albums"),
+        ("GET", "/api/recommendations/tracks"),
+        ("GET", "/api/releases/upcoming"),
+        ("GET", "/api/releases/recent"),
+        ("POST", "/api/spotify/parse"),
+        ("GET", "/api/spotify/import/session-log"),
+        ("GET", "/api/discover/exclusions"),
+        ("DELETE", "/api/discover/exclusions"),
+        ("DELETE", "/api/discover/exclusions/x"),
+        ("GET", "/api/discover/generate/status/x"),
+        ("GET", "/api/library/cover-art-colors"),
+        ("GET", "/api/analysis/track/x"),
+        ("POST", "/api/enrichment/artist/x"),
+        ("POST", "/api/enrichment/album/x"),
+        ("POST", "/api/onboarding/enrichment"),
+        ("GET", "/api/browse/playlists/featured"),
+        ("POST", "/api/playlists/x/pending/reconcile"),
+        ("POST", "/api/mixes/mood/buckets/backfill"),
+        ("POST", "/api/system-settings/test-spotify"),
+        ("GET", "/api/artists/preview/a/t"),
+        ("GET", "/api/podcasts/p/episodes/e/cache-status"),
+        ("GET", "/api/vibe/status"),
+    ];
+    let mut wrong = Vec::new();
+    for &(method, path) in removed {
+        let req = match method {
+            "GET" => e.server.get(path),
+            "POST" => e.server.post(path).json(&json!({})),
+            "PATCH" => e.server.patch(path).json(&json!({})),
+            "DELETE" => e.server.delete(path),
+            _ => unreachable!(),
+        };
+        let status = req.authorization_bearer(&e.ana).await.status_code();
+        if status != StatusCode::NOT_FOUND {
+            wrong.push(format!("{method} {path} -> {status}"));
+        }
+    }
+    assert!(wrong.is_empty(), "removed routes not 404: {wrong:#?}");
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn api_plays_returns_stored_source(pool: PgPool) {
     let s = seed(&pool, Seed::new("Alpha", "A1", Some(2000), "Song")).await;

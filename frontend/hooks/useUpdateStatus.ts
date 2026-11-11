@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { notify } from "@/lib/notify";
+import { useSectionFlags } from "@/lib/section-flags";
 
 const NOTIFIED_FOR_KEY = "kima-update-notified-for";
 
@@ -32,7 +33,10 @@ function markNotifiedFor(version: string) {
  * The tray ping fires once per release per browser.
  */
 export function useUpdateStatus() {
+    // kima-rs: `/whats-new/update-status` is not served yet (D-170).
+    const { changelog } = useSectionFlags();
     const query = useQuery({
+        enabled: changelog,
         queryKey: ["update-status"],
         queryFn: () => api.getUpdateStatus(),
         staleTime: 6 * 60 * 60 * 1000,

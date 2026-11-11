@@ -25,6 +25,8 @@ interface FeaturesState {
     /** Listening stats (`/stats/*`, M-STATS) and the release changelog (`/whats-new/*`); off until kima-rs serves them. */
     stats: boolean;
     changelog: boolean;
+    /** Deleting your own account (`DELETE /auth/account`); off until kima-rs serves it (D-180). */
+    accountDeletion: boolean;
     loading: boolean;
 }
 
@@ -47,6 +49,7 @@ const initial: Fetched = {
     imports: false,
     stats: false,
     changelog: false,
+    accountDeletion: false,
     loading: true,
 };
 
@@ -86,6 +89,7 @@ export function FeaturesProvider({ children }: { children: ReactNode }) {
                         imports: features.imports ?? false,
                         stats: features.stats ?? false,
                         changelog: features.changelog ?? false,
+                        accountDeletion: features.accountDeletion ?? false,
                         loading: false,
                     });
                 })
@@ -127,6 +131,7 @@ export function FeaturesProvider({ children }: { children: ReactNode }) {
             imports: state.imports,
             stats: state.stats,
             changelog: state.changelog,
+            accountDeletion: state.accountDeletion,
             loading: state.loading,
         }),
         [state, isAuthenticated, userId],
@@ -142,6 +147,7 @@ export function FeaturesProvider({ children }: { children: ReactNode }) {
             imports: value.imports,
             stats: value.stats,
             changelog: value.changelog,
+            accountDeletion: value.accountDeletion,
         }),
         [value],
     );

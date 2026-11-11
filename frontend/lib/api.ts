@@ -1092,6 +1092,7 @@ class ApiClient {
         imports?: boolean;
         stats?: boolean;
         changelog?: boolean;
+        accountDeletion?: boolean;
         liveReporting?: boolean;
     }> {
         return this.request("/system/features");

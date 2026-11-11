@@ -11,7 +11,8 @@ export type SectionFlag =
     | "downloads"
     | "imports"
     | "stats"
-    | "changelog";
+    | "changelog"
+    | "accountDeletion";
 
 export type SectionFlags = Record<SectionFlag, boolean>;
 
@@ -24,6 +25,7 @@ const ALL_SECTIONS: SectionFlags = {
     imports: true,
     stats: true,
     changelog: true,
+    accountDeletion: true,
 };
 
 /**

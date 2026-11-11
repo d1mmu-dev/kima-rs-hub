@@ -9,6 +9,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { useSectionFlags } from "@/lib/section-flags";
 
 interface ShelfBlock {
     tracks: { total: number; heard: number };
@@ -30,7 +31,10 @@ function heardLine(shelf: ShelfBlock | undefined): string | null {
 }
 
 export function useShelfSummary() {
+    // kima-rs: no request while the server has no stats routes (D-170).
+    const { stats } = useSectionFlags();
     const { data } = useQuery({
+        enabled: stats,
         queryKey: ["shelf-stats"],
         queryFn: () => api.get<StatsAnswer>("/stats"),
         staleTime: 1000 * 60 * 10,

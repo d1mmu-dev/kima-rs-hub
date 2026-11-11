@@ -18,6 +18,8 @@ mod playlists;
 mod plays;
 mod search;
 mod settings;
+#[allow(dead_code)] // Consumed by the stats handlers added in the next task.
+mod stats;
 mod stubs;
 mod system;
 mod system_settings;

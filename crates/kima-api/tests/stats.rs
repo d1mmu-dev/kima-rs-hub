@@ -630,3 +630,91 @@ async fn region_validates_like_js_and_requires_auth(pool: PgPool) {
         );
     }
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn false_starts_empty_history(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "audit").await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let response = server
+        .get("/api/stats/false-starts")
+        .authorization_bearer(&token)
+        .await;
+    response.assert_status_ok();
+    assert_eq!(
+        response.json::<Value>(),
+        json!({"totalRows":0,"totalListens":0,"duplicateRows":0,"collapsibleRows":0,"heard":0,"skipped":0,"tooShort":0,"unclear":0,"earliest":null,"tracks":[],"ignored":[]})
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn false_starts_reports_provable_skips_and_isolates_users(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Artist", "Album", None, "Song A")).await;
+    let b = seed(&pool, Seed::new("Artist", "Album", None, "Song B")).await;
+    sqlx::query("UPDATE tracks SET duration_secs=240 WHERE id=$1")
+        .bind(a.track)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = common::state(pool.clone());
+    let (ana, token) = common::user_with_token(&state, "audit-ana").await;
+    let (ben, other) = common::user_with_token(&state, "audit-ben").await;
+    for (u, track, sec) in [
+        (ana.id, a.track, 0),
+        (ana.id, b.track, 90),
+        (ana.id, b.track, 400),
+        (ben.id, b.track, 0),
+    ] {
+        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at,heard) VALUES ($1,$2,$3,'2026-03-01T12:00:00Z'::timestamptz + $4 * interval '1 second',false)")
+            .bind(Uuid::now_v7()).bind(u).bind(track).bind(sec as f64).execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO play_audit_ignore(user_id,track_id,ignored_at) VALUES ($1,$2,'2026-11-11T10:00:00Z')").bind(ana.id).bind(b.track).execute(&pool).await.unwrap();
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    server
+        .get("/api/stats/false-starts")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    let result = server
+        .get("/api/stats/false-starts")
+        .authorization_bearer(&token)
+        .await;
+    result.assert_status_ok();
+    assert_eq!(
+        result.json::<Value>(),
+        json!({"totalRows":3,"totalListens":3,"duplicateRows":0,"collapsibleRows":0,"heard":0,"skipped":1,"tooShort":0,"unclear":2,"earliest":"2026-03-01T12:00:00.000Z","tracks":[{"trackId":a.track.to_string(),"title":"Song A","artist":"Artist","durationSeconds":240,"requiredSeconds":120,"skipped":1,"tooShort":0,"heard":0,"listens":1,"rows":1,"shortestRunSeconds":90,"lastAt":"2026-03-01T12:00:00.000Z"}],"ignored":[{"trackId":b.track.to_string(),"title":"Song B","artist":"Artist","ignoredAt":"2026-11-11T10:00:00.000Z"}]})
+    );
+    let other = server
+        .get("/api/stats/false-starts")
+        .authorization_bearer(&other)
+        .await
+        .json::<Value>();
+    assert_eq!(other["totalRows"], 1);
+    assert_eq!(other["ignored"], json!([]));
+    assert_eq!(other["unclear"], 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn false_starts_native_history_is_all_heard(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Artist", "Album", None, "Native A")).await;
+    let b = seed(&pool, Seed::new("Artist", "Album", None, "Native B")).await;
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "audit-native").await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    for t in [a.track, b.track] {
+        let r = server
+            .post("/api/plays")
+            .authorization_bearer(&token)
+            .json(&json!({"trackId":t,"secondsListened":90}))
+            .await;
+        r.assert_status_ok();
+        assert_eq!(r.json::<Value>()["recorded"], true);
+    }
+    let v = server
+        .get("/api/stats/false-starts")
+        .authorization_bearer(&token)
+        .await
+        .json::<Value>();
+    assert_eq!(v["totalListens"], 2);
+    assert_eq!(v["heard"], 2);
+    assert_eq!(v["skipped"], 0);
+}

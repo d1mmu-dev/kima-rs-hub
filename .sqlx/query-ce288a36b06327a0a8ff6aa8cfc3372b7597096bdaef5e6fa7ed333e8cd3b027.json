@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.track_id, coalesce(t.display_title,t.title) AS \"title!\", coalesce(ar.display_name,ar.name) AS \"artist!\", i.ignored_at FROM play_audit_ignore i JOIN tracks t ON t.id=i.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE i.user_id=$1 ORDER BY i.ignored_at DESC,i.track_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "track_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "title!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "artist!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "ignored_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      false
+    ]
+  },
+  "hash": "ce288a36b06327a0a8ff6aa8cfc3372b7597096bdaef5e6fa7ed333e8cd3b027"
+}

@@ -821,9 +821,27 @@ async fn replaced_file_hands_history_to_copy(pool: PgPool) {
     rate(&pool, u, mp3, 4).await;
     bookmark(&pool, u, mp3, 1234).await;
     let p = playlist(&pool, u, &[mp3]).await;
+    let ben = user(&pool, "ben").await;
+    sqlx::query("INSERT INTO play_audit_ignore (user_id, track_id, ignored_at) VALUES ($1, $3, '2020-01-01'), ($2, $3, '2021-01-01'), ($2, $4, '2022-01-01')")
+        .bind(u).bind(ben).bind(mp3).bind(flac).execute(&pool).await.unwrap();
     make_missing(&pool, mp3, 8).await;
 
     let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    let ignores: Vec<(uuid::Uuid, uuid::Uuid, OffsetDateTime)> = sqlx::query_as(
+        "SELECT user_id, track_id, ignored_at FROM play_audit_ignore ORDER BY ignored_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ignores.len(), 2);
+    assert_eq!(
+        (ignores[0].0, ignores[0].1, ignores[0].2.year()),
+        (u, flac, 2020)
+    );
+    assert_eq!(
+        (ignores[1].0, ignores[1].1, ignores[1].2.year()),
+        (ben, flac, 2022)
+    );
     assert_eq!(r.tracks, 1);
     assert_eq!(r.playlists, vec![(u, p)]);
 

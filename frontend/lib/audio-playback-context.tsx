@@ -15,20 +15,17 @@ import { useAudioController } from "./audio-controller-context";
 import type { EngineSnapshot } from "./audio-engine-policy";
 import { usePlayReporting } from "@/hooks/usePlayReporting";
 import { upNext, useLiveReporting } from "@/hooks/useLiveReporting";
+import { useFeatures } from "./features-context";
 
 interface AudioPlaybackContextType {
     isPlaying: boolean;
     currentTime: number;
     duration: number;
     isBuffering: boolean;
-    canSeek: boolean;
-    downloadProgress: number | null;
     audioError: string | null;
     setCurrentTime: (time: number) => void;
     setCurrentTimeFromEngine: (time: number) => void;
     setDuration: (duration: number) => void;
-    setCanSeek: (canSeek: boolean) => void;
-    setDownloadProgress: (progress: number | null) => void;
 }
 
 const AudioPlaybackContext = createContext<AudioPlaybackContextType | undefined>(undefined);
@@ -38,10 +35,7 @@ export function AudioPlaybackProvider({ children }: { children: ReactNode }) {
     const [currentTime, setCurrentTime] = useState(0);
     const [duration, setDuration] = useState(0);
     const [isBuffering, setIsBuffering] = useState(false);
-    const [canSeek, setCanSeek] = useState(true);
-    const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
     const [audioError, setAudioError] = useState<string | null>(null);
-    const [isHydrated] = useState(() => typeof window !== "undefined");
 
     const lastSeekTimeRef = useRef(0);
 
@@ -65,7 +59,7 @@ export function AudioPlaybackProvider({ children }: { children: ReactNode }) {
     }, [state.playbackType, state.currentAudiobook?.trackOffset]);
 
     // Sync currentTime from audiobook/podcast progress when not playing
-    const progressKey = isHydrated && !isPlaying
+    const progressKey = !isPlaying
         ? `${state.playbackType}-${state.currentAudiobook?.progress?.currentTime}-${state.currentPodcast?.progress?.currentTime}`
         : null;
     const [prevProgressKey, setPrevProgressKey] = useState<string | null>(progressKey);
@@ -88,7 +82,7 @@ export function AudioPlaybackProvider({ children }: { children: ReactNode }) {
     usePlayReporting(
         controller as Parameters<typeof usePlayReporting>[0],
         state.currentTrack?.id ?? null,
-        state.currentTrack?.duration ?? duration ?? null,
+        state.currentTrack?.duration ?? duration,
     );
 
     const liveTrack = state.playbackType === "track" ? state.currentTrack : null;
@@ -98,10 +92,12 @@ export function AudioPlaybackProvider({ children }: { children: ReactNode }) {
             : [],
         [liveTrack, state.queue, state.currentIndex, state.isShuffle, state.shuffleIndices, state.repeatMode],
     );
+    const { liveReporting } = useFeatures();
     useLiveReporting(
         controller as Parameters<typeof useLiveReporting>[0],
         liveTrack ? { id: liveTrack.id, duration: liveTrack.duration } : null,
         liveQueue,
+        liveReporting,
     );
 
     // Snapshot subscriber: derive isPlaying/isBuffering/audioError from engine state machine.
@@ -126,7 +122,7 @@ export function AudioPlaybackProvider({ children }: { children: ReactNode }) {
         });
 
         return () => {
-            if (typeof unsubscribe === "function") unsubscribe();
+            unsubscribe();
         };
     }, [controller]);
 
@@ -167,12 +163,10 @@ export function AudioPlaybackProvider({ children }: { children: ReactNode }) {
         channel.onmessage = (event: MessageEvent) => {
             const msg = event.data;
             if (msg?.type === "playback-claimed" && msg.tabId !== tabId) {
-                 
                 controller.pause("system");
             }
         };
 
-         
         const unsubscribe = controller.subscribe((snap: EngineSnapshot) => {
             const { status } = snap;
             if (status === "playing" && prevStatusForBc !== "playing") {
@@ -184,7 +178,7 @@ export function AudioPlaybackProvider({ children }: { children: ReactNode }) {
         });
 
         return () => {
-            if (typeof unsubscribe === "function") unsubscribe();
+            unsubscribe();
             channel.close();
         };
     }, [controller]);
@@ -195,22 +189,16 @@ export function AudioPlaybackProvider({ children }: { children: ReactNode }) {
             currentTime,
             duration,
             isBuffering,
-            canSeek,
-            downloadProgress,
             audioError,
             setCurrentTime: setCurrentTimeWithSeekMark,
             setCurrentTimeFromEngine,
             setDuration,
-            setCanSeek,
-            setDownloadProgress,
         }),
         [
             isPlaying,
             currentTime,
             duration,
             isBuffering,
-            canSeek,
-            downloadProgress,
             audioError,
             setCurrentTimeWithSeekMark,
             setCurrentTimeFromEngine,

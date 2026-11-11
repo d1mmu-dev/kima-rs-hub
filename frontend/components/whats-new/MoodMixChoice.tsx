@@ -7,6 +7,10 @@
  */
 
 import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/Button";
+import { ChoiceButton } from "./ChoiceButton";
+import { refreshOpenCount } from "./useVersionChip";
+import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { Check, Loader2 } from "lucide-react";
 import { api, type MoodMixDecision, type MoodMixReleaseState } from "@/lib/api";
@@ -16,6 +20,7 @@ type Busy = "save" | MoodMixDecision | null;
 
 /** `onNavigate` puts the window off for this tab when the user follows the playlist link, as the window's own links do. */
 export function MoodMixChoice({ onNavigate }: { onNavigate?: () => void }) {
+    const queryClient = useQueryClient();
     const [state, setState] = useState<MoodMixReleaseState | null>(null);
     const [loadFailed, setLoadFailed] = useState(false);
     const [busy, setBusy] = useState<Busy>(null);
@@ -50,6 +55,7 @@ export function MoodMixChoice({ onNavigate }: { onNavigate?: () => void }) {
         setError(null);
         try {
             const saved = await api.saveMoodMixAsPlaylist(mix.id);
+            refreshOpenCount(queryClient);
             setState((s) => s && { ...s, playlist: { id: saved.id, name: saved.name } });
         } catch {
             setError("Couldn't save as a playlist");
@@ -63,6 +69,7 @@ export function MoodMixChoice({ onNavigate }: { onNavigate?: () => void }) {
         setError(null);
         try {
             await api.decideMoodMixes(next);
+            refreshOpenCount(queryClient);
             if (next === "remove") setRemovedRetired(true);
             setState((s) => s && { ...s, decision: next === "keep" ? "keep" : "rebuild", mix: next === "keep" ? s.mix : null });
         } catch {
@@ -87,7 +94,7 @@ export function MoodMixChoice({ onNavigate }: { onNavigate?: () => void }) {
         return (
             <div className="flex flex-col gap-2">
                 {savedNote}
-                <p className="text-sm text-success flex items-center gap-2" data-testid="moodmix-rebuilt">
+                <p className="text-sm text-success flex items-center gap-2" data-testid="moodmix-cleared">
                     <Check className="w-4 h-4" />
                     {decision !== "rebuild"
                         ? "No saved mood mix"
@@ -105,21 +112,15 @@ export function MoodMixChoice({ onNavigate }: { onNavigate?: () => void }) {
                 {mix.name} &middot; {mix.trackCount} {mix.trackCount === 1 ? "track" : "tracks"}
             </p>
             {savedNote ?? (
-                <button
-                    type="button"
-                    onClick={save}
-                    disabled={busy !== null}
-                    data-testid="moodmix-save"
-                    className="self-start h-11 px-4 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] text-white text-sm font-medium flex items-center gap-2 transition-colors disabled:opacity-60"
-                >
+                <Button onClick={save} disabled={busy !== null} data-testid="moodmix-save" className="self-start">
                     {busy === "save" && <Loader2 className="w-4 h-4 animate-spin" />}
                     {busy === "save" ? "Saving..." : "Save as playlist"}
-                </button>
+                </Button>
             )}
             <div className="flex gap-2">
                 {mix.retired ? (
                     // Can't be shown any more, so there is nothing to keep.
-                    <DecisionButton
+                    <ChoiceButton
                         label="Remove"
                         selected={false}
                         busy={busy === "remove"}
@@ -129,7 +130,7 @@ export function MoodMixChoice({ onNavigate }: { onNavigate?: () => void }) {
                     />
                 ) : (
                     <>
-                        <DecisionButton
+                        <ChoiceButton
                             label="Rebuild"
                             selected={false}
                             busy={busy === "rebuild"}
@@ -137,7 +138,7 @@ export function MoodMixChoice({ onNavigate }: { onNavigate?: () => void }) {
                             onClick={() => decide("rebuild")}
                             testId="moodmix-rebuild"
                         />
-                        <DecisionButton
+                        <ChoiceButton
                             label="Keep"
                             selected={decision === "keep"}
                             busy={busy === "keep"}
@@ -150,40 +151,5 @@ export function MoodMixChoice({ onNavigate }: { onNavigate?: () => void }) {
             </div>
             {error && <p className="text-sm text-danger-light" data-testid="moodmix-error">{error}</p>}
         </div>
-    );
-}
-
-function DecisionButton({
-    label,
-    selected,
-    busy,
-    disabled,
-    onClick,
-    testId,
-}: {
-    label: string;
-    selected: boolean;
-    busy: boolean;
-    disabled: boolean;
-    onClick: () => void;
-    testId: string;
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            disabled={disabled}
-            aria-pressed={selected}
-            data-testid={testId}
-            className={[
-                "h-11 px-4 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-60",
-                selected
-                    ? "bg-brand text-black"
-                    : "bg-white/[0.04] text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.08]",
-            ].join(" ")}
-        >
-            {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : selected ? <Check className="w-4 h-4" /> : null}
-            {label}
-        </button>
     );
 }

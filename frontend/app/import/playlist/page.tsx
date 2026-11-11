@@ -1,5 +1,8 @@
 "use client";
 
+import { usePublicConfig } from "@/hooks/useQueries";
+import { NumberedRow } from "@/components/ui/NumberedRow";
+import { ACQUIRE_LOCKED } from "@/lib/acquire";
 import { useState, useEffect, useRef, Suspense, type CSSProperties } from "react";
 import { formatTime, plural } from "@/lib/format";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -130,9 +133,12 @@ function ImportPlaylistPageContent() {
     const [isLoading, setIsLoading] = useState(false);
     const [previewJobId, setPreviewJobId] = useState<string | null>(null);
     const [preview, setPreview] = useState<ImportPreview | null>(null);
+    const { canAcquire, settled: permissionKnown } = usePublicConfig();
     const [selectedAlbums, setSelectedAlbums] = useState<Set<string>>(
         new Set()
     );
+    // Someone who may not start downloads imports only what the library has.
+    const albumCount = canAcquire ? selectedAlbums.size : 0;
     const [playlistName, setPlaylistName] = useState("");
     const [importJob, setImportJob] = useState<ImportJob | null>(null);
     const [refreshStatusMessage, setRefreshStatusMessage] = useState<
@@ -215,22 +221,32 @@ function ImportPlaylistPageContent() {
         refetchOnWindowFocus: false,
     });
 
-    // React to SSE-driven preview completion
-    useEffect(() => {
-        if (!ssePreviewStatus || step !== "previewing") return;
-        if (ssePreviewStatus.status === "completed" && ssePreviewStatus.preview) {
-            const result = ssePreviewStatus.preview;
-            setPreview(result);
-            setPlaylistName(result.playlist.name);
-            const downloadableAlbumIds = result.albumsToDownload.map((_a, i) => String(i));
-            setSelectedAlbums(new Set(downloadableAlbumIds));
-            setStep("preview");
-        } else if (ssePreviewStatus.status === "failed") {
-            notify.error("Failed to generate preview", { message: ssePreviewStatus.error ?? undefined });
-            setStep("input");
-            setPreviewJobId(null);
+    // React to SSE-driven preview completion (adjusted during render when the status changes)
+    const [lastPreviewStatus, setLastPreviewStatus] = useState(ssePreviewStatus);
+    const [failedPreview, setFailedPreview] = useState<PreviewStatus | null>(null);
+    if (ssePreviewStatus !== lastPreviewStatus) {
+        setLastPreviewStatus(ssePreviewStatus);
+        if (ssePreviewStatus && step === "previewing") {
+            if (ssePreviewStatus.status === "completed" && ssePreviewStatus.preview) {
+                const result = ssePreviewStatus.preview;
+                setPreview(result);
+                setPlaylistName(result.playlist.name);
+                const downloadableAlbumIds = result.albumsToDownload.map((_a, i) => String(i));
+                setSelectedAlbums(new Set(downloadableAlbumIds));
+                setStep("preview");
+            } else if (ssePreviewStatus.status === "failed") {
+                setFailedPreview(ssePreviewStatus);
+                setStep("input");
+                setPreviewJobId(null);
+            }
         }
-    }, [ssePreviewStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+    }
+
+    useEffect(() => {
+        if (failedPreview) {
+            notify.error("Failed to generate preview", { message: failedPreview.error ?? undefined });
+        }
+    }, [failedPreview]);
 
     // Import status: SSE populates cache, HTTP polls as fallback (mirrors preview-status pattern)
     const { data: sseImportStatus } = useQuery<(ImportJob & { jobId?: string }) | null>({
@@ -251,28 +267,30 @@ function ImportPlaylistPageContent() {
         refetchOnWindowFocus: false,
     });
 
-    // React to SSE-driven import status changes
-    useEffect(() => {
-        if (!sseImportStatus || !importJob) return;
+    // React to SSE-driven import status changes (adjusted during render when the status changes)
+    const [lastImportStatus, setLastImportStatus] = useState(sseImportStatus);
+    if (sseImportStatus !== lastImportStatus) {
+        setLastImportStatus(sseImportStatus);
+        if (sseImportStatus && importJob) {
+            const updated: ImportJob = {
+                ...importJob,
+                status: sseImportStatus.status,
+                progress: sseImportStatus.progress ?? importJob.progress,
+                albumsTotal: sseImportStatus.albumsTotal ?? importJob.albumsTotal,
+                albumsCompleted: sseImportStatus.albumsCompleted ?? importJob.albumsCompleted,
+                tracksMatched: sseImportStatus.tracksMatched ?? importJob.tracksMatched,
+                createdPlaylistId: sseImportStatus.createdPlaylistId ?? importJob.createdPlaylistId,
+                error: sseImportStatus.error ?? importJob.error,
+            };
+            setImportJob(updated);
 
-        const updated: ImportJob = {
-            ...importJob,
-            status: sseImportStatus.status,
-            progress: sseImportStatus.progress ?? importJob.progress,
-            albumsTotal: sseImportStatus.albumsTotal ?? importJob.albumsTotal,
-            albumsCompleted: sseImportStatus.albumsCompleted ?? importJob.albumsCompleted,
-            tracksMatched: sseImportStatus.tracksMatched ?? importJob.tracksMatched,
-            createdPlaylistId: sseImportStatus.createdPlaylistId ?? importJob.createdPlaylistId,
-            error: sseImportStatus.error ?? importJob.error,
-        };
-        setImportJob(updated);
-
-        if (TERMINAL_IMPORT_STATUSES.includes(updated.status)) {
-            setStep("complete");
+            if (TERMINAL_IMPORT_STATUSES.includes(updated.status)) {
+                setStep("complete");
+            }
         }
-    }, [sseImportStatus]); // eslint-disable-line react-hooks/exhaustive-deps
+    }
 
-    // Fetch preview (async — returns job ID, completion arrives via SSE)
+    // The preview answers with a job id; the finished preview arrives over the event stream.
     const handleFetchPreview = async () => {
         if (!url.trim()) return;
 
@@ -293,7 +311,6 @@ function ImportPlaylistPageContent() {
         }
     };
 
-    // Quick import (skip preview, import everything in background)
     const handleQuickImport = async () => {
         if (!url.trim()) return;
 
@@ -335,13 +352,14 @@ function ImportPlaylistPageContent() {
                     spotifyPlaylistId: preview.playlist.id,
                     url,
                     playlistName: playlistName || preview.playlist.name,
-                    albumMbidsToDownload: Array.from(selectedMbids),
+                    // Someone who may not start downloads imports what matches the library and downloads nothing.
+                    albumMbidsToDownload: canAcquire ? Array.from(selectedMbids) : [],
                     previewJobId: previewJobId ?? undefined,
                 }
             );
 
             setImportJob(pendingImportJob(response.jobId, {
-                albumsTotal: selectedAlbums.size,
+                albumsTotal: albumCount,
                 tracksMatched: preview.summary.inLibrary,
                 tracksTotal: preview.summary.total,
                 tracksDownloadable: preview.summary.downloadable,
@@ -418,7 +436,7 @@ function ImportPlaylistPageContent() {
 
     return (
         <div className="min-h-screen">
-            <div className="max-w-3xl mx-auto px-6 py-6">
+            <div className="max-w-3xl mx-auto px-6 pt-6 page-end">
                 <div className="flex items-center gap-4 mb-6">
                     <button
                         onClick={() => router.back()}
@@ -428,7 +446,7 @@ function ImportPlaylistPageContent() {
                         <ArrowLeft className="w-5 h-5 text-[var(--text-secondary)]" />
                     </button>
                     <div>
-                        <h1 className="text-2xl font-bold text-white">
+                        <h1 className="t-page-title">
                             Import Playlist
                         </h1>
                         <p className="text-sm text-[var(--text-secondary)]">
@@ -470,9 +488,9 @@ function ImportPlaylistPageContent() {
                             />
                             <p className="text-xs text-[var(--text-muted)] mt-2">
                                 Paste a public{" "}
-                                <span className="text-[#AD47FF]">Deezer</span>{" "}
+                                <span className="text-[var(--text-secondary)]">Deezer</span>{" "}
                                 or{" "}
-                                <span className="text-spotify">Spotify</span>{" "}
+                                <span className="text-[var(--text-secondary)]">Spotify</span>{" "}
                                 playlist URL
                             </p>
                         </div>
@@ -586,7 +604,7 @@ function ImportPlaylistPageContent() {
                                     {preview.summary.downloadable}
                                 </div>
                                 <div className="text-xs text-[var(--text-muted)]">
-                                    To Download
+                                    {canAcquire ? "To Download" : "Not in Library"}
                                 </div>
                             </div>
                             <div className="animate-rise text-center py-3 bg-success/10 rounded-lg" style={{ "--i": 3 } as CSSProperties}>
@@ -629,46 +647,26 @@ function ImportPlaylistPageContent() {
                                         {preview.matchedTracks
                                             .filter((m) => m.localTrack)
                                             .map((match, i) => (
-                                                <div
-                                                    key={
-                                                        match.spotifyTrack
-                                                            .spotifyId
-                                                    }
-                                                    className="flex items-center gap-3 px-4 py-2 hover:bg-white/5"
-                                                >
-                                                    <span className="text-xs text-[var(--text-muted)] w-5 text-right">
-                                                        {i + 1}
-                                                    </span>
-                                                    <div className="flex-1 min-w-0">
-                                                        <div className="text-sm text-white truncate">
-                                                            {match.localTrack
-                                                                ?.title ||
-                                                                match
-                                                                    .spotifyTrack
-                                                                    .title}
-                                                        </div>
-                                                        <div className="text-xs text-[var(--text-muted)] truncate">
-                                                            {match.localTrack
-                                                                ?.artistName ||
-                                                                match
-                                                                    .spotifyTrack
-                                                                    .artist}
-                                                        </div>
-                                                    </div>
-                                                    <span className="text-xs text-[var(--text-muted)]">
-                                                        {formatTime(
-                                                            Math.round(match.spotifyTrack
-                                                                .durationMs / 1000)
-                                                        )}
-                                                    </span>
-                                                </div>
+                                                <NumberedRow
+                                                    key={match.spotifyTrack.spotifyId}
+                                                    n={i + 1}
+                                                    title={match.localTrack?.title || match.spotifyTrack.title}
+                                                    subtitle={match.localTrack?.artistName || match.spotifyTrack.artist}
+                                                    trailing={formatTime(Math.round(match.spotifyTrack.durationMs / 1000))}
+                                                />
                                             ))}
                                     </div>
                                 )}
                             </div>
                         )}
 
-                        {preview.albumsToDownload.filter((a) => a.albumMbid)
+                        {!canAcquire && preview.summary.downloadable > 0 && (
+                            <p className="text-sm text-[var(--text-muted)]">
+                                Songs not in your library are left out: {ACQUIRE_LOCKED}.
+                            </p>
+                        )}
+
+                        {canAcquire && preview.albumsToDownload.filter((a) => a.albumMbid)
                             .length > 0 && (
                             <div className="bg-white/5 rounded-lg overflow-hidden">
                                 <button
@@ -806,24 +804,22 @@ function ImportPlaylistPageContent() {
                             <Button
                                 variant="primary"
                                 onClick={handleStartImport}
-                                disabled={
-                                    preview.summary.inLibrary === 0 &&
-                                    selectedAlbums.size === 0
-                                }
+                                disabled={!permissionKnown || (preview.summary.inLibrary === 0 && albumCount === 0)}
                                 isLoading={isLoading}
                                 className="flex-1 bg-success hover:bg-success hover:brightness-110"
                             >
                                 {isLoading ? (
                                     "Starting..."
-                                ) : preview.summary.inLibrary > 0 &&
-                                  selectedAlbums.size > 0 ? (
-                                    `Import ${preview.summary.inLibrary} songs + Download ${selectedAlbums.size} albums`
+                                ) : preview.summary.inLibrary > 0 && albumCount > 0 ? (
+                                    `Import ${preview.summary.inLibrary} songs + Download ${albumCount} albums`
                                 ) : preview.summary.inLibrary > 0 ? (
                                     `Import ${preview.summary.inLibrary} songs`
-                                ) : selectedAlbums.size > 0 ? (
-                                    `Download ${selectedAlbums.size} albums`
-                                ) : (
+                                ) : albumCount > 0 ? (
+                                    `Download ${albumCount} albums`
+                                ) : canAcquire ? (
                                     "Select albums to download"
+                                ) : (
+                                    "None of these songs are in your library"
                                 )}
                             </Button>
                         </div>
@@ -843,8 +839,6 @@ function ImportPlaylistPageContent() {
                                 : importJob.status === "creating_playlist" ||
                                   importJob.status === "matching_tracks"
                                 ? "Creating Playlist"
-                                : importJob.status === "pending"
-                                ? "Starting Import"
                                 : "Starting Import"}
                         </h2>
                         <p className="text-sm text-[var(--text-secondary)] mb-6">

@@ -1,13 +1,11 @@
-/**
- * TanStack Query hooks for the most-used endpoints. Stale times follow how
- * often the data changes: artists/albums 10m, search/mixes 5m, library and
- * home 2m, playlists 1m.
- */
+/** TanStack Query hooks for the most-used endpoints; each hook's stale time follows how often its data changes. */
 
 import { useMemo } from "react";
-import { useInfiniteQuery, useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import type { AddPlaylistItemsBody } from "@/lib/playlist-contract";
 import type { PlaylistPreview } from "@/features/home/types";
+import { buildRadioRow } from "@/features/home/radioData";
 
 export const queryKeys = {
     artist: (id: string) => ["artist", id] as const,
@@ -56,22 +54,27 @@ export const queryKeys = {
 
     podcasts: () => ["podcasts"] as const,
     podcast: (id: string) => ["podcast", id] as const,
-    topPodcasts: (limit?: number, genreId?: number) =>
-        ["podcasts", "top", limit, genreId] as const,
+    podcastEpisodes: (id: string, order: string) => ["podcast", id, order] as const,
+    podcastsListening: () => ["podcasts", "listening"] as const,
+    podcastsForYou: () => ["podcasts", "for-you"] as const,
+    podcastCategories: () => ["podcasts", "categories"] as const,
+    podcastChart: (category: number | null, limit: number) => ["podcasts", "chart", category ?? "all", limit] as const,
+    podcastChartPages: (category: number | null) => ["podcasts", "chart", category ?? "all", "paged"] as const,
 
     // Browse (Deezer playlists)
     browseAll: () => ["browse", "all"] as const,
 
     // Library radio data
-    libraryGenres: () => ["library", "genres"] as const,
-    libraryDecades: () => ["library", "decades"] as const,
+    radioRow: (scope: string, day: string) => ["library", "radio", "row", scope, day] as const,
+    // The collection page's mood band and card dots; refreshed when enrichment or a scan finishes (useEventSource)
+    libraryMoodSummary: () => ["library", "mood-summary"] as const,
 };
 
 export function useRecentlyListenedQuery(limit: number = 10) {
     return useQuery({
         queryKey: queryKeys.recentlyListened(limit),
         queryFn: () => api.getRecentlyListened(limit),
-        staleTime: 2 * 60 * 1000, // 2 minutes
+        staleTime: 2 * 60 * 1000,
     });
 }
 
@@ -79,7 +82,7 @@ export function useRecentlyAddedQuery(limit: number = 10) {
     return useQuery({
         queryKey: queryKeys.recentlyAdded(limit),
         queryFn: () => api.getRecentlyAdded(limit),
-        staleTime: 2 * 60 * 1000, // 2 minutes
+        staleTime: 2 * 60 * 1000,
     });
 }
 
@@ -112,16 +115,9 @@ export function useLibraryArtistsQuery({
     return useQuery({
         queryKey: queryKeys.libraryArtists({ filter, sortBy, limit, offset }),
         queryFn: () => api.getArtists({ limit, offset, filter, sortBy }),
-        select: (response) => ({
-            artists: response.artists,
-            total: response.total,
-            offset: response.offset,
-            limit: response.limit,
-        }),
         staleTime: 2 * 60 * 1000,
         enabled,
-        structuralSharing: true,
-        placeholderData: (previousData) => previousData,
+        placeholderData: keepPreviousData,
     });
 }
 
@@ -136,16 +132,10 @@ export function useLibraryAlbumsQuery({
     return useQuery({
         queryKey: queryKeys.libraryAlbums({ filter, sortBy, limit, offset }),
         queryFn: () => api.getAlbums({ limit, offset, filter, sortBy }),
-        select: (response) => ({
-            albums: response.albums,
-            total: response.total,
-            offset: response.offset,
-            limit: response.limit,
-        }),
         staleTime: 2 * 60 * 1000,
         enabled,
-        // Use placeholder data for better perceived performance (keeps pagination buttons enabled during fetches)
-        placeholderData: (previousData) => previousData,
+        // The last page stays shown while the next loads, so the pager stays usable.
+        placeholderData: keepPreviousData,
     });
 }
 
@@ -159,16 +149,10 @@ export function useLibraryTracksQuery({
     return useQuery({
         queryKey: queryKeys.libraryTracks({ sortBy, limit, offset }),
         queryFn: () => api.getTracks({ limit, offset, sortBy }),
-        select: (response) => ({
-            tracks: response.tracks,
-            total: response.total,
-            offset: response.offset,
-            limit: response.limit,
-        }),
         staleTime: 2 * 60 * 1000,
         enabled,
-        // Use placeholder data for better perceived performance (keeps pagination buttons enabled during fetches)
-        placeholderData: (previousData) => previousData,
+        // The last page stays shown while the next loads, so the pager stays usable.
+        placeholderData: keepPreviousData,
     });
 }
 
@@ -177,8 +161,17 @@ export function useRecommendationsQuery(limit: number = 10, enabled: boolean = t
         enabled,
         queryKey: queryKeys.recommendations(limit),
         queryFn: () => api.getRecommendationsForYou(limit),
-        staleTime: 5 * 60 * 1000, // 5 minutes
+        staleTime: 5 * 60 * 1000,
     });
+}
+
+/**
+ * After following or removing a show: the shows list, and every search, since searching shows and episodes covers
+ * only the shows you follow.
+ */
+export function refreshFollowedShows(queryClient: QueryClient) {
+    queryClient.invalidateQueries({ queryKey: queryKeys.podcasts() });
+    queryClient.invalidateQueries({ queryKey: ["search"] });
 }
 
 export function useSearchQuery(
@@ -189,14 +182,18 @@ export function useSearchQuery(
         | "albums"
         | "tracks"
         | "audiobooks"
-        | "podcasts" = "all",
+        | "podcasts"
+        | "episodes" = "all",
     limit: number = 20,
+    /** Keep the last answer on screen while the next query loads, as a search-as-you-type box does. */
+    keepPrevious = false,
 ) {
     return useQuery({
         queryKey: queryKeys.search(query, type, limit),
         queryFn: ({ signal }) => api.search(query, type, limit, signal),
+        placeholderData: keepPrevious ? keepPreviousData : undefined,
         enabled: query.length >= 2, // Only search if query is at least 2 characters
-        staleTime: 5 * 60 * 1000, // 5 minutes
+        staleTime: 5 * 60 * 1000,
     });
 }
 
@@ -204,12 +201,15 @@ export function useDiscoverSearchQuery(
     query: string,
     type: "music" | "podcasts" | "all" = "music",
     limit: number = 20,
+    /** Keep the last answer on screen while the next query loads, as a search-as-you-type box does. */
+    keepPrevious = false,
 ) {
     return useQuery({
         queryKey: queryKeys.discoverSearch(query, type, limit),
         queryFn: ({ signal }) => api.discoverSearch(query, type, limit, signal),
+        placeholderData: keepPrevious ? keepPreviousData : undefined,
         enabled: query.length >= 2,
-        staleTime: 5 * 60 * 1000, // 5 minutes
+        staleTime: 5 * 60 * 1000,
     });
 }
 
@@ -218,7 +218,7 @@ export function useDiscoverSimilarArtistsQuery(artistName: string, mbid: string 
         queryKey: queryKeys.discoverSimilar(artistName, mbid),
         queryFn: ({ signal }) => api.discoverSimilarArtists(artistName, mbid, signal),
         enabled: artistName.length > 0,
-        staleTime: 30 * 60 * 1000, // 30 minutes -- similar artists rarely change
+        staleTime: 30 * 60 * 1000, // similar artists rarely change
     });
 }
 
@@ -226,7 +226,7 @@ export function usePlaylistsQuery() {
     return useQuery({
         queryKey: queryKeys.playlists(),
         queryFn: () => api.getPlaylists(),
-        staleTime: 1 * 60 * 1000, // 1 minute
+        staleTime: 1 * 60 * 1000,
     });
 }
 
@@ -238,7 +238,7 @@ export function usePlaylistQuery(id: string | undefined) {
             return await api.getPlaylist(id);
         },
         enabled: !!id,
-        staleTime: 1 * 60 * 1000, // 1 minute
+        staleTime: 1 * 60 * 1000,
     });
 }
 
@@ -247,7 +247,7 @@ export function useMixesQuery(enabled: boolean = true) {
         enabled,
         queryKey: queryKeys.mixes(),
         queryFn: () => api.getMixes(),
-        staleTime: 5 * 60 * 1000, // 5 minutes
+        staleTime: 5 * 60 * 1000,
     });
 }
 
@@ -259,7 +259,7 @@ export function useMixQuery(id: string | undefined) {
             return await api.getMix(id);
         },
         enabled: !!id,
-        staleTime: 5 * 60 * 1000, // 5 minutes
+        staleTime: 5 * 60 * 1000,
     });
 }
 
@@ -268,7 +268,7 @@ export function usePopularArtistsQuery(limit: number = 20, enabled: boolean = tr
         enabled,
         queryKey: queryKeys.popularArtists(limit),
         queryFn: () => api.getPopularArtists(limit),
-        staleTime: 10 * 60 * 1000, // 10 minutes
+        staleTime: 10 * 60 * 1000,
     });
 }
 
@@ -277,7 +277,7 @@ export function useAudiobooksQuery(enabled: boolean = true) {
         enabled,
         queryKey: queryKeys.audiobooks(),
         queryFn: () => api.getAudiobooks(),
-        staleTime: 5 * 60 * 1000, // 5 minutes
+        staleTime: 5 * 60 * 1000,
     });
 }
 
@@ -289,7 +289,7 @@ export function useAudiobookQuery(id: string | undefined) {
             return await api.getAudiobook(id);
         },
         enabled: !!id,
-        staleTime: 5 * 60 * 1000, // 5 minutes
+        staleTime: 5 * 60 * 1000,
     });
 }
 
@@ -297,7 +297,7 @@ export function usePodcastsQuery() {
     return useQuery({
         queryKey: queryKeys.podcasts(),
         queryFn: () => api.getPodcasts(),
-        staleTime: 5 * 60 * 1000, // 5 minutes
+        staleTime: 5 * 60 * 1000,
     });
 }
 
@@ -318,7 +318,7 @@ export function usePodcastQuery(
     const query = useInfiniteQuery({
         // The order is part of the key: "oldest" must fetch a different page,
         // not just re-sort the newest one.
-        queryKey: [...queryKeys.podcast(id || ""), order],
+        queryKey: queryKeys.podcastEpisodes(id || "", order),
         queryFn: async ({ pageParam }) => {
             if (!id) throw new Error("Podcast ID is required");
             if (isItunesId) return null; // iTunes ID - go straight to preview mode
@@ -345,7 +345,7 @@ export function usePodcastQuery(
             return last && loaded < (last.episodeTotal ?? 0) ? loaded : undefined;
         },
         enabled: !!id,
-        staleTime: 5 * 60 * 1000, // 5 minutes
+        staleTime: 5 * 60 * 1000,
         retry: false, // Don't retry 404 errors
         // The other order of the same podcast keeps its page on screen meanwhile;
         // another podcast does not show this one's.
@@ -376,12 +376,60 @@ export function usePodcastQuery(
     };
 }
 
-export function useTopPodcastsQuery(limit: number = 20, genreId?: number, enabled: boolean = true) {
+/**
+ * What any signed-in user may know about the server: its public address, and whether they may start downloads.
+ * Until the server answers, downloads read as not allowed: the acquire routes are operator-only by default.
+ */
+export function usePublicConfig() {
+    const { data, isError } = useQuery({
+        queryKey: ["system", "public-config"],
+        queryFn: () => api.getPublicConfig(),
+        staleTime: 5 * 60 * 1000,
+    });
+    // Settled: answered, or failed (and nothing cached to fall back on). Locked: the server has said this listener
+    // may not start downloads, so the operator-only message shows (a control is disabled until then either way).
+    const canAcquire = data?.canAcquire === true;
+    const settled = data !== undefined || isError;
+    return { publicUrl: data?.publicUrl ?? "", canAcquire, settled, locked: settled && !canAcquire };
+}
+
+/** Apple's chart for a category, or the overall chart for null. */
+export function usePodcastChartQuery(category: number | null, limit: number, enabled = true, background = false) {
     return useQuery({
+        queryKey: queryKeys.podcastChart(category, limit),
+        queryFn: () => api.getPodcastChart(category, limit, 0, background),
         enabled,
-        queryKey: queryKeys.topPodcasts(limit, genreId),
-        queryFn: () => api.getTopPodcasts(limit, genreId),
-        staleTime: 10 * 60 * 1000, // 10 minutes
+        staleTime: 60 * 60 * 1000,
+    });
+}
+
+/** Episodes in progress across followed shows, and each show's newest unplayed one. */
+export function usePodcastListeningQuery(enabled = true) {
+    return useQuery({
+        queryKey: queryKeys.podcastsListening(),
+        queryFn: () => api.getPodcastListening(),
+        enabled,
+        staleTime: 30 * 1000,
+    });
+}
+
+/** Rows of shows from the categories of the shows this user follows. */
+export function usePodcastsForYouQuery(enabled = true) {
+    return useQuery({
+        queryKey: queryKeys.podcastsForYou(),
+        queryFn: () => api.getPodcastsForYou(),
+        enabled,
+        staleTime: 10 * 60 * 1000,
+    });
+}
+
+/** Apple's podcast categories, as the server names them. */
+export function usePodcastCategoriesQuery(enabled = true) {
+    return useQuery({
+        queryKey: queryKeys.podcastCategories(),
+        queryFn: () => api.getPodcastCategories(),
+        enabled,
+        staleTime: 60 * 60 * 1000,
     });
 }
 
@@ -398,9 +446,31 @@ export function useRefreshMixesMutation() {
 
 type PlaylistCache = Record<string, unknown> | undefined;
 
-function invalidatePlaylist(queryClient: QueryClient, playlistId: string) {
-    queryClient.invalidateQueries({ queryKey: queryKeys.playlist(playlistId) });
-    queryClient.invalidateQueries({ queryKey: queryKeys.playlists() });
+/** Every edit to a playlist carries this key, so edits still on their way to the server can be counted. */
+const PLAYLIST_EDIT = ["playlist-edit"] as const;
+
+/**
+ * Edits to one playlist sent and not yet answered (one settling counts itself). While any is on its way, a reply to
+ * a playlist fetch lacks it and would briefly undo it on screen, so only the last edit to settle asks for the
+ * playlist; the live stream's echo of this device's own change waits for it too.
+ */
+export function playlistEditsInFlight(queryClient: QueryClient, playlistId: string): number {
+    return queryClient.isMutating({
+        mutationKey: PLAYLIST_EDIT,
+        predicate: (mutation) => (mutation.state.variables as { playlistId?: string } | undefined)?.playlistId === playlistId,
+    });
+}
+
+/**
+ * Per playlist, while edits to it are on their way: the playlist as cached before the first of them was shown, and
+ * whether any has been accepted. Kept per query client, so each test's client starts clean.
+ */
+const playlistEditBursts = new WeakMap<QueryClient, Map<string, { before: unknown; anyAccepted: boolean }>>();
+
+function editBursts(queryClient: QueryClient) {
+    let bursts = playlistEditBursts.get(queryClient);
+    if (!bursts) playlistEditBursts.set(queryClient, (bursts = new Map()));
+    return bursts;
 }
 
 async function applyOptimisticPlaylistEdit(
@@ -409,36 +479,43 @@ async function applyOptimisticPlaylistEdit(
     edit: (old: PlaylistCache) => PlaylistCache,
 ) {
     await queryClient.cancelQueries({ queryKey: queryKeys.playlist(playlistId) });
-    const previous = queryClient.getQueryData(queryKeys.playlist(playlistId));
+    const bursts = editBursts(queryClient);
+    if (!bursts.has(playlistId)) {
+        bursts.set(playlistId, { before: queryClient.getQueryData(queryKeys.playlist(playlistId)), anyAccepted: false });
+    }
     queryClient.setQueryData(queryKeys.playlist(playlistId), edit);
-    return { previous };
 }
 
-function rollbackPlaylistEdit(queryClient: QueryClient, playlistId: string, context: { previous: unknown } | undefined) {
-    if (context?.previous) {
-        queryClient.setQueryData(queryKeys.playlist(playlistId), context.previous);
+/**
+ * Every playlist edit ends here, accepted or not. Only the last of the edits on their way acts: if none of them was
+ * accepted (a refusal, or no connection), the playlist goes back to how it was before the first was shown; then it is
+ * fetched, so the server's truth replaces what was shown. An edit's own snapshot is never restored on its own: it
+ * would also undo edits sent after it.
+ */
+function settlePlaylistEdit(queryClient: QueryClient, playlistId: string, accepted: boolean) {
+    const bursts = editBursts(queryClient);
+    const burst = bursts.get(playlistId);
+    if (burst && accepted) burst.anyAccepted = true;
+    if (playlistEditsInFlight(queryClient, playlistId) <= 1) {
+        bursts.delete(playlistId);
+        if (burst && !burst.anyAccepted && burst.before !== undefined) {
+            queryClient.setQueryData(queryKeys.playlist(playlistId), burst.before);
+        }
+        queryClient.invalidateQueries({ queryKey: queryKeys.playlist(playlistId) });
     }
+    queryClient.invalidateQueries({ queryKey: queryKeys.playlists() });
 }
 
 export function useAddToPlaylistMutation() {
     const queryClient = useQueryClient();
 
     return useMutation({
+        mutationKey: PLAYLIST_EDIT,
         // Accepts a single trackId or many; pass trackIds to add a whole mix in
         // one request.
-        mutationFn: ({
-            playlistId,
-            trackId,
-            trackIds,
-        }: {
-            playlistId: string;
-            trackId?: string;
-            trackIds?: string[];
-        }) =>
-            trackIds?.length
-                ? api.addTracksToPlaylist(playlistId, trackIds)
-                : api.addTrackToPlaylist(playlistId, trackId!),
-        onSettled: (_, __, variables) => invalidatePlaylist(queryClient, variables.playlistId),
+        mutationFn: ({ playlistId, ...body }: { playlistId: string } & AddPlaylistItemsBody) =>
+            api.addTrackToPlaylist(playlistId, body),
+        onSettled: (_, error, variables) => settlePlaylistEdit(queryClient, variables.playlistId, !error),
     });
 }
 
@@ -446,6 +523,7 @@ export function useRemoveFromPlaylistMutation() {
     const queryClient = useQueryClient();
 
     return useMutation({
+        mutationKey: PLAYLIST_EDIT,
         mutationFn: ({
             playlistId,
             trackId,
@@ -463,8 +541,7 @@ export function useRemoveFromPlaylistMutation() {
                     ),
                 };
             }),
-        onError: (_err, variables, context) => rollbackPlaylistEdit(queryClient, variables.playlistId, context),
-        onSettled: (_, __, variables) => invalidatePlaylist(queryClient, variables.playlistId),
+        onSettled: (_, error, variables) => settlePlaylistEdit(queryClient, variables.playlistId, !error),
     });
 }
 
@@ -472,6 +549,7 @@ export function useUpdatePlaylistMutation() {
     const queryClient = useQueryClient();
 
     return useMutation({
+        mutationKey: PLAYLIST_EDIT,
         mutationFn: ({
             playlistId,
             data,
@@ -479,7 +557,35 @@ export function useUpdatePlaylistMutation() {
             playlistId: string;
             data: { name?: string; isPublic?: boolean };
         }) => api.updatePlaylist(playlistId, data),
-        onSuccess: (_, variables) => invalidatePlaylist(queryClient, variables.playlistId),
+        onSettled: (_, error, variables) => settlePlaylistEdit(queryClient, variables.playlistId, !error),
+    });
+}
+
+export function useSetPlaylistReverseMutation() {
+    const queryClient = useQueryClient();
+
+    return useMutation({
+        mutationKey: PLAYLIST_EDIT,
+        mutationFn: ({
+            playlistId,
+            reverseOrder,
+        }: {
+            playlistId: string;
+            reverseOrder: boolean;
+        }) => api.updatePlaylistOrder(playlistId, reverseOrder),
+        onMutate: ({ playlistId, reverseOrder }) =>
+            applyOptimisticPlaylistEdit(queryClient, playlistId, (old) => {
+                if (!old || !Array.isArray(old.items)) return old;
+                return {
+                    ...old,
+                    reverseOrder,
+                    items: [...(old.items as unknown[])].reverse(),
+                    ...(Array.isArray(old.mergedItems) && {
+                        mergedItems: [...(old.mergedItems as unknown[])].reverse(),
+                    }),
+                };
+            }),
+        onSettled: (_, error, variables) => settlePlaylistEdit(queryClient, variables.playlistId, !error),
     });
 }
 
@@ -496,10 +602,59 @@ export function useDeletePlaylistMutation() {
     });
 }
 
+/**
+ * `list` (cached, so in display order) with `itemId` moved to just after `afterItemId` in stored order, or to the
+ * top for null, which is where the server ranks it: directly after the anchor, ahead of whatever followed it. Null
+ * when the item is not in the list.
+ */
+function moveAfter(list: Array<Record<string, unknown>>, itemId: string, afterItemId: string | null, reversed: boolean) {
+    const stored = reversed ? [...list].reverse() : [...list];
+    const idx = stored.findIndex((entry) => entry.id === itemId);
+    if (idx === -1) return null;
+    const [moved] = stored.splice(idx, 1);
+    if (afterItemId) {
+        const afterIdx = stored.findIndex((entry) => entry.id === afterItemId);
+        stored.splice(afterIdx !== -1 ? afterIdx + 1 : idx, 0, moved);
+    } else {
+        stored.unshift(moved);
+    }
+    return reversed ? stored.reverse() : stored;
+}
+
+/**
+ * The move the server takes (`afterItemId` in stored order, null for the first) that shows `itemId` right after
+ * `shownAfterId` on screen, or at the top of the screen for null. `shownIds` is the list as shown; a reversed playlist
+ * is shown in the opposite of its stored order, so "after on screen" is "before" in storage.
+ */
+export function anchorForScreenMove(shownIds: string[], itemId: string, shownAfterId: string | null, reversed: boolean): string | null {
+    if (!reversed) return shownAfterId;
+    const others = shownIds.filter((id) => id !== itemId);
+    if (shownAfterId === null) return others[0] ?? null;
+    const at = others.indexOf(shownAfterId);
+    return at === -1 ? shownAfterId : others[at + 1] ?? null;
+}
+
+/**
+ * A playlist after moving `itemId` to just after `afterItemId` (the top for null), as the server will store it. The
+ * page draws `mergedItems` (songs and songs still downloading, in one order) when the server sends it, so both lists
+ * move. A copy: the cached list is also `previous`, restored on failure.
+ */
+export function movePlaylistItem<T extends PlaylistCache>(old: T, itemId: string, afterItemId: string | null): T {
+    if (!old || !Array.isArray(old.items)) return old;
+    const reversed = Boolean((old as { reverseOrder?: boolean }).reverseOrder);
+    const items = moveAfter(old.items as Array<Record<string, unknown>>, itemId, afterItemId, reversed);
+    if (!items) return old;
+    const merged = Array.isArray(old.mergedItems)
+        ? moveAfter(old.mergedItems as Array<Record<string, unknown>>, itemId, afterItemId, reversed)
+        : null;
+    return { ...old, items, ...(merged && { mergedItems: merged }) };
+}
+
 export function useMoveTrackInPlaylistMutation() {
     const queryClient = useQueryClient();
 
     return useMutation({
+        mutationKey: PLAYLIST_EDIT,
         mutationFn: ({
             playlistId,
             itemId,
@@ -508,29 +663,12 @@ export function useMoveTrackInPlaylistMutation() {
             playlistId: string;
             itemId: string;
             afterItemId: string | null;
-        }) => api.moveTrackInPlaylist(playlistId, itemId, afterItemId),
+        }) => api.moveTrackInPlaylist(playlistId, itemId, { afterItemId }),
         onMutate: (variables) =>
-            applyOptimisticPlaylistEdit(queryClient, variables.playlistId, (old) => {
-                if (!old || !Array.isArray(old.items)) return old;
-                // A copy: the cached list is also `previous`, restored if the move fails.
-                const items = [...(old.items as Array<Record<string, unknown>>)];
-                const idx = items.findIndex((item) => item.id === variables.itemId);
-                if (idx === -1) return old;
-                const [moved] = items.splice(idx, 1);
-                if (variables.afterItemId) {
-                    const afterIdx = items.findIndex((item) => item.id === variables.afterItemId);
-                    if (afterIdx !== -1) {
-                        items.splice(afterIdx + 1, 0, moved);
-                    } else {
-                        items.splice(idx, 0, moved);
-                    }
-                } else {
-                    items.unshift(moved);
-                }
-                return { ...old, items };
-            }),
-        onError: (_err, variables, context) => rollbackPlaylistEdit(queryClient, variables.playlistId, context),
-        onSettled: (_, __, variables) => invalidatePlaylist(queryClient, variables.playlistId),
+            applyOptimisticPlaylistEdit(queryClient, variables.playlistId, (old) =>
+                movePlaylistItem(old, variables.itemId, variables.afterItemId),
+            ),
+        onSettled: (_, error, variables) => settlePlaylistEdit(queryClient, variables.playlistId, !error),
     });
 }
 
@@ -552,26 +690,22 @@ export function useBrowseAllQuery(enabled: boolean = true) {
         queryFn: async (): Promise<BrowseAllResponse> => {
             return api.get<BrowseAllResponse>("/browse/all");
         },
-        staleTime: 10 * 60 * 1000, // 10 minutes - playlists don't change often
+        staleTime: 10 * 60 * 1000, // playlists rarely change
     });
 }
 
-export function useLibraryGenresQuery() {
+/**
+ * A page's radio stations with their covers, in one request. The server picks each cover once per local day, so the
+ * reply is kept by day; a failed one is asked again on its own, so the tiles come back.
+ */
+export function useRadioRow(scope: "home" | "all") {
+    const day = new Date().toLocaleDateString("en-CA");
     return useQuery({
-        queryKey: queryKeys.libraryGenres(),
-        queryFn: async () => {
-            return api.get<{ genres: Array<{ genre: string; count: number }> }>("/library/genres");
-        },
+        queryKey: queryKeys.radioRow(scope, day),
+        queryFn: async () => buildRadioRow((await api.getRadioRow(scope, Intl.DateTimeFormat().resolvedOptions().timeZone)).stations),
+        // Across a day change the tiles keep their covers until the new day's answer; another page's row is never shown.
+        placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[3] === scope ? previous : undefined),
         staleTime: 10 * 60 * 1000,
-    });
-}
-
-export function useLibraryDecadesQuery() {
-    return useQuery({
-        queryKey: queryKeys.libraryDecades(),
-        queryFn: async () => {
-            return api.get<{ decades: Array<{ decade: number; count: number }> }>("/library/decades");
-        },
-        staleTime: 10 * 60 * 1000,
+        refetchInterval: (query) => (query.state.status === "error" ? 30_000 : false),
     });
 }

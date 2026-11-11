@@ -101,22 +101,14 @@ export default function SearchPage() {
 
     return (
         <div className="min-h-screen relative overflow-hidden">
-            <div className="relative z-(--z-raised) page-shell py-8 animate-rise">
+            <div className="relative z-(--z-raised) page-shell pt-8 page-end animate-rise">
                 <TVSearchInput initialQuery={query} onSearch={handleTVSearch} />
 
                 {!hasSearched && (
-                    <div className="mb-12 text-center animate-rise">
-                        <div className="inline-flex items-center gap-3 mb-4 text-brand">
-                            <span className="text-sm font-semibold">
-                                Discovery Engine
-                            </span>
-                        </div>
-                        <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold mb-4 text-white leading-tight">
-                            Find Your Sound
-                        </h1>
-                        <p className="text-lg text-[var(--text-secondary)] max-w-2xl mx-auto">
-                            Search your library, discover new artists, or tap
-                            into the P2P network for rare tracks
+                    <div className="mb-8">
+                        <h1 className="t-page-title">Search</h1>
+                        <p className="mt-2 text-sm text-[var(--text-muted)]">
+                            Your library, artists you don&apos;t have yet, and Soulseek when it&apos;s connected
                         </p>
                     </div>
                 )}
@@ -125,12 +117,12 @@ export default function SearchPage() {
                     <div className="mb-8">
                         <div className="flex items-center justify-between mb-6">
                             <div>
-                                <h1 className="text-2xl font-semibold mb-2 tracking-tight">
+                                <h1 className="t-page-title mb-2">
                                     {query}
                                 </h1>
                                 {isLoading && (
-                                    <div className="flex items-center gap-2 text-sm text-brand">
-                                        <div className="w-1 h-1 rounded-full bg-brand animate-ping" />
+                                    <div className="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+                                        <div className="w-1 h-1 rounded-full bg-white/60 animate-ping" />
                                         <span className="font-medium">
                                             Searching across sources...
                                         </span>
@@ -173,7 +165,6 @@ export default function SearchPage() {
                         <div className="flex flex-col items-center justify-center py-24 relative">
                             <div className="relative">
                                 <GradientSpinner size="xl" className="mb-6" />
-                                <div className="absolute inset-0 bg-gradient-to-r from-brand to-brand-dark opacity-20 blur-xl animate-pulse" />
                             </div>
                             <p className="text-[var(--text-secondary)] text-sm animate-pulse">
                                 Scanning library and network...
@@ -291,7 +282,7 @@ export default function SearchPage() {
                             description="Try a different search term or check your spelling"
                         >
                             <p className="text-sm text-[var(--text-muted)]">
-                                Tip: Enable Soulseek to search the P2P network
+                                Connect Soulseek in Settings to also search music other people share
                             </p>
                         </EmptyState>
                     )}

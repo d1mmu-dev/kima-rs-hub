@@ -16,6 +16,8 @@ pub struct Playlist {
     pub user_id: Uuid,
     pub name: String,
     pub is_public: bool,
+    /// Shown newest first (display only; `sort` is unchanged).
+    pub reverse_order: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }
@@ -41,10 +43,11 @@ pub struct ItemRow {
     pub track: TrackRow,
 }
 
-const PLAYLIST_COLS: &str = "p.id, p.user_id, p.name, p.is_public, p.created_at, p.updated_at";
+const PLAYLIST_COLS: &str =
+    "p.id, p.user_id, p.name, p.is_public, p.reverse_order, p.created_at, p.updated_at";
 
 const ITEM_COLS: &str = "pi.playlist_id, pi.id AS item_id, pi.sort,
-        t.id, t.title, t.artist_name, t.duration_secs, t.disc, t.track_no,
+        t.id, t.title, t.display_title, t.artist_name, t.duration_secs, t.disc, t.track_no,
         t.codec, t.bitrate, t.year, al.id AS album_id, al.title AS album_title, al.year AS album_year,
         ar.id AS album_artist_id, ar.name AS album_artist_name, t.recording_mbid, t.isrc";
 
@@ -71,7 +74,7 @@ pub async fn create(
 ) -> sqlx::Result<Playlist> {
     sqlx::query_as(
         "INSERT INTO playlists (id, user_id, name, is_public) VALUES ($1, $2, $3, $4)
-         RETURNING id, user_id, name, is_public, created_at, updated_at",
+         RETURNING id, user_id, name, is_public, reverse_order, created_at, updated_at",
     )
     .bind(id)
     .bind(user)
@@ -86,16 +89,18 @@ pub async fn update(
     id: Uuid,
     name: Option<&str>,
     is_public: Option<bool>,
+    reverse_order: Option<bool>,
 ) -> sqlx::Result<Option<Playlist>> {
     sqlx::query_as(
         "UPDATE playlists SET name = COALESCE($2, name), is_public = COALESCE($3, is_public),
-                updated_at = now()
+                reverse_order = COALESCE($4, reverse_order), updated_at = now()
          WHERE id = $1
-         RETURNING id, user_id, name, is_public, created_at, updated_at",
+         RETURNING id, user_id, name, is_public, reverse_order, created_at, updated_at",
     )
     .bind(id)
     .bind(name)
     .bind(is_public)
+    .bind(reverse_order)
     .fetch_optional(pool)
     .await
 }
@@ -219,6 +224,130 @@ async fn touch(tx: &mut Transaction<'_, Postgres>, playlist: Uuid) -> sqlx::Resu
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+/// Subsonic writes reject an entire request containing any unknown or missing track.
+async fn all_present(tx: &mut Transaction<'_, Postgres>, tracks: &[Uuid]) -> sqlx::Result<bool> {
+    let requested: HashSet<Uuid> = tracks.iter().copied().collect();
+    let found: HashSet<Uuid> =
+        sqlx::query_scalar("SELECT id FROM tracks WHERE id = ANY($1) AND missing_since IS NULL")
+            .bind(tracks)
+            .fetch_all(&mut **tx)
+            .await?
+            .into_iter()
+            .collect();
+    Ok(requested == found)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SubsonicWrite {
+    MissingPlaylist,
+    UnknownSong,
+    Unchanged,
+    Changed,
+}
+
+/// Creates the playlist and its songs in one commit; false means an unknown song.
+pub async fn subsonic_create(
+    pool: &PgPool,
+    id: Uuid,
+    user: Uuid,
+    name: &str,
+    tracks: &[Uuid],
+) -> sqlx::Result<bool> {
+    let mut tx = pool.begin().await?;
+    if !all_present(&mut tx, tracks).await? {
+        return Ok(false);
+    }
+    sqlx::query("INSERT INTO playlists (id, user_id, name, is_public) VALUES ($1, $2, $3, false)")
+        .bind(id)
+        .bind(user)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+    if !add_locked(&mut tx, id, tracks).await?.rejected.is_empty() {
+        return Ok(false);
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Serializes metadata and items on the playlist row; identical replacement retains item IDs.
+pub async fn subsonic_edit(
+    pool: &PgPool,
+    playlist: Uuid,
+    name: Option<&str>,
+    public: Option<bool>,
+    replace: Option<&[Uuid]>,
+    remove: &[usize],
+    add: &[Uuid],
+) -> sqlx::Result<SubsonicWrite> {
+    let mut tx = pool.begin().await?;
+    if !lock(&mut tx, playlist).await? {
+        return Ok(SubsonicWrite::MissingPlaylist);
+    }
+    if !all_present(&mut tx, replace.unwrap_or(add)).await? {
+        return Ok(SubsonicWrite::UnknownSong);
+    }
+    let changed = if let Some(tracks) = replace {
+        let mut seen = HashSet::new();
+        let wanted: Vec<Uuid> = tracks
+            .iter()
+            .copied()
+            .filter(|id| seen.insert(*id))
+            .collect();
+        let current: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT track_id FROM playlist_items WHERE playlist_id = $1 ORDER BY sort, id",
+        )
+        .bind(playlist)
+        .fetch_all(&mut *tx)
+        .await?;
+        if current != wanted {
+            sqlx::query("DELETE FROM playlist_items WHERE playlist_id = $1")
+                .bind(playlist)
+                .execute(&mut *tx)
+                .await?;
+            if !add_locked(&mut tx, playlist, &wanted)
+                .await?
+                .rejected
+                .is_empty()
+            {
+                return Ok(SubsonicWrite::UnknownSong);
+            }
+            if wanted.is_empty() {
+                touch(&mut tx, playlist).await?;
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        let removed = remove_locked(&mut tx, playlist, remove).await?;
+        let added = add_locked(&mut tx, playlist, add).await?;
+        if !added.rejected.is_empty() {
+            return Ok(SubsonicWrite::UnknownSong);
+        }
+        removed > 0 || added.added > 0
+    };
+    let metadata = sqlx::query(
+        "UPDATE playlists SET name = COALESCE($2, name), is_public = COALESCE($3, is_public),
+             updated_at = now() WHERE id = $1 AND
+             (($2::text IS NOT NULL AND name IS DISTINCT FROM $2) OR
+              ($3::bool IS NOT NULL AND is_public IS DISTINCT FROM $3))",
+    )
+    .bind(playlist)
+    .bind(name)
+    .bind(public)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    tx.commit().await?;
+    Ok(if changed || metadata {
+        SubsonicWrite::Changed
+    } else {
+        SubsonicWrite::Unchanged
+    })
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -373,7 +502,12 @@ async fn add_locked(
     let requested: Vec<Uuid> = tracks.iter().copied().filter(|t| seen.insert(*t)).collect();
 
     let present: HashSet<Uuid> =
-        sqlx::query_scalar("SELECT id FROM tracks WHERE id = ANY($1) AND missing_since IS NULL")
+        // Keep playable rows stable through the insert and commit. Unlike the FK's
+        // KEY SHARE lock, SHARE conflicts with a scanner's missing_since UPDATE.
+        // Lock multiple tracks in id order to avoid opposing playlist requests.
+        sqlx::query_scalar(
+            "SELECT id FROM tracks WHERE id = ANY($1) AND missing_since IS NULL ORDER BY id FOR SHARE",
+        )
             .bind(&requested)
             .fetch_all(&mut **tx)
             .await?
@@ -520,8 +654,9 @@ pub async fn move_item(
     Ok(Ok(sort))
 }
 
-pub async fn hide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<()> {
-    sqlx::query(
+/// Hides a playlist from `user`'s view. `true` when it was not hidden before.
+pub async fn hide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<bool> {
+    let done = sqlx::query(
         "INSERT INTO hidden_playlists (user_id, playlist_id) VALUES ($1, $2)
          ON CONFLICT DO NOTHING",
     )
@@ -529,14 +664,15 @@ pub async fn hide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<()>
     .bind(playlist)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(done.rows_affected() > 0)
 }
 
-pub async fn unhide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM hidden_playlists WHERE user_id = $1 AND playlist_id = $2")
+/// Shows a hidden playlist to `user` again. `true` when it was hidden.
+pub async fn unhide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<bool> {
+    let done = sqlx::query("DELETE FROM hidden_playlists WHERE user_id = $1 AND playlist_id = $2")
         .bind(user)
         .bind(playlist)
         .execute(pool)
         .await?;
-    Ok(())
+    Ok(done.rows_affected() > 0)
 }

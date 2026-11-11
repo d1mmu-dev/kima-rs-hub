@@ -1,7 +1,8 @@
 "use client";
 
-import { Suspense } from "react";
+import { Suspense, useState } from "react";
 
+import { usePublicConfig } from "@/hooks/useQueries";
 import {
     useAudioState,
     useAudioPlayback,
@@ -26,6 +27,8 @@ import { PopularTracks } from "@/features/artist/components/PopularTracks";
 import { Discography } from "@/features/artist/components/Discography";
 import { AvailableAlbums } from "@/features/artist/components/AvailableAlbums";
 import { SimilarArtists } from "@/features/artist/components/SimilarArtists";
+import { DeleteLibraryItemDialog } from "@/features/library/components/DeleteLibraryItemDialog";
+import { useAuth } from "@/lib/auth-context";
 import { PageMessage } from "@/components/ui/PageMessage";
 import Loading from "./loading";
 
@@ -33,7 +36,7 @@ function ArtistPageInner() {
     // Use split hooks to avoid re-renders from currentTime updates
     const { currentTrack } = useAudioState();
     const { isPlaying } = useAudioPlayback();
-    const { playTracks, pause } = useAudioControls();
+    const { playTracks, playStation, pause } = useAudioControls();
     const { isPendingByMbid } = useDownloadContext();
 
     const {
@@ -49,7 +52,10 @@ function ArtistPageInner() {
 
     const { playAll, shufflePlay } = useArtistActions();
     const { downloadArtist, downloadAlbum } = useDownloadActions();
+    const { canAcquire } = usePublicConfig();
     const preview = usePreview();
+    const { user } = useAuth();
+    const [confirmingDelete, setConfirmingDelete] = useState(false);
 
     const ownedAlbums = albums.filter((a) => a.owned);
     const availableAlbums = albums.filter((a) => !a.owned);
@@ -98,6 +104,7 @@ function ArtistPageInner() {
         const formattedTracks = playableTracks.map((t: Track) => ({
             id: t.id,
             title: t.title,
+            displayTitle: t.displayTitle,
             artist: { name: artist.name, id: artist.id },
             album: {
                 title: t.album?.title || "Unknown",
@@ -124,8 +131,10 @@ function ArtistPageInner() {
             const response = await api.getRadioTracks("artist", artist.id);
 
             if (response.tracks && response.tracks.length > 0) {
-                // Backend already returns properly formatted tracks - just pass them through
-                playTracks(response.tracks, 0);
+                playStation(response.tracks, async () => {
+                    const more = await api.getRadioTracks("artist", artist.id);
+                    return more.tracks ?? [];
+                });
             } else {
                 notify.error(
                     "Not enough similar music in your library for artist radio",
@@ -175,8 +184,9 @@ function ArtistPageInner() {
                     source={source}
                     onPlayAll={() => playAll(artist, albums)}
                     onShuffle={() => shufflePlay(artist, albums)}
-                    onDownloadAll={() => downloadArtist(artist)}
+                    onDownloadAll={canAcquire ? () => downloadArtist(artist) : undefined}
                     onStartRadio={handleStartRadio}
+                    onDelete={user?.role === "admin" && source === "library" && ownedAlbums.length > 0 ? () => setConfirmingDelete(true) : undefined}
                     isPendingDownload={isPendingByMbid(artist.mbid || "")}
                     isPlaying={isPlaying}
                     isPlayingThisArtist={
@@ -186,6 +196,14 @@ function ArtistPageInner() {
                     onPause={pause}
                 />
             </ArtistHero>
+
+            <DeleteLibraryItemDialog
+                kind="artist"
+                id={artist.id}
+                title={artist.name}
+                isOpen={confirmingDelete}
+                onClose={() => setConfirmingDelete(false)}
+            />
 
             <div className="relative min-h-[50vh] flex-1 animate-rise">
                 <div
@@ -199,7 +217,7 @@ function ArtistPageInner() {
                 />
                 <div className="absolute inset-0 bg-[linear-gradient(to_bottom,transparent_0%,rgba(16,16,16,0.4)_100%)] pointer-events-none" />
 
-                <div className="relative page-shell py-6 space-y-8">
+                <div className="relative page-shell pt-6 page-end space-y-8">
                     {(artist.bio || artist.summary) && (
                         <ArtistBio bio={artist.bio || artist.summary || ""} />
                     )}
@@ -228,7 +246,7 @@ function ArtistPageInner() {
                     <AvailableAlbums
                         albums={availableAlbums}
                         source={source}
-                        onDownloadAlbum={handleDownloadAlbum}
+                        onDownloadAlbum={canAcquire ? handleDownloadAlbum : undefined}
                         isPendingDownload={isPendingByMbid}
                     />
 

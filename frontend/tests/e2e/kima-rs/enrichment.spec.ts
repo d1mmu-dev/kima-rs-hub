@@ -24,7 +24,8 @@ async function signIn(page: Page, request: APIRequestContext) {
 
 test("AcoustID key: saved, shown as Saved, removed", async ({ page, request }) => {
     await signIn(page, request);
-    await page.goto("/settings/");
+    // v1.12.3 splits settings into pages: artwork keys are on the server page.
+    await page.goto("/settings/server/");
 
     const key = page.getByPlaceholder("Optional: Your AcoustID API key");
     await key.fill("test-acoustid-key");
@@ -46,7 +47,8 @@ test("AcoustID key: saved, shown as Saved, removed", async ({ page, request }) =
 
 test("Library Enrichment: the toggle is locked by KIMA_IDENTIFY=off", async ({ page, request }) => {
     await signIn(page, request);
-    await page.goto("/settings/");
+    // The enrichment controls are on the library settings page in v1.12.3.
+    await page.goto("/settings/library/");
     await expect(page.locator("#auto-enrich")).toBeDisabled();
     await expect(page.getByText("Turned off on the server (KIMA_IDENTIFY=off)")).toBeVisible();
 });

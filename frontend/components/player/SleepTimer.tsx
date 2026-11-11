@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import { Timer } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useSleepTimer } from "@/hooks/useSleepTimer";
+import { useClickOutside } from "@/hooks/useClickOutside";
 
 const PRESETS = [15, 30, 45, 60, 90, 120] as const;
 
@@ -12,39 +13,25 @@ function formatPreset(mins: number): string {
     return `${mins} minutes`;
 }
 
-interface SleepTimerProps {
-    size?: "sm" | "md";
-}
-
-export function SleepTimer({ size = "md" }: SleepTimerProps) {
+export function SleepTimer() {
     const { isActive, remainingSeconds, displayRemaining, setTimer, clearTimer } = useSleepTimer();
     const [isOpen, setIsOpen] = useState(false);
     const [customMinutes, setCustomMinutes] = useState("");
     const popoverRef = useRef<HTMLDivElement>(null);
     const buttonRef = useRef<HTMLButtonElement>(null);
 
+    useClickOutside([popoverRef, buttonRef], () => setIsOpen(false), isOpen);
+
     useEffect(() => {
         if (!isOpen) return;
-
-        const handleClick = (e: MouseEvent) => {
-            if (
-                popoverRef.current && !popoverRef.current.contains(e.target as Node) &&
-                buttonRef.current && !buttonRef.current.contains(e.target as Node)
-            ) {
-                setIsOpen(false);
-            }
-        };
-
         const handleKey = (e: KeyboardEvent) => {
-            if (e.key === "Escape") setIsOpen(false);
+            if (e.key !== "Escape") return;
+            // Used here: page-wide Escape handlers (TV Back, the vibe page) leave a handled key alone.
+            e.preventDefault();
+            setIsOpen(false);
         };
-
-        document.addEventListener("mousedown", handleClick);
         document.addEventListener("keydown", handleKey);
-        return () => {
-            document.removeEventListener("mousedown", handleClick);
-            document.removeEventListener("keydown", handleKey);
-        };
+        return () => document.removeEventListener("keydown", handleKey);
     }, [isOpen]);
 
     const handlePreset = (minutes: number) => {
@@ -60,8 +47,6 @@ export function SleepTimer({ size = "md" }: SleepTimerProps) {
             setIsOpen(false);
         }
     };
-
-    const iconSize = size === "sm" ? "w-3.5 h-3.5" : "w-4 h-4";
 
     return (
         <div className="relative">
@@ -79,7 +64,7 @@ export function SleepTimer({ size = "md" }: SleepTimerProps) {
                 aria-haspopup="dialog"
                 title={isActive ? `Sleep timer: ${displayRemaining} remaining`.toLowerCase() : "sleep timer"}
             >
-                <Timer className={iconSize} />
+                <Timer className="w-4 h-4" />
                 {isActive && remainingSeconds !== null && (
                     <span className="text-micro tabular-nums font-medium text-brand">
                         {displayRemaining}

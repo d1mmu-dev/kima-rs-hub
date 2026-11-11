@@ -1,10 +1,12 @@
 "use client";
 
 import { useState, useRef, useEffect, type ReactNode } from "react";
+import { Button } from "@/components/ui/Button";
 import { api } from "@/lib/api";
 import { notify } from "@/lib/notify";
 import { Trash2, Loader2, ArrowLeft } from "lucide-react";
 import type { DiscoverConfig } from "@/features/discover/types";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 interface ConfigSliderProps {
     label: string;
@@ -84,26 +86,21 @@ export function DiscoverSettingsTab({
         }, 500);
     }
 
+    const [confirmClear, setConfirmClear] = useState(false);
+
     async function handleClearPlaylist() {
         if (isClearing) return;
-
-        const confirmed = window.confirm(
-            "clear discovery playlist?\n\n" +
-                "• liked albums will be moved to your library\n" +
-                "• non-liked albums will be deleted\n\n" +
-                "this action cannot be undone."
-        );
-
-        if (!confirmed) return;
-
         setIsClearing(true);
         try {
             const result = await api.clearDiscoverPlaylist();
 
             const albums = (n: number) => `${n} album${n !== 1 ? "s" : ""}`;
+            const kept = result.lidarrFailed?.length ?? 0;
             const parts = [
                 result.likedMoved > 0 && `Moved ${albums(result.likedMoved)} you liked to your library.`,
                 result.activeDeleted > 0 && `Deleted ${albums(result.activeDeleted)}.`,
+                // Lidarr refusing, a file Kima could not delete, or Lidarr off: the server's own alert lists them and why.
+                kept > 0 && `Kept ${albums(kept)} the clear could not finish; the alert says why.`,
             ].filter(Boolean);
             notify.info("Discover playlist cleared", {
                 message: parts.length > 0 ? parts.join(" ") : "There were no albums to clear.",
@@ -120,13 +117,9 @@ export function DiscoverSettingsTab({
     return (
         <div className="h-full flex flex-col bg-[var(--bg-primary)]">
             <div className="flex items-center gap-3 px-5 py-4 border-b-2 border-white/20">
-                <button
-                    onClick={onBack}
-                    className="border border-white/20 p-2 hover:border-brand hover:bg-white/5 transition-colors"
-                    title="back to activity"
-                >
-                    <ArrowLeft className="w-4 h-4 text-[var(--text-secondary)]" />
-                </button>
+                <Button variant="icon" onClick={onBack} title="back to activity" aria-label="Back to activity">
+                    <ArrowLeft className="w-4 h-4" />
+                </Button>
                 <h3 className="text-sm font-bold text-white">Settings</h3>
             </div>
 
@@ -174,11 +167,7 @@ export function DiscoverSettingsTab({
                     <p className="text-xs text-[var(--text-muted)] mb-4 leading-relaxed">
                         Remove current playlist / Liked albums → library / Others → deleted
                     </p>
-                    <button
-                        onClick={handleClearPlaylist}
-                        disabled={isClearing}
-                        className="w-full flex items-center justify-center gap-3 px-4 py-3 border-2 border-danger/30 hover:border-danger hover:bg-danger/10 text-danger-light transition-all disabled:opacity-50 disabled:cursor-not-allowed font-semibold text-xs"
-                    >
+                    <Button variant="danger" onClick={() => setConfirmClear(true)} disabled={isClearing} className="w-full">
                         {isClearing ? (
                             <>
                                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -190,9 +179,17 @@ export function DiscoverSettingsTab({
                                 Clear Playlist
                             </>
                         )}
-                    </button>
+                    </Button>
                 </div>
             </div>
+            <ConfirmDialog
+                isOpen={confirmClear}
+                onClose={() => setConfirmClear(false)}
+                onConfirm={() => void handleClearPlaylist()}
+                title="clear discovery playlist?"
+                message="liked albums move to your library and the rest are deleted. this cannot be undone."
+                confirmText="clear"
+            />
         </div>
     );
 }

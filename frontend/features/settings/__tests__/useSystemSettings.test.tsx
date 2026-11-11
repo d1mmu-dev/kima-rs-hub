@@ -28,7 +28,7 @@ vi.mock("@/lib/api", () => ({
     },
 }));
 vi.mock("@/lib/auth-context", () => ({
-    useAuth: () => ({ isAuthenticated: true, user: { role: "admin" } }),
+    useAuth: () => ({ isAuthenticated: true, user: { id: "admin-1", role: "admin" } }),
 }));
 
 import { useSystemSettings } from "../hooks/useSystemSettings";

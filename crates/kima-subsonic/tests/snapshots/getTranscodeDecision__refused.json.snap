@@ -1,0 +1,21 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "transcodeDecision": {
+      "canDirectPlay": false,
+      "canTranscode": false,
+      "errorReason": "Kima transcodes only to mp3; it cannot make opus",
+      "transcodeReason": [
+        "source is flac, client asked for opus"
+      ]
+    },
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

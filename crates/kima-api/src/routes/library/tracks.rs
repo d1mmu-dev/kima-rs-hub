@@ -95,7 +95,7 @@ async fn detail(
         .unwrap_or_default();
     Ok(Json(json!({
         "id": t.id,
-        "title": t.title,
+        "title": t.display_title.as_deref().filter(|s| !s.is_empty()).unwrap_or(&t.title),
         "artist": { "id": t.album_artist_id, "name": t.artist_name },
         "album": {
             "id": t.album_id,

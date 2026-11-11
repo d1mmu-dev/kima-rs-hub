@@ -67,6 +67,26 @@ All 81 paths upstream registers are answered, each with and without `.view`, by 
 - **Starring and ratings:** `star`, `unstar`, `getStarred`, `getStarred2` and `setRating`, for songs, albums and artists.
 - **Users:** `getUser`, and for an admin `getUsers`, with any sign-in method. `createUser`, `updateUser`, `deleteUser` and `changePassword` need a password sign-in (an admin's, except for changing your own password) and refuse any app token with error 50.
 
+### Song stream decisions (D-167)
+
+`getTranscodeDecision`, `getTranscodeStream`, `stream` and `hls` share a song plan.
+`format=raw` serves the original. Without a cap, the source format serves directly;
+`format=mp3` serves directly only for an MP3 that fits the cap. With `maxBitRate`, a
+source already within the cap serves directly when no other format was requested;
+otherwise Kima makes MP3 at the highest available tier not above it (320, 192 or 128 kbps).
+A request for another output codec, or a cap below 128 kbps when the source does not fit,
+is refused by the decision endpoint.
+`stream` is more lenient for older clients: it retries without a refused format and, if
+still refused, falls back to 128 kbps MP3 (or the original if its bitrate fits).
+`download` always sends the original file.
+
+Direct decisions return `q-original`; MP3 decisions return `q-<high|medium|low>[-<cap>]`
+or `mp3-<high|medium|low>[-<cap>]`. `getTranscodeStream` accepts only valid decision
+parameters, not arbitrary quality strings. Source bitrate is recorded during scanning,
+not re-probed on each request; an unknown bitrate is transcode-eligible under a cap.
+The source format is taken from the filename extension. Podcast decisions and streams
+remain unavailable until M6 (D-101). See [D-167](DIVERGENCES.md) for remaining differences.
+
 Stubs, by the milestone that makes them real:
 
 | Milestone | Endpoints |

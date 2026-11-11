@@ -50,8 +50,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/enrichment/artists/{id}/metadata", put(editor::put_artist))
         .route("/enrichment/albums/{id}/metadata", put(editor::put_album))
+        .route("/enrichment/tracks/{id}/metadata", put(editor::put_track))
         .route("/enrichment/artists/{id}/reset", post(editor::reset_artist))
         .route("/enrichment/albums/{id}/reset", post(editor::reset_album))
+        .route("/enrichment/tracks/{id}/reset", post(editor::reset_track))
 }
 
 fn time_json(t: Option<OffsetDateTime>) -> Value {

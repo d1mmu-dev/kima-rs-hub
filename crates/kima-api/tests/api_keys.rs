@@ -258,7 +258,7 @@ async fn public_config_for_any_user(pool: PgPool) {
         .authorization_bearer(&jwt)
         .await;
     res.assert_status_ok();
-    res.assert_json(&json!({ "publicUrl": "" }));
+    res.assert_json(&json!({ "publicUrl": "", "canAcquire": false }));
 
     let configured = state
         .clone()
@@ -268,5 +268,5 @@ async fn public_config_for_any_user(pool: PgPool) {
         .get("/api/system-settings/public-config")
         .authorization_bearer(&jwt)
         .await;
-    res.assert_json(&json!({ "publicUrl": "https://kima.example" }));
+    res.assert_json(&json!({ "publicUrl": "https://kima.example", "canAcquire": false }));
 }

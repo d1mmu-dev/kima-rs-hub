@@ -4,10 +4,9 @@ import { useAudioController } from "@/lib/audio-controller-context";
 import { useAudioState } from "@/lib/audio-state-context";
 
 /**
- * The page's one song preview. Starting one stops any other and pauses the main player, which resumes
- * when the preview is stopped, ends or fails, never when another preview takes its place; the main player
- * starting ends the preview. The preview lives in a ref, so a quick second click acts on the first before
- * the next render. A preview that failed is not asked again on this page.
+ * The page's one preview: a song, or the start of a podcast episode. Starting one stops any other and pauses the
+ * main player, which resumes when the preview stops, ends or fails (not when another takes its place); the main
+ * player starting ends it. Held in a ref so a quick second click acts on the first; a failed one is not retried.
  */
 export function usePreview() {
     const controller = useAudioController();
@@ -61,15 +60,15 @@ export function usePreview() {
 
     useEffect(() => () => end(true), [end]);
 
-    /** Start the preview `id` from `url`, or stop it when it is the one playing. */
+    /** Start the preview `id` from `url`, or stop it when it is the one playing; `what` names it in messages. */
     const toggle = useCallback(
-        (id: string, url: string) => {
+        (id: string, url: string, what = "song") => {
             if (current.current?.id === id) {
                 end(true);
                 return;
             }
             if (failed.current.has(id)) {
-                notify.info("No preview for this song");
+                notify.info(`No preview for this ${what}`);
                 return;
             }
             end(false);
@@ -91,7 +90,7 @@ export function usePreview() {
                 if (isCurrent()) end(true);
             };
             audio.onerror = () => {
-                if (isCurrent()) fail("No preview for this song");
+                if (isCurrent()) fail(`No preview for this ${what}`);
             };
             // A preview stopped before it started rejects too; only the current one is a failure.
             audio.play().then(

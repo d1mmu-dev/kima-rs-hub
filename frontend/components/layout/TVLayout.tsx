@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { usePathname } from "@/lib/use-pathname";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useSectionFlags } from "@/lib/section-flags";
 import { cn } from "@/lib/cn";
 import { useAudio } from "@/lib/audio-context";
 import { api } from "@/lib/api";
@@ -13,31 +14,27 @@ import { formatTime, clampTime, formatMediaDuration } from "@/lib/format";
 import { RefreshCw, SkipBack, SkipForward, Shuffle, Repeat } from "lucide-react";
 import { CachedImage } from "@/components/ui/CachedImage";
 import { KimaMark } from "@/components/ui/KimaMark";
-import { useFeatures, type SectionFlag } from "@/lib/features-context";
+import { shownTitle } from "@/lib/track-title";
+import { useLibrarySync } from "@/hooks/useLibrarySync";
+import { NAV, isCurrentNav, type NavItem } from "./navItems";
 
-const allTvNavigation: Array<{ name: string; href: string; feature?: SectionFlag }> = [
-    { name: "Home", href: "/" },
-    { name: "Search", href: "/search" },
-    { name: "Collection", href: "/collection" },
-    { name: "Audiobooks", href: "/audiobooks", feature: "audiobooks" },
-    { name: "Podcasts", href: "/podcasts", feature: "podcasts" },
-    { name: "Discovery", href: "/discover", feature: "discover" },
-    { name: "Playlists", href: "/playlists" },
-];
+const allTvNavigation: NavItem[] = [NAV.home, NAV.search, NAV.collection, NAV.audiobooks, NAV.podcasts, NAV.discover, NAV.playlists];
+
+const FIRE_TV_BACK = 4;
 
 export function TVLayout({ children }: { children: React.ReactNode }) {
     const pathname = usePathname();
     const router = useRouter();
     // Sections the server does not have are neither shown nor reachable by D-pad (D-030).
-    const features = useFeatures();
+    const features = useSectionFlags();
     const tvNavigation = useMemo(
         () => allTvNavigation.filter((n) => !n.feature || features[n.feature]),
         [features],
     );
-    // Start with nav focused and first tab selected for immediate D-pad usability
+    // The remote starts on the first tab, so the D-pad works at once.
     const [focusedTabIndex, setFocusedTabIndex] = useState(0);
     const [isNavFocused, setIsNavFocused] = useState(true);
-    const [isSyncing, setIsSyncing] = useState(false);
+    const { sync: handleSync, syncing: isSyncing } = useLibrarySync();
     const navRef = useRef<HTMLDivElement>(null);
 
     const {
@@ -98,7 +95,7 @@ export function TVLayout({ children }: { children: React.ReactNode }) {
     let coverUrl: string | null = null;
 
     if (playbackType === "track" && currentTrack) {
-        title = currentTrack.title;
+        title = shownTitle(currentTrack);
         artist = currentTrack.artist?.name || "";
         coverUrl = currentTrack.album?.coverArt
             ? api.getCoverArtUrl(currentTrack.album.coverArt, 96)
@@ -119,24 +116,11 @@ export function TVLayout({ children }: { children: React.ReactNode }) {
 
     const clampedCurrentTime = clampTime(currentTime, duration);
 
-    const handleSync = async () => {
-        setIsSyncing(true);
-        try {
-            await api.scanLibrary();
-        } catch (error) {
-            console.error("Sync failed:", error);
-        } finally {
-            setIsSyncing(false);
-        }
-    };
-
     const handleKeyDown = useCallback((e: KeyboardEvent) => {
-        // Media keys work globally regardless of focus state
         if (hasMedia) {
             switch (e.key) {
                 case DPAD_KEYS.PLAY_PAUSE:
-                case "MediaPlayPause":
-                case " ": // Space bar as play/pause
+                case " ":
                     // Only use space when not in an input field
                     if (e.key === " ") {
                         const target = e.target as HTMLElement;
@@ -156,12 +140,10 @@ export function TVLayout({ children }: { children: React.ReactNode }) {
                     previous();
                     return;
                 case DPAD_KEYS.FAST_FORWARD:
-                case "MediaFastForward":
                     e.preventDefault();
                     seek(Math.min(currentTimeRef.current + 10, durationRef.current));
                     return;
                 case DPAD_KEYS.REWIND:
-                case "MediaRewind":
                     e.preventDefault();
                     seek(Math.max(currentTimeRef.current - 10, 0));
                     return;
@@ -178,7 +160,6 @@ export function TVLayout({ children }: { children: React.ReactNode }) {
             } else if (e.key === DPAD_KEYS.DOWN) {
                 e.preventDefault();
                 setIsNavFocused(false);
-                // Use the navigation hook to focus first card
                 focusFirstCard();
             } else if (e.key === DPAD_KEYS.CENTER) {
                 e.preventDefault();
@@ -194,7 +175,19 @@ export function TVLayout({ children }: { children: React.ReactNode }) {
         return () => window.removeEventListener("keydown", handleKeyDown);
     }, [handleKeyDown]);
 
-    // Focus correct nav tab when isNavFocused changes or focusedTabIndex changes
+    // Fire TV's remote sends Back as key code 4 (Amazon's Fire TV remote input table); everything in Kima answers
+    // Escape. Back is turned into Escape before anything sees it, and the browser's own back is cancelled.
+    useEffect(() => {
+        const backToEscape = (e: KeyboardEvent) => {
+            if (e.keyCode !== FIRE_TV_BACK) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            (e.target ?? window).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        };
+        window.addEventListener("keydown", backToEscape, true);
+        return () => window.removeEventListener("keydown", backToEscape, true);
+    }, []);
+
     useEffect(() => {
         if (isNavFocused && navRef.current) {
             const tabs = navRef.current.querySelectorAll<HTMLAnchorElement>('[data-tv-tab]');
@@ -203,14 +196,16 @@ export function TVLayout({ children }: { children: React.ReactNode }) {
     }, [focusedTabIndex, isNavFocused]);
 
     // On initial mount and pathname change, set the correct focused tab
-    useEffect(() => {
+    const [syncedPathname, setSyncedPathname] = useState<string | null>(null);
+    if (pathname !== syncedPathname) {
+        setSyncedPathname(pathname);
         const currentIndex = tvNavigation.findIndex(n =>
             n.href === pathname || (n.href !== "/" && pathname.startsWith(n.href))
         );
         if (currentIndex >= 0) {
             setFocusedTabIndex(currentIndex);
         }
-    }, [pathname]);
+    }
 
     return (
         <>
@@ -222,8 +217,7 @@ export function TVLayout({ children }: { children: React.ReactNode }) {
 
                 <nav ref={navRef} className="tv-nav-links">
                     {tvNavigation.map((item, index) => {
-                        const isActive = pathname === item.href ||
-                            (item.href !== "/" && pathname.startsWith(item.href));
+                        const isActive = isCurrentNav(item, pathname);
                         const isFocused = isNavFocused && focusedTabIndex === index;
 
                         return (

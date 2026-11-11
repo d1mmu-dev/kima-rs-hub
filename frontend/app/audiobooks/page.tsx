@@ -306,12 +306,11 @@ export default function AudiobooksPage() {
         return (
             <div className="min-h-screen">
                 <PageHeader
-                    eyebrow="Not set up"
                     title="Audiobooks"
                     description="Connect Audiobookshelf to listen to your audiobooks here"
                 />
 
-                <div className="relative page-shell pb-24">
+                <div className="relative page-shell page-end">
 
                     <div className="grid md:grid-cols-3 gap-4 mb-12">
                         {[
@@ -344,7 +343,7 @@ export default function AudiobooksPage() {
                         <Button
                             variant="primary"
                             size="lg"
-                            onClick={() => router.push("/settings#audiobookshelf")}
+                            onClick={() => router.push("/settings/sources#audiobookshelf")}
                             className="flex-1"
                         >
                             Configure Audiobookshelf
@@ -376,13 +375,12 @@ export default function AudiobooksPage() {
     return (
         <div className="min-h-screen">
             <PageHeader
-                eyebrow="Your library"
                 title="Audiobooks"
                 description={`${audiobooks.length} ${audiobooks.length === 1 ? "book" : "books"}`}
                 className="pb-2"
             />
 
-            <div className="relative page-shell pb-24 animate-rise">
+            <div className="relative page-shell page-end animate-rise">
                 <div className="mb-8 space-y-3">
                     {/* First Row: Filter Pills and Shuffle */}
                     <div className="flex flex-wrap items-center gap-2">

@@ -48,8 +48,6 @@ pub struct MeResponse {
     pub username: String,
     pub role: String,
     pub onboarding_complete: bool,
-    /// Always `null` today; kept so the shape round-trips.
-    pub enrichment_settings: Option<serde_json::Value>,
     /// RFC 3339 timestamp.
     pub created_at: String,
 }

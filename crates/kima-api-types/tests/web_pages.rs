@@ -61,8 +61,39 @@ fn playlist_shapes_round_trip() {
         include_str!("fixtures/playlist_detail_response.json"),
     );
     assert_eq!(detail.items.len(), 2);
-    assert_eq!(detail.items[0].sort, 0);
+    assert!(detail.summary.playlist.reverse_order);
+    assert_eq!(detail.items[0].sort, 1);
     assert_eq!(detail.items[0].track.id, detail.items[0].track_id);
+    // Captured in one run: dynamic UUIDs vary across runs, but must join up.
+    assert_eq!(created.id, detail.summary.playlist.id);
+    assert_eq!(created.user_id, detail.summary.playlist.user_id);
+    assert!(!created.reverse_order);
+    assert_eq!(detail.summary.playlist.created_at, created.created_at);
+    let updated: Playlist =
+        serde_json::from_str(include_str!("fixtures/playlist_update_response.json")).unwrap();
+    assert_eq!(updated.id, created.id);
+    assert_eq!(updated.user_id, created.user_id);
+    assert!(updated.reverse_order);
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].summary.playlist.id, created.id);
+    assert_eq!(list[0].summary.playlist.user_id, created.user_id);
+    assert_eq!(
+        list[0].summary.playlist.reverse_order,
+        updated.reverse_order
+    );
+    assert_eq!(list[0].summary.playlist.updated_at, updated.updated_at);
+    assert_eq!(detail.summary.playlist.updated_at, updated.updated_at);
+    assert_eq!(detail.items, detail.merged_items);
+    for item in &detail.items {
+        assert_eq!(item.playlist_id, created.id);
+        assert_eq!(item.track_id, item.track.id);
+        assert!(
+            list[0]
+                .items
+                .iter()
+                .any(|preview| preview.id == item.id && preview.track.id == item.track_id)
+        );
+    }
     let added: AddItemsResponse = round_trip(
         "add",
         include_str!("fixtures/playlist_add_items_response.json"),
@@ -88,6 +119,17 @@ fn playlist_shapes_round_trip() {
     assert_eq!(err.error, "Playlist not found");
 }
 
+/// A server from before the 1.12 base sends no `reverseOrder`: it reads as false.
+#[test]
+fn playlist_without_reverse_order_parses() {
+    let mut v: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/playlist_create_response.json")).unwrap();
+    assert_eq!(v["reverseOrder"], false);
+    v.as_object_mut().unwrap().remove("reverseOrder");
+    let p: Playlist = serde_json::from_value(v).unwrap();
+    assert!(!p.reverse_order);
+}
+
 #[test]
 fn playlist_requests_serialize_as_the_backend_reads_them() {
     let create = serde_json::to_value(CreatePlaylist {
@@ -99,9 +141,16 @@ fn playlist_requests_serialize_as_the_backend_reads_them() {
     let rename = serde_json::to_value(UpdatePlaylist {
         name: Some("y".into()),
         is_public: None,
+        reverse_order: None,
     })
     .unwrap();
     assert_eq!(rename, json!({ "name": "y" }));
+    let reverse = serde_json::to_value(UpdatePlaylist {
+        reverse_order: Some(true),
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(reverse, json!({ "reverseOrder": true }));
     let add = serde_json::to_value(AddItems::one("t1")).unwrap();
     assert_eq!(add, json!({ "trackId": "t1" }));
 }
@@ -132,4 +181,26 @@ fn settings_and_change_password_round_trip() {
     })
     .unwrap();
     assert_eq!(body, json!({ "currentPassword": "a", "newPassword": "b" }));
+}
+
+#[test]
+fn captured_sync_routes_have_the_expected_wire_contract() {
+    let public: Value =
+        serde_json::from_str(include_str!("fixtures/public_config_response.json")).unwrap();
+    assert_eq!(public, json!({"publicUrl":"", "canAcquire":false}));
+    let removals: Value =
+        serde_json::from_str(include_str!("fixtures/library_removals_response.json")).unwrap();
+    assert_eq!(removals, json!({"count":0, "removals":[]}));
+    let rerun: Value =
+        serde_json::from_str(include_str!("fixtures/enrichment_rerun_response.json")).unwrap();
+    assert_eq!(
+        rerun,
+        json!({
+            "artists": 3,
+            "tracks": 0,
+            "vectors": 0,
+            "message": "Re-running from identification"
+        }),
+        "identification reset on this fresh captured library changed its wire contract"
+    );
 }

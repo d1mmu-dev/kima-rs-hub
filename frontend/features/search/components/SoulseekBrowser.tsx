@@ -5,7 +5,7 @@ import { CASCADE_WINDOW_MS } from "@/lib/motion";
 import { Download, CheckCircle, Music, ChevronDown, ChevronRight, List, Users } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { GradientSpinner } from "@/components/ui/GradientSpinner";
-import { formatFileSize, getQualityBadge, parseFilename } from "./soulseekHelpers";
+import { describeResult, formatFileSize, getQualityBadge, qualityScore, resultKey } from "./soulseekHelpers";
 import type {
     SoulseekResult,
     SoulseekSortField,
@@ -13,6 +13,8 @@ import type {
     SoulseekFormatFilter,
 } from "../types";
 import { Button } from "@/components/ui/Button";
+import { usePublicConfig } from "@/hooks/useQueries";
+import { ACQUIRE_LOCKED, ACQUIRE_LOCKED_LABEL } from "@/lib/acquire";
 
 interface SoulseekBrowserProps {
     results: SoulseekResult[];
@@ -43,14 +45,6 @@ const SORT_OPTIONS: { label: string; value: SoulseekSortField }[] = [
 const RESULT_GRID =
     "grid grid-cols-[32px_1fr_minmax(80px,120px)_80px_80px_80px_44px] gap-2 px-3 py-2";
 
-function getResultKey(r: SoulseekResult): string {
-    return `${r.username}:${r.path}`;
-}
-
-function qualityScore(r: SoulseekResult): number {
-    return r.format === "flac" ? 10000 : r.bitrate;
-}
-
 export function SoulseekBrowser({
     results,
     isSearching,
@@ -60,6 +54,8 @@ export function SoulseekBrowser({
     onDownload,
     onBulkDownload,
 }: SoulseekBrowserProps) {
+    // Disabled until the server answers; the operator-only message only once it has said no.
+    const { canAcquire, locked } = usePublicConfig();
     const [formatFilters, setFormatFilters] = useState<Set<SoulseekFormatFilter>>(new Set(["all"]));
     const [sortField, setSortField] = useState<SoulseekSortField>("quality");
     const [viewMode, setViewMode] = useState<SoulseekViewMode>("flat");
@@ -105,8 +101,6 @@ export function SoulseekBrowser({
                 return copy.sort((a, b) => b.size - a.size);
             case "filename":
                 return copy.sort((a, b) => a.filename.localeCompare(b.filename));
-            default:
-                return copy;
         }
     }, [filtered, sortField]);
 
@@ -179,7 +173,7 @@ export function SoulseekBrowser({
     }, []);
 
     const toggleSelectAll = useCallback(() => {
-        const visibleKeys = displayResults.map(getResultKey);
+        const visibleKeys = displayResults.map(resultKey);
         setSelectedKeys((prev) => {
             const allSelected = visibleKeys.every((k) => prev.has(k));
             if (allSelected) return new Set();
@@ -188,7 +182,7 @@ export function SoulseekBrowser({
     }, [displayResults]);
 
     const selectedResults = useMemo(
-        () => sorted.filter((r) => selectedKeys.has(getResultKey(r))),
+        () => sorted.filter((r) => selectedKeys.has(resultKey(r))),
         [sorted, selectedKeys],
     );
 
@@ -281,6 +275,8 @@ export function SoulseekBrowser({
                     <Button
                         variant="primary"
                         onClick={handleBulkDownloadClick}
+                        disabled={!canAcquire}
+                        title={locked ? ACQUIRE_LOCKED : undefined}
                         className="ml-auto"
                     >
                         <Download className="w-4 h-4" />
@@ -340,7 +336,7 @@ function FlatView({
     onToggleSelectAll,
     onDownload,
 }: FlatViewProps) {
-    const allSelected = results.length > 0 && results.every((r) => selectedKeys.has(getResultKey(r)));
+    const allSelected = results.length > 0 && results.every((r) => selectedKeys.has(resultKey(r)));
 
     return (
         <div>
@@ -365,8 +361,8 @@ function FlatView({
                 <ResultRow
                     key={`${result.username}-${result.path}-${index}`}
                     result={result}
-                    isSelected={selectedKeys.has(getResultKey(result))}
-                    isDownloading={downloadingFiles.has(getResultKey(result))}
+                    isSelected={selectedKeys.has(resultKey(result))}
+                    isDownloading={downloadingFiles.has(resultKey(result))}
                     onToggleSelect={onToggleSelect}
                     onDownload={onDownload}
                     animationDelay={index * Math.round(CASCADE_WINDOW_MS / Math.max(results.length, 1))}
@@ -384,7 +380,8 @@ interface ResultRowProps {
     isDownloading: boolean;
     onToggleSelect: (key: string) => void;
     onDownload: (result: SoulseekResult) => void;
-    animationDelay: number;
+    /** Rows of the flat list rise in a cascade, each this far behind the one above; grouped rows do not animate. */
+    animationDelay?: number;
 }
 
 function ResultRow({
@@ -395,21 +392,15 @@ function ResultRow({
     onDownload,
     animationDelay,
 }: ResultRowProps) {
-    const key = getResultKey(result);
-    const parsed = result.parsedTitle
-        ? { artist: result.parsedArtist || "Unknown", title: result.parsedTitle }
-        : parseFilename(result.filename);
+    // Disabled until the server answers; the operator-only message only once it has said no.
+    const { canAcquire, locked } = usePublicConfig();
+    const key = resultKey(result);
+    const parsed = describeResult(result);
 
     return (
         <div
-            className={cn(RESULT_GRID, "items-center hover:bg-white/5 transition-colors rounded")}
-            style={
-                animationDelay > 0
-                    ? {
-                          animation: `fadeSlideIn 150ms ${animationDelay}ms both`,
-                      }
-                    : undefined
-            }
+            className={cn(RESULT_GRID, "items-center hover:bg-white/5 transition-colors rounded", animationDelay !== undefined && "animate-rise")}
+            style={animationDelay !== undefined ? { animationDelay: `${animationDelay}ms` } : undefined}
         >
             <div className="flex items-center justify-center">
                 <input
@@ -440,12 +431,16 @@ function ResultRow({
             <div className="flex items-center justify-center">
                 <button
                     onClick={() => onDownload(result)}
-                    disabled={isDownloading}
+                    disabled={isDownloading || !canAcquire}
+                    title={locked ? ACQUIRE_LOCKED : undefined}
+                    aria-label={locked ? ACQUIRE_LOCKED_LABEL : "download from soulseek"}
                     className={cn(
                         "p-1.5 rounded-full transition-colors",
                         isDownloading
                             ? "text-success cursor-not-allowed"
-                            : "text-brand hover:bg-brand/10",
+                            : !canAcquire
+                              ? "text-brand opacity-40 cursor-not-allowed"
+                              : "text-brand hover:bg-brand/10",
                     )}
                 >
                     {isDownloading ? (
@@ -508,11 +503,10 @@ function GroupedView({
                                     <ResultRow
                                         key={`${result.path}-${index}`}
                                         result={result}
-                                        isSelected={selectedKeys.has(getResultKey(result))}
-                                        isDownloading={downloadingFiles.has(getResultKey(result))}
+                                        isSelected={selectedKeys.has(resultKey(result))}
+                                        isDownloading={downloadingFiles.has(resultKey(result))}
                                         onToggleSelect={onToggleSelect}
                                         onDownload={onDownload}
-                                        animationDelay={0}
                                     />
                                 ))}
                             </div>

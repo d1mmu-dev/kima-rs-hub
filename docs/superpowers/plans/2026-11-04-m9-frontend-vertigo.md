@@ -385,6 +385,34 @@ in-flight milestone claimed it first).
     (`frontend/postcss.config.mjs`), `frontend/components/` and `frontend/features/` (colours, fonts, spacing,
     radii, shadows, breakpoints, icons, animations). Check the licence of every font/icon/asset before copying it
     into `kima-web`; assets without a clear right to reuse are replaced and listed as compromises.
+    - **Re-baseline to v1.12.3 (M-SYNC Task 19, 2026-11-11).** The reference `frontend/` now follows upstream
+      v1.12.3 (`c7527577`); `frontend/app/globals.css` is byte-identical to it. Token changes against the v1.11
+      (the previous pin) sheet the M9 styling was built from (70 -> 72 custom properties):
+      - added: `--bg-chrome: #000000`; `--card-w: 11.25rem` and `--card-gap: clamp(0.75rem, 1.6vw, 1.25rem)` (one
+        card width and gap for grids and shelves); `--page-end: clamp(2rem, 3.5vw, 3rem)`, and
+        `calc(var(--mini-clearance) + 1rem)` under `:root[data-mini-player]` (pages end with `.page-end`, not their
+        own bottom padding); `--z-sheet: 47`; `--z-tooltip: 210`.
+      - removed: `--card-min` (grids now `minmax(min(var(--card-w), 100%), 1fr)`), `--color-ambient: #773b97`,
+        `--motion-ok`, `--animate-panel-down`.
+      - changed: `--color-type-artist` `#fca200` -> `oklch(0.64 0.09 245)` (artist accents turn blue).
+      - rules: new `.t-page-title` (700, 1.75rem, 2rem from 48rem wide, line-height 1.1, letter-spacing -0.025em: page
+        titles are smaller than M9's), `::selection` (brand at 35 %), `body { caret-color: var(--color-brand) }`,
+        a global brand `:focus-visible` outline (2px, offset 2px) unless the element has its own ring, and
+        `html/body:has(#main-content)` at full height with no overflow; `.section-stack` gap
+        `clamp(3rem, 5vw, 4.5rem)` -> `clamp(2rem, 3.5vw, 3rem)`; the TV-mode focus rules for
+        `[data-tv-action|filter|track]` are gone. Fonts (Montserrat), the brand colour and breakpoints are unchanged.
+      - layout (from the screenshots, not tokens): the 1440 desktop shell is now an icon rail plus a collapsible
+        "library" panel (filter box, playlists with covers, daily mixes) instead of the numbered "navigation index";
+        a bell (activity) button joins the top bar; collection pages put sort and page size inline (no "refine"
+        button); track rows gain a delete action and a playing-bars indicator; onboarding shows a two-step
+        account/integrations stepper; the playlists page adds import buttons; mosaic covers can be three tiles.
+    - **New baselines (2026-11-11):** `tools/compare-kima-web-visual.mjs` against the refreshed reference (same
+      seeded library, isolated database, kima-web build of this branch). `diff % / ink % / SSIM` per viewport:
+      login `0.00/0.0/1.00` at all three (identical, inspected); setup 8.38/13.87/16.59 % (stepper); artists
+      3.48/4.28/7.19; albums 22.41/29.85/24.75; tracks 5.42/6.89/11.93; search 1.94/2.09/4.39; playlists
+      6.43/10.98/15.70; playlist 4.56/1.92/6.72; settings 2.43/2.89/4.78; player 10.56/22.60/19.99 (1440/1024/390).
+      Every page but login is over the 1 % / 8 % / 0.93 bounds: kima-web still draws the v1.11 shell. Screenshots
+      were kept in scratch only (`~/.hermes/cache/scratch/t19-evidence/visual/`, gitignored, temporary).
   - **Step 2 (shared styling layer):** implement the tokens once in `kima-web` (vertigo `css!`/a shared stylesheet
     served with the build, no runtime dependency on Node/Tailwind at build time) and rebuild the shared pieces
     (header/nav, track row, buttons, inputs, cards, player bar) on top of it before touching pages.

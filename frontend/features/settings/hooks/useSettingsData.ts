@@ -1,40 +1,54 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { UserSettings } from "../types";
+import { settleFor } from "./settleFor";
 
 const defaultSettings: UserSettings = {
     playbackQuality: "original",
     wifiOnly: false,
-    offlineEnabled: false,
-    maxCacheSizeMb: 5120,
 };
 
 export function useSettingsData() {
-    const { isAuthenticated } = useAuth();
+    const { isAuthenticated, user } = useAuth();
+    // The settings belong to whoever is signed in; a different person starts from the defaults.
+    const userId = isAuthenticated ? (user?.id ?? null) : null;
     const [settings, setSettings] = useState<UserSettings>(defaultSettings);
     const [isLoading, setIsLoading] = useState(true);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
 
-    useEffect(() => {
-        if (isAuthenticated) {
-            loadSettings();
-        }
-    }, [isAuthenticated]);
+    // An answer that arrives after someone else signed in is dropped.
+    const currentUserRef = useRef(userId);
+    useLayoutEffect(() => {
+        currentUserRef.current = userId;
+    }, [userId]);
 
-    const loadSettings = async () => {
-        try {
-            setIsLoading(true);
-            setLoadError(null);
-            const data = await api.getSettings();
-            setSettings(data);
-        } catch (error) {
-            setLoadError(error instanceof Error ? error.message : "Failed to load settings");
-        } finally {
-            setIsLoading(false);
-        }
+    const fetchSettings = useCallback(() => {
+        const askedFor = userId;
+        const current = () => currentUserRef.current === askedFor;
+        return settleFor(api.getSettings(), current, setSettings, setLoadError, setIsLoading);
+    }, [userId]);
+
+    const loadSettings = () => {
+        setIsLoading(true);
+        setLoadError(null);
+        return fetchSettings();
     };
+
+    const [shownFor, setShownFor] = useState(userId);
+    if (shownFor !== userId) {
+        setShownFor(userId);
+        setSettings(defaultSettings);
+        setIsLoading(true);
+        setLoadError(null);
+    }
+
+    useEffect(() => {
+        if (userId) {
+            fetchSettings();
+        }
+    }, [userId, fetchSettings]);
 
     const saveSettings = async (newSettings: UserSettings) => {
         try {

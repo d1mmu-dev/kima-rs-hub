@@ -63,8 +63,8 @@ A per-file clone is not a transaction with an external writer: it cannot show th
 ## Not covered by automated tests
 
 * Real bind mounts are covered by `tests/input_snapshot_mounts.rs`, which is `#[ignore]`d because it needs mount rights; run it with `unshare -Urm cargo test -p kima-ml --test input_snapshot_mounts -- --ignored` (works without root where unprivileged user namespaces are enabled). It checks `RESOLVE_NO_XDEV` (`EXDEV`, class `Unreadable`) on a mount inside the library and a mount-ID mismatch of a bind-mounted snapshot directory. Mount-ID mismatches of each individual comparison (root vs directory, source, reopened source, snapshot) are tested with injected IDs.
-* Positive tests need a reflink filesystem and **fail with an explicit `NO REFLINK SUPPORT` message** otherwise; with `KIMA_TEST_ALLOW_NO_REFLINK=1` they print `SKIPPED: ...` to stderr and return instead.
-* Filesystems other than Btrfs and tmpfs (e.g. XFS, overlayfs, NFS).
+* Positive tests need a reflink filesystem and **fail with an explicit `NO REFLINK SUPPORT` message** otherwise; with `KIMA_TEST_ALLOW_NO_REFLINK=1` they print `SKIPPED: ...` to stderr and return instead. Their temporary directories live in the crate directory (inside the checkout, Btrfs on the dev box) or, when set, under the absolute `KIMA_TEST_REFLINK_DIR`; hosted CI sets it to a loop-mounted XFS (`reflink=1`) because the runner's ext4 has no reflink.
+* Filesystems other than Btrfs and tmpfs (e.g. overlayfs, NFS); XFS only through the hosted CI loop mount.
 * `EINTR` handling is unit-tested on the retry helper; the signal interruption of the real syscalls is not provoked.
 * The container entrypoint script and the compose file were syntax/config checked only, not run in a container.
 * ACL-based exposure of the snapshot directory.

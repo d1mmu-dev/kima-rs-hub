@@ -17,6 +17,7 @@ import { useAudioControls } from "@/lib/audio-controls-context";
 import { api } from "@/lib/api";
 import type { Track, VibeOperation } from "@/lib/audio-state-context";
 import { useIsMobile, useIsTablet } from "@/hooks/useMediaQuery";
+import { useSoundRebuild, describeSoundRebuild } from "@/hooks/useSoundRebuild";
 import { notify } from "@/lib/notify";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/Button";
@@ -83,10 +84,11 @@ function MapIconButton({ icon: Icon, compact, className, ...props }: { icon: Luc
     );
 }
 
-function toQueueTrack(t: { id: string; title: string; duration?: number; artist: { id: string; name: string }; album: { id: string; title: string; coverUrl: string | null } }): Track {
+function toQueueTrack(t: { id: string; title: string; displayTitle?: string | null; duration?: number; artist: { id: string; name: string }; album: { id: string; title: string; coverUrl: string | null } }): Track {
     return {
         id: t.id,
         title: t.title,
+        displayTitle: t.displayTitle,
         duration: t.duration ?? 0,
         artist: { name: t.artist.name, id: t.artist.id },
         album: { title: t.album.title, coverArt: t.album.coverUrl ?? undefined, id: t.album.id },
@@ -98,8 +100,9 @@ export default function VibePage() {
         mapData, isLoading, computing, error, refetch, trackMap, mode, selectedTrackId, highlightedIds,
         selectTrack, resetMode, setMode, setHighlightedIds,
     } = useVibeMap();
+    const rebuild = useSoundRebuild();
 
-    const { currentTrack, playbackType, queue, activeOperation } = useAudioState();
+    const { currentTrack, queue, activeOperation } = useAudioState();
     const { playTrack, replaceOperation } = useAudioControls();
     const isMobile = useIsMobile();
     const isTablet = useIsTablet();
@@ -214,6 +217,7 @@ export default function VibePage() {
             const tracks: Track[] = steps.map((t) => ({
                 id: t.id,
                 title: t.title,
+                displayTitle: t.displayTitle,
                 duration: t.duration,
                 artist: { name: t.artistName, id: t.artistId },
                 album: { title: t.albumTitle, coverArt: t.albumCoverUrl ?? undefined, id: t.albumId },
@@ -297,6 +301,12 @@ export default function VibePage() {
         setSearchClears((n) => n + 1);
     }, [resetMode]);
 
+    // Pinning a mood ends whatever tool is running; pinning it again unpins it.
+    const toggleMood = useCallback((m: string) => {
+        if (mode !== "idle") clearAll();
+        setMoodPinned((cur) => (cur === m ? null : m));
+    }, [mode, clearAll]);
+
     // One Escape handler for the page, undoing the latest thing first: the menu,
     // an open Song Path or Blend panel, a pending song-path pick, then the
     // selection. Inputs that handle Escape themselves mark the event handled.
@@ -326,16 +336,7 @@ export default function VibePage() {
     }, [selectedTrackId, mapData, trackMap, selectTrack]);
 
     if (isLoading) return <CenteredNote title="Charting your library" spinner />;
-    if (computing) {
-        return (
-            <CenteredNote
-                title="Charting your library"
-                detail="Building the map. Large libraries take a few minutes."
-                spinner
-            />
-        );
-    }
-
+    // A map that failed to load says so, with its retry, even while the sound features are being rebuilt.
     if (error) {
         return (
             <CenteredNote
@@ -346,6 +347,25 @@ export default function VibePage() {
                         Try again
                     </Button>
                 }
+            />
+        );
+    }
+    // While the sound features are still being built, the map waits on them: say how far along they are.
+    if (rebuild && (computing || !mapData || mapData.tracks.length === 0)) {
+        return (
+            <CenteredNote
+                title="Getting your sound features ready"
+                detail={`${describeSoundRebuild(rebuild)} The map appears when they are done; playback and your library work as usual.`}
+                spinner
+            />
+        );
+    }
+    if (computing) {
+        return (
+            <CenteredNote
+                title="Charting your library"
+                detail="Building the map. Large libraries take a few minutes."
+                spinner
             />
         );
     }
@@ -360,6 +380,17 @@ export default function VibePage() {
 
     return (
         <div className="vibe-sky relative h-full w-full overflow-hidden animate-rise">
+            {/* The cosmic glow: fixed to the page, not the map. Two soft colour
+                fields behind the canvas, so dragging or zooming never moves them. */}
+            <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0"
+                style={{
+                    background:
+                        "radial-gradient(circle at 18% 30%, rgba(95,47,142,0.04), transparent 55%), radial-gradient(circle at 82% 72%, rgba(125,47,102,0.03), transparent 55%)",
+                    mixBlendMode: "screen",
+                }}
+            />
             <SceneErrorBoundary>
                 <VibeMapScene
                     tracks={mapData.tracks}
@@ -394,9 +425,22 @@ export default function VibePage() {
                 onReset={clearAll}
             />
 
-            <div className={`absolute z-(--z-scene) flex ${compact
-                ? "right-3 top-[max(0.75rem,env(safe-area-inset-top))] gap-2"
-                : "left-[max(0.75rem,env(safe-area-inset-left))] top-[max(1rem,env(safe-area-inset-top))] gap-1"}`}>
+            <div className={cn(
+                "absolute z-(--z-scene) flex items-center",
+                compact
+                    ? "left-3 top-[max(0.75rem,env(safe-area-inset-top))] gap-2"
+                    : "left-[max(0.75rem,env(safe-area-inset-left))] top-[max(1rem,env(safe-area-inset-top))] gap-1",
+            )}>
+                {compact && (
+                    <MoodLegend
+                        compact
+                        tracks={mapData.tracks}
+                        trackCount={mapData.trackCount}
+                        activeMood={moodFocus}
+                        onPreview={setMoodPreview}
+                        onToggle={toggleMood}
+                    />
+                )}
                 <MapIconButton
                     icon={Tag}
                     compact={compact}
@@ -417,7 +461,12 @@ export default function VibePage() {
             </div>
 
             {driftSourceId && (
-                <div role="status" className={`vibe-glass absolute left-1/2 z-(--z-scene) flex -translate-x-1/2 items-center gap-3 rounded-full px-4 py-2 text-sm text-[var(--text-secondary)] ${compact ? "top-[max(7rem,calc(env(safe-area-inset-top)+7rem))] w-max max-w-[calc(100%-1.5rem)]" : "top-[max(4.25rem,calc(env(safe-area-inset-top)+4.25rem))]"}`}>
+                <div role="status" className={cn(
+                    "vibe-glass absolute z-(--z-scene) flex items-center gap-3 rounded-full px-4 py-2 text-sm text-[var(--text-secondary)]",
+                    compact
+                        ? "left-3 right-[calc(0.75rem+3.25rem)] top-[max(7.625rem,calc(env(safe-area-inset-top)+7.625rem))] justify-between"
+                        : "left-1/2 -translate-x-1/2 top-[max(4.25rem,calc(env(safe-area-inset-top)+4.25rem))]",
+                )}>
                     <span className="h-2 w-2 animate-pulse rounded-full bg-[var(--color-brand)]" />
                     {compact ? "Tap the track the path should end on" : "Click the track the song path should end on"}
                     <button type="button" onClick={() => setDriftSourceId(null)} className="text-xs text-[var(--text-muted)] hover:text-white">
@@ -429,18 +478,17 @@ export default function VibePage() {
             {showPathPicker && <VibeSongPath library={libraryIndex} onStartPath={submitPath} onClose={() => { setShowPathPicker(false); setMode((m) => (m === "path-picking" ? "idle" : m)); }} />}
             {showAlchemy && <VibeAlchemy library={libraryIndex} onHighlight={setHighlightedIds} onClose={() => { setShowAlchemy(false); resetMode(); }} />}
 
-            <div className={`absolute z-(--z-scene) ${compact
-                ? "left-0 right-0 top-[max(4rem,calc(env(safe-area-inset-top)+4rem))] px-3"
-                : "left-[max(0.75rem,env(safe-area-inset-left))] bottom-[max(0.75rem,env(safe-area-inset-bottom))] max-w-[min(30rem,calc(100%-25rem))]"}`}>
-                <MoodLegend
-                    tracks={mapData.tracks}
-                    trackCount={mapData.trackCount}
-                    activeMood={moodFocus}
-                    scroll={compact}
-                    onPreview={setMoodPreview}
-                    onToggle={(m) => { if (mode !== "idle") clearAll(); setMoodPinned((cur) => (cur === m ? null : m)); }}
-                />
-            </div>
+            {!compact && (
+                <div className="absolute z-(--z-scene) left-[max(0.75rem,env(safe-area-inset-left))] bottom-[max(0.75rem,env(safe-area-inset-bottom))] max-w-[min(30rem,calc(100%-25rem))]">
+                    <MoodLegend
+                        tracks={mapData.tracks}
+                        trackCount={mapData.trackCount}
+                        activeMood={moodFocus}
+                        onPreview={setMoodPreview}
+                        onToggle={toggleMood}
+                    />
+                </div>
+            )}
 
             {!compact && showHint && (
                 <div className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-[max(0.75rem,env(safe-area-inset-right))] z-(--z-scene) w-[22rem] max-w-sm">
@@ -493,7 +541,10 @@ export default function VibePage() {
                     onPlay={selectedTrack ? playSelected : undefined}
                     selectedArtistId={selectedTrack?.artistId ?? null}
                     songPathActive={!!driftSourceId}
-                    aboveMiniPlayer={!!playbackType}
+                    onSearch={handleSearch}
+                    results={mode === "search" ? searchResults : null}
+                    onPickResult={pickSearchResult}
+                    clearSignal={searchClears}
                     intro={showHint ? (
                         <div className="flex items-start gap-3">
                             <p className="min-w-0 flex-1 text-xs leading-relaxed text-[var(--text-secondary)] landscape-short:text-[11px]">

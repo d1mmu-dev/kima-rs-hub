@@ -1,6 +1,6 @@
 //! Jobs on the `library` queue (concurrency 1): reconciles, single-file updates, organizer runs
 //! and autotag applies and undos. Payloads are `{"kind":"reconcile"}`,
-//! `{"kind":"path","path":"<rel>"}`,
+//! `{"kind":"reread_all"}`, `{"kind":"path","path":"<rel>"}`,
 //! `{"kind":"organize","runId":"<uuid>","action":"preview"|"apply"|"undo"|"switch-root"}`,
 //! `{"kind":"autotag-apply","runId":"<uuid>"}` and `{"kind":"autotag-undo","runId":"<uuid>"}`.
 
@@ -28,6 +28,8 @@ pub const MAX_ATTEMPTS: i32 = 3;
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum LibraryJob {
     Reconcile,
+    #[serde(rename = "reread_all")]
+    RereadAll,
     Path {
         path: String,
     },
@@ -85,6 +87,19 @@ pub async fn request_reconcile(pool: &PgPool) -> sqlx::Result<Uuid> {
     .await
 }
 
+/// Starts exactly one queued/running re-file job; a second request reports a conflict.
+/// The queue's advisory enqueue lock makes concurrent requests single-winner.
+pub async fn request_refile(pool: &PgPool) -> sqlx::Result<bool> {
+    Ok(queue::enqueue_unless_pending(
+        pool,
+        QUEUE,
+        serde_json::json!({ "kind": "reread_all" }),
+        MAX_ATTEMPTS,
+    )
+    .await?
+    .is_some())
+}
+
 /// Queues a single-file update for `rel` (relative to the library root), unless an update for
 /// the same file is already waiting (not yet running). Returns the new id, if one was queued.
 pub async fn enqueue_path(pool: &PgPool, rel: &str) -> sqlx::Result<Option<Uuid>> {
@@ -135,6 +150,23 @@ pub async fn run_attempt(
                 unchanged = r.unchanged,
                 failed = r.failed.len(),
                 "library reconcile finished"
+            );
+            Ok(r.added + r.updated + r.repointed + r.restored + r.missing > 0)
+        }
+        LibraryJob::RereadAll => {
+            let r = scan::refile_cancellable(ctx, cancel)
+                .await
+                .map_err(|e| JobError::Retry(e.to_string()))?;
+            info!(
+                songs_read = r.tags_read,
+                files_failed = r.failed.len(),
+                added = r.added,
+                updated = r.updated,
+                repointed = r.repointed,
+                missing = r.missing,
+                restored = r.restored,
+                purged = r.purged,
+                "library re-file finished"
             );
             Ok(r.added + r.updated + r.repointed + r.restored + r.missing > 0)
         }
@@ -208,6 +240,7 @@ mod tests {
     fn payloads_parse() {
         let parse = |v| serde_json::from_value::<LibraryJob>(v).unwrap();
         assert_eq!(parse(json!({"kind": "reconcile"})), LibraryJob::Reconcile);
+        assert_eq!(parse(json!({"kind": "reread_all"})), LibraryJob::RereadAll);
         assert_eq!(
             parse(json!({"kind": "path", "path": "A/b.mp3"})),
             LibraryJob::Path {

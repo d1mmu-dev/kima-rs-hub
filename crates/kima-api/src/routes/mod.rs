@@ -18,7 +18,6 @@ mod playlists;
 mod plays;
 mod search;
 mod settings;
-#[allow(dead_code)] // Consumed by the stats handlers added in the next task.
 mod stats;
 mod stubs;
 mod system;
@@ -40,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .merge(library::routes())
         .merge(search::routes())
         .merge(plays::routes())
+        .merge(stats::routes())
         .merge(playlists::routes())
         .merge(playback_state::routes())
         .merge(settings::routes())

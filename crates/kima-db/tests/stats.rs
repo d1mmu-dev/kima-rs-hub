@@ -196,4 +196,28 @@ async fn period_window_applies_after_the_walk(pool: PgPool) {
         .unwrap();
         assert_eq!(count, expected, "{period:?}");
     }
+
+    // A listen that starts before the twelve-month boundary must not be
+    // reopened by a later raw row inside that boundary.
+    sqlx::query("DELETE FROM plays WHERE user_id = $1")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for offset in ["-1 hour", "1 hour"] {
+        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now() - interval '12 months' + $4::interval)")
+            .bind(Uuid::now_v7()).bind(user).bind(track).bind(offset)
+            .execute(&pool).await.unwrap();
+    }
+    for (period, expected) in [(Period::All, 1), (Period::Months12, 0)] {
+        let count: i64 = sqlx::query_scalar(&format!(
+            "{} SELECT count(*) FROM p",
+            listen_rows(period, false)
+        ))
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, expected, "{period:?}");
+    }
 }

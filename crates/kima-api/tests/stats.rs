@@ -578,3 +578,55 @@ async fn stats_habit_excludes_exactly_fifteen_minutes(pool: PgPool) {
     r.assert_status_ok();
     assert_eq!(r.json::<Value>()["signature"]["albumHabit"], Value::Null);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn region_validates_like_js_and_requires_auth(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    server
+        .get("/api/stats/region?x=12&y=18")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    for query in [
+        "x=0&y=18",
+        "x=25&y=18",
+        "x=1.5&y=18",
+        "y=18",
+        "x=12&x=13&y=18",
+        "x=12&y=",
+        "x=12&y=Infinity",
+    ] {
+        let r = server
+            .get(&format!("/api/stats/region?{query}"))
+            .authorization_bearer(&token)
+            .await;
+        r.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(r.json::<Value>(), json!({"error":"Bad request"}));
+    }
+    for query in ["x=12&y=18", "x=0x18&y=1&period=garbage", "x=1.0&y=24"] {
+        let r = server
+            .get(&format!("/api/stats/region?{query}"))
+            .authorization_bearer(&token)
+            .await;
+        r.assert_status_ok();
+        let x = if query.starts_with("x=12") {
+            12
+        } else if query.starts_with("x=0x") {
+            24
+        } else {
+            1
+        };
+        let y = if x == 12 {
+            18
+        } else if x == 24 {
+            1
+        } else {
+            24
+        };
+        assert_eq!(
+            r.json::<Value>(),
+            json!({"x":x,"y":y,"listens":0,"tracks":[],"energy":null,"valence":null,"bpm":null})
+        );
+    }
+}

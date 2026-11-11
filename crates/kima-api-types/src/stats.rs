@@ -27,6 +27,17 @@ pub struct TracksResponse {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct RegionDetail {
+    pub x: i32,
+    pub y: i32,
+    pub listens: i64,
+    pub tracks: Vec<HourTrack>,
+    pub energy: Option<f64>,
+    pub valence: Option<f64>,
+    pub bpm: Option<f64>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct TrackPlays {
     pub plays: i64,
 }

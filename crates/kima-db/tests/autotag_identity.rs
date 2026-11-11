@@ -1486,3 +1486,115 @@ async fn various_artists_with_several_albums_keeps_them(pool: PgPool) {
         json!(library::VARIOUS_ARTISTS_MBID)
     );
 }
+
+/// Waits until `task` has finished or is waiting on a row/transaction lock (not the gate).
+async fn finished_or_blocked<T>(pool: &PgPool, task: &tokio::task::JoinHandle<T>) {
+    for _ in 0..3000 {
+        if task.is_finished() {
+            return;
+        }
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() \
+             AND wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple'))",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if blocked {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the task neither finished nor blocked");
+}
+
+/// An apply writes the recording rows of several tracks in one transaction, creating the
+/// missing ones. A concurrent recording claim holds the rows it takes (it never waits for an
+/// existing one) and waits for a row the apply is creating; the apply must not then wait for
+/// a row the claim holds (a deadlock, 40P01).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn apply_and_recording_claim_do_not_deadlock(pool: PgPool) {
+    let x = artist(&pool, "Xavier").await;
+    let b = album(&pool, x, "Record", None).await;
+    let fresh = track(&pool, b, "x/1.flac", false).await;
+    let due = track(&pool, b, "x/2.flac", false).await;
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status) VALUES ($1, 'recording', 'pending')",
+    )
+    .bind(due)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let r = run(
+        &pool,
+        b,
+        applied(
+            "Record",
+            "Xavier",
+            None,
+            vec![at(fresh, Some(REC1)), at(due, Some(REC2))],
+        ),
+    )
+    .await;
+    // Park the apply as it reaches the second track, after creating the first one's row.
+    sqlx::query(
+        "CREATE FUNCTION test_gate() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_advisory_xact_lock_shared(1); RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER test_gate BEFORE UPDATE ON tracks FOR EACH ROW \
+         WHEN (OLD.id = '{due}' AND NEW.recording_mbid IS DISTINCT FROM OLD.recording_mbid) \
+         EXECUTE FUNCTION test_gate()"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut holder = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(1)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let applying = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            apply(&pool, &r)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}"))
+        }
+    });
+    for _ in 0..3000 {
+        let parked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() \
+             AND wait_event_type = 'Lock' AND wait_event = 'advisory')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if parked {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let claim = tokio::spawn({
+        let pool = pool.clone();
+        async move { kima_db::stages::claim(&pool, kima_db::stages::Stage::Recording, 20, false).await }
+    });
+    finished_or_blocked(&pool, &claim).await;
+    sqlx::query("SELECT pg_advisory_unlock(1)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let applied = applying.await.unwrap();
+    let claimed = claim.await.unwrap();
+    assert_eq!(applied, Ok(()), "the apply deadlocked");
+    claimed.expect("the claim deadlocked");
+    for t in [fresh, due] {
+        assert_eq!(stage(&pool, t).await["status"], "done");
+    }
+}

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { createRoot } from "react-dom/client";
 import React, { act } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const state = vi.hoisted(() => ({
     keys: [] as { id: string; name: string; createdAt: string; lastUsed: string | null }[],
@@ -13,6 +14,7 @@ vi.mock("@/lib/api", () => ({
         ),
         post: vi.fn(),
         delete: vi.fn(),
+        getPublicConfig: vi.fn(async () => ({ publicUrl: "", canAcquire: false })),
     },
 }));
 
@@ -25,7 +27,15 @@ let root: ReturnType<typeof createRoot> | null = null;
 async function render() {
     const el = document.createElement("div");
     root = createRoot(el);
-    await act(async () => root!.render(<SubsonicSection />));
+    // v1.12.3 reads the server address through React Query (usePublicConfig).
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () =>
+        root!.render(
+            <QueryClientProvider client={client}>
+                <SubsonicSection />
+            </QueryClientProvider>,
+        ),
+    );
     return el.textContent ?? "";
 }
 

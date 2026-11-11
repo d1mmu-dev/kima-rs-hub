@@ -1,6 +1,6 @@
 "use client";
 
-import { SettingsSection, SettingsRow, SettingsSelect } from "../ui";
+import { SettingsSection, SettingsRow, SettingsSelect, SettingsToggle } from "../ui";
 import { SystemSettings, soulseekConfigured } from "../../types";
 
 interface DownloadPreferencesSectionProps {
@@ -39,9 +39,20 @@ export function DownloadPreferencesSection({
     return (
         <SettingsSection
             id="download-preferences"
-            title="Download Preferences"
+            title="Downloads"
             description="Configure how music is downloaded for playlists and discovery"
         >
+            <SettingsRow
+                label="Member Downloads"
+                description="Off: only operators can request downloads. On: signed-in members can acquire music too — deleting stays operator-only."
+            >
+                <SettingsToggle
+                    id="allow-member-acquire"
+                    checked={settings.allowMemberAcquire === true}
+                    onChange={(v) => onUpdate({ allowMemberAcquire: v })}
+                />
+            </SettingsRow>
+
             <SettingsRow
                 label="Primary Download Source"
                 description={

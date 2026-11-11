@@ -154,8 +154,9 @@ export function SettingsScreen({ slug }: { slug: SettingsPageSlug }) {
         ),
         library: (
             <>
-                <CacheSection settings={systemSettings} onUpdate={updateSystemSettings} />
-                <CorruptTracksSection />
+                <CacheSection settings={systemSettings} onUpdate={updateSystemSettings}>
+                    <CorruptTracksSection />
+                </CacheSection>
                 <LibraryToolsSection />
             </>
         ),
@@ -194,7 +195,7 @@ export function SettingsScreen({ slug }: { slug: SettingsPageSlug }) {
                 />
             </>
         ),
-        people: <UserManagementSection />,
+        people: <UserManagementSection settings={systemSettings} onUpdate={updateSystemSettings} />,
     };
 
     return (

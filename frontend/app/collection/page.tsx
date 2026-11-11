@@ -14,19 +14,21 @@ import {
 } from "@/hooks/useQueries";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { notify } from "@/lib/notify";
 import { useLibraryActions } from "@/features/library/hooks/useLibraryActions";
+import { useAuth } from "@/lib/auth-context";
 import { CollectionMasthead } from "@/features/library/components/CollectionMasthead";
 import { useLibraryVibe } from "@/features/library/useLibraryVibe";
 import { useShelfSummary } from "@/features/library/useShelfSummary";
 import { LibraryTabs } from "@/features/library/components/LibraryTabs";
 import { LibraryToolbar } from "@/features/library/components/LibraryToolbar";
-import { ArtistsGrid } from "@/features/library/components/ArtistsGrid";
-import { AlbumsGrid } from "@/features/library/components/AlbumsGrid";
+import { LibraryGrid, albumCard, artistCard } from "@/features/library/components/LibraryGrid";
 import { TracksList } from "@/features/library/components/TracksList";
 import { DEFAULT_REFINE, PER_PAGE_OPTIONS, sortOptionsFor } from "@/features/library/components/RefinePanel";
 import { Pagination } from "@/components/ui/Pagination";
 import { latchTotal, parsePageParam } from "@/lib/pagination";
 import { scrollMainToTop } from "@/lib/scroll";
+import { stillRequested, viewToChange } from "@/lib/requested-views";
 
 const FILTERS: LibraryFilter[] = ["owned", "discovery", "all"];
 
@@ -36,6 +38,9 @@ interface LibraryView {
     itemsPerPage: number;
 }
 const DEFAULT_VIEW: LibraryView = DEFAULT_REFINE;
+
+const sameView = (a: LibraryView, b: LibraryView) =>
+    a.filter === b.filter && a.sortBy === b.sortBy && a.itemsPerPage === b.itemsPerPage;
 
 /** The address carries tab, page, filter, sort and page size, so refresh and Back keep them; defaults are left out. */
 function libraryUrl(tab: Tab, page: number, view: LibraryView): string {
@@ -91,6 +96,10 @@ export default function LibraryPage() {
     const [latchedTotals, setLatchedTotals] = useState<Partial<Record<Tab, number>>>({});
 
     const queryClient = useQueryClient();
+    const { user } = useAuth();
+    // Deleting library content is an admin action on the backend; the UI must
+    // not offer it to anyone else.
+    const isAdmin = user?.role === "admin";
 
     // Use React Query hooks for cached data fetching
     // Only fetch data for active tab to prevent unnecessary API calls
@@ -135,6 +144,8 @@ export default function LibraryPage() {
         () => (activeTab === "tracks" ? (tracksQuery.data?.tracks ?? []) : []),
         [activeTab, tracksQuery.data?.tracks],
     );
+    const artistCards = useMemo(() => artists.map(artistCard), [artists]);
+    const albumCards = useMemo(() => albums.map(albumCard), [albums]);
 
     const isLoading =
         (activeTab === "artists" && artistsQuery.isLoading) ||
@@ -169,17 +180,7 @@ export default function LibraryPage() {
         scrollMainToTop();
     }, [pageDataReady, currentPage]);
 
-    const pagination = useMemo(
-        () => ({
-            total,
-            offset: 0,
-            limit: itemsPerPage,
-            totalPages: Math.max(1, Math.ceil(total / itemsPerPage)),
-            currentPage,
-            itemsPerPage,
-        }),
-        [total, itemsPerPage, currentPage],
-    );
+    const totalPages = Math.max(1, Math.ceil(total / itemsPerPage));
 
     const reloadData = useCallback(async () => {
         if (activeTab === "artists") {
@@ -218,16 +219,30 @@ export default function LibraryPage() {
 
     // Changing filter/sort/page-size starts again at page 1 and remounts the
     // grid. Done in the handlers, so the URL changes only on user action.
+    // Quick changes in a row build on each other, not on the last render (lib/requested-views.ts).
+    const requested = useRef<LibraryView[]>([]);
+    const rendered = useRef<LibraryView>({ filter, sortBy, itemsPerPage });
+    useLayoutEffect(() => {
+        const view = { filter, sortBy, itemsPerPage };
+        rendered.current = view;
+        requested.current = stillRequested(requested.current, view, sameView);
+    }, [filter, sortBy, itemsPerPage]);
+    useLayoutEffect(() => {
+        requested.current = [];
+    }, [activeTab]);
     const changeView = useCallback(
         (next: Partial<LibraryView>) => {
+            const view = { ...viewToChange(requested.current, rendered.current), ...next };
+            requested.current = [...requested.current, view];
             setGridKey((k) => k + 1);
-            router.replace(libraryUrl(activeTab, 1, { filter, sortBy, itemsPerPage, ...next }), { scroll: false });
+            router.replace(libraryUrl(activeTab, 1, view), { scroll: false });
         },
-        [activeTab, filter, sortBy, itemsPerPage, router],
+        [activeTab, router],
     );
     const changeFilter = useCallback((next: LibraryFilter) => changeView({ filter: next }), [changeView]);
     const changeSort = useCallback((next: SortOption) => changeView({ sortBy: next }), [changeView]);
     const changeItemsPerPage = useCallback((next: number) => changeView({ itemsPerPage: next }), [changeView]);
+    const resetView = useCallback(() => changeView(DEFAULT_VIEW), [changeView]);
 
     // A ?page= past the end is moved back to the last real page once a response
     // lands. The URL stays the single source of truth, so one empty frame shows.
@@ -235,19 +250,16 @@ export default function LibraryPage() {
         !isLoading &&
         !activeQuery.isError &&
         activeQuery.data !== undefined &&
-        currentPage > pagination.totalPages;
+        currentPage > totalPages;
     useEffect(() => {
         if (outOfRange) {
-            router.replace(libraryUrl(activeTab, pagination.totalPages, { filter, sortBy, itemsPerPage }), { scroll: false });
+            router.replace(libraryUrl(activeTab, totalPages, { filter, sortBy, itemsPerPage }), { scroll: false });
         }
-    }, [outOfRange, activeTab, pagination.totalPages, filter, sortBy, itemsPerPage, router]);
+    }, [outOfRange, activeTab, totalPages, filter, sortBy, itemsPerPage, router]);
 
-    const totalItems = pagination.total;
-    const totalPages = pagination.totalPages;
-
+    const [deleting, setDeleting] = useState(false);
     const [deleteConfirm, setDeleteConfirm] = useState<DeleteDialogState>({
         isOpen: false,
-        type: "track",
         id: "",
         title: "",
     });
@@ -276,6 +288,7 @@ export default function LibraryPage() {
         return libraryTracks.map((track) => ({
             id: track.id,
             title: track.title,
+            displayTitle: track.displayTitle,
             duration: track.duration,
             artist: {
                 id: track.album?.artist?.id,
@@ -297,10 +310,9 @@ export default function LibraryPage() {
         [formatTracksForAudio, playTracks],
     );
 
-    // Shuffle entire library - uses server-side shuffle for large libraries
+    // The server shuffles, so a large library is not fetched whole to shuffle here.
     const handleShuffleLibrary = useCallback(async () => {
         try {
-            // Use server-side shuffle endpoint for better performance with large libraries
             const { tracks: shuffledTracks } = await api.getShuffledTracks(500);
 
             if (shuffledTracks.length === 0) {
@@ -314,57 +326,38 @@ export default function LibraryPage() {
         }
     }, [formatTracksForAudio, playTracks]);
 
+    const closeDelete = useCallback(
+        () => setDeleteConfirm({ isOpen: false, id: "", title: "" }),
+        [],
+    );
+
     const handleDelete = useCallback(async () => {
+        setDeleting(true);
         try {
-            switch (deleteConfirm.type) {
-                case "artist":
-                    await api.deleteArtist(deleteConfirm.id);
-                    break;
-                case "album":
-                    await api.deleteAlbum(deleteConfirm.id);
-                    break;
-                case "track":
-                    await api.deleteTrack(deleteConfirm.id);
-                    break;
-            }
-
-            // Reload data and close dialog - the item disappearing is feedback enough
-            await reloadData();
-            setDeleteConfirm({
-                isOpen: false,
-                type: "track",
-                id: "",
-                title: "",
-            });
+            await api.deleteTrack(deleteConfirm.id);
         } catch (error) {
-            console.error(`Failed to delete ${deleteConfirm.type}:`, error);
-            // Keep dialog open on error so user can retry
+            console.error("Failed to delete track:", error);
+            notify.error(`Could not delete track "${deleteConfirm.title}"`, {
+                message: error instanceof Error ? error.message : undefined,
+            });
+            // The dialog stays open so it can be retried.
+            setDeleting(false);
+            return;
         }
-    }, [deleteConfirm, reloadData]);
-
-    // Memoize delete handlers to prevent grid re-renders
-    const handleDeleteArtist = useCallback((id: string, name: string) => {
-        setDeleteConfirm({
-            isOpen: true,
-            type: "artist",
-            id,
-            title: name,
-        });
-    }, []);
-
-    const handleDeleteAlbum = useCallback((id: string, title: string) => {
-        setDeleteConfirm({
-            isOpen: true,
-            type: "album",
-            id,
-            title,
-        });
-    }, []);
+        // The track disappearing is feedback enough; the dialog closes even if the refresh fails.
+        try {
+            await reloadData();
+        } catch (error) {
+            console.error("Failed to refresh after deleting a track:", error);
+        } finally {
+            setDeleting(false);
+            closeDelete();
+        }
+    }, [deleteConfirm, reloadData, closeDelete]);
 
     const handleDeleteTrack = useCallback((id: string, title: string) => {
         setDeleteConfirm({
             isOpen: true,
-            type: "track",
             id,
             title,
         });
@@ -375,19 +368,17 @@ export default function LibraryPage() {
             <CollectionMasthead
                 title="Collection"
                 heardLine={shelf.heard}
-                fallbackLine={`${totalItems.toLocaleString()} ${activeTab === "artists" ? "artists" : activeTab === "albums" ? "albums" : "tracks"}`}
+                fallbackLine={`${total.toLocaleString()} ${activeTab === "artists" ? "artists" : activeTab === "albums" ? "albums" : "tracks"}`}
                 shares={vibe.shares}
             />
 
-            <div className="relative page-shell pb-24">
-                <div className="mb-6">
+            <div className="relative page-shell page-end">
+                {/* Tabs and refine controls share one line; on a TV each keeps a row of its own for the remote. */}
+                <div className="mb-6 flex flex-wrap items-center gap-x-6 gap-y-3 pb-4 border-b border-white/5">
                     <LibraryTabs
                         activeTab={activeTab}
                         onTabChange={changeTab}
                     />
-                </div>
-
-                <div className="mb-8">
                     <LibraryToolbar
                         activeTab={activeTab}
                         filter={filter}
@@ -396,35 +387,37 @@ export default function LibraryPage() {
                         onFilterChange={changeFilter}
                         onSortChange={changeSort}
                         onItemsPerPageChange={changeItemsPerPage}
+                        onReset={resetView}
                         onShuffleLibrary={handleShuffleLibrary}
                     />
                 </div>
+
+                {/* The cards' titles are h3s; this names the list they sit in for screen readers. */}
+                <h2 className="sr-only">{activeTab}</h2>
 
                 <div
                     aria-busy={activeQuery.isPlaceholderData}
                     className={`transition-opacity duration-150 ${activeQuery.isPlaceholderData ? "opacity-50" : ""}`}
                 >
                     {activeTab === "artists" && (
-                        <ArtistsGrid
+                        <LibraryGrid
                             key={gridKey}
-                            artists={artists}
+                            kind="artist"
+                            cards={artistCards}
                             isLoading={isLoading}
                             onPlay={playArtist}
-                            onDelete={handleDeleteArtist}
                             moodByKey={vibe.artistMood}
-                            gridKey={gridKey}
                         />
                     )}
 
                     {activeTab === "albums" && (
-                        <AlbumsGrid
+                        <LibraryGrid
                             key={gridKey}
-                            albums={albums}
+                            kind="album"
+                            cards={albumCards}
                             isLoading={isLoading}
                             onPlay={playAlbum}
-                            onDelete={handleDeleteAlbum}
                             moodByKey={vibe.albumMood}
-                            gridKey={gridKey}
                         />
                     )}
 
@@ -436,8 +429,7 @@ export default function LibraryPage() {
                             onPlay={handlePlayTracks}
                             onAddToQueue={addTrackToQueue}
                             onAddToPlaylist={addTrackToPlaylist}
-                            onDelete={handleDeleteTrack}
-                            gridKey={gridKey}
+                            onDelete={isAdmin ? handleDeleteTrack : undefined}
                         />
                     )}
                 </div>
@@ -475,28 +467,12 @@ export default function LibraryPage() {
 
                 <ConfirmDialog
                     isOpen={deleteConfirm.isOpen}
-                    onClose={() =>
-                        setDeleteConfirm({
-                            isOpen: false,
-                            type: "track",
-                            id: "",
-                            title: "",
-                        })
-                    }
-                    onConfirm={handleDelete}
-                    title={`Delete ${
-                        deleteConfirm.type === "artist" ? "Artist"
-                        : deleteConfirm.type === "album" ? "Album"
-                        : "Track"
-                    }?`}
-                    message={
-                        deleteConfirm.type === "track" ?
-                            `Are you sure you want to delete "${deleteConfirm.title}"? This will permanently delete the file from your system.`
-                        : deleteConfirm.type === "album" ?
-                            `Are you sure you want to delete "${deleteConfirm.title}"? This will permanently delete all tracks and files from your system.`
-                        :   `Are you sure you want to delete "${deleteConfirm.title}"? This will permanently delete all albums, tracks, and files from your system.`
-
-                    }
+                    onClose={closeDelete}
+                    onConfirm={() => void handleDelete()}
+                    closeOnConfirm={false}
+                    busy={deleting}
+                    title="Delete Track?"
+                    message={`Are you sure you want to delete "${deleteConfirm.title}"? This will permanently delete the file from your system.`}
                     confirmText="Delete"
                     cancelText="Cancel"
                     variant="danger"

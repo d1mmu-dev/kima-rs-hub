@@ -35,8 +35,11 @@ export const SETTINGS_PAGES: SettingsPage[] = [
         description: "What Kima has worked out about your music, and the work that keeps it current.",
         adminOnly: true,
         sections: [
-            { id: "cache", label: "Status and actions" },
+            { id: "cache", label: "Status" },
+            { id: "library-actions", label: "Actions" },
             { id: "corrupt-tracks", label: "Corrupt tracks" },
+            { id: "library-performance", label: "Performance" },
+            { id: "library-start-over", label: "Start over" },
             { id: "library-tools", label: "Local library tools" },
         ],
     },

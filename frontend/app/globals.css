@@ -16,7 +16,7 @@
 /* A phone on its side: the app's bars and the mini player take less height. */
 @custom-variant landscape-short (@media (orientation: landscape) and (max-height: 480px));
 
-/* Upstream hover-only row controls must remain visible on touch devices. */
+/* A device that can hover: for a hover-revealed control's resting offset, so touch screens show it in place. */
 @custom-variant can-hover (@media (hover: hover));
 
 @theme {
@@ -32,16 +32,13 @@
     /* Glyphs and text that sit on an amber fill. */
     --color-on-brand: #160a02;
 
-    /* The violet cosmos bleed behind page headers and hero backdrops. */
-    --color-ambient: #773b97;
-
     /* One colour per content type, used only to mark the type: section bars,
      * type dots. Controls and the playing state always use brand. */
     --color-type-track: #773b97;
     --color-type-album: oklch(0.63 0.07 195);
     --color-type-podcast: oklch(0.6 0.125 350);
     --color-type-audiobook: oklch(0.57 0.155 33);
-    --color-type-artist: #fca200;
+    --color-type-artist: oklch(0.64 0.09 245);
 
     /* Status: outcome of an action, never decoration. */
     --color-success: #22c55e;
@@ -65,7 +62,6 @@
     --animate-fade-soft: fade-soft 200ms cubic-bezier(0.25, 1, 0.5, 1) both;
     --animate-pop: pop 200ms cubic-bezier(0.25, 1, 0.5, 1) both;
     --animate-panel-up: panel-up 300ms cubic-bezier(0.25, 1, 0.5, 1) both;
-    --animate-panel-down: panel-down 220ms cubic-bezier(0.25, 1, 0.5, 1) both;
     --animate-slide-in: slide-in 280ms cubic-bezier(0.25, 1, 0.5, 1) both;
     --animate-sweep: sweep 1600ms cubic-bezier(0.65, 0, 0.35, 1) infinite;
     --animate-kima-drift: kima-drift 16s linear infinite;
@@ -86,10 +82,6 @@
         from { opacity: 0; transform: translateY(16px); }
         to { opacity: 1; transform: translateY(0); }
     }
-    @keyframes panel-down {
-        from { opacity: 1; transform: translateY(0); }
-        to { opacity: 0; transform: translateY(8px); }
-    }
     @keyframes slide-in {
         from { transform: translateX(100%); }
         to { transform: translateX(0); }
@@ -109,13 +101,12 @@
 }
 
 :root {
-    /* Kima Design System - Dark Theme Only */
-
     /* Background Layers */
     --bg-primary: #0a0a0a; /* Primary canvas */
     --bg-secondary: #0f0f0f; /* Cards, panels */
     --bg-tertiary: #141414; /* Nested content, wells */
     --bg-hover: #1a1a1a; /* Modals, dropdowns, hover */
+    --bg-chrome: #000000; /* The icon rail and both side panels sit on the app's black; the page is the one lifted surface */
 
     /* Borders */
     --border-subtle: #1c1c1c; /* Subtle borders (default) */
@@ -128,12 +119,13 @@
     /* 5.4:1 on the page ground, 4.7:1 on the lightest card surface (#1a1a1a). */
     --text-muted: #858585; /* labels, meta, timestamps */
 
-/* Stacking order: one ladder, named by what sits on each rung. */
+    /* Stacking order: one ladder, named by what sits on each rung. */
     --z-raised: 10;            /* overlay inside a component: hover play, scrim */
     --z-scene: 20;             /* overlays within the vibe canvas */
-    --z-scene-panel: 30;       /* the vibe sheet */
+    --z-scene-panel: 30;       /* the song-path and blend panels over the map */
     --z-nav: 40;               /* bottom navigation */
     --z-player: 45;            /* mini player, above the nav it overlaps */
+    --z-sheet: 47;             /* the phone vibe sheet: over the map's controls, under the top bar */
     --z-header: 50;            /* fixed top bar */
     --z-dropdown: 55;          /* menus and popovers anchored to a control */
     --z-drawer-backdrop: 70;   /* mobile sidebar backdrop */
@@ -142,7 +134,7 @@
     --z-panel-backdrop: 75;    /* activity panel scrim */
     --z-panel: 76;             /* activity panel, below any dialog it opens */
     --z-overlay: 200;          /* full-screen player */
-    --z-tooltip: 210;          /* icon-label tooltip above overlays */
+    --z-tooltip: 210;          /* a control's name on hover or focus, over everything */
 }
 
 * {
@@ -150,10 +142,8 @@
 }
 
 /* ── Type roles ───────────────────────────────────────────────────────────
- * Six roles cover every piece of text; size, weight and colour carry the
- * hierarchy. Nothing is capitalised: the body sets every page lowercase. Monospace
- * is only for machine strings (codes, tokens, URLs); aligned digits use tabular
- * figures instead. */
+ * Six roles cover every piece of text; size, weight and colour carry the hierarchy. The body sets every page
+ * lowercase. Monospace is only for machine strings (codes, tokens, URLs); aligned digits use tabular figures. */
 @layer components {
     /* A page's title: one size on every page, 28px on a phone and 32px from a
      * tablet up. A section heading under it is 20px. */
@@ -238,13 +228,14 @@ code {
     font-variant-numeric: tabular-nums;
 }
 
-/* Upstream cards share a width and gap between the grid and shelves. */
+/* ── The media grid ───────────────────────────────────────────────────────
+ * Every artwork wall and home shelf starts from one card width and one gap. A wider screen shows more cards; a
+ * wall's cards stretch to fill the row, shelves keep the exact width. A phone fits two to a row. */
 :root {
-    --card-w: 11.25rem;
-    --card-gap: clamp(0.75rem, 1.6vw, 1.25rem);
+    --card-w: 11.25rem; /* 180px */
+    --card-gap: clamp(0.75rem, 1.6vw, 1.25rem); /* 12px on a phone to 20px on a desktop */
 }
 
-/* ── The media grid ─────────────────────────────────────────────────────── */
 @layer components {
     .grid-media {
         display: grid;
@@ -305,7 +296,8 @@ code {
     }
 
     /* For hover-revealed controls the rules above miss, such as a partial
-     * group-hover opacity. */
+     * group-hover opacity. Position is left alone: an offset that only exists
+     * to slide in on hover is written with can-hover:. */
     .touch-reveal {
         opacity: 1;
         pointer-events: auto;
@@ -338,11 +330,26 @@ code {
     }
 }
 
-/* The vertical beat between top-level page sections: 48px on a phone,
- * opening to 72px on a desktop. */
+/* The vertical beat between top-level page sections: 32px on a phone,
+ * opening to 48px on a desktop. A section's heading sits 16px above its
+ * content, so the space between sections always reads as the larger break. */
 @layer components {
     .section-stack > * + * {
-        margin-top: clamp(3rem, 5vw, 4.5rem);
+        margin-top: clamp(2rem, 3.5vw, 3rem);
+    }
+}
+
+/* The room under a page's last row: one section beat, plus the floating mini player's height while it shows
+ * (it marks the page with data-mini-player). Pages end with .page-end instead of their own bottom padding. */
+:root {
+    --page-end: clamp(2rem, 3.5vw, 3rem);
+}
+:root[data-mini-player] {
+    --page-end: calc(var(--mini-clearance) + 1rem);
+}
+@layer components {
+    .page-end {
+        padding-bottom: var(--page-end);
     }
 }
 
@@ -352,9 +359,26 @@ img {
     color: transparent;
 }
 
+/* The parts of the page the browser draws itself follow the dark interface: native controls and pickers, the caret,
+ * selected text and scrollbars. */
+:root {
+    color-scheme: dark;
+    accent-color: var(--color-brand);
+}
+/* Only where ::-webkit-scrollbar is unknown (Firefox): in Chrome, scrollbar-color would switch those rules off. */
+@supports not selector(::-webkit-scrollbar) {
+    :root {
+        scrollbar-color: var(--bg-hover) transparent;
+    }
+}
+::selection {
+    background: color-mix(in oklab, var(--color-brand) 35%, transparent);
+}
+
 body {
     background: var(--bg-primary);
     color: #e5e5e5;
+    caret-color: var(--color-brand);
     font-family: var(--font-montserrat), -apple-system, BlinkMacSystemFont,
         "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
     min-height: 100vh;
@@ -373,11 +397,9 @@ code, pre, .font-mono {
     text-transform: none;
 }
 
-/* Keyboard focus ring -- restores visibility removed by Tailwind outline-none.
-   :focus-visible triggers only for keyboard nav, not mouse clicks.
-   This rule lives outside @layer, so it wins over Tailwind's @layer utilities
-   regardless of source order (unlayered CSS beats layered CSS in the cascade). */
-:focus-visible {
+/* Keyboard focus outline for every control that draws no focus ring of its own; one with a
+   focus-visible:ring-* class keeps just its ring. Unlayered, so it beats Tailwind's outline-none. */
+:focus-visible:not([class*="focus-visible:ring-"]) {
     outline: 2px solid var(--color-brand);
     outline-offset: 2px;
 }
@@ -479,17 +501,9 @@ button:disabled {
    ===================================================== */
 
 /* Reduced motion zeroes both duration and delay, so staggered lists appear at
- * once, and turns off smooth scrolling. --motion-ok and useReducedMotion expose
- * the same preference for motion a media query cannot reach. */
-:root {
-    --motion-ok: 1;
-}
-
+ * once, and turns off smooth scrolling. useReducedMotion reads the same
+ * preference for motion a media query cannot reach. */
 @media (prefers-reduced-motion: reduce) {
-    :root {
-        --motion-ok: 0;
-    }
-
     html {
         scroll-behavior: auto !important;
     }
@@ -756,28 +770,6 @@ body.tv-mode [data-tv-card] {
     transition: box-shadow 0.15s ease, transform 0.15s ease;
 }
 
-/* Filter buttons / tabs focus */
-body.tv-mode [data-tv-filter]:focus {
-    outline: none;
-    background: rgba(252, 162, 0, 0.2);
-    color: var(--color-brand);
-    box-shadow: 0 0 0 2px var(--color-brand);
-}
-
-/* Track list items focus */
-body.tv-mode [data-tv-track]:focus {
-    outline: none;
-    background: rgba(252, 162, 0, 0.15);
-    box-shadow: inset 0 0 0 2px var(--color-brand);
-}
-
-/* Action buttons in action bars */
-body.tv-mode [data-tv-action]:focus {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--color-brand);
-    transform: scale(1.05);
-}
-
 /* Smooth scrolling for TV */
 body.tv-mode .tv-content {
     scroll-behavior: smooth;
@@ -794,6 +786,15 @@ body.tv-mode .tv-content {
      * standalone); in a browser the chrome already clears the notch. */
     --standalone-safe-area-top: 0px;
     --standalone-safe-area-bottom: 0px;
+}
+
+/* The signed-in app scrolls inside <main>; the document itself must not, or iOS Safari slides the whole page up
+ * under the fixed top bar (the shell is the visible height, but the page behind it is the taller 100vh). */
+html:has(#main-content),
+body:has(#main-content) {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
 }
 
 /* When running as installed PWA */

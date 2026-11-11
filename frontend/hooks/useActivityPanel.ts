@@ -1,13 +1,23 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import type { ActivityView } from "@/components/activity/ActivityBody";
 
 const ACTIVITY_PANEL_KEY = "kima_activity_panel_open";
 
-export type ActivityPanelTab = "notifications" | "active" | "imports" | "history" | "settings";
+/** What the panel can be opened on: an activity view, or the settings a page put in it. */
+export type ActivityPanelTab = ActivityView | "settings";
 
 export function setActivityPanelTab(tab: ActivityPanelTab) {
     window.dispatchEvent(new CustomEvent("set-activity-panel-tab", { detail: { tab } }));
+}
+
+/**
+ * Leaves the settings a page put in the panel (Discover's, the lyrics'), back to what the panel showed before them.
+ * Not a tab: "downloads" means "show the downloads", which is right after starting one and wrong after "back".
+ */
+export function leaveActivityPanelSettings() {
+    window.dispatchEvent(new CustomEvent("leave-activity-panel-settings"));
 }
 
 /** Opens the activity panel, on `tab` when one is given. */
@@ -45,7 +55,19 @@ export function useActivityPanel() {
         if (typeof window === "undefined") return false;
         return localStorage.getItem(ACTIVITY_PANEL_KEY) === "true";
     });
-    const [activeTab, setActiveTab] = useState<ActivityPanelTab>("notifications");
+    const [activeTab, setActiveTabState] = useState<ActivityPanelTab>("all");
+    // The tab shown before settings took the panel, for leaving them. Kept beside the state so a quick open and
+    // close in one render still reads the tab the panel was really on.
+    const activeTabRef = useRef<ActivityPanelTab>("all");
+    const beforeSettings = useRef<ActivityPanelTab>("all");
+    const setActiveTab = useCallback((tab: ActivityPanelTab) => {
+        if (tab === "settings" && activeTabRef.current !== "settings") beforeSettings.current = activeTabRef.current;
+        activeTabRef.current = tab;
+        setActiveTabState(tab);
+    }, []);
+    const leaveSettings = useCallback(() => {
+        if (activeTabRef.current === "settings") setActiveTab(beforeSettings.current);
+    }, [setActiveTab]);
 
     useEffect(() => {
         if (typeof window !== "undefined") {
@@ -93,8 +115,9 @@ export function useActivityPanel() {
         isOpen,
         activeTab,
         setActiveTab,
+        leaveSettings,
         toggle,
         open,
         close,
-    }), [isOpen, activeTab, setActiveTab, toggle, open, close]);
+    }), [isOpen, activeTab, setActiveTab, leaveSettings, toggle, open, close]);
 }

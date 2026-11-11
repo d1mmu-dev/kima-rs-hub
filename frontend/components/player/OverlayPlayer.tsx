@@ -6,8 +6,6 @@ import { PlayCountLine } from "@/features/stats/PlayCountLine";
 import Link from "next/link";
 import { useRef, useState } from "react";
 import {
-    Play,
-    Pause,
     SkipBack,
     SkipForward,
     ChevronDown,
@@ -15,15 +13,14 @@ import {
     Shuffle,
     Repeat,
     Repeat1,
-    Loader2,
     RotateCcw,
     RotateCw,
-    RefreshCw,
     MicVocal,
 } from "lucide-react";
 import { formatTime, formatMediaDuration } from "@/lib/format";
 import { shuffleState } from "@/lib/shuffle";
 import { cn } from "@/lib/cn";
+import { PlayPauseButton } from "./PlayPauseButton";
 import { useIsMobile, useIsTablet } from "@/hooks/useMediaQuery";
 import { SeekSlider } from "./SeekSlider";
 import { SleepTimer } from "./SleepTimer";
@@ -43,8 +40,6 @@ export function OverlayPlayer() {
         activeOperation,
         isPlaying,
         isBuffering,
-        canSeek,
-        downloadProgress,
         audioError,
         duration,
         displayTime,
@@ -53,7 +48,7 @@ export function OverlayPlayer() {
         resumeWithGesture,
         next,
         previous,
-        returnToPreviousMode,
+        closeOverlay,
         seek,
         skipForward,
         skipBackward,
@@ -75,6 +70,8 @@ export function OverlayPlayer() {
     if (!currentTrack && !currentAudiobook && !currentPodcast) return null;
 
     const canSkip = playbackType === "track";
+    // A podcast moves on to the show's next episode.
+    const canNext = canSkip || playbackType === "podcast";
     const shuffle = shuffleState(hasMedia, playbackType, activeOperation.type);
 
     // A sideways swipe on the artwork skips the track; the seek bar and other
@@ -100,12 +97,10 @@ export function OverlayPlayer() {
         touchStartY.current = null;
         if (touchStartX.current === null) return;
 
-        if (canSkip) {
-            if (swipeOffset > 60) {
-                previous();
-            } else if (swipeOffset < -60) {
-                next();
-            }
+        if (canSkip && swipeOffset > 60) {
+            previous();
+        } else if (canNext && swipeOffset < -60) {
+            next();
         }
 
         setSwipeOffset(0);
@@ -114,8 +109,18 @@ export function OverlayPlayer() {
 
     return (
         <div
-            className="fixed inset-0 bg-gradient-to-b from-[#141210] via-[#0a0a0a] to-[#000000] z-(--z-overlay) flex flex-col overflow-hidden"
+            className="fixed inset-0 bg-[#020104] z-(--z-overlay) flex flex-col overflow-hidden"
+            role="region"
+            aria-label="now playing"
         >
+            {/* Ambient backdrop: the base canvas and the song's accent glow. */}
+            <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
+                <div
+                    className="absolute inset-0"
+                    style={{ background: "radial-gradient(circle at 50% 38%, rgba(252,162,0,0.16), transparent 75%)" }}
+                />
+            </div>
+
             <div
                 className="flex items-center justify-between px-4 py-3 flex-shrink-0"
                 style={{ paddingTop: "calc(12px + env(safe-area-inset-top))" }}
@@ -124,7 +129,7 @@ export function OverlayPlayer() {
                     onClick={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        returnToPreviousMode();
+                        closeOverlay();
                     }}
                     className="text-[var(--text-secondary)] hover:text-white transition-colors p-2 -ml-2 rounded-full hover:bg-white/10"
                     title="close"
@@ -134,18 +139,18 @@ export function OverlayPlayer() {
                 <span className="text-xs text-[var(--text-muted)] font-medium">
                     Now Playing
                 </span>
-                <div className="w-11" /> {/* Spacer for centering */}
+                <div className="w-11" aria-hidden="true" />
             </div>
 
             {/* Main Content - Portrait vs Landscape */}
-            <div className="flex-1 flex flex-col landscape:flex-row items-center justify-center px-6 pb-6 landscape:px-8 landscape:gap-8 overflow-hidden">
+            <div className="flex-1 flex flex-col landscape:flex-row items-center justify-start landscape:justify-center px-6 pb-6 landscape:px-8 landscape:gap-12 overflow-hidden">
                 {isLyricsActive ? (
-                    <div className="w-full max-w-[280px] landscape:flex-1 aspect-square flex-shrink-0 relative mb-6 landscape:mb-0 rounded-2xl bg-[var(--bg-primary)]/90 border border-white/[0.06]">
+                    <div className="w-full max-w-[min(340px,calc(100vh-26rem))] landscape:w-[min(340px,calc(100vh-9rem))] landscape:max-w-none landscape:flex-none aspect-square flex-shrink-0 relative mb-6 landscape:mb-0 rounded-2xl bg-[var(--bg-primary)]/90 border border-white/[0.06]">
                         <LyricsView variant="compact" />
                     </div>
                 ) : (
                     <div
-                        className="w-full max-w-[280px] landscape:flex-1 aspect-square flex-shrink-0 relative mb-6 landscape:mb-0"
+                        className="w-full max-w-[min(340px,calc(100vh-26rem))] landscape:w-[min(340px,calc(100vh-9rem))] landscape:max-w-none landscape:flex-none aspect-square flex-shrink-0 relative mb-6 landscape:mb-0"
                         style={{
                             transform: `translateX(${swipeOffset * 0.5}px)`,
                             opacity: 1 - Math.abs(swipeOffset) / 200,
@@ -203,35 +208,35 @@ export function OverlayPlayer() {
                     </div>
                 )}
 
-                <div className="w-full max-w-[320px] landscape:max-w-[280px] landscape:flex-1 flex flex-col">
-                    <div className="text-center landscape:text-left mb-6">
+                <div className="w-full landscape:flex-1 landscape:max-w-[460px] flex flex-col">
+                    <div className="text-center mb-6">
                         {mediaLink ? (
                             <Link
                                 href={mediaLink}
-                                onClick={returnToPreviousMode}
+                                onClick={closeOverlay}
                                 className="block hover:underline"
                             >
-                                <h1 className="text-xl font-bold text-white mb-1 truncate tracking-tight">
+                                <p data-player-title className="text-[23px] font-semibold text-[var(--text-primary)] mb-1 tracking-[-0.2px] line-clamp-2">
                                     {title}
-                                </h1>
+                                </p>
                             </Link>
                         ) : (
-                            <h1 className="text-xl font-bold text-white mb-1 truncate tracking-tight">
+                            <p data-player-title className="text-[23px] font-semibold text-[var(--text-primary)] mb-1 tracking-[-0.2px] line-clamp-2">
                                 {title}
-                            </h1>
+                            </p>
                         )}
                         {artistLink ? (
                             <Link
                                 href={artistLink}
-                                onClick={returnToPreviousMode}
+                                onClick={closeOverlay}
                                 className="block hover:underline"
                             >
-                                <p className="text-base text-[var(--text-secondary)] truncate">
+                                <p className="text-[15px] text-[var(--text-secondary)] truncate">
                                     {subtitle}
                                 </p>
                             </Link>
                         ) : (
-                            <p className="text-base text-[var(--text-secondary)] truncate">
+                            <p className="text-[15px] text-[var(--text-secondary)] truncate">
                                 {subtitle}
                             </p>
                         )}
@@ -239,7 +244,6 @@ export function OverlayPlayer() {
                             trackId={playbackType === "track" ? currentTrack?.id : null}
                             className="mt-1"
                         />
-
                     </div>
 
                     <div className="mb-6">
@@ -247,9 +251,7 @@ export function OverlayPlayer() {
                             progress={progress}
                             duration={duration}
                             onSeek={seek}
-                            canSeek={canSeek}
                             hasMedia={hasMedia}
-                            downloadProgress={downloadProgress}
                             variant="overlay"
                             showHandle={false}
                             className="mb-2"
@@ -287,46 +289,25 @@ export function OverlayPlayer() {
                             <SkipBack className="w-8 h-8" />
                         </button>
 
-                        <button
-                            onClick={isPlaying ? pause : resumeWithGesture}
-                            className={cn(
-                                "w-16 h-16 rounded-full flex items-center justify-center hover:scale-105 transition-all",
-                                audioError
-                                    ? "bg-danger text-black hover:bg-danger-light"
-                                    : isBuffering
-                                    ? "bg-brand/80 text-black"
-                                    : "bg-brand text-black"
-                            )}
-                            title={
-                                audioError
-                                    ? "retry playback"
-                                    : isBuffering
-                                    ? "buffering..."
-                                    : isPlaying
-                                    ? "pause"
-                                    : "play"
-                            }
-                        >
-                            {audioError ? (
-                                <RefreshCw className="w-7 h-7" />
-                            ) : isBuffering ? (
-                                <Loader2 className="w-7 h-7 animate-spin" />
-                            ) : isPlaying ? (
-                                <span className="animate-pop"><Pause className="w-7 h-7" /></span>
-                            ) : (
-                                <span className="animate-pop"><Play className="w-7 h-7 ml-1" /></span>
-                            )}
-                        </button>
+                        <PlayPauseButton
+                            isPlaying={isPlaying}
+                            isBuffering={isBuffering}
+                            audioError={audioError}
+                            onPlay={resumeWithGesture}
+                            onPause={pause}
+                            size="lg"
+                        />
 
                         <button
                             onClick={next}
                             className={cn(
                                 "text-[var(--text-primary)] hover:text-white transition-all hover:scale-110",
-                                !canSkip &&
+                                !canNext &&
                                     "opacity-30 cursor-not-allowed hover:scale-100"
                             )}
-                            disabled={!canSkip}
-                            title={canSkip ? "next" : "skip only for music"}
+                            disabled={!canNext}
+                            aria-label={playbackType === "podcast" ? "next episode" : "next track"}
+                            title={playbackType === "podcast" ? "next episode" : canNext ? "next" : "next is for music and podcasts"}
                         >
                             <SkipForward className="w-8 h-8" />
                         </button>

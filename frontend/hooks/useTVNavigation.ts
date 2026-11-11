@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useIsTV, DPAD_KEYS } from "@/lib/tv-utils";
 
 interface UseTVNavigationOptions {
@@ -27,16 +27,25 @@ export function useTVNavigation(options: UseTVNavigationOptions = {}): UseTVNavi
     const [focusedCardIndex, setFocusedCardIndex] = useState(0);
     const [isContentFocused, setIsContentFocused] = useState(false);
 
-    // Focus memory: remember last focused card index per section
-    const focusMemory = useRef<Map<number, number>>(new Map());
+    // The last focused card in each section, by the section's own name: sections can appear or go while the
+    // page is open (a row whose shows arrive later), so a position in the list would point at another row.
+    const focusMemory = useRef<Map<string, number>>(new Map());
 
-    // Store latest callbacks in refs to avoid stale closures
+    // The latest props, synced before any timer can run, so a pending Back never reads stale ones.
     const onBackRef = useRef(onBack);
     const onSelectRef = useRef(onSelect);
-    useEffect(() => {
+    const enabledRef = useRef(enabled);
+    useLayoutEffect(() => {
         onBackRef.current = onBack;
         onSelectRef.current = onSelect;
+        enabledRef.current = enabled;
     });
+
+    // A Back waiting for the key to reach every listener; dropped if the page goes away first.
+    const pendingBack = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useLayoutEffect(() => () => {
+        if (pendingBack.current) clearTimeout(pendingBack.current);
+    }, []);
 
     const getSections = useCallback(() => {
         if (!containerRef.current) return [];
@@ -95,6 +104,20 @@ export function useTVNavigation(options: UseTVNavigationOptions = {}): UseTVNavi
     const handleKeyDown = useCallback((e: KeyboardEvent) => {
         if (!enabled || !isTV) return;
 
+        // Back returns to the tab row from anywhere in the content (TVLayout sends keys here only when the tab row is not
+        // focused), even when nothing is focused. Decided after every listener has seen the key: anything that used it (a
+        // rename, a popover, a window) marks it handled, so Back never cancels Escape's own action.
+        if (e.key === DPAD_KEYS.BACK) {
+            if (pendingBack.current) clearTimeout(pendingBack.current);
+            pendingBack.current = setTimeout(() => {
+                pendingBack.current = null;
+                if (e.defaultPrevented || !enabledRef.current) return;
+                onBackRef.current?.();
+                setIsContentFocused(false);
+            }, 0);
+            return;
+        }
+
         // If not content focused, ignore - let TVLayout handle it
         if (!isContentFocused) return;
 
@@ -109,15 +132,15 @@ export function useTVNavigation(options: UseTVNavigationOptions = {}): UseTVNavi
             const currentIdx = Array.from(focusables).findIndex(el => el === document.activeElement);
             if (currentIdx === -1) return;
 
-            if (e.key === DPAD_KEYS.RIGHT || e.key === 'ArrowRight') {
+            if (e.key === DPAD_KEYS.RIGHT) {
                 e.preventDefault();
                 const next = focusables[Math.min(currentIdx + 1, focusables.length - 1)];
                 next?.focus();
-            } else if (e.key === DPAD_KEYS.LEFT || e.key === 'ArrowLeft') {
+            } else if (e.key === DPAD_KEYS.LEFT) {
                 e.preventDefault();
                 const prev = focusables[Math.max(currentIdx - 1, 0)];
                 prev?.focus();
-            } else if (e.key === DPAD_KEYS.UP || e.key === 'ArrowUp') {
+            } else if (e.key === DPAD_KEYS.UP) {
                 e.preventDefault();
                 onBackRef.current?.();
                 setIsContentFocused(false);
@@ -125,83 +148,72 @@ export function useTVNavigation(options: UseTVNavigationOptions = {}): UseTVNavi
             return;
         }
 
-        const currentSection = sections[focusedSectionIndex];
+        // Where the focus really is, read from the page on every press: sections that appeared or went since the
+        // last move would leave a stored position pointing at another row.
+        const active = document.activeElement as HTMLElement | null;
+        let sectionIndex = sections.findIndex((s) => active !== null && s.contains(active));
+        if (sectionIndex === -1) sectionIndex = Math.min(focusedSectionIndex, sections.length - 1);
+        const currentSection = sections[sectionIndex];
         if (!currentSection) return;
+        const nameOf = (section: HTMLElement) => section.getAttribute('data-tv-section') ?? '';
 
         const cards = getCardsInSection(currentSection);
+        const activeCard = active ? cards.indexOf(active) : -1;
+        // Focus on something in the section that is not a card (a "show all" link) sits before its first card (-1):
+        // right or left goes to card 0, up or down to column 0. A stored column belongs to wherever the focus was.
+        const insideSection = active !== null && currentSection.contains(active);
+        const cardIndex = activeCard !== -1 ? activeCard : insideSection ? -1 : Math.min(focusedCardIndex, Math.max(cards.length - 1, 0));
+        const column = Math.max(cardIndex, 0);
 
         switch (e.key) {
-            case DPAD_KEYS.RIGHT:
-            case 'ArrowRight': {
+            case DPAD_KEYS.RIGHT: {
                 e.preventDefault();
-                const nextIndex = Math.min(focusedCardIndex + 1, cards.length - 1);
-                if (nextIndex !== focusedCardIndex) {
+                const nextIndex = Math.min(cardIndex + 1, cards.length - 1);
+                if (nextIndex !== cardIndex) {
                     focusCard(cards[nextIndex]);
                     setFocusedCardIndex(nextIndex);
-                    focusMemory.current.set(focusedSectionIndex, nextIndex);
+                    focusMemory.current.set(nameOf(currentSection), nextIndex);
                 }
                 break;
             }
 
-            case DPAD_KEYS.LEFT:
-            case 'ArrowLeft': {
+            case DPAD_KEYS.LEFT: {
                 e.preventDefault();
-                const prevIndex = Math.max(focusedCardIndex - 1, 0);
-                if (prevIndex !== focusedCardIndex) {
+                const prevIndex = Math.max(cardIndex - 1, 0);
+                if (prevIndex !== cardIndex) {
                     focusCard(cards[prevIndex]);
                     setFocusedCardIndex(prevIndex);
-                    focusMemory.current.set(focusedSectionIndex, prevIndex);
+                    focusMemory.current.set(nameOf(currentSection), prevIndex);
                 }
                 break;
             }
 
             case DPAD_KEYS.DOWN:
-            case 'ArrowDown': {
+            case DPAD_KEYS.UP: {
                 e.preventDefault();
-                if (focusedSectionIndex < sections.length - 1) {
-                    focusMemory.current.set(focusedSectionIndex, focusedCardIndex);
-
-                    const nextSectionIndex = focusedSectionIndex + 1;
-                    const nextSection = sections[nextSectionIndex];
-                    const nextCards = getCardsInSection(nextSection);
-
-                    if (nextCards.length > 0) {
-                        // Try to restore saved position, or use current column, or clamp
-                        const savedIndex = focusMemory.current.get(nextSectionIndex);
-                        const targetIndex = savedIndex !== undefined
-                            ? Math.min(savedIndex, nextCards.length - 1)
-                            : Math.min(focusedCardIndex, nextCards.length - 1);
-
-                        focusCard(nextCards[targetIndex]);
-                        setFocusedSectionIndex(nextSectionIndex);
-                        setFocusedCardIndex(targetIndex);
-                    }
+                const step = e.key === DPAD_KEYS.DOWN ? 1 : -1;
+                // The nearest row that way with cards to focus: a row still loading has none, and is stepped over.
+                let targetSectionIndex = sectionIndex + step;
+                while (
+                    targetSectionIndex >= 0 &&
+                    targetSectionIndex < sections.length &&
+                    getCardsInSection(sections[targetSectionIndex]).length === 0
+                ) {
+                    targetSectionIndex += step;
                 }
-                break;
-            }
+                if (targetSectionIndex >= 0 && targetSectionIndex < sections.length) {
+                    focusMemory.current.set(nameOf(currentSection), column);
+                    const targetSection = sections[targetSectionIndex];
+                    const targetCards = getCardsInSection(targetSection);
+                    // Restore the row's saved position, or keep the current column, clamped to the row.
+                    const savedIndex = focusMemory.current.get(nameOf(targetSection));
+                    const targetIndex = Math.min(savedIndex ?? column, targetCards.length - 1);
 
-            case DPAD_KEYS.UP:
-            case 'ArrowUp': {
-                e.preventDefault();
-                if (focusedSectionIndex > 0) {
-                    focusMemory.current.set(focusedSectionIndex, focusedCardIndex);
-
-                    const prevSectionIndex = focusedSectionIndex - 1;
-                    const prevSection = sections[prevSectionIndex];
-                    const prevCards = getCardsInSection(prevSection);
-
-                    if (prevCards.length > 0) {
-                        const savedIndex = focusMemory.current.get(prevSectionIndex);
-                        const targetIndex = savedIndex !== undefined
-                            ? Math.min(savedIndex, prevCards.length - 1)
-                            : Math.min(focusedCardIndex, prevCards.length - 1);
-
-                        focusCard(prevCards[targetIndex]);
-                        setFocusedSectionIndex(prevSectionIndex);
-                        setFocusedCardIndex(targetIndex);
-                    }
-                } else {
-                    // At top section, trigger onBack to return to nav
+                    focusCard(targetCards[targetIndex]);
+                    setFocusedSectionIndex(targetSectionIndex);
+                    setFocusedCardIndex(targetIndex);
+                } else if (step < 0) {
+                    // Above the top row, back to the nav.
                     onBackRef.current?.();
                     setIsContentFocused(false);
                 }
@@ -219,14 +231,6 @@ export function useTVNavigation(options: UseTVNavigationOptions = {}): UseTVNavi
                     // Otherwise trigger onSelect
                     onSelectRef.current?.(focusedElement);
                 }
-                break;
-            }
-
-            case DPAD_KEYS.BACK:
-            case 'Escape': {
-                e.preventDefault();
-                onBackRef.current?.();
-                setIsContentFocused(false);
                 break;
             }
         }

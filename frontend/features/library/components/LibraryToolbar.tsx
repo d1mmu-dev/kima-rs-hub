@@ -1,9 +1,11 @@
 "use client";
 
 import { Shuffle } from "lucide-react";
+import { Button } from "@/components/ui/Button";
+import { useIsTV } from "@/lib/tv-utils";
 import { LibraryFilter, SortOption } from "@/hooks/useQueries";
 import { Tab } from "../types";
-import { RefinePanel } from "./RefinePanel";
+import { RefineBar, RefinePanel } from "./RefinePanel";
 
 interface LibraryToolbarProps {
     activeTab: Tab;
@@ -13,6 +15,7 @@ interface LibraryToolbarProps {
     onFilterChange: (filter: LibraryFilter) => void;
     onSortChange: (sort: SortOption) => void;
     onItemsPerPageChange: (items: number) => void;
+    onReset: () => void;
     onShuffleLibrary: () => void;
 }
 
@@ -24,29 +27,37 @@ export function LibraryToolbar({
     onFilterChange,
     onSortChange,
     onItemsPerPageChange,
+    onReset,
     onShuffleLibrary,
 }: LibraryToolbarProps) {
+    const refine = {
+        activeTab,
+        filter,
+        sortBy,
+        itemsPerPage,
+        onFilterChange,
+        onSortChange,
+        onItemsPerPageChange,
+        onReset,
+    };
+    const tv = useIsTV();
     return (
-        <div className="flex items-center gap-3 pb-4 border-b border-white/5">
-            <RefinePanel
-                activeTab={activeTab}
-                filter={filter}
-                sortBy={sortBy}
-                itemsPerPage={itemsPerPage}
-                onFilterChange={onFilterChange}
-                onSortChange={onSortChange}
-                onItemsPerPageChange={onItemsPerPageChange}
-            />
+        // A section of its own for the TV remote, between the tabs and the grid: the refine choices, then shuffle.
+        <div data-tv-section="library-refine" className="flex grow items-center gap-3 in-[.tv-mode]:basis-full">
+            {/* The controls sit on this line beside a phone; on a phone they open from a Refine button. */}
+            <RefineBar {...refine} />
+            <RefinePanel {...refine} />
 
-            {/* Shuffle button -- stays primary, always visible */}
-            <button
-                type="button"
+            <Button
+                variant="primary"
+                size="sm"
                 onClick={onShuffleLibrary}
                 aria-label="Shuffle entire library"
-                className="ml-auto p-2.5 min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg bg-[var(--color-brand)] hover:bg-[var(--color-brand-hover)] text-black transition-all hover:scale-105 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-brand)]"
+                data-tv-card={tv || undefined}
+                className="ml-auto min-w-[44px] px-2.5"
             >
                 <Shuffle className="w-4 h-4" />
-            </button>
+            </Button>
         </div>
     );
 }

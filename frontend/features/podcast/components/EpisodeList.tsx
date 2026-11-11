@@ -10,12 +10,14 @@ import { useMemo, useState } from "react";
 import { Play, Pause, Check, ArrowUpDown, CheckCircle, ChevronDown, ChevronUp, Disc3 } from "lucide-react";
 import DOMPurify from "dompurify";
 import { cn } from "@/lib/cn";
+import { tabListKeyDown } from "@/lib/tabListKeys";
 import { Episode } from "../types";
 import { formatDuration } from "@/lib/format";
 import { formatDate } from "../utils";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { Button } from "@/components/ui/Button";
 import { CachedImage } from "@/components/ui/CachedImage";
+import { coverArtUrl } from "@/lib/cover-art";
 import { cascadeStyle } from "@/lib/motion";
 import { GradientSpinner } from "@/components/ui/GradientSpinner";
 
@@ -23,6 +25,13 @@ import { GradientSpinner } from "@/components/ui/GradientSpinner";
 const clampPercent = (p: number) => Math.min(100, Math.max(0, Math.round(p)));
 
 type Filter = "all" | "unplayed" | "inProgress" | "finished";
+
+const EPISODE_FILTERS: [Filter, string][] = [
+    ["all", "All"],
+    ["unplayed", "Unplayed"],
+    ["inProgress", "In progress"],
+    ["finished", "Finished"],
+];
 
 function listenState(ep: Episode): Filter {
     if (ep.progress?.isFinished) return "finished";
@@ -51,7 +60,8 @@ function EpisodeRow({
     const percent = episode.progress ? clampPercent(episode.progress.progress) : 0;
     const finished = Boolean(episode.progress?.isFinished);
     const hasDescription = Boolean(episode.description?.trim());
-    const cover = episode.imageUrl || fallbackCoverUrl;
+    // Through the cover proxy like every other image: the page's policy lets only a few image hosts load directly.
+    const cover = coverArtUrl(episode.imageUrl || fallbackCoverUrl, 112);
 
     const metaBits = [
         formatDate(episode.publishedAt),
@@ -61,6 +71,7 @@ function EpisodeRow({
 
     return (
         <div
+            data-episode-row
             className={cn(
                 "group rounded-xl transition-colors animate-rise [animation-delay:calc(var(--i)*var(--stagger))]",
                 isCurrentEpisode ? "bg-white/[0.06]" : "hover:bg-white/[0.03]",
@@ -238,19 +249,20 @@ export function EpisodeList({
                 }
             />
 
-            <div className="flex flex-wrap gap-1.5 px-3 pb-3" role="tablist" aria-label="Filter episodes">
-                {(
-                    [
-                        ["all", "All"],
-                        ["unplayed", "Unplayed"],
-                        ["inProgress", "In progress"],
-                        ["finished", "Finished"],
-                    ] as [Filter, string][]
-                ).map(([key, label]) => (
+            <div
+                className="flex flex-wrap gap-1.5 px-3 pb-3"
+                role="tablist"
+                aria-label="Filter episodes"
+                onKeyDown={(e) => tabListKeyDown(e, EPISODE_FILTERS.map(([key]) => key), filter, setFilter)}
+            >
+                {EPISODE_FILTERS.map(([key, label]) => (
                     <button
                         key={key}
+                        type="button"
                         role="tab"
+                        data-tab-key={key}
                         aria-selected={filter === key}
+                        tabIndex={filter === key ? 0 : -1}
                         onClick={() => setFilter(key)}
                         className={cn(
                             "px-3 py-1.5 rounded-full text-xs tabular-nums border transition-colors",

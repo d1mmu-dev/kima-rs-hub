@@ -10,7 +10,6 @@ import { BottomNavigation } from "./BottomNavigation";
 import { UniversalPlayer } from "../player/UniversalPlayer";
 import { MediaControlsHandler } from "../player/MediaControlsHandler";
 import { WhatsNewGate } from "@/components/whats-new/WhatsNewGate";
-import { PlayerModeWrapper } from "../player/PlayerModeWrapper";
 import { ActivityPanel } from "./ActivityPanel";
 import { UnifiedPanel } from "./UnifiedPanel";
 import { GalaxyBackground } from "../ui/GalaxyBackground";
@@ -25,6 +24,18 @@ import { useActivityPanel, type ActivityPanelTab } from "@/hooks/useActivityPane
 // needs audio but no chrome.
 const publicPaths = ["/login", "/onboarding", "/sync", "/share"];
 
+/** Lets a keyboard skip the navigation; every layout's main element is #main-content. */
+function SkipLink() {
+    return (
+        <a
+            href="#main-content"
+            className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-(--z-panel) focus:px-4 focus:py-2 focus:bg-white focus:text-black focus:rounded-lg focus:font-medium"
+        >
+            skip to main content
+        </a>
+    );
+}
+
 export function AuthenticatedLayout({ children }: { children: ReactNode }) {
     const { isAuthenticated, isLoading } = useAuth();
     const pathname = usePathname();
@@ -33,7 +44,7 @@ export function AuthenticatedLayout({ children }: { children: ReactNode }) {
     const isTV = useIsTV();
     const isMobileOrTablet = isMobile || isTablet;
     const activityPanel = useActivityPanel();
-    const { toggle, open, close, setActiveTab } = activityPanel;
+    const { toggle, open, close, setActiveTab, leaveSettings } = activityPanel;
 
     useEffect(() => {
         const handleToggle = () => toggle();
@@ -51,6 +62,7 @@ export function AuthenticatedLayout({ children }: { children: ReactNode }) {
             "set-activity-panel-tab",
             handleSetTab as EventListener
         );
+        window.addEventListener("leave-activity-panel-settings", leaveSettings);
 
         return () => {
             window.removeEventListener("toggle-activity-panel", handleToggle);
@@ -60,8 +72,9 @@ export function AuthenticatedLayout({ children }: { children: ReactNode }) {
                 "set-activity-panel-tab",
                 handleSetTab as EventListener
             );
+            window.removeEventListener("leave-activity-panel-settings", leaveSettings);
         };
-    }, [toggle, open, close, setActiveTab]);
+    }, [toggle, open, close, setActiveTab, leaveSettings]);
 
     const isPublicPage = publicPaths.some(
         (p) => pathname === p || pathname.startsWith(p + "/")
@@ -84,43 +97,34 @@ export function AuthenticatedLayout({ children }: { children: ReactNode }) {
         return <>{children}</>;
     }
 
-    // On protected pages, show appropriate layout based on device
     if (isAuthenticated) {
-        // Android TV Layout - Optimized for 10-foot UI
+        // A television: the 10-foot layout driven by a remote.
         if (isTV) {
             return (
-                <PlayerModeWrapper>
-                    <a
-                        href="#main-content"
-                        className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-(--z-panel) focus:px-4 focus:py-2 focus:bg-white focus:text-black focus:rounded-lg focus:font-medium"
-                    >
-                        Skip to main content
-                    </a>
+                <>
+                    <SkipLink />
                     <MediaControlsHandler />
                     <WhatsNewGate />
                     <TVLayout>{children}</TVLayout>
-                </PlayerModeWrapper>
+                </>
             );
         }
 
         if (isMobileOrTablet) {
             return (
-                <PlayerModeWrapper>
-                    <a
-                        href="#main-content"
-                        className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-(--z-panel) focus:px-4 focus:py-2 focus:bg-white focus:text-black focus:rounded-lg focus:font-medium"
-                    >
-                        Skip to main content
-                    </a>
-                    <div className="h-screen bg-black overflow-hidden flex flex-col">
+                <>
+                    <SkipLink />
+                    {/* Fixed to the screen like the top bar and tab bar, so the three can never drift apart when
+                        iOS Safari scrolls or resizes the document behind them. */}
+                    <div className="fixed inset-0 bg-black overflow-hidden flex flex-col">
                         <MediaControlsHandler />
-                    <WhatsNewGate />
+                        <WhatsNewGate />
                         <TopBar />
 
-                        {/* Sidebar - renders MobileSidebar for hamburger menu */}
+                        {/* On a phone or tablet the sidebar is the menu the top bar's button opens. */}
                         <Sidebar />
 
-                        {/* Activity Panel - for mobile notifications (rendered as overlay) */}
+                        {/* The activity overlay: alerts, downloads, imports and history. */}
                         <ActivityPanel
                             isOpen={activityPanel.isOpen}
                             onToggle={activityPanel.toggle}
@@ -128,7 +132,6 @@ export function AuthenticatedLayout({ children }: { children: ReactNode }) {
                             onTabChange={activityPanel.setActiveTab}
                         />
 
-                        {/* Main content area with rounded corners */}
                         <main
                             id="main-content"
                             tabIndex={-1}
@@ -142,26 +145,20 @@ export function AuthenticatedLayout({ children }: { children: ReactNode }) {
                             <div className="h-full">{children}</div>
                         </main>
 
-                        {/* Mini Player - fixed, positioned above bottom nav */}
+                        {/* The mini player, fixed above the tab bar. */}
                         <UniversalPlayer />
 
-                        {/* Bottom Navigation - fixed at bottom */}
                         <BottomNavigation />
                     </div>
-                </PlayerModeWrapper>
+                </>
             );
         }
 
         return (
-            <PlayerModeWrapper>
-                <a
-                    href="#main-content"
-                    className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-(--z-panel) focus:px-4 focus:py-2 focus:bg-white focus:text-black focus:rounded-lg focus:font-medium"
-                >
-                    Skip to main content
-                </a>
+            <>
+                <SkipLink />
                 <div
-                    className="h-screen bg-black overflow-hidden flex flex-col"
+                    className="h-dvh bg-black overflow-hidden flex flex-col"
                     style={{ paddingTop: "calc(64px + var(--titlebar-height, 0px))" }}
                 >
                     <MediaControlsHandler />
@@ -184,7 +181,7 @@ export function AuthenticatedLayout({ children }: { children: ReactNode }) {
                     </div>
                     <UniversalPlayer />
                 </div>
-            </PlayerModeWrapper>
+            </>
         );
     }
 

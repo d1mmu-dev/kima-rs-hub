@@ -7,3 +7,4 @@ export { SettingsSelect } from "./SettingsSelect";
 export { SettingsInput } from "./SettingsInput";
 export { ConnectionTestButton } from "./ConnectionTestButton";
 export { ConnectionRows } from "./ConnectionRows";
+export { CopyButton } from "./CopyButton";

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { playlistTrackToAudio, type PlaylistTrack } from "@/lib/playlist-track";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { usePlaylistsQuery } from "@/hooks/useQueries";
@@ -34,7 +35,6 @@ import { mosaicCovers } from "@/features/playlist/coverMosaic";
 type ActionPanel = "create" | "importUrl" | "importFile" | null;
 
 interface PlaylistItem {
-    id: string;
     track: {
         album?: {
             coverUrl?: string;
@@ -108,7 +108,7 @@ function PlaylistCard({
                         aria-label={playlist.isHidden ? "Show playlist" : "Hide playlist"}
                         title={playlist.isHidden ? "show playlist" : "hide playlist"}
                         className={cn(
-                            "w-8 h-8 rounded-lg flex items-center justify-center bg-black/60 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity duration-150",
+                            "w-8 h-8 rounded-lg flex items-center justify-center bg-black/60 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity duration-150 touch-reveal",
                             playlist.isHidden ? "text-success" : "text-[var(--text-muted)]",
                             isHiding && "opacity-50 cursor-not-allowed",
                         )}
@@ -479,10 +479,8 @@ function GettingStarted({
 }) {
     return (
         <div className="relative overflow-hidden rounded-lg border-2 border-white/10 bg-gradient-to-br from-[#0f0f0f] to-[#0a0a0a] p-8 md:p-12">
-            <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-brand to-brand-dark" />
-
             <div className="flex items-center gap-3 mb-8 pb-4 border-b border-white/10">
-                <div className="w-2 h-2 bg-brand" />
+                <div className="w-2 h-2 bg-white/30" />
                 <span className="text-xs text-[var(--text-secondary)]">
                     Getting Started
                 </span>
@@ -581,20 +579,7 @@ export default function PlaylistsPage() {
         try {
             const playlist = await api.getPlaylist(playlistId);
             if (playlist?.items && playlist.items.length > 0) {
-                const tracks = playlist.items.map((item: { track: { id: string; title: string; duration: number; album?: { id?: string; title?: string; coverArt?: string; artist?: { id?: string; name?: string } } } }) => ({
-                    id: item.track.id,
-                    title: item.track.title,
-                    artist: {
-                        name: item.track.album?.artist?.name || "Unknown",
-                        id: item.track.album?.artist?.id,
-                    },
-                    album: {
-                        title: item.track.album?.title || "Unknown",
-                        coverArt: item.track.album?.coverArt,
-                        id: item.track.album?.id,
-                    },
-                    duration: item.track.duration,
-                }));
+                const tracks = playlist.items.map((item: { track: PlaylistTrack }) => playlistTrackToAudio(item.track));
                 playTracks(tracks, 0);
             }
         } catch (error) {
@@ -631,7 +616,6 @@ export default function PlaylistsPage() {
     return (
         <div className="min-h-screen bg-gradient-to-b from-[#0a0a0a] to-black section-stack">
             <PageHeader
-                eyebrow="Your library"
                 title="Playlists"
                 description={
                     `${visiblePlaylists.length} ${visiblePlaylists.length === 1 ? "playlist" : "playlists"}` +
@@ -696,7 +680,7 @@ export default function PlaylistsPage() {
                 )}
             </PageHeader>
 
-            <div className="relative page-shell pb-24 animate-rise">
+            <div className="relative page-shell page-end animate-rise">
                 {showHiddenTab && (
                     <div className="mb-6 px-4 py-3 bg-white/5 rounded-lg border border-white/10">
                         <p className="text-xs text-[var(--text-muted)]">

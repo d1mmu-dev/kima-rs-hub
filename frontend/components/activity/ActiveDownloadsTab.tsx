@@ -1,12 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Download, Loader2, X } from "lucide-react";
+import { Loader2, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { useActiveDownloads } from "@/hooks/useNotifications";
-import { EmptyState } from "../ui/EmptyState";
 import { GradientSpinner } from "../ui/GradientSpinner";
 import { DownloadRow, RowAction } from "./DownloadRow";
+import { ListHeader } from "./ListHeader";
 
 export function ActiveDownloadsTab() {
     const { downloads, isLoading: loading, refetch } = useActiveDownloads();
@@ -51,30 +51,15 @@ export function ActiveDownloadsTab() {
     }
 
     if (downloads.length === 0) {
-        return (
-            <EmptyState
-                icon={<Download className="w-8 h-8" />}
-                title="No active downloads"
-                description="Downloads will appear here"
-            />
-        );
+        return <p className="px-3 py-4 text-xs text-[var(--text-muted)]">nothing downloading right now</p>;
     }
 
     return (
         <div className="flex flex-col h-full">
-            <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/10">
-                <span className="flex items-center gap-2 text-xs font-medium text-[var(--text-secondary)]">
-                    <span className="size-1.5 rounded-full bg-brand animate-pulse" aria-hidden />
-                    <span className="tabular-nums">{downloads.length} downloading</span>
-                </span>
-                <button
-                    type="button"
-                    onClick={handleCancelAll}
-                    className="rounded-full px-2.5 py-1 text-xs font-medium text-[var(--text-muted)] transition-colors hover:bg-white/10 hover:text-danger-light"
-                >
-                    Cancel all
-                </button>
-            </div>
+            <ListHeader action={{ label: "cancel all", onClick: handleCancelAll, danger: true }}>
+                <span className="size-1.5 rounded-full bg-brand animate-pulse" aria-hidden />
+                <span className="text-brand">{downloads.length} downloading</span>
+            </ListHeader>
 
             <ul className="flex-1 space-y-0.5 overflow-y-auto p-2">
                 {downloads.map((download) => (
@@ -84,7 +69,7 @@ export function ActiveDownloadsTab() {
                         tone="active"
                         actions={
                             <RowAction
-                                label={`Cancel ${download.subject}`}
+                                label={`cancel ${download.subject}`}
                                 onClick={() => handleCancel(download.id)}
                                 disabled={cancelling.has(download.id)}
                                 danger

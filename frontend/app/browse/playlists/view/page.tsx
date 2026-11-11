@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useState, useEffect } from "react";
-import { formatTime, plural } from "@/lib/format";
+import { formatHoursMinutes, formatTime, plural } from "@/lib/format";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
     ArrowLeft,
@@ -74,7 +74,7 @@ function DeezerPlaylistDetailPageInner() {
             setError(null);
             try {
                 const data = await api.get<DeezerPlaylistFull>(
-                    `/browse/playlists/${encodeURIComponent(playlistId)}`
+                    `/browse/playlists/view/?id=${encodeURIComponent(playlistId)}`
                 );
                 setPlaylist(data);
             } catch (err) {
@@ -102,13 +102,6 @@ function DeezerPlaylistDetailPageInner() {
 
     const totalDuration = playlist?.tracks.reduce((sum, track) => sum + track.durationMs, 0) || 0;
 
-    const formatTotalDuration = (ms: number) => {
-        const hours = Math.floor(ms / 3600000);
-        const mins = Math.floor((ms % 3600000) / 60000);
-        if (hours > 0) return `${hours} hr ${mins} min`;
-        return `${mins} min`;
-    };
-
     if (isLoading) {
         return <LoadingScreen />;
     }
@@ -134,7 +127,6 @@ function DeezerPlaylistDetailPageInner() {
                                 src={playlist.imageUrl}
                                 alt={playlist.title}
                                 fill
-                                sizes="100vw"
                                 className="object-cover"
                             />
                         </div>
@@ -194,7 +186,7 @@ function DeezerPlaylistDetailPageInner() {
                                     {totalDuration > 0 && (
                                         <>
                                             <span className="text-[var(--text-muted)]">|</span>
-                                            <span>{formatTotalDuration(totalDuration)}</span>
+                                            <span>{formatHoursMinutes(totalDuration / 1000)}</span>
                                         </>
                                     )}
                                 </div>
@@ -247,7 +239,7 @@ function DeezerPlaylistDetailPageInner() {
                 </div>
             </div>
 
-            <div className="relative page-shell pb-32 animate-rise">
+            <div className="relative page-shell page-end animate-rise">
                 <div>
                     {playlist.tracks.length > 0 ? (
                         <div>
@@ -272,6 +264,7 @@ function DeezerPlaylistDetailPageInner() {
                                             role={hasPreview ? "button" : undefined}
                                             tabIndex={hasPreview ? 0 : undefined}
                                             aria-label={hasPreview ? `play a preview of ${track.title}` : undefined}
+                                            title={hasPreview ? undefined : "no preview available"}
                                             onKeyDown={(e) => {
                                                 if (hasPreview && (e.key === "Enter" || e.key === " ")) {
                                                     e.preventDefault();
@@ -282,7 +275,7 @@ function DeezerPlaylistDetailPageInner() {
                                                 "grid grid-cols-[40px_1fr_auto] md:grid-cols-[40px_minmax(200px,4fr)_minmax(100px,1fr)_80px] gap-4 px-3 py-2 rounded-lg transition-all group",
                                                 hasPreview
                                                     ? "hover:bg-white/[0.03] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60"
-                                                    : "opacity-40 cursor-not-allowed",
+                                                    : "opacity-60 cursor-not-allowed",
                                                 isCurrentlyPlaying && "bg-white/5 border border-brand/30"
                                             )}
                                         >

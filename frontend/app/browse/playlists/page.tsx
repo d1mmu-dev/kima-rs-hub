@@ -34,7 +34,6 @@ interface Genre {
 type BrowseTab = "playlists" | "genres";
 
 export default function BrowsePlaylistsPage() {
-
     const [activeTab, setActiveTab] = useState<BrowseTab>("playlists");
     const [searchQuery, setSearchQuery] = useState("");
     const [isLoading, setIsLoading] = useState(true);
@@ -50,25 +49,30 @@ export default function BrowsePlaylistsPage() {
     const [selectedGenre, setSelectedGenre] = useState<Genre | null>(null);
     const [genrePlaylists, setGenrePlaylists] = useState<PlaylistPreview[]>([]);
 
-    const fetchAllContent = useCallback(async () => {
-        setIsLoading(true);
-        setLoadError(null);
-        try {
-            const response = await api.get<{
+    const fetchAllContent = useCallback(() => {
+        return api
+            .get<{
                 playlists: PlaylistPreview[];
                 genres: Genre[];
-            }>("/browse/all");
-            setPlaylists(response.playlists);
-            setGenres(response.genres);
-        } catch (error) {
-            console.error("Failed to fetch browse content:", error);
-            setLoadError(
-                "Couldn't load playlists. Check your connection and try again.",
-            );
-        } finally {
-            setIsLoading(false);
-        }
+            }>("/browse/all")
+            .then((response) => {
+                setPlaylists(response.playlists);
+                setGenres(response.genres);
+            })
+            .catch((error) => {
+                console.error("Failed to fetch browse content:", error);
+                setLoadError(
+                    "Couldn't load playlists. Check your connection and try again.",
+                );
+            })
+            .finally(() => setIsLoading(false));
     }, []);
+
+    const reloadContent = () => {
+        setIsLoading(true);
+        setLoadError(null);
+        fetchAllContent();
+    };
 
     useEffect(() => {
         fetchAllContent();
@@ -102,7 +106,7 @@ export default function BrowsePlaylistsPage() {
     const clearSearch = () => {
         setSearchQuery("");
         setHasSearched(false);
-        fetchAllContent();
+        reloadContent();
     };
 
     const handleUrlSubmit = async () => {
@@ -190,18 +194,17 @@ export default function BrowsePlaylistsPage() {
         <div className="min-h-screen">
             <div className="section-stack">
                 <PageHeader
-                    eyebrow="From Deezer"
                     title="Browse playlists"
                     description="Find playlists on Deezer and import them into your library"
                     className="pb-2"
                 />
 
-                <div className="relative page-shell pb-24 animate-rise">
+                <div className="relative page-shell page-end animate-rise">
                     <div className="mb-6">
                         <div className="flex items-start gap-3 px-4 py-3 rounded-lg bg-type-track/5 border border-type-track/20">
-                            <Info className="w-4 h-4 text-brand shrink-0 mt-0.5" />
+                            <Info className="w-4 h-4 text-[var(--text-secondary)] shrink-0 mt-0.5" />
                             <p className="text-xs tabular-nums text-[var(--text-secondary)] leading-relaxed">
-                                <span className="font-bold text-brand">
+                                <span className="font-bold text-white">
                                     Beta
                                 </span>{" "}
                                 · Importing from Spotify and Deezer relies on
@@ -294,7 +297,7 @@ export default function BrowsePlaylistsPage() {
                             icon={<Music2 className="w-12 h-12" />}
                             title="Couldn't load content"
                             description={loadError}
-                            action={{ label: "Try again", onClick: fetchAllContent }}
+                            action={{ label: "Try again", onClick: reloadContent }}
                         />
                     )}
 
@@ -346,7 +349,6 @@ export default function BrowsePlaylistsPage() {
                             <>
                                 {activeTab === "playlists" && (
                                     <div
-
                                         style={{
                                             animationDelay: `${sectionIndex++ * 0.1}s`,
                                         }}
@@ -376,7 +378,6 @@ export default function BrowsePlaylistsPage() {
 
                                 {activeTab === "genres" && (
                                     <div
-
                                         style={{
                                             animationDelay: `${sectionIndex++ * 0.1}s`,
                                         }}

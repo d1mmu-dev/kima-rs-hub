@@ -90,7 +90,7 @@ pub async fn complete_embedding(
 ) -> sqlx::Result<bool> {
     let mut tx = pool.begin().await?;
     let current = sqlx::query_scalar!(
-        "SELECT id FROM tracks WHERE id=$1 AND ml_generation=$2 AND missing_since IS NULL FOR UPDATE",
+        "SELECT id FROM tracks WHERE id=$1 AND ml_generation=$2 AND missing_since IS NULL FOR NO KEY UPDATE",
         claim.track_id, claim.file_generation
     ).fetch_optional(&mut *tx).await?;
     if current.is_none() {

@@ -326,3 +326,77 @@ async fn overview_counts_raw_rows_for_shelf_and_listens_for_signature(pool: PgPo
     assert!(recent.concentration.distinct.is_none());
     assert!(recent.era.is_empty());
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn walk_agrees_with_audit_grouping(pool: PgPool) {
+    use kima_db::stats::{
+        audit,
+        listens::{Period, listen_rows},
+    };
+    let user = Uuid::now_v7();
+    let artist = Uuid::now_v7();
+    let album = Uuid::now_v7();
+    sqlx::query("INSERT INTO users(id,username,password_hash) VALUES ($1,'audit-walk','h')")
+        .bind(user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO artists(id,name,name_key) VALUES($1,'a','a')")
+        .bind(artist)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO albums(id,artist_id,title,title_key) VALUES($1,$2,'a','a')")
+        .bind(album)
+        .bind(artist)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tracks = Vec::new();
+    for (i, duration) in [5, 30, 31, 100, 214, 0].into_iter().enumerate() {
+        let t = Uuid::now_v7();
+        tracks.push((t, duration));
+        sqlx::query("INSERT INTO tracks(id,album_id,artist_name,title,codec,path,size,mtime,fingerprint,duration_secs) VALUES($1,$2,'a','t','flac',$3,0,now(),decode('','hex'),$4)").bind(t).bind(album).bind(format!("/audit{i}")).bind(duration).execute(&pool).await.unwrap();
+    }
+    let mut rng = 42_u64;
+    for case in 0..200 {
+        sqlx::query("DELETE FROM plays WHERE user_id=$1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut next = || {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            rng
+        };
+        let count = 1 + (next() % 40);
+        let ntracks = 1 + (next() % 4) as usize;
+        let start = (next() % 6) as usize;
+        let mut at = 0_i64;
+        for j in 0..count {
+            let (t, duration) = tracks[(start + (next() as usize % ntracks)) % tracks.len()];
+            at += if j % 7 == 0 {
+                i64::from(duration.max(30))
+            } else {
+                (next() % 401) as i64
+            };
+            sqlx::query("INSERT INTO plays(id,user_id,track_id,played_at) VALUES($1,$2,$3,'2026-03-01'::timestamptz+$4*interval '1 second')").bind(Uuid::now_v7()).bind(user).bind(t).bind(at as f64).execute(&pool).await.unwrap();
+        }
+        let rows = audit::audit_rows(&pool, user).await.unwrap();
+        let listens = audit::listens_of(&rows);
+        let sql = format!(
+            "{} SELECT track_id,count(*)::bigint FROM p GROUP BY track_id ORDER BY track_id",
+            listen_rows(Period::All, false)
+        );
+        let db: Vec<(Uuid, i64)> = sqlx::query_as(&sql)
+            .bind(user)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let mut counts = std::collections::BTreeMap::new();
+        for l in listens {
+            *counts.entry(l.track_id).or_insert(0_i64) += 1;
+        }
+        assert_eq!(db, counts.into_iter().collect::<Vec<_>>(), "case {case}");
+    }
+}

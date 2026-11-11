@@ -18,6 +18,7 @@ pub fn routes() -> Router<AppState> {
         .route("/stats/track/{id}/plays", get(track_plays))
         .route("/stats/region", get(region_detail))
         .route("/stats/hour", get(hour_detail))
+        .route("/stats/false-starts", get(false_starts))
 }
 
 async fn tracks(
@@ -373,5 +374,60 @@ async fn hour_detail(
             })
             .collect(),
         last_at: result.last_at.map(js_iso),
+    }))
+}
+
+async fn false_starts(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<kima_api_types::stats::FalseStartAudit>, ApiError> {
+    use kima_api_types::stats::{FalseStartAudit, FalseStartTrack, IgnoredTrack};
+    use kima_db::stats::audit;
+    let (rows, ignored) = tokio::try_join!(
+        audit::audit_rows(&state.pool, user.id),
+        audit::ignored(&state.pool, user.id)
+    )
+    .map_err(|error| {
+        tracing::error!(?error, "false-start audit failed");
+        ApiError::Failed("Failed to read your play history")
+    })?;
+    let a = audit::summarize(&audit::listens_of(&rows), &ignored);
+    Ok(Json(FalseStartAudit {
+        total_rows: a.total_rows,
+        total_listens: a.total_listens,
+        duplicate_rows: a.duplicate_rows,
+        collapsible_rows: a.collapsible_rows,
+        heard: a.heard,
+        skipped: a.skipped,
+        too_short: a.too_short,
+        unclear: a.unclear,
+        earliest: a.earliest.map(js_iso),
+        tracks: a
+            .tracks
+            .into_iter()
+            .map(|t| FalseStartTrack {
+                track_id: t.track_id.to_string(),
+                title: t.title,
+                artist: t.artist,
+                duration_seconds: t.duration,
+                required_seconds: t.required,
+                skipped: t.skipped,
+                too_short: t.too_short,
+                heard: t.heard,
+                listens: t.listens,
+                rows: t.rows,
+                shortest_run_seconds: t.shortest_run,
+                last_at: js_iso(t.last_at),
+            })
+            .collect(),
+        ignored: ignored
+            .into_iter()
+            .map(|r| IgnoredTrack {
+                track_id: r.track_id.to_string(),
+                title: r.title,
+                artist: r.artist,
+                ignored_at: js_iso(r.ignored_at),
+            })
+            .collect(),
     }))
 }

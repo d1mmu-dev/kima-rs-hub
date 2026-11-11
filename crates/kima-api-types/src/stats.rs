@@ -369,3 +369,51 @@ pub struct HourlyEnergy {
     #[serde(serialize_with = "js_f64")]
     pub energy: f64,
 }
+
+fn js_optional_f64<S: Serializer>(v: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(n) => js_f64(n, s),
+        None => s.serialize_none(),
+    }
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FalseStartTrack {
+    pub track_id: String,
+    pub title: String,
+    pub artist: String,
+    pub duration_seconds: i32,
+    #[serde(serialize_with = "js_optional_f64")]
+    pub required_seconds: Option<f64>,
+    pub skipped: usize,
+    pub too_short: usize,
+    pub heard: usize,
+    pub listens: usize,
+    pub rows: usize,
+    #[serde(serialize_with = "js_optional_f64")]
+    pub shortest_run_seconds: Option<f64>,
+    pub last_at: String,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IgnoredTrack {
+    pub track_id: String,
+    pub title: String,
+    pub artist: String,
+    pub ignored_at: String,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FalseStartAudit {
+    pub total_rows: usize,
+    pub total_listens: usize,
+    pub duplicate_rows: usize,
+    pub collapsible_rows: usize,
+    pub heard: usize,
+    pub skipped: usize,
+    pub too_short: usize,
+    pub unclear: usize,
+    pub earliest: Option<String>,
+    pub tracks: Vec<FalseStartTrack>,
+    pub ignored: Vec<IgnoredTrack>,
+}

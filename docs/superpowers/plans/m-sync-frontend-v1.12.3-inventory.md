@@ -25,11 +25,11 @@ M10 deletes it).
 
 | Status | Count |
 |---|---|
-| Exact (byte-identical to v1.12.3) | 423 |
-| Adapted at the same path | 95 |
+| Exact (byte-identical to v1.12.3) | 420 |
+| Adapted at the same path | 98 |
 | Adapted at a local path (static export) | 18 |
 | Missing (neither the path nor a mapped local path) | 0 |
-| Local-only paths (not in v1.12.3) | 87 |
+| Local-only paths (not in v1.12.3) | 89 |
 
 A green build is not visual parity: exact bytes say nothing about how the page renders against kima-rs data, and
 an adapted file can differ visually. See "Browser and visual checks" below.
@@ -57,6 +57,7 @@ an adapted file can differ visually. See "Browser and visual checks" below.
 
 ### Adapted at the same path (reason)
 
+- `features/library/useShelfSummary.ts`, `features/stats/useTrackPlays.ts`, `hooks/useUpdateStatus.ts`: requests gated behind the `stats`/`changelog` section flags (D-170) because kima-rs serves no such route (commit `75526f4`)
 - `app/audiobooks/page.tsx` (6 diff lines): mechanical D-011 only: query-route links via the codemod, `encodeURIComponent` path segments, `usePathname` wrapper
 - `app/browse/playlists/page.tsx` (4 diff lines): mechanical D-011 only: query-route links via the codemod, `encodeURIComponent` path segments, `usePathname` wrapper
 - `app/device/page.tsx` (4 diff lines): mechanical D-011 only: query-route links via the codemod, `encodeURIComponent` path segments, `usePathname` wrapper
@@ -155,7 +156,7 @@ an adapted file can differ visually. See "Browser and visual checks" below.
 
 ### Local-only paths
 
-`app/album/page.tsx`, `app/artist/loading.tsx`, `app/artist/page.tsx`, `app/audiobooks/book/page.tsx`, `app/audiobooks/layout.tsx`, `app/audiobooks/series/page.tsx`, `app/browse/playlists/view/page.tsx`, `app/changelog/layout.tsx`, `app/discover/layout.tsx`, `app/import/layout.tsx`, `app/mix/layout.tsx`, `app/mix/page.tsx`, `app/playlist/page.tsx`, `app/podcasts/category/page.tsx`, `app/podcasts/layout.tsx`, `app/podcasts/show/page.tsx`, `app/radio/layout.tsx`, `app/settings/attention/page.tsx`, `app/settings/autotag/album/page.tsx`, `app/settings/autotag/page.tsx`, `app/settings/library/page.tsx`, `app/settings/organize/page.tsx`, `app/settings/people/page.tsx`, `app/settings/server/page.tsx`, `app/settings/sources/page.tsx`, `app/share/SharePageClient.tsx`, `app/share/layout.tsx`, `app/share/page.tsx`, `app/stats/layout.tsx`, `components/FeatureGate.tsx`, `components/__tests__/FeatureGate.test.tsx`, `components/__tests__/upstream-headings.test.tsx`, `features/autotag/__tests__/CandidateList.test.tsx`, `features/autotag/__tests__/ChangesTable.test.tsx`, `features/autotag/__tests__/MappingDiff.test.tsx`, `features/autotag/__tests__/RunPanel.test.tsx`, `features/autotag/__tests__/TargetPicker.test.tsx`, `features/autotag/__tests__/admin.test.tsx`, `features/autotag/__tests__/api.test.ts`, `features/autotag/__tests__/list.test.tsx`, `features/autotag/__tests__/progress.test.ts`, `features/autotag/__tests__/review.test.tsx`, `features/autotag/components/CandidateList.tsx`, `features/autotag/components/ChangesTable.tsx`, `features/autotag/components/MappingDiff.tsx`, `features/autotag/components/RunPanel.tsx`, `features/autotag/components/TargetPicker.tsx`, `features/autotag/progress.ts`, `features/autotag/types.ts`, `features/organizer/__tests__/AlbumGroupedPreview.test.tsx`, `features/organizer/__tests__/entry-points.test.tsx`, `features/organizer/__tests__/organizer-api.test.ts`, `features/organizer/__tests__/organizer-page.test.tsx`, `features/organizer/__tests__/organizer.test.tsx`, `features/organizer/__tests__/runActions.test.ts`, `features/organizer/components/AlbumGroupedPreview.tsx`, `features/organizer/components/IssueChip.tsx`, `features/organizer/components/NotAvailable.tsx`, `features/organizer/components/ProgressBar.tsx`, `features/organizer/filters.ts`, `features/organizer/progress.ts`, `features/organizer/runActions.ts`, `features/organizer/types.ts`, `features/podcast/components/SimilarPodcasts.tsx`, `features/podcast/routes.ts`, `features/settings/__tests__/settings-pages.test.ts`, `features/settings/__tests__/systemSettingsBody.test.ts`, `features/settings/__tests__/useSystemSettings.test.tsx`, `features/settings/components/sections/LibraryToolsSection.tsx`, `features/settings/components/sections/__tests__/ArtworkSection.test.tsx`, `features/settings/components/sections/__tests__/CacheSection.test.tsx`, `features/settings/components/sections/__tests__/SubsonicSection.test.tsx`, `features/settings/systemSettingsBody.ts`, `lib/__tests__/api-path-encoding.test.ts`, `lib/__tests__/playlist-contract.test.ts`, `lib/__tests__/podcast-routes.test.ts`, `lib/__tests__/stats-keyboard.test.tsx`, `lib/playlist-contract.ts`, `lib/section-flags.ts`, `lib/use-pathname.ts`, `playwright.kima-rs.config.ts`, `public/manifest.webmanifest`, `tests/e2e/kima-rs/autotag.spec.ts`, `tests/e2e/kima-rs/enrichment.spec.ts`, `tests/e2e/kima-rs/library.spec.ts`, `tests/e2e/kima-rs/smoke.spec.ts`, `tests/e2e/kima-rs/subsonic.spec.ts`
+`app/album/page.tsx`, `app/artist/loading.tsx`, `app/artist/page.tsx`, `app/audiobooks/book/page.tsx`, `app/audiobooks/layout.tsx`, `app/audiobooks/series/page.tsx`, `app/browse/playlists/view/page.tsx`, `app/changelog/layout.tsx`, `app/discover/layout.tsx`, `app/import/layout.tsx`, `app/mix/layout.tsx`, `app/mix/page.tsx`, `app/playlist/page.tsx`, `app/podcasts/category/page.tsx`, `app/podcasts/layout.tsx`, `app/podcasts/show/page.tsx`, `app/radio/layout.tsx`, `app/settings/attention/page.tsx`, `app/settings/autotag/album/page.tsx`, `app/settings/autotag/page.tsx`, `app/settings/library/page.tsx`, `app/settings/organize/page.tsx`, `app/settings/people/page.tsx`, `app/settings/server/page.tsx`, `app/settings/sources/page.tsx`, `app/share/SharePageClient.tsx`, `app/share/layout.tsx`, `app/share/page.tsx`, `app/stats/layout.tsx`, `components/FeatureGate.tsx`, `components/__tests__/FeatureGate.test.tsx`, `components/__tests__/upstream-headings.test.tsx`, `features/autotag/__tests__/CandidateList.test.tsx`, `features/autotag/__tests__/ChangesTable.test.tsx`, `features/autotag/__tests__/MappingDiff.test.tsx`, `features/autotag/__tests__/RunPanel.test.tsx`, `features/autotag/__tests__/TargetPicker.test.tsx`, `features/autotag/__tests__/admin.test.tsx`, `features/autotag/__tests__/api.test.ts`, `features/autotag/__tests__/list.test.tsx`, `features/autotag/__tests__/progress.test.ts`, `features/autotag/__tests__/review.test.tsx`, `features/autotag/components/CandidateList.tsx`, `features/autotag/components/ChangesTable.tsx`, `features/autotag/components/MappingDiff.tsx`, `features/autotag/components/RunPanel.tsx`, `features/autotag/components/TargetPicker.tsx`, `features/autotag/progress.ts`, `features/autotag/types.ts`, `features/organizer/__tests__/AlbumGroupedPreview.test.tsx`, `features/organizer/__tests__/entry-points.test.tsx`, `features/organizer/__tests__/organizer-api.test.ts`, `features/organizer/__tests__/organizer-page.test.tsx`, `features/organizer/__tests__/organizer.test.tsx`, `features/organizer/__tests__/runActions.test.ts`, `features/organizer/components/AlbumGroupedPreview.tsx`, `features/organizer/components/IssueChip.tsx`, `features/organizer/components/NotAvailable.tsx`, `features/organizer/components/ProgressBar.tsx`, `features/organizer/filters.ts`, `features/organizer/progress.ts`, `features/organizer/runActions.ts`, `features/organizer/types.ts`, `features/podcast/components/SimilarPodcasts.tsx`, `features/podcast/routes.ts`, `features/settings/__tests__/settings-pages.test.ts`, `features/settings/__tests__/systemSettingsBody.test.ts`, `features/settings/__tests__/useSystemSettings.test.tsx`, `features/settings/components/sections/LibraryToolsSection.tsx`, `features/settings/components/sections/__tests__/ArtworkSection.test.tsx`, `features/settings/components/sections/__tests__/CacheSection.test.tsx`, `features/settings/components/sections/__tests__/SubsonicSection.test.tsx`, `features/settings/systemSettingsBody.ts`, `lib/__tests__/api-path-encoding.test.ts`, `lib/__tests__/playlist-contract.test.ts`, `lib/__tests__/podcast-routes.test.ts`, `lib/__tests__/stats-keyboard.test.tsx`, `lib/playlist-contract.ts`, `lib/section-flags.ts`, `lib/use-pathname.ts`, `playwright.kima-rs.config.ts`, `public/manifest.webmanifest`, `tests/e2e/kima-rs/autotag.spec.ts`, `tests/e2e/kima-rs/enrichment.spec.ts`, `tests/e2e/kima-rs/library.spec.ts`, `tests/e2e/kima-rs/smoke.spec.ts`, `tests/e2e/kima-rs/subsonic.spec.ts`, `lib/__tests__/account-deletion-hidden.test.tsx`, `lib/__tests__/section-flags-requests.test.tsx`
 
 ### Exact matches by directory
 
@@ -201,13 +202,13 @@ an adapted file can differ visually. See "Browser and visual checks" below.
 - `features/audiobook`: 5
 - `features/discover`: 9
 - `features/home`: 6
-- `features/library`: 10
+- `features/library`: 9
 - `features/playlist`: 1
 - `features/podcast`: 5
 - `features/search`: 9
 - `features/settings`: 26
 - `features/spoken`: 2
-- `features/stats`: 23
+- `features/stats`: 22
 - `features/vibe`: 23
 - `hooks/__tests__`: 14
 - `hooks/useActivityPanel.ts`: 1
@@ -234,7 +235,6 @@ an adapted file can differ visually. See "Browser and visual checks" below.
 - `hooks/useSoundRebuild.ts`: 1
 - `hooks/useTVNavigation.ts`: 1
 - `hooks/useTrackFormat.ts`: 1
-- `hooks/useUpdateStatus.ts`: 1
 - `hooks/useVibeToggle.ts`: 1
 - `lib/__tests__`: 70
 - `lib/acquire.ts`: 1
@@ -283,7 +283,7 @@ an adapted file can differ visually. See "Browser and visual checks" below.
 - `public/sw.js`: 1
 - `tests/e2e`: 28
 
-<details><summary>All 423 exact paths</summary>
+<details><summary>All 420 exact paths</summary>
 
 - `.dockerignore`
 - `.gitignore`
@@ -422,7 +422,6 @@ an adapted file can differ visually. See "Browser and visual checks" below.
 - `features/library/hooks/useLibraryActions.ts`
 - `features/library/types.ts`
 - `features/library/useLibraryVibe.ts`
-- `features/library/useShelfSummary.ts`
 - `features/playlist/coverMosaic.ts`
 - `features/podcast/components/ContinueListening.tsx`
 - `features/podcast/components/EpisodeList.tsx`
@@ -488,7 +487,6 @@ an adapted file can differ visually. See "Browser and visual checks" below.
 - `features/stats/types.ts`
 - `features/stats/usePlaySlice.ts`
 - `features/stats/useTrackMood.ts`
-- `features/stats/useTrackPlays.ts`
 - `features/vibe/MoodLegend.tsx`
 - `features/vibe/ScenePanel.tsx`
 - `features/vibe/TrackFinder.tsx`
@@ -551,7 +549,6 @@ an adapted file can differ visually. See "Browser and visual checks" below.
 - `hooks/useSoundRebuild.ts`
 - `hooks/useTVNavigation.ts`
 - `hooks/useTrackFormat.ts`
-- `hooks/useUpdateStatus.ts`
 - `hooks/useVibeToggle.ts`
 - `lib/__tests__/activity-areas.test.tsx`
 - `lib/__tests__/activity-feed.test.tsx`

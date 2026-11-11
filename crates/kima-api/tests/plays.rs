@@ -241,16 +241,22 @@ async fn recently_listened_orders_by_last_play(pool: PgPool) {
     assert_eq!(stored_plays(&pool, e.ana_id).await.len(), 4);
 }
 
-/// Routes upstream v1.12.3 removed (plan Appendix C). `GET /api/plays` is the one kima-rs
-/// served; `POST /api/plays` is still routed, so axum answers the GET with 405 (owner decision,
-/// D-172). Every other removed path must stay 404 so a future re-add is caught (one exception,
-/// D-173, is noted in the list).
+/// Routes upstream v1.12.3 removed (plan Appendix C). `GET /api/plays` and the bulk
+/// `DELETE /api/playlists/{id}/items` were served by kima-rs; another method is still routed on
+/// each path (`POST`), so axum answers them 405 (owner decision D-172, applied to D-173). Every
+/// other removed path must stay 404 so a future re-add is caught.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn removed_routes_are_404(pool: PgPool) {
     let e = env(pool).await;
     e.server
         .get("/api/plays")
         .authorization_bearer(&e.ana)
+        .await
+        .assert_status(StatusCode::METHOD_NOT_ALLOWED);
+    e.server
+        .delete("/api/playlists/x/items")
+        .authorization_bearer(&e.ana)
+        .json(&json!({ "trackIds": [] }))
         .await
         .assert_status(StatusCode::METHOD_NOT_ALLOWED);
 
@@ -281,8 +287,6 @@ async fn removed_routes_are_404(pool: PgPool) {
         ("POST", "/api/onboarding/enrichment"),
         ("GET", "/api/browse/playlists/featured"),
         ("POST", "/api/playlists/x/pending/reconcile"),
-        // `DELETE /api/playlists/{id}/items` (bulk remove, upstream `42250c43`) is still served
-        // by kima-rs and tested in playlists.rs: D-173, owner decision pending.
         ("POST", "/api/mixes/mood/buckets/backfill"),
         ("POST", "/api/system-settings/test-spotify"),
         ("GET", "/api/artists/preview/a/t"),

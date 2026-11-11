@@ -144,14 +144,18 @@ async fn create_add_list_remove(pool: PgPool) {
         .assert_status(StatusCode::NOT_FOUND);
     assert_eq!(titles(&detail(&e, &e.ana, &id).await), ["Song 1"]);
 
-    // Bulk removal.
+    // Remove the last one (the bulk `DELETE /playlists/:id/items` is gone, D-173).
     let res = e
         .server
-        .delete(&format!("/api/playlists/{id}/items"))
+        .delete(&format!("/api/playlists/{id}/items/{}", t[1]))
         .authorization_bearer(&e.ana)
-        .json(&json!({ "trackIds": [t[1]] }))
         .await;
-    assert_eq!(res.json::<Value>(), json!({ "removed": 1 }));
+    res.assert_status_ok();
+    assert_eq!(
+        res.json::<Value>(),
+        json!({ "success": true, "removed": 1 })
+    );
+    assert!(titles(&detail(&e, &e.ana, &id).await).is_empty());
 
     // Delete.
     e.server

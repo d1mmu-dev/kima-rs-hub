@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+form_urlencoded.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 futures.workspace = true

@@ -17,6 +17,10 @@ fi
 
 cd "$web"
 rm -rf build
+# vertigo's build script writes target/wasm32-unknown-unknown/release/static/wasm_run.js. A restored build cache
+# (CI's rust-cache) keeps the compiled vertigo crate but not that directory, so the script never re-runs and
+# `vertigo build` exits 10 (CantReadWasmRunFromStatics). Cleaning just that package forces the script to run.
+cargo clean -p vertigo --release --target wasm32-unknown-unknown
 "$vertigo" build
 
 fail=0

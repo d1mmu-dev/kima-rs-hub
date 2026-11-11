@@ -874,3 +874,185 @@ async fn claim_skips_a_track_being_deleted(pool: PgPool) {
     assert_eq!(ids(&got), vec![kept]);
     tx.commit().await.unwrap();
 }
+
+// ---- Claims against multi-track writers: no lock-order cycle (deadlock) ------------------
+
+/// Makes the first transaction that reaches a second BEFORE `op` on `table` wait there on
+/// advisory lock 1 until the test releases it; later transactions pass. Every row the gate
+/// sees is appended (by `col`) to the transaction's `test.gate_order` setting, so a test can
+/// read which row came first. The gate is open until [`hold_gate`].
+async fn gate_second(pool: &PgPool, op: &str, table: &str, col: &str) {
+    sqlx::query(&format!(
+        "CREATE FUNCTION test_gate_second() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF coalesce(current_setting('test.gate_seen', true), '') = 'yes' THEN
+             IF pg_try_advisory_xact_lock(3) THEN PERFORM pg_advisory_xact_lock_shared(1); END IF;
+           ELSE
+             PERFORM set_config('test.gate_seen', 'yes', true);
+           END IF;
+           PERFORM set_config('test.gate_order',
+             coalesce(current_setting('test.gate_order', true), '') || NEW.{col}::text || ',', true);
+           RETURN NEW;
+         END $$"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    // Named to fire before `tracks_ml_identity` (BEFORE ROW triggers run in name order).
+    sqlx::query(&format!(
+        "CREATE TRIGGER test_gate_second BEFORE {op} ON {table} FOR EACH ROW \
+         EXECUTE FUNCTION test_gate_second()"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Closes the gate: returns the session holding advisory lock 1.
+async fn hold_gate(pool: &PgPool) -> sqlx::pool::PoolConnection<sqlx::Postgres> {
+    let mut holder = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(1)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder
+}
+
+/// Waits until `task` has finished or is waiting on a row/transaction lock (not the gate).
+async fn finished_or_blocked<T>(pool: &PgPool, task: &tokio::task::JoinHandle<T>) {
+    for _ in 0..3000 {
+        if task.is_finished() {
+            return;
+        }
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() \
+             AND wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple'))",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if blocked {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("the task neither finished nor blocked");
+}
+
+/// Marks `paths` missing in one transaction, as the scanner does, and returns the order the
+/// track rows were updated in (`test.gate_order`).
+async fn mark_missing_tx(pool: &PgPool, paths: &[String], commit: bool) -> sqlx::Result<String> {
+    let mut tx = pool.begin().await?;
+    kima_db::library::mark_missing_in(&mut tx, paths).await?;
+    let order: String = sqlx::query_scalar("SELECT current_setting('test.gate_order', true)")
+        .fetch_one(&mut *tx)
+        .await?;
+    if commit {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(order)
+}
+
+/// Reviewer finding I1: the scanner's `mark_missing_in` updates several tracks in one
+/// transaction and the `tracks_ml_identity` trigger resets each track's embedding row as it
+/// goes. A claim must not take one of those stage rows and then wait for another the scanner
+/// holds (the scanner then waits for the first: a deadlock, 40P01).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn claim_and_mark_missing_do_not_deadlock(pool: PgPool) {
+    let al = album(&pool).await;
+    let a = track(&pool, al, 100).await;
+    let b = track(&pool, al, 200).await;
+    for t in [a, b] {
+        put(&pool, t, "embedding", "pending", "NULL").await;
+    }
+    let paths = vec![a.to_string(), b.to_string()];
+    gate_second(&pool, "UPDATE", "tracks", "id").await;
+    // Which track the scanner updates second (a dry run, rolled back): the claim must meet
+    // that one first, so it gets the newer file.
+    let order = mark_missing_tx(&pool, &paths, false).await.unwrap();
+    let (first, second) = if order.starts_with(&a.to_string()) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    sqlx::query("UPDATE tracks SET mtime = now() - make_interval(secs => $2) WHERE id = $1")
+        .bind(first)
+        .bind(500.0_f64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tracks SET mtime = now() - make_interval(secs => $2) WHERE id = $1")
+        .bind(second)
+        .bind(5.0_f64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let holder = hold_gate(&pool).await;
+    let scan = tokio::spawn({
+        let pool = pool.clone();
+        let paths = paths.clone();
+        async move { mark_missing_tx(&pool, &paths, true).await }
+    });
+    gated(&pool).await;
+
+    let claim = tokio::spawn({
+        let pool = pool.clone();
+        async move { stages::claim(&pool, Stage::Embedding, 20, true).await }
+    });
+    finished_or_blocked(&pool, &claim).await;
+    open_gate(holder).await;
+
+    let scanned = scan.await.unwrap();
+    let claimed = claim.await.unwrap();
+    assert_eq!(
+        scanned.as_ref().map_err(ToString::to_string),
+        Ok(&order),
+        "the scanner deadlocked or changed its update order"
+    );
+    let claimed = claimed.expect("the claim deadlocked");
+    // The track the scanner was resetting is skipped, the other one claimed.
+    assert_eq!(ids(&claimed), vec![second]);
+}
+
+/// Reviewer minor M3: two claimers of one stage must insert new stage rows in the same order.
+/// If a track's mtime changes between their snapshots, newest-first order reverses and each
+/// can wait for the other's uncommitted insert.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn same_stage_claimers_do_not_deadlock_when_mtimes_change(pool: PgPool) {
+    let al = album(&pool).await;
+    let a = track(&pool, al, 100).await;
+    let b = track(&pool, al, 200).await;
+    gate_second(&pool, "INSERT", "track_stages", "track_id").await;
+    let holder = hold_gate(&pool).await;
+    let first = tokio::spawn({
+        let pool = pool.clone();
+        async move { stages::claim(&pool, Stage::Recording, 20, false).await }
+    });
+    gated(&pool).await;
+    // Reverse newest-first order for the second claimer.
+    sqlx::query("UPDATE tracks SET mtime = now() - make_interval(secs => $2) WHERE id = $1")
+        .bind(a)
+        .bind(300.0_f64)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second = tokio::spawn({
+        let pool = pool.clone();
+        async move { stages::claim(&pool, Stage::Recording, 20, false).await }
+    });
+    finished_or_blocked(&pool, &second).await;
+    open_gate(holder).await;
+
+    let first = first.await.unwrap().expect("the first claimer deadlocked");
+    let second = second
+        .await
+        .unwrap()
+        .expect("the second claimer deadlocked");
+    let mut all: Vec<Uuid> = ids(&first).into_iter().chain(ids(&second)).collect();
+    all.sort();
+    let mut want = vec![a, b];
+    want.sort();
+    assert_eq!(all, want, "each track claimed exactly once");
+}

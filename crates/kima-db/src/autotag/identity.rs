@@ -679,21 +679,36 @@ pub async fn apply_identity(
             }
         }
     }
-    for t in &applied.tracks {
-        let Some(rec) = t.recording_mbid else {
-            continue;
-        };
+    // The recording rows of several tracks are written below. A recording claim holds the
+    // existing rows it takes and waits only for rows being created (`stages::claim`), so lock
+    // the existing rows first and then create the missing ones in track-id order, as the claim
+    // does: otherwise the claim waits for a row created here while this waits for one it holds.
+    let mut recorded: Vec<(Uuid, Uuid)> = applied
+        .tracks
+        .iter()
+        .filter_map(|t| t.recording_mbid.map(|rec| (t.track_id, rec)))
+        .collect();
+    recorded.sort_unstable();
+    let ids: Vec<Uuid> = recorded.iter().map(|(t, _)| *t).collect();
+    sqlx::query!(
+        "SELECT track_id FROM track_stages WHERE stage = 'recording' AND track_id = ANY($1)
+         ORDER BY track_id FOR NO KEY UPDATE",
+        &ids
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for (track, rec) in recorded {
         let hit = sqlx::query_scalar!(
             "UPDATE tracks SET recording_mbid = $3, recording_source = 'autotag', updated_at = now()
              WHERE id = $1 AND album_id = $2 RETURNING id",
-            t.track_id,
+            track,
             album,
             rec
         )
         .fetch_optional(&mut *conn)
         .await?;
         if hit.is_some() {
-            crate::stages::close_recording_autotag(conn, t.track_id).await?;
+            crate::stages::close_recording_autotag(conn, track).await?;
         }
     }
 

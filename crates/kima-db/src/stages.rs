@@ -69,6 +69,13 @@ pub struct Claim {
 /// skipped (its stage row could not be written), but another stage's claim, failure report or
 /// publication (`FOR NO KEY UPDATE` on the track) does not hide it. The coordinator runs the
 /// stages side by side on the same tracks, and an empty claim ends a phase for the cycle.
+///
+/// The claim never waits on a stage row someone else holds, so it cannot close a lock cycle
+/// with a writer that touches several tracks' stage rows in one transaction (the scanner's
+/// `tracks_ml_identity` trigger resets them track by track): existing rows of `stage` are
+/// locked `FOR NO KEY UPDATE ... SKIP LOCKED` up front (a row being reset or reported is
+/// skipped this time), and new rows are inserted in track-id order, so two claimers that
+/// race on the same new rows queue up instead of deadlocking.
 pub async fn claim(
     pool: &PgPool,
     stage: Stage,
@@ -76,13 +83,12 @@ pub async fn claim(
     fingerprinting: bool,
 ) -> sqlx::Result<Vec<Claim>> {
     let rows = sqlx::query!(
-        r#"WITH due AS (
-             SELECT t.id FROM tracks t
-             LEFT JOIN track_stages s ON s.track_id = t.id AND s.stage = $1
+        r#"WITH existing AS (
+             SELECT t.id, t.mtime FROM tracks t
+             JOIN track_stages s ON s.track_id = t.id AND s.stage = $1
              WHERE t.missing_since IS NULL
-               AND (s.track_id IS NULL
-                    OR (s.status = 'pending'
-                        AND (s.next_attempt_at IS NULL OR s.next_attempt_at <= now()))
+               AND ((s.status = 'pending'
+                     AND (s.next_attempt_at IS NULL OR s.next_attempt_at <= now()))
                     OR (s.status IN ('failed', 'working') AND s.next_attempt_at <= now()))
                AND ($1 <> 'recording' OR NOT $3 OR EXISTS (
                     SELECT 1 FROM track_stages f
@@ -91,10 +97,29 @@ pub async fn claim(
                            OR (f.status = 'failed' AND f.next_attempt_at IS NULL))))
              ORDER BY t.mtime DESC, t.id
              LIMIT $2
+             FOR KEY SHARE OF t SKIP LOCKED FOR NO KEY UPDATE OF s SKIP LOCKED),
+           fresh AS (
+             SELECT t.id, t.mtime FROM tracks t
+             WHERE t.missing_since IS NULL
+               AND NOT EXISTS (SELECT 1 FROM track_stages s
+                               WHERE s.track_id = t.id AND s.stage = $1)
+               AND ($1 <> 'recording' OR NOT $3 OR EXISTS (
+                    SELECT 1 FROM track_stages f
+                    WHERE f.track_id = t.id AND f.stage = 'fingerprint'
+                      AND (f.status = 'done'
+                           OR (f.status = 'failed' AND f.next_attempt_at IS NULL))))
+             ORDER BY t.mtime DESC, t.id
+             LIMIT $2
              FOR KEY SHARE OF t SKIP LOCKED),
+           due AS (
+             SELECT id FROM (SELECT id, mtime FROM existing
+                             UNION ALL SELECT id, mtime FROM fresh) d
+             ORDER BY mtime DESC, id
+             LIMIT $2),
            claimed AS (
              INSERT INTO track_stages (track_id, stage, status, next_attempt_at, started_at, updated_at)
              SELECT id, $1, 'working', now() + interval '15 minutes', now(), now() FROM due
+             ORDER BY id
              ON CONFLICT (track_id, stage) DO UPDATE SET
                status = 'working',
                redelivered = track_stages.redelivered + (track_stages.status = 'working')::int,

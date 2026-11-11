@@ -174,3 +174,162 @@ pub struct TopTrack {
     pub artist: String,
     pub plays: i64,
 }
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsResponse {
+    pub period: String,
+    pub listening: ListeningStats,
+    pub shelf: ShelfStats,
+    pub spoken: SpokenStats,
+    pub signature: Signature,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Tally {
+    pub total: i64,
+    pub heard: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct AnalysisTally {
+    pub done: i64,
+    pub failed: i64,
+    pub pending: i64,
+    pub total: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Decade {
+    pub decade: i32,
+    pub albums: i64,
+    pub heard: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShelfStats {
+    pub tracks: Tally,
+    pub albums: Tally,
+    pub artists: Tally,
+    pub analysis: AnalysisTally,
+    pub never_played: i64,
+    pub decades: Vec<Decade>,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct SpokenStats {
+    pub audiobooks: AudiobookStats,
+    pub podcasts: PodcastStats,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudiobookStats {
+    pub seconds: i64,
+    pub finished: i64,
+    pub in_progress: i64,
+    pub set_aside: i64,
+    pub top_authors: Vec<Author>,
+    pub current: Option<CurrentBook>,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Author {
+    pub name: String,
+    pub seconds: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct CurrentBook {
+    pub title: String,
+    pub author: Option<String>,
+    pub percent: f64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodcastStats {
+    pub seconds: i64,
+    pub finished: i64,
+    pub in_progress: i64,
+    pub subscriptions: i64,
+    pub backlog: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Concentration {
+    pub for_half: i64,
+    pub for_eighty: i64,
+    pub distinct: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlbumHabit {
+    pub moves: i64,
+    #[serde(serialize_with = "js_f64")]
+    pub same_album_pct: f64,
+    #[serde(serialize_with = "js_f64")]
+    pub in_order_pct: f64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Era {
+    pub median_year: i32,
+    pub buckets: Vec<EraBucket>,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct EraBucket {
+    pub label: String,
+    pub plays: i64,
+    #[serde(serialize_with = "js_f64")]
+    pub percent: f64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Signature {
+    pub concentration: Option<Concentration>,
+    pub album_habit: Option<AlbumHabit>,
+    pub era: Option<Era>,
+    pub key: Option<KeyStats>,
+    pub owned_vs_played: Vec<OwnedVsPlayed>,
+    pub hourly: Vec<HourlyEnergy>,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyStats {
+    #[serde(serialize_with = "js_f64")]
+    pub minor_pct: f64,
+    pub top: Vec<KeyTop>,
+    pub all: Vec<KeyCount>,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct KeyTop {
+    pub key: String,
+    pub plays: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct KeyCount {
+    pub key: String,
+    pub scale: KeyScale,
+    pub plays: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyScale {
+    Major,
+    Minor,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct OwnedVsPlayed {
+    pub label: String,
+    #[serde(serialize_with = "js_f64")]
+    pub owned: f64,
+    #[serde(serialize_with = "js_f64")]
+    pub played: f64,
+    pub unit: StatsUnit,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatsUnit {
+    Ratio,
+    Bpm,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct HourlyEnergy {
+    pub hour: i32,
+    pub plays: i64,
+    #[serde(serialize_with = "js_f64")]
+    pub energy: f64,
+}

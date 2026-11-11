@@ -61,3 +61,25 @@ mod tests {
         assert_eq!(serde_json::to_string(&Value(15.5)).unwrap(), "15.5");
     }
 }
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct HourTrack {
+    pub title: String,
+    pub artist: String,
+    pub listens: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct NamedListens {
+    pub name: String,
+    pub listens: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HourDetail {
+    pub weekday: i32,
+    pub hour: i32,
+    pub listens: i64,
+    pub tracks: Vec<HourTrack>,
+    pub artists: Vec<NamedListens>,
+    pub last_at: Option<String>,
+}

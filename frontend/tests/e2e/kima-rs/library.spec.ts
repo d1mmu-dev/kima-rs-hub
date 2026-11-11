@@ -194,4 +194,18 @@ test("hidden sections are hidden", async ({ page, request }) => {
     await expect(page.getByRole("link", { name: "Discovery" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Podcasts" })).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Audiobooks" })).toHaveCount(0);
+    // v1.12.3 sections kima-rs has no API for yet: stats and the changelog (D-030 flags `stats`, `changelog`).
+    await expect(page.getByRole("link", { name: "stats", exact: true })).toHaveCount(0);
+    for (const path of ["/stats/", "/changelog/"]) {
+        await page.goto(path);
+        await expect(page.getByText("Not available yet")).toBeVisible();
+    }
+});
+
+test("upstream removed the queue page and the podcast genre page", async ({ page }) => {
+    // v1.12.3 moved the queue into the side panel and dropped /podcasts/genre; the export has neither.
+    for (const path of ["/queue/", "/podcasts/genre/"]) {
+        const res = await page.goto(path);
+        expect(res?.status(), path).toBe(404);
+    }
 });

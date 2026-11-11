@@ -25,8 +25,9 @@ test("native apps: create a token, use it on /rest, revoke it", async ({ page, r
         localStorage.setItem("refresh_token", v.refreshToken);
     }, s);
 
-    await page.goto("/settings");
-    await page.getByRole("button", { name: /native apps/i }).click();
+    // v1.12.3: the token list is the "Apps" section of the personal settings page, always open.
+    await page.goto("/settings/");
+    await page.getByRole("button", { name: "Apps", exact: true }).click();
     await expect(page.getByText("Setup Guide")).toBeVisible();
     await expect(page.getByText("Active Tokens")).toBeVisible();
 

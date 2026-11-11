@@ -16,6 +16,7 @@ pub fn routes() -> Router<AppState> {
         .route("/stats", get(stats))
         .route("/stats/tracks", get(tracks))
         .route("/stats/track/{id}/plays", get(track_plays))
+        .route("/stats/region", get(region_detail))
         .route("/stats/hour", get(hour_detail))
 }
 
@@ -278,6 +279,35 @@ async fn track_plays(
         0
     };
     Ok(Json(TrackPlays { plays }))
+}
+
+async fn region_detail(
+    _user: AuthUser,
+    RawQuery(query): RawQuery,
+) -> Result<Json<kima_api_types::stats::RegionDetail>, ApiError> {
+    let args = args::Args(
+        form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes())
+            .into_owned()
+            .collect(),
+    );
+    let x = args.get("x").number();
+    let y = args.get("y").number();
+    if [x, y]
+        .iter()
+        .any(|n| !n.is_finite() || n.fract() != 0.0 || !(1.0..=24.0).contains(n))
+    {
+        return Err(ApiError::BadRequest("Bad request".into()));
+    }
+    // S1 does not use track analysis; S2 will replace this empty result.
+    Ok(Json(kima_api_types::stats::RegionDetail {
+        x: x as i32,
+        y: y as i32,
+        listens: 0,
+        tracks: vec![],
+        energy: None,
+        valence: None,
+        bpm: None,
+    }))
 }
 
 async fn hour_detail(

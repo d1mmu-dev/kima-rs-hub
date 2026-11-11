@@ -9,5 +9,6 @@ description = "Wire-format DTOs shared by kima-api and kima-web (native and wasm
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+time.workspace = true
 # Not `uuid.workspace`: the workspace enables v4/v7 (getrandom), which does not build for wasm32-unknown-unknown.
 uuid = { version = "1", default-features = false, features = ["serde"] }

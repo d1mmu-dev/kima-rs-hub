@@ -958,8 +958,9 @@ pub async fn paths_under(pool: &PgPool, dir_prefix: &str) -> sqlx::Result<Vec<St
     .await
 }
 
-/// Clears the missing flag of tracks whose file is back at the same path, unchanged, and
-/// reopens their `FILE_MISSING` stage rows. Returns how many tracks changed.
+/// Clears the missing flag of tracks whose file is back at the same path and reopens their
+/// `FILE_MISSING` stage rows; re-reading a changed file is the caller's job. Returns how many
+/// tracks changed.
 pub async fn clear_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
     let n = clear_missing_in(&mut tx, paths).await?;

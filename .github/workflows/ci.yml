@@ -36,6 +36,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # The input-snapshot tests need FICLONE, which the runner's ext4 lacks; they fail loudly
+      # without it (docs/m4-input-snapshots.md). Give them a real reflink filesystem (loop XFS,
+      # reflink=1) owned by the runner user instead of skipping them, and prove a clone works.
+      - name: Reflink filesystem for the input-snapshot tests
+        run: |
+          sudo apt-get install -y xfsprogs
+          img="$RUNNER_TEMP/kima-reflink.img"
+          truncate -s 2G "$img"
+          mkfs.xfs -q -m reflink=1 "$img"
+          sudo mkdir -p /mnt/kima-reflink
+          sudo mount -o loop "$img" /mnt/kima-reflink
+          sudo chown "$(id -u):$(id -g)" /mnt/kima-reflink
+          echo probe > /mnt/kima-reflink/probe
+          cp --reflink=always /mnt/kima-reflink/probe /mnt/kima-reflink/probe.clone
+          rm /mnt/kima-reflink/probe /mnt/kima-reflink/probe.clone
+          findmnt /mnt/kima-reflink
+          echo "KIMA_TEST_REFLINK_DIR=/mnt/kima-reflink" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

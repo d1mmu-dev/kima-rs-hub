@@ -30,6 +30,7 @@ pg-publish = ["dep:kima-db", "dep:sqlx", "dep:tokio", "dep:uuid"]
 libc.workspace = true
 
 [dev-dependencies]
+kima-test-support.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

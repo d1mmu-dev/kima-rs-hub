@@ -245,7 +245,11 @@ async fn without_a_proxy_nothing_changes(pool: PgPool) {
 
 #[tokio::test]
 async fn a_bad_gateway_when_the_ssr_server_is_gone() {
-    let port = free_port(); // nothing listens there
+    // Bound but never listening: connections are refused, and the port stays ours, so the
+    // server below cannot be handed the same port (which made the proxy call itself: 431).
+    let held = tokio::net::TcpSocket::new_v4().unwrap();
+    held.bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+    let port = held.local_addr().unwrap().port();
     let app = web_proxy::layer(
         Router::new().route("/ok", get(|| async { "ok" })),
         Arc::new(WebProxy::new(port, vec![])),
@@ -537,8 +541,15 @@ fn the_process_exits_non_zero_when_the_ssr_server_cannot_start() {
         cases.push((dir, port));
     }
     for (build, ssr_port) in cases {
-        let out = Command::new(env!("CARGO_BIN_EXE_kima"))
-            .env_clear()
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kima"));
+        cmd.env_clear();
+        // The cleared environment is the server's configuration. The dynamic loader path is
+        // not: the pinned libsoxr lives in a private prefix reached only through
+        // LD_LIBRARY_PATH (CI, Dockerfile), and without it the binary cannot even start.
+        if let Some(path) = std::env::var_os("LD_LIBRARY_PATH") {
+            cmd.env("LD_LIBRARY_PATH", path);
+        }
+        let out = cmd
             .env("DATABASE_URL", "postgres://nobody@127.0.0.1:1/none")
             .env("KIMA_DATA_DIR", data.path())
             .env("KIMA_WEB_BUILD_DIR", &build)

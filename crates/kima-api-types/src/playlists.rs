@@ -156,3 +156,20 @@ pub struct RemoveItemResponse {
 pub struct MessageResponse {
     pub message: String,
 }
+
+/// Body of `POST /playlists/:id/items/:itemId/move`; malformed anchors reach handler validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveItemBody {
+    pub after_item_id: Option<String>,
+}
+
+/// Answer of `POST /playlists/:id/items/:itemId/move`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveItemResponse {
+    pub success: bool,
+    pub rank: String,
+}
+
+/// Compatibility name for the add-items request.
+pub type AddItemBody = AddItems;

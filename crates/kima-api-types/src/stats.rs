@@ -1,6 +1,11 @@
 use serde::Serializer;
 use time::OffsetDateTime;
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct TrackPlays {
+    pub plays: i64,
+}
+
 pub fn js_iso(t: OffsetDateTime) -> String {
     let t = t.to_offset(time::UtcOffset::UTC);
     let year = match t.year() {

@@ -30,10 +30,7 @@ pub fn routes() -> Router<AppState> {
             get(detail).put(update).patch(update).delete(remove),
         )
         .route("/playlists/{id}/hide", post(hide).delete(unhide))
-        .route(
-            "/playlists/{id}/items",
-            post(add_items).delete(remove_items),
-        )
+        .route("/playlists/{id}/items", post(add_items))
         .route("/playlists/{id}/items/batch", post(add_batch))
         .route("/playlists/{id}/items/{track_id}", delete(remove_item))
         .route("/playlists/{id}/items/{item_id}/move", post(move_item))
@@ -420,23 +417,6 @@ async fn add_items(
 #[serde(rename_all = "camelCase")]
 struct TrackIdsBody {
     track_ids: Vec<String>,
-}
-
-async fn remove_items(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Path(id): Path<String>,
-    ApiJson(body): ApiJson<TrackIdsBody>,
-) -> Result<Json<Value>, ApiError> {
-    let p = guard(&state, &user, &id, Need::Owner).await?;
-    too_many(body.track_ids.len(), 1000)?;
-    let (ids, _) = split_ids(&body.track_ids);
-    let removed = playlists::remove_tracks(&state.pool, p.id, &ids).await?;
-    if removed == 0 {
-        return Err(ApiError::NotFound("No matching tracks in playlist"));
-    }
-    announce(&state, user.id, p.id, false);
-    Ok(Json(json!({ "removed": removed })))
 }
 
 async fn add_batch(

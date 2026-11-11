@@ -802,7 +802,8 @@ async fn store(
     tx.commit().await?;
     let stored = match (repointed, old_album) {
         (Some(id), _) => Stored::Repointed(id),
-        (None, Some(_)) => Stored::Updated,
+        (None, Some(_)) if up.row_changed => Stored::Updated,
+        (None, Some(_)) => Stored::Unchanged,
         (None, None) => Stored::Added,
     };
     Ok(Some(StoreResult {
@@ -994,6 +995,8 @@ async fn flip_and_refresh(
 enum Stored {
     Added,
     Updated,
+    /// Read again, and every stored value already matched: nothing was written.
+    Unchanged,
     /// Took over a missing track's row; carries that track's id.
     Repointed(Uuid),
 }
@@ -1299,7 +1302,7 @@ async fn process_folder(
             Ok(Some(r)) => {
                 touched.add(&r, &track);
                 out.album_moved |= r.album_moved;
-                out.stored.push((s.path.clone(), Stored::Updated));
+                out.stored.push((s.path.clone(), r.stored));
             }
             Err(e) if per_file_db_error(&e) => out.failed.push((s.path.clone(), e.to_string())),
             Err(e) => return Err(e.into()),
@@ -1495,6 +1498,7 @@ async fn reconcile_with(
             match stored {
                 Stored::Added => report.added += 1,
                 Stored::Updated => report.updated += 1,
+                Stored::Unchanged => {}
                 Stored::Repointed(id) => {
                     report.repointed += 1;
                     if vanished_ids.contains(&id) {
@@ -1707,6 +1711,7 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
     let outcome = match mine {
         Some(Stored::Added) => PathOutcome::Added,
         Some(Stored::Updated) => PathOutcome::Updated,
+        Some(Stored::Unchanged) => PathOutcome::Unchanged,
         Some(Stored::Repointed(_)) => PathOutcome::Repointed,
         None => {
             let reason = result
@@ -1811,6 +1816,7 @@ pub async fn reread_paths(
             match stored {
                 Stored::Added => report.added += 1,
                 Stored::Updated => report.updated += 1,
+                Stored::Unchanged => {}
                 Stored::Repointed(_) => report.repointed += 1,
             }
         }

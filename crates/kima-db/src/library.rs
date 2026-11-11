@@ -102,6 +102,9 @@ pub struct Upserted {
     pub artist: Uuid,
     /// The row existed and its stored content fingerprint differed.
     pub content_changed: bool,
+    /// The track row was inserted or at least one stored value changed; a re-read that
+    /// finds every value as stored writes nothing (`updated_at` stays).
+    pub row_changed: bool,
     /// The album row was created by this upsert.
     pub album_created: bool,
 }
@@ -173,12 +176,13 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
     )
     .fetch_one(&mut *tx)
     .await?;
-    let (track_id, content_changed) = upsert_track_row(tx, t, album.id).await?;
+    let (track_id, content_changed, row_changed) = upsert_track_row(tx, t, album.id).await?;
     Ok(Upserted {
         track: track_id,
         album: album.id,
         artist: artist_id,
         content_changed,
+        row_changed,
         album_created: album.created,
     })
 }
@@ -231,12 +235,13 @@ pub async fn upsert_track_pinned(
     let artist = sqlx::query_scalar!("SELECT artist_id FROM albums WHERE id = $1", album)
         .fetch_one(&mut *tx)
         .await?;
-    let (track, content_changed) = upsert_track_row(tx, t, album).await?;
+    let (track, content_changed, row_changed) = upsert_track_row(tx, t, album).await?;
     Ok(Upserted {
         track,
         album,
         artist,
         content_changed,
+        row_changed,
         album_created: false,
     })
 }
@@ -260,13 +265,14 @@ pub async fn release_autotag_albums(conn: &mut PgConnection, albums: &[Uuid]) ->
     Ok(r.rows_affected())
 }
 
-/// The track row of [`upsert_track`] on `album_id`: answers the track id and whether its stored
-/// content fingerprint differed.
+/// The track row of [`upsert_track`] on `album_id`: answers the track id, whether its stored
+/// content fingerprint differed, and whether the row was written at all (an existing row whose
+/// values all match is left alone).
 async fn upsert_track_row(
     tx: &mut PgConnection,
     t: &ResolvedTrack,
     album_id: Uuid,
-) -> sqlx::Result<(Uuid, bool)> {
+) -> sqlx::Result<(Uuid, bool, bool)> {
     let previous: Option<Vec<u8>> =
         sqlx::query_scalar!("SELECT fingerprint FROM tracks WHERE path = $1", t.path)
             .fetch_optional(&mut *tx)
@@ -301,6 +307,25 @@ async fn upsert_track_row(
                                   WHEN tracks.isrc_source = 'id3' THEN NULL
                                   ELSE tracks.isrc_source END,
                missing_since = NULL, updated_at = now()
+           WHERE (tracks.album_id, tracks.artist_name, tracks.title, tracks.year, tracks.disc,
+                  tracks.track_no, tracks.duration_secs, tracks.codec, tracks.bitrate, tracks.size,
+                  tracks.mtime, tracks.fingerprint, tracks.guessed, tracks.tag_recording_mbid,
+                  tracks.tag_release_track_mbid, tracks.tag_release_mbid,
+                  tracks.tag_release_group_mbid, tracks.tag_artist_mbids,
+                  tracks.tag_album_artist_mbids, tracks.disc_total, tracks.track_total)
+                 IS DISTINCT FROM
+                 (EXCLUDED.album_id, EXCLUDED.artist_name, EXCLUDED.title, EXCLUDED.year,
+                  EXCLUDED.disc, EXCLUDED.track_no, EXCLUDED.duration_secs, EXCLUDED.codec,
+                  EXCLUDED.bitrate, EXCLUDED.size, EXCLUDED.mtime, EXCLUDED.fingerprint,
+                  EXCLUDED.guessed, EXCLUDED.tag_recording_mbid, EXCLUDED.tag_release_track_mbid,
+                  EXCLUDED.tag_release_mbid, EXCLUDED.tag_release_group_mbid,
+                  EXCLUDED.tag_artist_mbids, EXCLUDED.tag_album_artist_mbids,
+                  EXCLUDED.disc_total, EXCLUDED.track_total)
+              OR tracks.missing_since IS NOT NULL
+              OR (EXCLUDED.isrc IS NOT NULL
+                  AND (tracks.isrc, tracks.isrc_source)
+                      IS DISTINCT FROM (EXCLUDED.isrc, EXCLUDED.isrc_source))
+              OR (EXCLUDED.isrc IS NULL AND tracks.isrc_source = 'id3')
            RETURNING id"#,
         Uuid::now_v7(),
         album_id,
@@ -327,12 +352,19 @@ async fn upsert_track_row(
         t.track_total,
         t.isrc,
     )
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok((
-        track_id,
-        previous.is_some_and(|f| f.as_slice() != t.fingerprint.as_slice()),
-    ))
+    let content_changed = previous.is_some_and(|f| f.as_slice() != t.fingerprint.as_slice());
+    match track_id {
+        Some(id) => Ok((id, content_changed, true)),
+        // The row exists and every value already matches: nothing was written.
+        None => {
+            let id = sqlx::query_scalar!("SELECT id FROM tracks WHERE path = $1", t.path)
+                .fetch_one(&mut *tx)
+                .await?;
+            Ok((id, content_changed, false))
+        }
+    }
 }
 
 /// Sets the album's `release_mbid` and `release_group_mbid` to the mode of its present tracks'

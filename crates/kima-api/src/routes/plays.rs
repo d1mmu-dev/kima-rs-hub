@@ -1,4 +1,4 @@
-//! `POST /api/plays`, `GET /api/plays` (upstream `routes/plays.ts`) and
+//! `POST /api/plays` (upstream `routes/plays.ts`; `GET /api/plays` is gone, D-172) and
 //! `GET /api/library/recently-listened` (`routes/library/tracks.ts`, artists only: M1 has no
 //! audiobooks or podcasts).
 

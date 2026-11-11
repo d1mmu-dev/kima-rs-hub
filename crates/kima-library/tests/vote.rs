@@ -494,6 +494,36 @@ async fn refile_rereads_unchanged_files_and_merges_stray_guest(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn second_refile_of_an_unchanged_library_writes_nothing(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    legacy_stray(&pool, root).await;
+    let first = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(
+        first.updated > 0,
+        "the first re-file files the stray: {first:?}"
+    );
+    let rows = "SELECT path, updated_at, to_jsonb(t)::text FROM tracks t ORDER BY path";
+    let before: Vec<(String, time::OffsetDateTime, String)> =
+        sqlx::query_as(rows).fetch_all(&pool).await.unwrap();
+
+    let again = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(again.failed.is_empty(), "{again:?}");
+    assert_eq!(again.tags_read, 4, "a re-file still reads every file");
+    assert_eq!(again.updated, 0, "nothing changed on disk: {again:?}");
+    let after: Vec<(String, time::OffsetDateTime, String)> =
+        sqlx::query_as(rows).fetch_all(&pool).await.unwrap();
+    assert_eq!(after, before, "no row is rewritten, updated_at included");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn reread_all_job_dispatches_forced_scan(pool: PgPool) {
     if !require_ffmpeg() {
         return;

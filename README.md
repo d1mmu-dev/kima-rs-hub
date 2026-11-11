@@ -60,9 +60,18 @@ reconcile also runs at startup.
   (at least 10 missing tracks and more than 10% of the library) prevents retirement; when a
   same-slot copy exists, history is handed over. `GET /api/library/removals` is an admin-only,
   newest-first audit of retired tracks (`count`, `removals`; optional `limit` and `offset`).
-  Restoring a file before retirement clears its missing flag.
-- `POST /api/library/scan` requests a normal reconcile. A forced album re-file route is **not**
-  available yet: `POST /api/library/refile` is planned, not a synonym for the scan route.
+  Restoring a file before retirement clears its missing flag. There is no `RECONCILE_MODE`
+  switch as upstream has: the 7-day grace is fixed, and `KIMA_WATCH_MODE=off` stops the
+  event-driven scans (D-161).
+- `POST /api/library/scan` (admin) requests a normal reconcile, which skips files whose size and
+  modification time are unchanged; it answers with the `jobId` that
+  `GET /api/library/scan/status/:jobId` reports on.
+- `POST /api/library/refile` (admin) queues a one-off re-file: a forced full reconcile that
+  re-reads every present file, unchanged ones included, and files each album again under the
+  artist elected from all its songs. It answers 202 `{"message":"Re-filing albums by their tags"}`,
+  or 409 while a re-file is already queued or running. Albums or artists a person edited and
+  folders with an unreadable file or disc subfolder are left as they are; row ids, plays and
+  playlists are kept. The outcome is logged (`library re-file finished`), not returned (D-168).
 
 **Streaming.** `GET /api/library/tracks/:id/stream?quality=...` supports `original` (the file as
 is, with range requests for seeking), `high` (MP3 320 kbps), `medium` (MP3 192 kbps) and `low`

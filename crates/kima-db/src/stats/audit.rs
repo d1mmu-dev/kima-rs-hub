@@ -42,7 +42,11 @@ pub struct IgnoredRow {
     pub ignored_at: OffsetDateTime,
 }
 fn seconds(a: OffsetDateTime, b: OffsetDateTime) -> f64 {
-    (a - b).whole_microseconds() as f64 / 1_000_000.0
+    // Prisma materializes each timestamp as a JavaScript Date before subtraction.
+    // Truncate each instant separately, including instants before the Unix epoch;
+    // truncating the duration would change comparisons across millisecond boundaries.
+    let millis = |t: OffsetDateTime| t.unix_timestamp_nanos().div_euclid(1_000_000);
+    (millis(a) - millis(b)) as f64 / 1_000.0
 }
 pub fn listens_of(rows: &[AuditRow]) -> Vec<Listen> {
     let mut out: Vec<Listen> = Vec::new();
@@ -227,6 +231,22 @@ mod tests {
             duration,
         }
     }
+    #[test]
+    fn javascript_milliseconds_at_verdict_threshold() {
+        let mut first = row(1, 0, 100, false);
+        first.played_at += time::Duration::microseconds(500);
+        let listens = listens_of(&[first, row(2, 50, 100, false)]);
+        assert_eq!(listens[0].verdict, Verdict::Unclear);
+    }
+
+    #[test]
+    fn javascript_milliseconds_at_group_boundary() {
+        let mut first = row(1, 0, 100, false);
+        first.played_at += time::Duration::microseconds(500);
+        let listens = listens_of(&[first, row(1, 100, 100, false)]);
+        assert_eq!(listens.len(), 2);
+    }
+
     #[test]
     fn thresholds_global_gaps_anchoring_and_recorded_heard() {
         let rows = vec![

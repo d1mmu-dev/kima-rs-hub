@@ -1302,7 +1302,7 @@ async fn process_folder(
             Ok(Some(r)) => {
                 touched.add(&r, &track);
                 out.album_moved |= r.album_moved;
-                out.stored.push((s.path.clone(), Stored::Updated));
+                out.stored.push((s.path.clone(), r.stored));
             }
             Err(e) if per_file_db_error(&e) => out.failed.push((s.path.clone(), e.to_string())),
             Err(e) => return Err(e.into()),

@@ -723,17 +723,74 @@ an adapted file can differ visually. See "Browser and visual checks" below.
 - Podcasts AI filter (owner spec, M6): not implemented here; backend and UI wait for M6.
 - npm dependencies stay at the fork's lockfile (D-171).
 
+## Commits
+
+`11870b2` codemod rules and tests; `e66a39f` the refresh itself; `be6db6f` kima-rs Playwright specs; `75526f4`
+request gating follow-up; then this inventory and the M9 baselines. The refresh is one commit rather than one per
+subsystem: `lib/api.ts`, `hooks/useQueries.ts` and the feature flags are shared by every subsystem, and a trial
+split (core libraries and hooks on top of the old components) left type errors in 32 files.
+
 ## Gates (frontend/, Node v26.7.0)
 
 - `npx tsc --noEmit`: exit 0 (first run after the apply: syntax errors in one file, then 40 diagnostics; the type
   error list was the conflict map).
-- `npm run test:unit`: 123 files, 804 passed, 5 skipped (`mood-stations` without `KIMA_UPSTREAM_DIR`; with it set
-  to an upstream checkout the 5 pass). First run after the apply: 34 failed in 11 files.
+- `npm run test:unit`: 125 files, 808 passed, 5 skipped (`mood-stations` without `KIMA_UPSTREAM_DIR`; with it set
+  to an upstream checkout the 5 pass). First run after the apply: 34 failed in 11 files (123 files then).
 - `npm run build`: exit 0, 40 static-generation units, 41 HTML files under `out/` (previously 41 units / 42 files:
   `-/queue`, `-/podcasts/genre`, `+/changelog`).
 - `node --test tools/frontend-route-codemod.test.mjs`: 6 passed (category rule and `usePathname` rewrite failed
   before the change).
 - kima-rs Playwright (`playwright.kima-rs.config.ts`, kima `target/debug/kima` from this worktree serving `out/`,
-  isolated Postgres, generated fixture library, `KIMA_IDENTIFY=off`): 13 passed. Before the spec updates: 8 passed,
+  isolated Postgres, generated fixture library, `KIMA_IDENTIFY=off`): 13 passed (also after the request-gating
+  follow-up). Before the spec updates: 8 passed,
   4 failed (settings split into pages, the always-open Apps section). The two new checks (stats/changelog hidden,
   `/queue` and `/podcasts/genre` 404) failed against an export of `8a8aa1f` and pass on the refresh.
+
+## Browser and visual checks
+
+Run on the final tree: kima built from this branch (`target/debug/kima`), kima-web built with vertigo 0.13.4 from
+this branch, the legacy reference from the committed `frontend/` as a `next dev` comparison copy in scratch (never
+a product path), the seeded visual library on the isolated database. Per page, `diff % / ink % / SSIM` at
+1440x900, 1024x768, 390x844 (thresholds 1 % / 8 % / 0.93):
+
+| page | 1440x900 | 1024x768 | 390x844 |
+|---|---|---|---|
+| login | 0.00 / 0.0 / 1.00 | 0.00 / 0.0 / 1.00 | 0.00 / 0.0 / 1.00 |
+| setup | 8.38 / 32.4 / 0.14 | 13.87 / 39.8 / 0.16 | 16.59 / 51.5 / 0.16 |
+| artists | 3.48 / 32.8 / 0.34 | 4.28 / 28.1 / 0.37 | 7.19 / 35.6 / 0.35 |
+| albums | 22.41 / 63.4 / 0.24 | 29.85 / 64.4 / 0.40 | 24.75 / 41.4 / 0.33 |
+| tracks | 5.42 / 44.5 / 0.38 | 6.89 / 40.0 / 0.40 | 11.93 / 49.2 / 0.34 |
+| search | 1.94 / 32.6 / 0.42 | 2.09 / 25.4 / 0.56 | 4.39 / 45.6 / 0.44 |
+| playlists | 6.43 / 63.3 / 0.32 | 10.98 / 66.5 / 0.36 | 15.70 / 73.9 / 0.31 |
+| playlist | 4.56 / 47.2 / 0.41 | 1.92 / 14.6 / 0.67 | 6.72 / 37.9 / 0.51 |
+| settings | 2.43 / 37.1 / 0.41 | 2.89 / 31.2 / 0.42 | 4.78 / 56.7 / 0.41 |
+| player | 10.56 / 45.9 / 0.34 | 22.60 / 53.5 / 0.37 | 19.99 / 48.5 / 0.35 |
+
+Inspected by eye (legacy, kima-web): login is the same page in both (the 0.00 is real, not a blank capture);
+albums 1440 shows the v1.12.3 icon rail and library panel, the smaller page title and the inline sort/page-size
+controls against kima-web's v1.11 "navigation index" and "refine" button; settings 1440 shows the five-page
+navigation (you/library/sources/server/people) and the Apps section against kima-web's single account section;
+player 1024 shows the delete action and playing indicator in track rows; setup shows the new two-step stepper;
+playlists 390 shows the import buttons and a three-tile mosaic. The token and layout changes are written into the
+M9 plan's Task 15b Step 1. These are new baselines for kima-web, not parity.
+
+API calls the refreshed reference still makes that kima-rs answers 404 (legacy dev-server log of the final run):
+`/notifications` (48), `/vibe/mood-summary` (24), `/notifications/downloads/history` (16), `/auth/2fa/status` (6),
+`/soulseek/status` (6), `/search/discover` (6), `/vibe/mood/:id` (1). `/stats` and `/whats-new/*` no longer
+appear (D-170 follow-up).
+
+## Not done / open
+
+- Visual parity of kima-web with the v1.12.3 reference (M9 Task 15b / M10): every page but login is over the
+  bounds above.
+- The 404s listed above are not gated; the playlists page's import buttons show although `imports` is off (as
+  before this refresh).
+- Podcasts AI-label filter and the podcast backend: M6.
+- Independent review of these commits and hosted CI on a pushed SHA: not done (nothing pushed).
+
+## Progress note (2026-11-11)
+
+Done in worktree `kima-rust-hub-m-sync-frontend`, branch `feature/m-sync-frontend`, not pushed. Next command for a
+resuming writer: `git log --oneline 8a8aa1f..HEAD` and, to re-run the browser checks,
+`python3 ~/.hermes/cache/scratch/t19-evidence/run_e2e.py` (needs the isolated DB URL file and a
+`t19-target/debug/kima` build; scratch is temporary).

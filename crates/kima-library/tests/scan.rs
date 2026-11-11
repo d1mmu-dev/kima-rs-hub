@@ -748,6 +748,13 @@ async fn failed_upsert_rolls_back_the_repoint(pool: PgPool) {
     scan::reconcile(&c).await.unwrap();
     let id = track_id(&pool, "A/B/01.flac").await;
 
+    // A stored value the re-read must correct, so the upsert after the re-point writes the
+    // row (an upsert whose values all match writes nothing).
+    sqlx::query("UPDATE tracks SET title = 'stale' WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
     // Fails the upsert's UPDATE (which sets `title`) but not the re-point (which does not).
     sqlx::query(
         "CREATE FUNCTION boom() RETURNS trigger LANGUAGE plpgsql AS $$

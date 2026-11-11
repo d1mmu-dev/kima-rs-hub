@@ -387,7 +387,7 @@ in-flight milestone claimed it first).
     into `kima-web`; assets without a clear right to reuse are replaced and listed as compromises.
     - **Re-baseline to v1.12.3 (M-SYNC Task 19, 2026-11-11).** The reference `frontend/` now follows upstream
       v1.12.3 (`c7527577`); `frontend/app/globals.css` is byte-identical to it. Token changes against the v1.11
-      (`12faf1cd`) sheet the M9 styling was built from (70 -> 72 custom properties):
+      (the previous pin) sheet the M9 styling was built from (70 -> 72 custom properties):
       - added: `--bg-chrome: #000000`; `--card-w: 11.25rem` and `--card-gap: clamp(0.75rem, 1.6vw, 1.25rem)` (one
         card width and gap for grids and shelves); `--page-end: clamp(2rem, 3.5vw, 3rem)`, and
         `calc(var(--mini-clearance) + 1rem)` under `:root[data-mini-player]` (pages end with `.page-end`, not their

@@ -83,3 +83,94 @@ pub struct HourDetail {
     pub artists: Vec<NamedListens>,
     pub last_at: Option<String>,
 }
+
+#[cfg(test)]
+mod listening_tests {
+    use super::*;
+    #[test]
+    fn listening_wire_shape_keeps_empty_analysis_and_sources_object() {
+        let value = ListeningStats {
+            plays: 1,
+            estimated_seconds: 180,
+            distinct_tracks: 1,
+            distinct_artists: 1,
+            distinct_albums: 1,
+            first_play: None,
+            last_play: None,
+            by_source: [("LIBRARY".to_string(), 1)].into_iter().collect(),
+            clock: [[0; 24]; 7],
+            peak: None,
+            shape: vec![],
+            drift: vec![DriftMonth {
+                month: "2026-04".into(),
+                energy: None,
+                valence: None,
+                bpm: None,
+                plays: 1,
+            }],
+            top_artists: vec![],
+            top_tracks: vec![],
+        };
+        let json = serde_json::to_value(value).unwrap();
+        assert_eq!(json["bySource"]["LIBRARY"], 1);
+        assert_eq!(json["shape"], serde_json::json!([]));
+        assert_eq!(
+            json["drift"][0],
+            serde_json::json!({"month":"2026-04","energy":null,"valence":null,"bpm":null,"plays":1})
+        );
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListeningStats {
+    pub plays: i64,
+    pub estimated_seconds: i64,
+    pub distinct_tracks: i64,
+    pub distinct_artists: i64,
+    pub distinct_albums: i64,
+    pub first_play: Option<String>,
+    pub last_play: Option<String>,
+    pub by_source: std::collections::BTreeMap<String, i64>,
+    pub clock: [[i64; 24]; 7],
+    pub peak: Option<Peak>,
+    pub shape: Vec<ShapeCell>,
+    pub drift: Vec<DriftMonth>,
+    pub top_artists: Vec<TopArtist>,
+    pub top_tracks: Vec<TopTrack>,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Peak {
+    pub weekday: i32,
+    pub hour: i32,
+    pub plays: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ShapeCell {
+    pub x: i32,
+    pub y: i32,
+    pub plays: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct DriftMonth {
+    pub month: String,
+    pub energy: Option<f64>,
+    pub valence: Option<f64>,
+    pub bpm: Option<f64>,
+    pub plays: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopArtist {
+    pub id: String,
+    pub name: String,
+    pub plays: i64,
+    pub estimated_seconds: i64,
+}
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct TopTrack {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub plays: i64,
+}

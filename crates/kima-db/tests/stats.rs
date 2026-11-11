@@ -2,6 +2,59 @@ use kima_db::PgPool;
 use uuid::Uuid;
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn playable_db_counts_listens_and_respects_user(pool: PgPool) {
+    use kima_db::stats::{listens::Period, playable::playable_slice};
+    let user = Uuid::now_v7();
+    let other = Uuid::now_v7();
+    let artist = Uuid::now_v7();
+    let album = Uuid::now_v7();
+    let a = Uuid::now_v7();
+    let b = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users (id,username,password_hash) VALUES ($1,'ana','h'),($2,'ben','h')",
+    )
+    .bind(user)
+    .bind(other)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO artists (id,name,name_key,display_name) VALUES ($1,'artist','artist','Edited artist')").bind(artist).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO albums (id,artist_id,title,title_key,year,display_year,display_title) VALUES ($1,$2,'album','album',1980,1999,'Edited album')").bind(album).bind(artist).execute(&pool).await.unwrap();
+    for (id, title) in [(a, "A"), (b, "B")] {
+        sqlx::query("INSERT INTO tracks (id,album_id,artist_name,title,display_title,duration_secs,codec,path,size,mtime,fingerprint) VALUES ($1,$2,'artist',$3,$3,180,'flac',$3,0,now(),decode('','hex'))").bind(id).bind(album).bind(title).execute(&pool).await.unwrap();
+    }
+    for (who, track, offset) in [(user, a, 0), (user, a, -30), (user, b, -300), (other, b, 0)] {
+        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now()+$4 * interval '1 second')").bind(Uuid::now_v7()).bind(who).bind(track).bind(offset as f64).execute(&pool).await.unwrap();
+    }
+    let rows = playable_slice(&pool, user, "top", f64::NAN, 40, Period::All)
+        .await
+        .unwrap();
+    assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![a, b]);
+    assert_eq!(rows[0].artist_name, "Edited artist");
+    assert_eq!(rows[0].album_title, "Edited album");
+    assert!(
+        playable_slice(&pool, user, "never", f64::NAN, 40, Period::All)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        playable_slice(&pool, other, "never", f64::NAN, 40, Period::All)
+            .await
+            .unwrap()[0]
+            .id,
+        a
+    );
+    assert_eq!(
+        playable_slice(&pool, user, "decade", 1990.0, 40, Period::All)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn ignore_rows_cascade_with_track_and_user(pool: PgPool) {
     let user = Uuid::now_v7();
     let artist = Uuid::now_v7();

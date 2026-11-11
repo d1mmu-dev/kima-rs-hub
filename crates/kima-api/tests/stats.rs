@@ -8,6 +8,156 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn tracks_returns_full_playable_shape(pool: PgPool) {
+    let row = seed(&pool, Seed::new("Artist", "Album", Some(1994), "Song")).await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "ana").await;
+    sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now())")
+        .bind(Uuid::now_v7())
+        .bind(user.id)
+        .bind(row.track)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let response = server
+        .get("/api/stats/tracks?of=top")
+        .authorization_bearer(&token)
+        .await;
+    response.assert_status_ok();
+    assert_eq!(
+        response.json::<Value>(),
+        json!({"tracks":[{"id":row.track.to_string(),"title":"Song","duration":180,"artist":{"id":row.artist.to_string(),"name":"Artist"},"album":{"id":row.album.to_string(),"title":"Album","coverArt":row.album.to_string()}}]})
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn tracks_parameters_limits_and_auth(pool: PgPool) {
+    for n in 0..105 {
+        seed(
+            &pool,
+            Seed::new("Artist", "Album", Some(1991), &format!("Song {n:03}")),
+        )
+        .await;
+    }
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    server
+        .get("/api/stats/tracks?of=never")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    for query in ["", "of=bogus", "of=top&of=top"] {
+        let r = server
+            .get(&format!("/api/stats/tracks?{query}"))
+            .authorization_bearer(&token)
+            .await;
+        r.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(r.json::<Value>(), json!({"error":"Bad request"}));
+    }
+    for (query, count) in [
+        ("", 40),
+        ("&limit=", 1),
+        ("&limit=0", 1),
+        ("&limit=-5", 1),
+        ("&limit=2.9", 2),
+        ("&limit=500", 100),
+        ("&limit=abc", 40),
+    ] {
+        let r = server
+            .get(&format!("/api/stats/tracks?of=never{query}"))
+            .authorization_bearer(&token)
+            .await;
+        r.assert_status_ok();
+        assert_eq!(
+            r.json::<Value>()["tracks"].as_array().unwrap().len(),
+            count,
+            "{query}"
+        );
+    }
+    for query in [
+        "of=key&key=E%20minor",
+        "of=key&key=H%20dorian",
+        "of=decade&decade=0",
+        "of=decade&decade=abc",
+    ] {
+        let r = server
+            .get(&format!("/api/stats/tracks?{query}"))
+            .authorization_bearer(&token)
+            .await;
+        r.assert_status_ok();
+        assert_eq!(r.json::<Value>(), json!({"tracks":[]}));
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn tracks_period_isolation_decade_and_core(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Artist", "Album", Some(1981), "A")).await;
+    let b = seed(&pool, Seed::new("Artist", "Album", Some(1981), "B")).await;
+    let c = seed(&pool, Seed::new("Other", "Other", Some(2005), "C")).await;
+    sqlx::query("UPDATE albums SET display_year=1994 WHERE id=$1")
+        .bind(a.album)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = common::state(pool.clone());
+    let (ana, token) = common::user_with_token(&state, "ana").await;
+    let (ben, _) = common::user_with_token(&state, "ben").await;
+    for (user, track, seconds) in [
+        (ana.id, a.track, 0),
+        (ana.id, a.track, -300),
+        (ana.id, b.track, -3000000),
+        (ben.id, c.track, 0),
+    ] {
+        sqlx::query("INSERT INTO plays(id,user_id,track_id,played_at) VALUES ($1,$2,$3,now()+$4 * interval '1 second')").bind(Uuid::now_v7()).bind(user).bind(track).bind(seconds as f64).execute(&pool).await.unwrap();
+    }
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let get = |query: &str| format!("/api/stats/tracks?{query}");
+    let top = server
+        .get(&get("of=top&period=30d"))
+        .authorization_bearer(&token)
+        .await
+        .json::<Value>();
+    assert_eq!(top["tracks"].as_array().unwrap().len(), 1);
+    assert_eq!(top["tracks"][0]["id"], a.track.to_string());
+    let core = server
+        .get(&get("of=core&period=30d"))
+        .authorization_bearer(&token)
+        .await
+        .json::<Value>();
+    assert_eq!(top, core);
+    let all = server
+        .get(&get("of=top"))
+        .authorization_bearer(&token)
+        .await
+        .json::<Value>();
+    assert_eq!(all["tracks"][0]["id"], a.track.to_string());
+    assert_eq!(all["tracks"][1]["id"], b.track.to_string());
+    let never = server
+        .get(&get("of=never&period=30d"))
+        .authorization_bearer(&token)
+        .await
+        .json::<Value>();
+    assert_eq!(never["tracks"].as_array().unwrap().len(), 1);
+    assert_eq!(never["tracks"][0]["id"], c.track.to_string());
+    let decade = server
+        .get(&get("of=decade&decade=1990&period=30d"))
+        .authorization_bearer(&token)
+        .await
+        .json::<Value>();
+    let mut ids: Vec<_> = decade["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_owned())
+        .collect();
+    ids.sort();
+    let mut expected = vec![a.track.to_string(), b.track.to_string()];
+    expected.sort();
+    assert_eq!(ids, expected);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn hour_buckets_in_the_callers_zone_green(pool: PgPool) {
     let track = seed(&pool, Seed::new("Artist", "Album", None, "Song"))
         .await

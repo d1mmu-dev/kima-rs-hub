@@ -14,8 +14,69 @@ use crate::{auth::AuthUser, error::ApiError, state::AppState};
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/stats", get(stats))
+        .route("/stats/tracks", get(tracks))
         .route("/stats/track/{id}/plays", get(track_plays))
         .route("/stats/hour", get(hour_detail))
+}
+
+async fn tracks(
+    State(state): State<AppState>,
+    user: AuthUser,
+    RawQuery(query): RawQuery,
+) -> Result<Json<kima_api_types::stats::TracksResponse>, ApiError> {
+    use kima_api_types::stats::{PlayableAlbum, PlayableArtist, PlayableTrack, TracksResponse};
+    let args = args::Args(
+        form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes())
+            .into_owned()
+            .collect(),
+    );
+    let slice = args.get("of").js_string();
+    if !["top", "never", "core", "key", "decade"].contains(&slice.as_str()) {
+        return Err(ApiError::BadRequest("Bad request".into()));
+    }
+    let asked = args.get("limit").number();
+    let limit = if asked.is_finite() {
+        asked.floor().clamp(1.0, 100.0) as i64
+    } else {
+        40
+    };
+    let decade = args.get("decade").number();
+    let period = kima_db::stats::listens::Period::parse(args.get("period").string());
+    let rows = kima_db::stats::playable::playable_slice(
+        &state.pool,
+        user.id,
+        &slice,
+        decade,
+        limit,
+        period,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(?error, "playable slice failed");
+        ApiError::Failed("Couldn't gather those tracks")
+    })?;
+    Ok(Json(TracksResponse {
+        tracks: rows
+            .into_iter()
+            .map(|row| {
+                let album_id = row.album_id.to_string();
+                PlayableTrack {
+                    id: row.id.to_string(),
+                    title: row.title,
+                    duration: row.duration,
+                    artist: PlayableArtist {
+                        id: row.artist_id.to_string(),
+                        name: row.artist_name,
+                    },
+                    album: PlayableAlbum {
+                        id: album_id.clone(),
+                        title: row.album_title,
+                        cover_art: album_id,
+                    },
+                }
+            })
+            .collect(),
+    }))
 }
 
 async fn stats(

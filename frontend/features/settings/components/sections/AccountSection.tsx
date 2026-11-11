@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { API_KEYS_CHANGED_EVENT, PASSWORD_CHANGE_WARNING } from "./SubsonicSection";
 import { SettingsSection, SettingsRow, SettingsInput } from "../ui";
 import { useAuth } from "@/lib/auth-context";
+import { useSectionFlags } from "@/lib/section-flags";
 import { api } from "@/lib/api";
 import { useTwoFactor } from "../../hooks/useTwoFactor";
 import { Modal } from "@/components/ui/Modal";
@@ -15,6 +16,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 export function AccountSection() {
     const { user, deleteAccount } = useAuth();
+    const { accountDeletion } = useSectionFlags();
     const [confirmingDelete, setConfirmingDelete] = useState(false);
     const [deleting, setDeleting] = useState(false);
     const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -323,17 +325,20 @@ export function AccountSection() {
                         </div>
                     </div>
                 )}
-                <SettingsRow
-                    label="Delete account"
-                    description={deleteError ?? "Deletes your account and everything that is yours here: playlists, plays, likes and settings."}
-                >
-                    <button
-                        onClick={() => setConfirmingDelete(true)}
-                        className="text-xs text-danger-light hover:brightness-125 transition-colors"
+                {/* kima-rs: shown only when the server deletes accounts (D-180). */}
+                {accountDeletion && (
+                    <SettingsRow
+                        label="Delete account"
+                        description={deleteError ?? "Deletes your account and everything that is yours here: playlists, plays, likes and settings."}
                     >
-                        Delete
-                    </button>
-                </SettingsRow>
+                        <button
+                            onClick={() => setConfirmingDelete(true)}
+                            className="text-xs text-danger-light hover:brightness-125 transition-colors"
+                        >
+                            Delete
+                        </button>
+                    </SettingsRow>
+                )}
             </SettingsSection>
 
             <ConfirmDialog

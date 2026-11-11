@@ -221,3 +221,55 @@ async fn period_window_applies_after_the_walk(pool: PgPool) {
         assert_eq!(count, expected, "{period:?}");
     }
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn overview_counts_raw_rows_for_shelf_and_listens_for_signature(pool: PgPool) {
+    use kima_db::stats::{listens::Period, overview::overview};
+    let user = Uuid::now_v7();
+    let other = Uuid::now_v7();
+    let artist = Uuid::now_v7();
+    let album = Uuid::now_v7();
+    let track = Uuid::now_v7();
+    for (id, name) in [(user, "a"), (other, "b")] {
+        sqlx::query("INSERT INTO users (id,username,password_hash) VALUES ($1,$2,'hash')")
+            .bind(id)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO artists (id,name,name_key) VALUES ($1,'a','a')")
+        .bind(artist)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO albums (id,artist_id,title,title_key,year,display_year) VALUES ($1,$2,'a','a',1905,1994)").bind(album).bind(artist).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO tracks (id,album_id,artist_name,title,codec,path,size,mtime,fingerprint,duration_secs) VALUES ($1,$2,'a','t','flac','/t',0,now(),decode('','hex'),180)").bind(track).bind(album).execute(&pool).await.unwrap();
+    for (id, seconds) in [(user, 0), (user, 20), (other, 0)] {
+        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now()-interval '60 days'+$4*interval '1 second')").bind(Uuid::now_v7()).bind(id).bind(track).bind(seconds as f64).execute(&pool).await.unwrap();
+    }
+    let all = overview(&pool, user, Period::All).await.unwrap();
+    assert_eq!((all.total.tracks, all.heard.tracks), (1, 1));
+    assert_eq!((all.decades[0].decade, all.decades[0].heard), (1990, 1));
+    assert_eq!(
+        (
+            all.concentration.for_half,
+            all.concentration.for_eighty,
+            all.concentration.distinct
+        ),
+        (Some(1), Some(1), Some(1))
+    );
+    assert_eq!(all.habit.moves, 0);
+    assert_eq!(
+        (
+            all.era[0].label.as_str(),
+            all.era[0].median,
+            all.era[0].plays
+        ),
+        ("before 2000", 1994, 1)
+    );
+    let recent = overview(&pool, user, Period::Days30).await.unwrap();
+    assert_eq!(recent.heard.tracks, 1);
+    assert!(recent.concentration.distinct.is_none());
+    assert!(recent.era.is_empty());
+}

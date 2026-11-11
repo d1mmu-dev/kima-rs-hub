@@ -241,3 +241,190 @@ async fn hour_order_limits_and_display_names(pool: PgPool) {
     assert_eq!(v["artists"][0], json!({"name":"Artist 0","listens":2}));
     assert_eq!(v["artists"][1], json!({"name":"Artist 1","listens":2}));
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stats_empty_authenticated_contract(pool: PgPool) {
+    let state = common::state(pool);
+    let (admin, token) = common::user_with_token(&state, "ana").await;
+    assert_eq!(admin.role, "admin");
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    server
+        .get("/api/stats")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    let response = server
+        .get("/api/stats?period=week")
+        .authorization_bearer(&token)
+        .await;
+    response.assert_status_ok();
+    let v = response.json::<Value>();
+    assert_eq!(v["period"], "all");
+    assert_eq!(
+        v["listening"],
+        json!({"plays":0,"estimatedSeconds":0,"distinctTracks":0,"distinctArtists":0,"distinctAlbums":0,"firstPlay":null,"lastPlay":null,"bySource":{},"clock":vec![vec![0;24];7],"peak":null,"shape":[],"drift":[],"topArtists":[],"topTracks":[]})
+    );
+    assert_eq!(
+        v["shelf"],
+        json!({"tracks":{"total":0,"heard":0},"albums":{"total":0,"heard":0},"artists":{"total":0,"heard":0},"analysis":{"done":0,"failed":0,"pending":0,"total":0},"neverPlayed":0,"decades":[]})
+    );
+    let dto: kima_api_types::stats::StatsResponse = serde_json::from_value(v.clone()).unwrap();
+    assert_eq!(serde_json::to_value(dto).unwrap(), v);
+    assert_eq!(
+        v.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["period", "listening", "shelf", "spoken", "signature"]
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        v["spoken"],
+        json!({"audiobooks":{"seconds":0,"finished":0,"inProgress":0,"setAside":0,"topAuthors":[],"current":null},"podcasts":{"seconds":0,"finished":0,"inProgress":0,"subscriptions":0,"backlog":0}})
+    );
+    assert_eq!(v["shelf"]["tracks"], json!({"total":0,"heard":0}));
+    assert_eq!(
+        v["shelf"]["analysis"],
+        json!({"done":0,"failed":0,"pending":0,"total":0})
+    );
+    assert_eq!(
+        v["signature"],
+        json!({"concentration":null,"albumHabit":null,"era":null,"key":null,"ownedVsPlayed":[],"hourly":[]})
+    );
+    assert!(v.get("system").is_none());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stats_shelf_and_listening_are_isolated_per_user(pool: PgPool) {
+    let first = seed(&pool, Seed::new("Artist", "Album", Some(1994), "One")).await;
+    let second = seed(
+        &pool,
+        Seed::new("Artist", "Album", Some(1994), "Two").at(1, 2),
+    )
+    .await;
+    let state = common::state(pool.clone());
+    let (ana, ana_token) = common::user_with_token(&state, "ana").await;
+    let (ben, ben_token) = common::user_with_token(&state, "ben").await;
+    for (user, track, stamp) in [
+        (ana.id, first.track, "2026-03-01T12:00:00Z"),
+        (ana.id, first.track, "2026-03-01T12:00:20Z"),
+        (ben.id, second.track, "2026-03-01T12:00:00Z"),
+    ] {
+        sqlx::query(
+            "INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,$4::timestamptz)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(user)
+        .bind(track)
+        .bind(stamp)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    for (token, title) in [(&ana_token, "One"), (&ben_token, "Two")] {
+        let r = server
+            .get("/api/stats?period=all")
+            .authorization_bearer(token)
+            .await;
+        r.assert_status_ok();
+        let v = r.json::<Value>();
+        assert_eq!(v["listening"]["plays"], 1);
+        assert_eq!(v["listening"]["topTracks"][0]["title"], title);
+        assert_eq!(v["shelf"]["tracks"], json!({"total":2,"heard":1}));
+        assert_eq!(v["shelf"]["neverPlayed"], 1);
+        assert_eq!(
+            v["shelf"]["decades"],
+            json!([{"decade":1990,"albums":1,"heard":1}])
+        );
+        assert_eq!(
+            v["signature"]["concentration"],
+            json!({"forHalf":1,"forEighty":1,"distinct":1})
+        );
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stats_habit_era_decades_and_period(pool: PgPool) {
+    let mut tracks = Vec::new();
+    for no in [1, 2, 3, 5] {
+        let title = format!("Song {no}");
+        tracks.push(
+            seed(
+                &pool,
+                Seed::new("Artist", "Record", Some(1994), &title).at(1, no),
+            )
+            .await
+            .track,
+        );
+    }
+    let ancient = seed(&pool, Seed::new("Other", "Old", Some(1905), "Old song")).await;
+    let recent = seed(
+        &pool,
+        Seed::new("Third", "Modern", Some(1912), "Modern song"),
+    )
+    .await;
+    sqlx::query("UPDATE albums SET display_year=2022 WHERE id=$1")
+        .bind(recent.album)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "ana").await;
+    for (i, track) in tracks.iter().enumerate() {
+        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now() - interval '2 days' + $4 * interval '200 seconds')")
+            .bind(Uuid::now_v7()).bind(user.id).bind(track).bind(i as f64).execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now() - interval '400 days')")
+        .bind(Uuid::now_v7()).bind(user.id).bind(ancient.track).execute(&pool).await.unwrap();
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let r = server
+        .get("/api/stats?period=30d")
+        .authorization_bearer(&token)
+        .await;
+    r.assert_status_ok();
+    let v = r.json::<Value>();
+    assert_eq!(v["period"], "30d");
+    assert_eq!(v["listening"]["plays"], 4);
+    assert_eq!(v["shelf"]["tracks"], json!({"total":6,"heard":5}));
+    assert_eq!(
+        v["shelf"]["decades"],
+        json!([{"decade":1990,"albums":1,"heard":1},{"decade":2020,"albums":1,"heard":0}])
+    );
+    assert_eq!(
+        v["signature"]["concentration"],
+        json!({"forHalf":2,"forEighty":4,"distinct":4})
+    );
+    assert_eq!(
+        v["signature"]["albumHabit"],
+        json!({"moves":3,"sameAlbumPct":100,"inOrderPct":66.7})
+    );
+    assert_eq!(
+        v["signature"]["era"],
+        json!({"medianYear":1994,"buckets":[{"label":"before 2000","plays":4,"percent":100}]})
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stats_habit_excludes_exactly_fifteen_minutes(pool: PgPool) {
+    let first = seed(
+        &pool,
+        Seed::new("Artist", "Record", Some(2005), "One").at(1, 1),
+    )
+    .await;
+    let second = seed(
+        &pool,
+        Seed::new("Artist", "Record", Some(2005), "Two").at(1, 2),
+    )
+    .await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "ana").await;
+    for (track, offset) in [(first.track, 0), (second.track, 900)] {
+        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,'2026-01-01T00:00:00Z'::timestamptz+$4*interval '1 second')").bind(Uuid::now_v7()).bind(user.id).bind(track).bind(offset as f64).execute(&pool).await.unwrap();
+    }
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let r = server.get("/api/stats").authorization_bearer(&token).await;
+    r.assert_status_ok();
+    assert_eq!(r.json::<Value>()["signature"]["albumHabit"], Value::Null);
+}

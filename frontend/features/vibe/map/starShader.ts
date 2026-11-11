@@ -104,6 +104,12 @@ export interface StarUniforms {
     uFocusColor: THREE.IUniform<THREE.Color>;
 }
 
+/** A see-through shader drawn over the scene without writing depth, as the stars and the queue chart are. */
+export function overlayMaterial<U extends Record<string, THREE.IUniform>>(uniforms: U, vertexShader: string, fragmentShader: string) {
+    const material = new THREE.ShaderMaterial({ uniforms, vertexShader, fragmentShader, transparent: true, depthWrite: false });
+    return { material, uniforms };
+}
+
 export function createStarMaterial(opts: { sizeScale: number; opacity: number; minPx: number; revealFade?: number }) {
     const uniforms: StarUniforms = {
         uSizeScale: { value: opts.sizeScale },
@@ -117,14 +123,7 @@ export function createStarMaterial(opts: { sizeScale: number; opacity: number; m
         uFocusMix: { value: 0 },
         uFocusColor: { value: new THREE.Color(1, 1, 1) },
     };
-    const material = new THREE.ShaderMaterial({
-        uniforms,
-        vertexShader: VERT,
-        fragmentShader: FRAG,
-        transparent: true,
-        depthWrite: false,
-    });
-    return { material, uniforms };
+    return overlayMaterial(uniforms, VERT, FRAG);
 }
 
 /** Per-frame update: twinkle clock, load-in clock, eased mood focus, and the canvas's live pixel ratio. */
@@ -141,17 +140,3 @@ export function setStarFocus(u: StarUniforms, moodIdx: number, rgb: [number, num
     u.uFocusColor.value.setRGB(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255, THREE.SRGBColorSpace);
 }
 
-/** Soft radial glow sprite for the faint nebula wisps. */
-export function createGlowTexture() {
-    const size = 128;
-    const canvas = document.createElement("canvas");
-    canvas.width = canvas.height = size;
-    const ctx = canvas.getContext("2d")!;
-    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-    g.addColorStop(0, "rgba(255,255,255,1)");
-    g.addColorStop(0.25, "rgba(255,255,255,0.5)");
-    g.addColorStop(1, "rgba(255,255,255,0)");
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, size, size);
-    return new THREE.CanvasTexture(canvas);
-}

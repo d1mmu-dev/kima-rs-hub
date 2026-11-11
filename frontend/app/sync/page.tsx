@@ -32,7 +32,6 @@ export default function SyncPage() {
     const router = useRouter();
     const [initError, setInitError] = useState("");
     const [initFailed, setInitFailed] = useState(false);
-    const [postScanDone, setPostScanDone] = useState(false);
     const [scanJobId, setScanJobId] = useState<string | null>(null);
     const handledRef = useRef(false);
 
@@ -75,13 +74,12 @@ export default function SyncPage() {
     });
 
     // Derive display state from scanStatus (no setState in effects)
-    const { progress, message, completedSteps, syncing, error } = useMemo(() => {
+    const { progress, message, completedSteps, error } = useMemo(() => {
         if (initFailed) {
             return {
                 progress: 0,
                 message: "",
                 completedSteps: [] as string[],
-                syncing: false,
                 error: initError,
             };
         }
@@ -91,17 +89,15 @@ export default function SyncPage() {
                 progress: 0,
                 message: "",
                 completedSteps: [] as string[],
-                syncing: false,
                 error: "Scan failed. You can skip and try again later.",
             };
         }
 
         if (scanStatus?.status === "completed") {
             return {
-                progress: postScanDone ? 100 : 90,
-                message: postScanDone ? "All set! Redirecting..." : "Syncing audiobooks...",
+                progress: 100,
+                message: "All set! Redirecting...",
                 completedSteps: ["tracks", "library", "albums", "indexes"],
-                syncing: true,
                 error: "",
             };
         }
@@ -112,7 +108,6 @@ export default function SyncPage() {
                 progress: deriveProgress(p),
                 message: deriveMessage(p),
                 completedSteps: deriveSteps(p),
-                syncing: true,
                 error: "",
             };
         }
@@ -121,10 +116,9 @@ export default function SyncPage() {
             progress: 0,
             message: "Scanning your music library...",
             completedSteps: [] as string[],
-            syncing: true,
             error: "",
         };
-    }, [scanStatus, postScanDone, initFailed, initError]);
+    }, [scanStatus, initFailed, initError]);
 
     useEffect(() => {
         let mounted = true;
@@ -149,26 +143,17 @@ export default function SyncPage() {
         return () => { mounted = false; };
     }, [queryClient]);
 
-    // Handle post-scan side effects (audiobook sync, redirect)
+    // Once the scan is done, go home. Audiobooks need nothing here: finishing onboarding already started their
+    // sync on the server when Audiobookshelf is on.
     useEffect(() => {
         if (!scanStatus || handledRef.current) return;
         if (scanStatus.status !== "completed") return;
 
         handledRef.current = true;
-
-        (async () => {
-            try {
-                await api.post("/audiobooks/sync");
-            } catch (audiobookError) {
-                console.error("Audiobook sync failed:", audiobookError);
-            }
-
-            setPostScanDone(true);
-            setTimeout(() => {
-                void queryClient.invalidateQueries();
-                router.push("/");
-            }, 1500);
-        })();
+        setTimeout(() => {
+            void queryClient.invalidateQueries();
+            router.push("/");
+        }, 1500);
     }, [scanStatus, queryClient, router]);
 
     const handleSkip = () => {
@@ -208,14 +193,16 @@ export default function SyncPage() {
                         <div className="p-6 md:p-8 space-y-6">
                             <div>
                                 <h2 className="text-2xl font-bold text-white mb-1">
-                                    {syncing ? "Setting Things Up" : "Ready to Go!"}
+                                    {error ? "Sync Didn't Finish" : "Setting Things Up"}
                                 </h2>
-                                <p className="text-[var(--text-secondary)]">
-                                    {error || message}
-                                </p>
+                                {!error && (
+                                    <p className="text-[var(--text-secondary)]">
+                                        {message}
+                                    </p>
+                                )}
                             </div>
 
-                            {syncing && !error && (
+                            {!error && (
                                 <div className="space-y-2">
                                     <div className="w-full bg-white/10 rounded-full h-1.5 overflow-hidden">
                                         <div

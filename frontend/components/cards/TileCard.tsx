@@ -1,14 +1,13 @@
 "use client";
 
 import { memo, type CSSProperties, type ReactNode, type Ref } from "react";
-import { Loader2, Play } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { CachedImage } from "@/components/ui/CachedImage";
 import { cn } from "@/lib/cn";
 
 interface TileCardProps {
     title: string;
     subtitle?: string;
-    eyebrow?: ReactNode;
     imageUrl?: string | null;
     /** Gradient classes for the tile when it has no image; unused when `background` is given. */
     tint?: string;
@@ -16,7 +15,6 @@ interface TileCardProps {
     /** Gradient classes for the underline that grows on hover; no underline without it. */
     accent?: string;
     onClick: () => void;
-    playable?: boolean;
     busy?: boolean;
     disabled?: boolean;
     buttonRef?: Ref<HTMLButtonElement>;
@@ -34,13 +32,11 @@ interface TileCardProps {
 export const TileCard = memo(function TileCard({
     title,
     subtitle,
-    eyebrow,
     imageUrl,
     tint,
     hoverBorder,
     accent,
     onClick,
-    playable = false,
     busy = false,
     disabled = false,
     buttonRef,
@@ -77,8 +73,7 @@ export const TileCard = memo(function TileCard({
                 <div className={cn("absolute inset-0 bg-gradient-to-br cover-zoom", tint)} />
             ))}
 
-            <div className="absolute inset-0 p-3 flex flex-col justify-between">
-                <div>{eyebrow}</div>
+            <div className="absolute inset-0 p-3 flex flex-col justify-end">
                 <div>
                     <h3 className={cn(titleClassName ?? "text-sm", "font-bold text-white truncate tracking-tight leading-tight")}>{title}</h3>
                     {subtitle && (
@@ -103,13 +98,7 @@ export const TileCard = memo(function TileCard({
                     <Loader2 className="w-5 h-5 text-white animate-spin" />
                 </div>
             ) : (
-                badge ?? (playable ? (
-                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                        <div className="w-10 h-10 rounded-lg bg-white flex items-center justify-center">
-                            <Play className="w-4 h-4 text-black ml-0.5" fill="currentColor" />
-                        </div>
-                    </div>
-                ) : null)
+                badge
             )}
         </button>
     );

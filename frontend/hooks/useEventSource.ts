@@ -1,18 +1,30 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, type QueryKey } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth-context";
 import { searchResultStore } from "@/lib/search-result-store";
 import { api, getApiBaseUrl } from "@/lib/api";
 import { applyAutotagProgress } from "@/features/autotag/progress";
 import { applyLibraryProgress } from "@/features/organizer/progress";
+import { playlistEditsInFlight } from "@/hooks/useQueries";
 
-/** In proxy mode this is "", so events go through the streaming route in app/api/events. */
-function getSSEBaseUrl(): string {
-    if (typeof window === "undefined") return "";
-    return getApiBaseUrl();
-}
+/**
+ * Every cache an event below keeps fresh. Events sent while the stream is down are not replayed, so a reconnect
+ * refreshes them all. Job-status caches (scan, import, preview) are not here: their pages poll while a job runs.
+ */
+const STREAM_FED_QUERIES: QueryKey[] = [
+    ["notifications"],
+    ["active-downloads"],
+    ["download-history"],
+    ["album"],
+    ["enrichment-progress"],
+    ["library", "recently-added"],
+    ["library", "mood-summary"],
+    ["user-imports"],
+    ["playlists"],
+    ["playlist"],
+];
 
 export function useEventSource() {
     const { isAuthenticated } = useAuth();
@@ -26,19 +38,25 @@ export function useEventSource() {
 
         let mounted = true;
 
+        // Waits 1 s, then twice as long after each failure in a row, up to 30 s.
+        const reconnectLater = () => {
+            const delay = Math.min(1000 * 2 ** reconnectAttemptsRef.current, 30000);
+            reconnectAttemptsRef.current++;
+            reconnectTimeoutRef.current = setTimeout(() => { connect().catch(() => {}); }, delay);
+        };
+
         const connect = async () => {
             if (!mounted) return;
 
             const ticket = await api.getSSETicket();
             if (!mounted) return;
             if (!ticket) {
-                const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
-                reconnectAttemptsRef.current++;
-                reconnectTimeoutRef.current = setTimeout(() => { connect().catch(() => {}); }, delay);
+                reconnectLater();
                 return;
             }
 
-            const es = new EventSource(`${getSSEBaseUrl()}/api/events?ticket=${ticket}`);
+            // In proxy mode the base is "", so events go through the streaming route in app/api/events.
+            const es = new EventSource(`${getApiBaseUrl()}/api/events?ticket=${ticket}`);
             eventSourceRef.current = es;
 
             es.onmessage = (event) => {
@@ -93,11 +111,14 @@ export function useEventSource() {
                             );
                             queryClient.invalidateQueries({ queryKey: ["enrichment-progress"] });
                             queryClient.invalidateQueries({ queryKey: ["library", "recently-added"] });
+                            queryClient.invalidateQueries({ queryKey: ["library", "mood-summary"] });
                             break;
                         case "autotag:progress":
                             applyAutotagProgress(queryClient, data);
                             break;
                         case "enrichment:progress":
+                            // Not the mood summary: this fires once a track during sound vectors, and the moods and
+                            // the map only change when their own steps finish (the summary's stale time covers that).
                             queryClient.invalidateQueries({ queryKey: ["enrichment-progress"] });
                             break;
                         case "import:progress":
@@ -122,7 +143,6 @@ export function useEventSource() {
                                 ["discover-batch-status"],
                                 { active: false, status: null, batchId: data.batchId }
                             );
-                            queryClient.invalidateQueries({ queryKey: ["discover-playlist"] });
                             break;
                         case "preview:progress":
                             queryClient.setQueryData(
@@ -139,42 +159,50 @@ export function useEventSource() {
                         case "playlist:updated":
                             if (data.playlistId) {
                                 queryClient.invalidateQueries({ queryKey: ["playlists"] });
-                                queryClient.invalidateQueries({ queryKey: ["playlist", data.playlistId] });
+                                if (data.deleted) {
+                                    // Gone: drop it where no page is using it, never ask the server for it again, and tell
+                                    // a page still showing it (the same signal a delete on this device sends).
+                                    queryClient.removeQueries({ queryKey: ["playlist", data.playlistId], type: "inactive" });
+                                    window.dispatchEvent(new CustomEvent("playlist-deleted", { detail: { playlistId: data.playlistId } }));
+                                } else if (playlistEditsInFlight(queryClient, data.playlistId) === 0) {
+                                    // With this device's own edits on their way, the last of them asks instead.
+                                    queryClient.invalidateQueries({ queryKey: ["playlist", data.playlistId] });
+                                }
                             }
                             break;
                         case "connected":
-                            // Only refetch on reconnect (not initial connect) to avoid
-                            // duplicate requests when queries were just fetched on mount.
+                            // Only on a reconnect: the first connect follows pages that just fetched.
                             if (reconnectAttemptsRef.current > 0) {
-                                queryClient.invalidateQueries({ queryKey: ["notifications"] });
-                                queryClient.invalidateQueries({ queryKey: ["active-downloads"] });
-                                queryClient.invalidateQueries({ queryKey: ["download-history"] });
+                                for (const queryKey of STREAM_FED_QUERIES) {
+                                    queryClient.invalidateQueries({
+                                        queryKey,
+                                        // A playlist with this device's own edits on their way: the last of them fetches it.
+                                        predicate: (query) =>
+                                            !(query.queryKey[0] === "playlist" &&
+                                                playlistEditsInFlight(queryClient, String(query.queryKey[1])) > 0),
+                                    });
+                                }
                             }
                             reconnectAttemptsRef.current = 0;
-                            // Sync batch status after reconnect to clear stale cache
+                            // A Discover batch may have finished while the stream was down.
                             api.getDiscoverBatchStatus()
                                 .then(status => {
                                     queryClient.setQueryData(["discover-batch-status"], status);
                                 })
                                 .catch(() => {
-                                    // On error, assume no active batch
                                     queryClient.setQueryData(["discover-batch-status"], { active: false, status: null, batchId: null });
                                 });
                             break;
                     }
                 } catch {
-                    // Ignore parse errors (heartbeat comments, etc.)
+                    // A message that is not JSON, or a handler that threw, must not close the stream.
                 }
             };
 
             es.onerror = () => {
                 es.close();
                 eventSourceRef.current = null;
-                if (mounted) {
-                    const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
-                    reconnectAttemptsRef.current++;
-                    reconnectTimeoutRef.current = setTimeout(() => { connect().catch(() => {}); }, delay);
-                }
+                if (mounted) reconnectLater();
             };
         };
 

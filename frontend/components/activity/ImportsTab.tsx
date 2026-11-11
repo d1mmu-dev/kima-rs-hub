@@ -13,12 +13,13 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import { EmptyState } from "../ui/EmptyState";
 import { GradientSpinner } from "../ui/GradientSpinner";
 import { useAuth } from "@/lib/auth-context";
 import { timeAgo } from "@/lib/relative-time";
+import { ListHeader } from "./ListHeader";
+import { ActivityIcon } from "./ActivityIcon";
 
-interface ImportJob {
+export interface ImportJob {
     id: string;
     playlistName: string;
     status: string;
@@ -42,32 +43,20 @@ const ACTIVE_STATUSES = [
     "matching_tracks",
 ];
 
-function statusLabel(status: string): string {
-    switch (status) {
-        case "pending":
-            return "Pending";
-        case "fetching":
-            return "Fetching";
-        case "downloading":
-            return "Downloading";
-        case "scanning":
-            return "Scanning";
-        case "creating_playlist":
-            return "Creating";
-        case "matching_tracks":
-            return "Matching";
-        case "completed":
-            return "Done";
-        case "failed":
-            return "Failed";
-        case "cancelled":
-            return "Cancelled";
-        default:
-            // An unmapped status from the server, shown as-is rather than
-            // stamped into capitals.
-            return status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, " ");
-    }
-}
+/** The statuses whose word changes on screen; any other shows as the server names it, with spaces for underscores. */
+const STATUS_LABEL: Record<string, string> = {
+    creating_playlist: "creating",
+    matching_tracks: "matching",
+    completed: "done",
+};
+
+export const statusLabel = (status: string) => STATUS_LABEL[status] ?? status.replace(/_/g, " ");
+
+/** The listener's imports, one query and cache for the imports list and the merged activity list. */
+export const userImportsQuery = {
+    queryKey: ["user-imports"],
+    queryFn: () => api.get<ImportJob[]>("/spotify/imports"),
+};
 
 function statusColor(status: string): string {
     if (ACTIVE_STATUSES.includes(status)) return "text-brand";
@@ -82,9 +71,8 @@ export function ImportsTab() {
     const queryClient = useQueryClient();
     const [cancelling, setCancelling] = useState<Set<string>>(new Set());
 
-    const { data: imports = [], isLoading } = useQuery<ImportJob[]>({
-        queryKey: ["user-imports"],
-        queryFn: () => api.get<ImportJob[]>("/spotify/imports"),
+    const { data: imports = [], isLoading } = useQuery({
+        ...userImportsQuery,
         enabled: isAuthenticated,
         refetchInterval: 10000,
         refetchIntervalInBackground: false,
@@ -115,13 +103,7 @@ export function ImportsTab() {
     }
 
     if (imports.length === 0) {
-        return (
-            <EmptyState
-                icon={<ListMusic className="w-8 h-8" />}
-                title="No imports yet"
-                description="Playlist imports will appear here"
-            />
-        );
+        return <p className="px-3 py-4 text-xs text-[var(--text-muted)]">no playlist imports yet</p>;
     }
 
     const activeImports = imports.filter((j) =>
@@ -133,188 +115,115 @@ export function ImportsTab() {
 
     return (
         <div className="flex flex-col h-full">
-            {activeImports.length > 0 && (
-                <div className="flex items-center justify-between px-3 py-2 border-b-2 border-white/10">
-                    <div className="flex items-center gap-2">
-                        <span className="w-1.5 h-1.5 rounded-full bg-brand animate-pulse" />
-                        <span className="t-eyebrow">
-                            {String(activeImports.length).padStart(2, "0")}{" "}
-                            ACTIVE
-                        </span>
-                    </div>
-                </div>
-            )}
+            <ListHeader>
+                <span>
+                    {activeImports.length > 0 ? (
+                        <span className="text-brand">{activeImports.length} importing</span>
+                    ) : (
+                        <>
+                            {pastImports.length} {pastImports.length === 1 ? "import" : "imports"}
+                        </>
+                    )}
+                    {activeImports.length > 0 && pastImports.length > 0 && <> · {pastImports.length} earlier</>}
+                </span>
+            </ListHeader>
 
-            <div className="flex-1 overflow-y-auto">
-                {activeImports.map((job, index) => (
+            <ul className="flex-1 overflow-y-auto pb-1">
+                {activeImports.map((job) => (
                     <ImportJobCard
                         key={job.id}
                         job={job}
-                        index={index}
                         cancelling={cancelling.has(job.id)}
                         onCancel={handleCancel}
                     />
                 ))}
-
-                {pastImports.length > 0 && activeImports.length > 0 && (
-                    <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5">
-                        <span className="text-xs font-semibold text-[var(--text-muted)]">
-                            Previous
-                        </span>
-                        <span className="flex-1 border-t border-white/5" />
-                    </div>
-                )}
-
-                {pastImports.map((job, index) => (
-                    <ImportJobCard
-                        key={job.id}
-                        job={job}
-                        index={activeImports.length + index}
-                        cancelling={false}
-                        onCancel={handleCancel}
-                    />
+                {pastImports.map((job) => (
+                    <ImportJobCard key={job.id} job={job} cancelling={false} onCancel={handleCancel} />
                 ))}
-            </div>
+            </ul>
         </div>
     );
 }
 
 function ImportJobCard({
     job,
-    index,
     cancelling,
     onCancel,
 }: {
     job: ImportJob;
-    index: number;
     cancelling: boolean;
     onCancel: (id: string) => void;
 }) {
     const isActive = ACTIVE_STATUSES.includes(job.status);
-    const borderColor = isActive
-        ? "border-brand"
-        : job.status === "completed"
-          ? "border-success"
-          : job.status === "failed"
-            ? "border-danger-light"
-            : "border-white/5";
+    const facts = [
+        statusLabel(job.status),
+        isActive && job.albumsTotal > 0 ? `${job.albumsCompleted}/${job.albumsTotal} albums` : null,
+        job.tracksMatched > 0 ? `${job.tracksMatched} tracks matched` : null,
+    ].filter(Boolean);
 
     return (
-        <div
-            className={cn(
-                "px-3 py-3 border-b border-white/5 border-l-2 bg-[var(--bg-secondary)] hover:bg-white/5 transition-colors group",
-                borderColor,
-            )}
-        >
-            <div className="flex items-start gap-3">
-                <div className="flex-shrink-0 w-6 mt-0.5">
-                    <span className="text-micro tabular-nums font-semibold text-[var(--text-muted)]">
-                        {String(index + 1).padStart(2, "0")}
-                    </span>
-                </div>
-
-                <div className="mt-0.5 shrink-0">
-                    {isActive ? (
-                        cancelling ? (
-                            <Loader2 className="w-4 h-4 text-[var(--text-muted)] animate-spin" />
-                        ) : (
-                            <GradientSpinner size="sm" />
-                        )
-                    ) : job.status === "completed" ? (
-                        <CheckCircle2 className="w-4 h-4 text-success" />
+        <li className="group flex items-start gap-2.5 px-3 py-2 transition-colors duration-150 hover:bg-white/[0.04] focus-within:bg-white/[0.04]">
+            <ActivityIcon>
+                {isActive ? (
+                    cancelling ? (
+                        <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin text-[var(--text-muted)]" />
                     ) : (
-                        <AlertCircle className="w-4 h-4 text-danger-light" />
-                    )}
-                </div>
+                        <ListMusic aria-hidden="true" className="h-3.5 w-3.5 text-brand" />
+                    )
+                ) : job.status === "completed" ? (
+                    <CheckCircle2 aria-hidden="true" className="h-3.5 w-3.5 text-success" />
+                ) : (
+                    <AlertCircle aria-hidden="true" className="h-3.5 w-3.5 text-danger-light" />
+                )}
+            </ActivityIcon>
 
-                <div className="flex-1 min-w-0">
-                    <p className="text-xs font-semibold tracking-tight text-white truncate mb-1">
+            <div className="min-w-0 flex-1">
+                <p className="flex items-baseline gap-2">
+                    <span className="min-w-0 flex-1 truncate text-[13px] leading-5 text-[var(--text-primary)]">
                         {job.playlistName}
-                    </p>
+                    </span>
+                    <span className="shrink-0 text-[11px] tabular-nums text-[var(--text-muted)]">{timeAgo(job.createdAt)}</span>
+                </p>
+                <p className={cn("truncate text-xs leading-4", isActive ? "text-[var(--text-secondary)]" : statusColor(job.status))}>
+                    {facts.join(" · ")}
+                </p>
 
-                    <div className="flex items-center gap-2 flex-wrap">
-                        <span
-                            className={cn(
-                                "text-xs font-semibold",
-                                statusColor(job.status),
-                            )}
-                        >
-                            {statusLabel(job.status)}
-                        </span>
-
-                        {isActive && job.albumsTotal > 0 && (
-                            <>
-                                <span className="text-micro text-[var(--text-muted)]">
-                                    --
-                                </span>
-                                <span className="text-xs tabular-nums text-[var(--text-muted)]">
-                                    {job.albumsCompleted}/{job.albumsTotal}{" "}
-                                    albums
-                                </span>
-                            </>
-                        )}
-
-                        {job.tracksMatched > 0 && (
-                            <>
-                                <span className="text-micro text-[var(--text-muted)]">
-                                    --
-                                </span>
-                                <span className="text-xs tabular-nums text-[var(--text-muted)]">
-                                    {job.tracksMatched} tracks matched
-                                </span>
-                            </>
-                        )}
-
-                        <span className="text-micro text-[var(--text-muted)]">
-                            --
-                        </span>
-                        <span className="text-xs tabular-nums text-[var(--text-muted)]">
-                            {timeAgo(job.createdAt)}
-                        </span>
+                {isActive && job.albumsTotal > 0 && (
+                    <div aria-hidden="true" className="mt-1.5 h-[2px] overflow-hidden rounded-full bg-white/[0.06]">
+                        <div
+                            className="h-full rounded-full bg-brand transition-[width] duration-500"
+                            style={{ width: `${Math.round((job.albumsCompleted / job.albumsTotal) * 100)}%` }}
+                        />
                     </div>
+                )}
 
-                    {/* Progress bar for active imports */}
-                    {isActive && job.albumsTotal > 0 && (
-                        <div className="mt-2 h-1 bg-white/5 rounded-full overflow-hidden">
-                            <div
-                                className="h-full bg-brand rounded-full transition-all duration-300"
-                                style={{
-                                    width: `${Math.round((job.albumsCompleted / job.albumsTotal) * 100)}%`,
-                                }}
-                            />
-                        </div>
-                    )}
+                {job.status === "failed" && job.error && (
+                    <p className="mt-0.5 truncate text-xs text-danger-light/80">{job.error}</p>
+                )}
 
-                    {job.status === "failed" && job.error && (
-                        <p className="text-micro tabular-nums text-danger-light/70 mt-1 truncate">
-                            {job.error}
-                        </p>
-                    )}
-
-                    {/* Completed: link to playlist */}
-                    {job.status === "completed" && job.createdPlaylistId && (
-                        <Link
-                            href={`/playlist/?id=${encodeURIComponent(job.createdPlaylistId)}`}
-                            className="inline-flex items-center gap-1 mt-1.5 text-micro tabular-nums font-semibold text-success hover:text-success/80 transition-colors"
-                        >
-                            <ExternalLink className="w-3 h-3" />
-                            View Playlist
-                        </Link>
-                    )}
-                </div>
-
-                {/* Cancel button for active imports */}
-                {isActive && (
-                    <button
-                        onClick={() => onCancel(job.id)}
-                        disabled={cancelling}
-                        className="p-1 hover:bg-white/10 transition-colors shrink-0"
-                        title="cancel import"
+                {job.status === "completed" && job.createdPlaylistId && (
+                    <Link
+                        href={`/playlist/?id=${encodeURIComponent(job.createdPlaylistId)}`}
+                        className="mt-1 inline-flex items-center gap-1 rounded-sm text-[11px] text-brand outline-none hover:underline focus-visible:ring-2 focus-visible:ring-brand/60"
                     >
-                        <X className="w-3 h-3 text-[var(--text-muted)] hover:text-danger-light" />
-                    </button>
+                        open the playlist
+                        <ExternalLink aria-hidden="true" className="h-2.5 w-2.5" />
+                    </Link>
                 )}
             </div>
-        </div>
+
+            {isActive && (
+                <button
+                    type="button"
+                    onClick={() => onCancel(job.id)}
+                    disabled={cancelling}
+                    aria-label={`cancel importing ${job.playlistName}`}
+                    title="cancel import"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] outline-none transition-colors hover:bg-danger/10 hover:text-danger-light focus-visible:ring-2 focus-visible:ring-brand/60 disabled:opacity-40"
+                >
+                    <X aria-hidden="true" className="h-3.5 w-3.5" />
+                </button>
+            )}
+        </li>
     );
 }

@@ -30,6 +30,8 @@ interface AuthContextType {
         token?: string
     ) => Promise<void>;
     logout: () => Promise<void>;
+    /** Deletes this person's own account, then leaves them signed out on the sign-in page. */
+    deleteAccount: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -138,13 +140,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         router.push("/login");
     }, [router]);
 
+    const deleteAccount = useCallback(async () => {
+        await api.deleteAccount();
+        setIsAuthenticated(false);
+        setUser(null);
+        router.push("/login");
+    }, [router]);
+
     const contextValue = useMemo(() => ({
         isAuthenticated,
         isLoading,
         user,
         login,
         logout,
-    }), [isAuthenticated, isLoading, user, login, logout]);
+        deleteAccount,
+    }), [isAuthenticated, isLoading, user, login, logout, deleteAccount]);
 
     return (
         <AuthContext.Provider value={contextValue}>

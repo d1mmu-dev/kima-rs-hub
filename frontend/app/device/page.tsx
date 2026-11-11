@@ -56,16 +56,15 @@ export default function DeviceLinkPage() {
         }
     }, [isAuthenticated, authLoading, router]);
 
-    const loadDevices = useCallback(async () => {
-        try {
-            const response = await api.request<LinkedDevice[]>("/device-link/devices");
-            setDevices(response);
-        } catch (err) {
-            console.error("Failed to load devices:", err);
-            notify.error("Failed to load linked devices");
-        } finally {
-            setIsLoadingDevices(false);
-        }
+    const loadDevices = useCallback(() => {
+        return api
+            .request<LinkedDevice[]>("/device-link/devices")
+            .then(setDevices)
+            .catch((err) => {
+                console.error("Failed to load devices:", err);
+                notify.error("Failed to load linked devices");
+            })
+            .finally(() => setIsLoadingDevices(false));
     }, []);
 
     useEffect(() => {
@@ -159,9 +158,8 @@ export default function DeviceLinkPage() {
     }
 
     return (
-        <div className="min-h-screen pb-24">
+        <div className="min-h-screen page-end">
             <PageHeader
-                eyebrow="Devices"
                 title="Link a device"
                 description="Scan the QR code, or type the code into the app on your phone"
             />
@@ -346,25 +344,25 @@ export default function DeviceLinkPage() {
                         </h2>
                         <ol className="space-y-3 text-[var(--text-secondary)]">
                             <li className="flex gap-3">
-                                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[var(--color-brand)]/20 text-brand text-sm font-bold flex items-center justify-center">
+                                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-white/10 text-white text-sm font-bold flex items-center justify-center">
                                     1
                                 </span>
                                 <span>Open the Kima app on your mobile device</span>
                             </li>
                             <li className="flex gap-3">
-                                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[var(--color-brand)]/20 text-brand text-sm font-bold flex items-center justify-center">
+                                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-white/10 text-white text-sm font-bold flex items-center justify-center">
                                     2
                                 </span>
                                 <span>Tap &quot;Scan QR Code&quot; or &quot;Enter Code&quot; on the login screen</span>
                             </li>
                             <li className="flex gap-3">
-                                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[var(--color-brand)]/20 text-brand text-sm font-bold flex items-center justify-center">
+                                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-white/10 text-white text-sm font-bold flex items-center justify-center">
                                     3
                                 </span>
                                 <span>Scan the QR code above, or manually enter the 6-digit code</span>
                             </li>
                             <li className="flex gap-3">
-                                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-[var(--color-brand)]/20 text-brand text-sm font-bold flex items-center justify-center">
+                                <span className="flex-shrink-0 w-6 h-6 rounded-full bg-white/10 text-white text-sm font-bold flex items-center justify-center">
                                     4
                                 </span>
                                 <span>Your device will be automatically logged in and linked to your account</span>

@@ -6,7 +6,7 @@ import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { queryKeys, usePodcastQuery } from "@/hooks/useQueries";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
-import { Podcast, PodcastPreview, SimilarPodcast, Episode } from "../types";
+import type { Podcast, PodcastPreview, DiscoveryPodcast, Episode } from "../types";
 import { subscribeQueryEvent } from "@/lib/query-events";
 
 export function usePodcastData() {
@@ -53,7 +53,7 @@ export function usePodcastData() {
       if (savedFor !== podcastId) return;
       // Only the order on screen: patching the other would mark it fresh and
       // drop a refetch it still owes.
-      queryClient.setQueryData<InfiniteData<Podcast | null>>([...queryKeys.podcast(podcastId), sortOrder], (data) =>
+      queryClient.setQueryData<InfiniteData<Podcast | null>>(queryKeys.podcastEpisodes(podcastId, sortOrder), (data) =>
         data && {
           ...data,
           pages: data.pages.map((page) =>
@@ -66,11 +66,11 @@ export function usePodcastData() {
     return unsubscribe;
   }, [refetch, queryClient, podcastId, sortOrder]);
 
-  // State for preview mode, subscription, and similar podcasts
+  // A show not followed yet is read as a preview; similar shows load for both.
   const [previewData, setPreviewData] = useState<PodcastPreview | null>(null);
   const [previewLoadState, setPreviewLoadState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [similarPodcasts, setSimilarPodcasts] = useState<SimilarPodcast[]>([]);
+  const [similarPodcasts, setSimilarPodcasts] = useState<DiscoveryPodcast[]>([]);
 
   // Reset preview/error state when navigating between podcasts so a previous
   // page's error UI does not sticky-state into the next podcast's view.
@@ -85,26 +85,31 @@ export function usePodcastData() {
 
   const rawCoverUrl = podcast?.coverUrl || previewData?.coverUrl;
   const heroImage = rawCoverUrl ? api.getCoverArtUrl(rawCoverUrl, 1200) : null;
-  // Separate URL with token for color extraction (CORS access for canvas)
+  // The token lets a canvas read the cover's pixels for its colours.
   const colorExtractionImage = rawCoverUrl ? api.getCoverArtUrl(rawCoverUrl, 300, true) : null;
 
+  // A show's neighbours come from its categories' charts, worked out by the server for a followed show and a
+  // previewed one alike.
+  const previewItunesId = previewData?.itunesId ?? null;
   useEffect(() => {
-    if (!podcast?.id || !isAuthenticated) return;
+    if (!isAuthenticated || (!podcast?.id && !previewItunesId)) return;
 
     let cancelled = false;
 
     async function loadSimilarPodcasts() {
       try {
-        const similar = await api.getSimilarPodcasts(podcastId);
+        const similar = podcast?.id
+          ? await api.getSimilarPodcasts(podcastId)
+          : await api.getPreviewSimilarPodcasts(previewItunesId!);
         if (!cancelled) setSimilarPodcasts(similar);
-      } catch (error) {
-        if (!cancelled) console.error("Failed to load similar podcasts:", error);
+      } catch {
+        // The shelf is extra: without it the page just shows no "more like this".
       }
     }
 
     loadSimilarPodcasts();
     return () => { cancelled = true; };
-  }, [podcast?.id, isAuthenticated, podcastId]);
+  }, [podcast?.id, isAuthenticated, podcastId, previewItunesId]);
 
   // An unsubscribed podcast is shown from its directory preview instead.
   useEffect(() => {
@@ -125,7 +130,6 @@ export function usePodcastData() {
         }
       } catch (err) {
         if (!cancelled) {
-          console.error("Failed to load preview:", err);
           setPreviewLoadState('error');
           setPreviewError(err instanceof Error ? err.message : "Could not load podcast");
         }
@@ -163,12 +167,9 @@ export function usePodcastData() {
       )
     : [];
 
-  // The server pages from the end that was asked for; render in the order it arrived.
-  const sortedEpisodes = podcast ? [...podcast.episodes] : [];
+  // The server pages from the end that was asked for, so the episodes are already in the chosen order.
+  const episodes: Episode[] = podcast?.episodes ?? [];
 
-  // Determine loading state:
-  // - Loading if podcast query is loading
-  // - Loading if podcast query done but no podcast and we haven't tried/finished preview yet
   const needsPreviewLoad = !podcast && previewLoadState === 'idle';
   const isLoadingPreview = previewLoadState === 'loading';
   const isLoading = isPodcastLoading || needsPreviewLoad || isLoadingPreview;
@@ -187,7 +188,7 @@ export function usePodcastData() {
     sortOrder,
     setSortOrder,
     inProgressEpisodes,
-    sortedEpisodes,
+    episodes,
     episodesUpdating,
     hasMore,
     loadMore,

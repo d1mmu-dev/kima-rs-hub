@@ -1,30 +1,33 @@
 "use client";
 
 /**
- * Shows every release the user has not closed in one window, the newest note
- * first and every pending item oldest first, and the current release again on
- * request (the version number beside the logo). The server decides what is
- * pending; nothing is recorded locally, so a second device still asks.
+ * Shows the newest release until the user closes it; older releases are never shown here, and what they still ask
+ * of this user is open on the changelog page instead. The version number beside the logo opens the window while it is
+ * unread, and the changelog otherwise. The server decides what is pending; nothing is recorded locally, so a second
+ * device still asks.
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { notify } from "@/lib/notify";
 import { useAuth } from "@/lib/auth-context";
-import { WhatsNewWindow, type Release } from "./WhatsNewWindow";
+import { useSectionFlags } from "@/lib/section-flags";
+import { WhatsNewWindow } from "./WhatsNewWindow";
+import { WipeAction } from "./WipeAction";
+import { RefileAction } from "./RefileAction";
+import type { Release } from "./types";
 import { MoodMixChoice } from "./MoodMixChoice";
-import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { useQueryClient } from "@tanstack/react-query";
+import { refreshOpenCount } from "./useVersionChip";
 
-// One pending fetch per app session, shared across remounts (the layout switching
-// between phone, desktop and TV), so a remount neither refetches nor replaces the
-// queue being read. A failed fetch is not cached; the next mount retries.
+// One pending fetch per sign-in, shared across remounts (the layout switching between phone, desktop and TV), so a
+// remount neither refetches nor replaces the queue being read. Keyed to the user and their session: sign out and in
+// again without a reload, as someone else or the same person, and the queue is read afresh. A failed fetch is not
+// kept; the next mount retries.
 let pendingFetch: Promise<Release[]> | null = null;
 let pendingFetchKey: string | null = null;
-function fetchPending(): Promise<Release[]> {
-    // Keyed to the session token: sign out and in as someone else without a
-    // reload, and the new user must not inherit the old user's queue.
-    const key = typeof window === "undefined" ? "ssr" : localStorage.getItem("auth_token") ?? "";
+function fetchPending(userId: string): Promise<Release[]> {
+    const key = `${userId}:${api.getToken() ?? ""}`;
     if (!pendingFetch || pendingFetchKey !== key) {
         pendingFetchKey = key;
         pendingFetch = api
@@ -45,9 +48,19 @@ function closeAll(): void {
 
 const OPEN_EVENT = "kima:whats-new-open";
 
-/** Opens the window on the current release again, closed or not (the version number beside the logo). */
-export function openWhatsNew(): void {
+/** Brings the window up with the current release and its answers so far: unread news, or a window put off by a link. */
+function openWhatsNew(): void {
     window.dispatchEvent(new Event(OPEN_EVENT));
+}
+
+/** The version number's door: unread news opens the window; otherwise it opens the permanent /changelog. */
+export async function openWhatsNewOrChangelog(userId: string | undefined, push: (href: string) => void): Promise<void> {
+    try {
+        if (userId && (await fetchPending(userId)).length > 0) openWhatsNew();
+        else push("/changelog");
+    } catch {
+        push("/changelog");
+    }
 }
 
 export function WhatsNewGate() {
@@ -57,23 +70,25 @@ export function WhatsNewGate() {
     // survives the gate remounting on navigation and clears with the tab, so the
     // window returns next visit.
     const { user } = useAuth();
+    // kima-rs has no `/whats-new` routes yet (D-030): nothing is fetched until the server says it has them.
+    const { changelog } = useSectionFlags();
     const deferKey = user ? `whatsnew.deferred:${user.id}` : null;
     const [, setDeferredNow] = useState(0);
     const deferred =
         deferKey !== null && typeof window !== "undefined" && window.sessionStorage.getItem(deferKey) === "1";
-    const [confirming, setConfirming] = useState(false);
-    const [wiping, setWiping] = useState(false);
     const [done, setDone] = useState<string[]>([]);
-    const [wipeError, setWipeError] = useState<string | null>(null);
-    // What a reopened release already has settled, so the window does not ask again.
+    // Answers the current release already has, so the window shows them instead of asking again.
     const [answered, setAnswered] = useState<Record<string, boolean>>({});
     const reopening = useRef(false);
+    const queryClient = useQueryClient();
 
+    const userId = user?.id;
     useEffect(() => {
+        if (!userId || !changelog) return;
         let cancelled = false;
         (async () => {
             try {
-                const releases = await fetchPending();
+                const releases = await fetchPending(userId);
                 if (!cancelled) setQueue(releases);
             } catch {
                 // Never block the app on this. Someone who came to listen to
@@ -82,7 +97,7 @@ export function WhatsNewGate() {
             }
         })();
         return () => { cancelled = true; };
-    }, []);
+    }, [userId, changelog]);
 
     useEffect(() => {
         const reopen = async () => {
@@ -96,7 +111,6 @@ export function WhatsNewGate() {
                 setDeferredNow((n) => n + 1);
                 setAnswered(current.answers);
                 setDone((d) => [...new Set([...d, ...current.done])]);
-                // Older releases still unread stay ahead of it.
                 setQueue((q) => (q.some((r) => r.version === current.release.version) ? q : [...q, current.release]));
             } catch {
                 notify.error("Couldn't open what's new");
@@ -109,25 +123,7 @@ export function WhatsNewGate() {
     }, [deferKey]);
 
     if (queue.length === 0 || deferred) return null;
-    const wipe = queue.flatMap((r) => r.items).find((i) => i.kind === "action" && i.run === "wipeEnrichment");
-
-    const runWipe = async () => {
-        if (!wipe) return;
-        setConfirming(false);
-        setWiping(true);
-        setWipeError(null);
-        try {
-            await api.wipeAndRerunEnrichment();
-            setDone((d) => [...d, wipe.key]);
-        } catch {
-            setWipeError("Couldn't start it. Try again, or use Settings, under Library Enrichment.");
-        } finally {
-            setWiping(false);
-        }
-    };
-
-    // Done closes every pending release in the queue, not just the heading's:
-    // a window that shows two releases must record both closings.
+    // Done closes what the window showed: the newest release, and the current one if it was reopened.
     const dismissAll = async () => {
         for (const r of queue) await api.post(`/whats-new/${encodeURIComponent(r.version)}/dismiss`, {});
     };
@@ -139,59 +135,24 @@ export function WhatsNewGate() {
     };
 
     return (
-        <>
-            <WhatsNewWindow
-                releases={queue}
-                answered={answered}
-                onDismiss={dismissAll}
-                onClose={() => { closeAll(); setQueue([]); }}
-                onNavigate={defer}
-                done={done}
-                renderAction={(item) =>
-                    item.key === "moods.mixes" || item.key === "moods.mixes.retired" ? (
-                        // Rebuild / keep / save as playlist, or for a mix under a
-                        // removed mood, save / remove. The server only sends these
-                        // to users who have that kind of saved mix.
-                        <MoodMixChoice onNavigate={defer} />
-                    ) : item.run === "wipeEnrichment" ? (
-                        <div className="flex flex-col gap-2">
-                            {done.includes(item.key) ? (
-                                <p className="text-sm text-success flex items-center gap-2" data-testid="wipe-started">
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                    Wiped. Your library is running through the new engine in the background.
-                                </p>
-                            ) : (
-                                <button
-                                    type="button"
-                                    onClick={() => setConfirming(true)}
-                                    disabled={wiping}
-                                    data-testid="wipe-run"
-                                    className="self-start min-h-11 py-2.5 px-4 rounded-lg bg-brand hover:bg-brand-hover text-black text-sm font-semibold flex items-center gap-2 transition-colors disabled:opacity-60"
-                                >
-                                    {wiping ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-                                    {wiping ? "Starting..." : item.cta}
-                                </button>
-                            )}
-                            {wipeError && <p className="text-sm text-danger-light">{wipeError}</p>}
-                        </div>
-                    ) : null
-                }
-            />
-
-            {confirming && wipe && wipe.kind === "action" && (
-                <div data-nested-confirm="true">
-                    <ConfirmDialog
-                        isOpen={true}
-                        onClose={() => setConfirming(false)}
-                        onConfirm={runWipe}
-                        title={wipe.confirmTitle ?? "Wipe and re-run enrichment?"}
-                        message={wipe.confirmMessage ?? ""}
-                        confirmText={wipe.confirmLabel ?? wipe.cta}
-                        cancelText="Not now"
-                        variant="warning"
-                    />
-                </div>
-            )}
-        </>
+        <WhatsNewWindow
+            releases={queue}
+            answered={answered}
+            onDismiss={dismissAll}
+            onClose={() => { closeAll(); setQueue([]); refreshOpenCount(queryClient); }}
+            onNavigate={defer}
+            done={done}
+            renderAction={(item) =>
+                item.kind === "action" && (item.requires === "savedMoodMix" || item.requires === "retiredMoodMix") ? (
+                    // Rebuild, keep or save as a playlist (save or remove for a mix under a removed mood); the server
+                    // sends these only to listeners with that kind of saved mood mix.
+                    <MoodMixChoice onNavigate={defer} />
+                ) : item.run === "wipeEnrichment" ? (
+                    <WipeAction item={item} done={done.includes(item.key)} onDone={() => setDone((d) => [...d, item.key])} />
+                ) : item.run === "refileAlbums" ? (
+                    <RefileAction item={item} done={done.includes(item.key)} onDone={() => setDone((d) => [...d, item.key])} />
+                ) : null
+            }
+        />
     );
 }

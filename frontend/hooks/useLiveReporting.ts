@@ -1,11 +1,5 @@
 "use client";
 
-/**
- * Reports the web player's play, pause, seek, track and up-next changes for the
- * public live trip. Only the server's public user is heard; anyone else gets a
- * 404 once and the hook goes quiet for the rest of the session.
- */
-
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { api } from "@/lib/api";
 import type { EngineStatus } from "@/lib/audio-engine-policy";
@@ -89,11 +83,19 @@ interface Sent {
 
 const queueKeyOf = (queue: LiveQueueEntry[]) => queue.map((e) => e.trackId).join(",");
 
+/**
+ * Reports the web player's play, pause, seek, track and up-next changes for the
+ * public live trip. It runs only when the server says this user's listening is the
+ * public one (`liveReporting` from /system/features); everywhere else it sends nothing.
+ * A 404 from the server still silences it for the session.
+ */
 export function useLiveReporting(
     controller: LiveController | null,
     track: LiveTrack | null,
     queue: LiveQueueEntry[],
+    enabled: boolean,
 ) {
+    const enabledRef = useRef(enabled);
     const controllerRef = useRef(controller);
     const trackRef = useRef(track);
     const queueRef = useRef(queue);
@@ -103,6 +105,7 @@ export function useLiveReporting(
     const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useLayoutEffect(() => {
+        enabledRef.current = enabled;
         controllerRef.current = controller;
         trackRef.current = track;
         queueRef.current = queue;
@@ -115,7 +118,7 @@ export function useLiveReporting(
             clearTimeout(settleTimerRef.current);
             settleTimerRef.current = null;
         }
-        if (disabledRef.current || !ctrl) return;
+        if (!enabledRef.current || disabledRef.current || !ctrl) return;
         const snap = ctrl.getSnapshot();
         const current = trackRef.current;
         const sent = sentRef.current;
@@ -179,5 +182,5 @@ export function useLiveReporting(
     const queueKey = queueKeyOf(queue);
     useEffect(() => {
         evaluateRef.current(false);
-    }, [controller, track?.id, queueKey]);
+    }, [controller, track?.id, queueKey, enabled]);
 }

@@ -6,13 +6,29 @@
 import { test, expect, Browser, Page, BrowserContext } from "@playwright/test";
 import { DogfoodSession } from "./session";
 import { PLAYER, settle } from "../fixtures/shared";
+import { dismissWhatsNew, getAuthToken, loginAsTestUser } from "../fixtures/test-helpers";
+import { requireBaseUrl, destructiveVerdict } from "../fixtures/target";
+import { stackSql } from "../fixtures/stackDb";
 
-const baseUrl = process.env.KIMA_UI_BASE_URL || "http://127.0.0.1:3030";
+const baseUrl = requireBaseUrl();
 const username = process.env.KIMA_TEST_USERNAME || "";
 const password = process.env.KIMA_TEST_PASSWORD || "";
 
+/** The timezone every stats request names, so the page and the API cut days the same way. */
+const TZ = "Europe/London";
+
+/** The fewest plays at which the stats page has anything to compare against the API. */
+const MIN_PLAYS = 50;
+
 /** One thread of interaction: the filter journeys mean nothing if the page never loaded. */
 test.describe.configure({ mode: "serial" });
+
+/** Opens the lazy play-history audit if it is waiting to be asked, and waits for its totals. */
+async function scanPlayHistory(page: Page): Promise<void> {
+    const ask = page.getByRole("button", { name: /scan play history/i });
+    if (await ask.isVisible().catch(() => false)) await ask.click();
+    await expect(page.getByText(/total plays/i).first()).toBeVisible({ timeout: 30_000 });
+}
 
 test.describe("Dogfood: stats, filters, audit, queue", () => {
     let browser: Browser;
@@ -27,6 +43,15 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
         forHalf: number | null;
         neverPlayed: number;
     } | null = null;
+    /** False when the signed-in user has too few plays for the history-dependent journeys. */
+    let hasHistory = true;
+
+    /** Records the skipped journey as not covered; true when the caller should stop. */
+    const lacksHistory = (journey: string): boolean => {
+        if (hasHistory) return false;
+        session.noteNotCovered(`stats ${journey}: the signed-in user has ${allTime?.plays ?? 0} plays (needs more than ${MIN_PLAYS}), so this journey did not run`);
+        return true;
+    };
 
     test.beforeAll(async ({ browser: launched }) => {
         browser = launched;
@@ -43,13 +68,18 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
 
     test.afterAll(async () => {
         if (session) {
-            const reportPath = session.writeReport("test-results");
+            const reportPath = session.writeReport("test-results/stats");
             console.log(`\n[stats-dogfood] report written to ${reportPath}`);
             console.log(
                 `[stats-dogfood] ${session.steps.length} steps, ${session.violations.length} violations`,
             );
         }
-        await context?.close();
+        try {
+            // Anything that went wrong after a journey's own check, or in a journey that stopped before its own.
+            session?.assertNoneLeft();
+        } finally {
+            await context?.close();
+        }
     });
 
     test("1. arrive: sign in and reach the stats page", async () => {
@@ -65,18 +95,14 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
         });
 
         await session.step("sign in", async () => {
-            await page.goto("/login");
-            await page.locator("#username").fill(username);
-            await page.locator("#password").fill(password);
-            await page.getByRole("button", { name: /sign in/i }).click();
-            await page.waitForURL((u) => !u.pathname.startsWith("/login"), { timeout: 30_000 });
-            token = await page.evaluate(() => localStorage.getItem("auth_token") ?? "");
+            await loginAsTestUser(page);
+            token = await getAuthToken(page);
             expect(token, "a token should be stored after login").toBeTruthy();
         });
 
         await session.step("read the API's own answer, to compare the page against", async () => {
             const res = await page.request.get(
-                `/api/stats?tz=Europe/London&period=all`,
+                `/api/stats?tz=${TZ}&period=all`,
                 { headers: { Authorization: `Bearer ${token}` } },
             );
             expect(res.status()).toBe(200);
@@ -87,20 +113,18 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
                 forHalf: d.signature.concentration?.forHalf ?? null,
                 neverPlayed: d.shelf.neverPlayed,
             };
-            expect(
-                allTime.plays,
-                "this suite needs a real play history; a page of zeroes proves nothing",
-            ).toBeGreaterThan(50);
+            // A page of zeroes proves nothing, and plays are never invented to fill it.
+            hasHistory = allTime.plays > MIN_PLAYS;
+            if (!hasHistory) {
+                session.noteNotCovered(
+                    `stats: the signed-in user has ${allTime.plays} plays (needs more than ${MIN_PLAYS}); the figure, filter, playable-slice, play-count and audit-read journeys did not run`,
+                );
+            }
         });
 
         await session.step("dismiss the release window if it is up", async () => {
-            // Close the What's New dialog of any release; it opens over
-            // everything on first login after an upgrade.
-            const dialog = page.locator('div[role="dialog"][aria-labelledby="whats-new-title"]');
-            if (await dialog.isVisible().catch(() => false)) {
-                await page.locator('div[role="dialog"] button[aria-label="Close"]').first().click();
-                await expect(dialog).toBeHidden({ timeout: 10_000 });
-            } else {
+            // The release window opens over everything on first login after an upgrade.
+            if (!(await dismissWhatsNew(page))) {
                 session.noteNotCovered("no release window was shown on this instance");
             }
         });
@@ -108,7 +132,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
         await session.step("the stats page loads", async () => {
             await page.goto("/stats");
             await settle(page);
-            await expect(page.getByText(/your listening/i).first()).toBeVisible();
+            await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible();
         });
 
         session.assertClean("1. Arrive");
@@ -116,6 +140,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
 
     test("2. the ledger states the same numbers the API does", async () => {
         session.setJourney("2. Ledger");
+        if (lacksHistory("journey 2")) return;
 
         await session.step("the headline figures match the API exactly", async () => {
             const body = await page.locator("main").innerText();
@@ -125,7 +150,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
                 expect(
                     body,
                     "the concentration figure the ledger prints must be the one the API returned",
-                ).toContain(`${allTime!.forHalf} songs`);
+                ).toContain(`${allTime!.forHalf} ${allTime!.forHalf === 1 ? "track" : "tracks"}`);
             }
         });
 
@@ -149,6 +174,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
 
     test("3. the period filter actually narrows, and says which window it is showing", async () => {
         session.setJourney("3. Period filter");
+        if (lacksHistory("journey 3")) return;
 
         let thirtyDayPlays = 0;
 
@@ -187,7 +213,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
         });
 
         await session.step("the never-played count is a shelf fact and is unchanged", async () => {
-            const res = await page.request.get(`/api/stats?tz=Europe/London&period=30d`, {
+            const res = await page.request.get(`/api/stats?tz=${TZ}&period=30d`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             const d = await res.json();
@@ -212,12 +238,13 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
 
     test("4. every figure the page can play, plays", async () => {
         session.setJourney("4. Playable slices");
+        if (lacksHistory("journey 4")) return;
 
         await session.step("a key wedge returns tracks rather than silently nothing", async () => {
             // The wheel folds both spellings of a pitch into one wedge. When the
             // query matched only the wedge's own label, a wedge could show
             // hundreds of listens and hand back an empty queue.
-            const res = await page.request.get(`/api/stats?tz=Europe/London&period=all`, {
+            const res = await page.request.get(`/api/stats?tz=${TZ}&period=all`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             const keys = (await res.json()).signature.key;
@@ -260,7 +287,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
         await session.step("pressing play on a top track starts audio", async () => {
             await page.goto("/stats");
             await settle(page);
-            const trackRow = page.locator('main ol li button[aria-label^="Play "]').first();
+            const trackRow = page.locator('main ol li button[aria-label^="play " i]').first();
             await expect(trackRow).toBeVisible({ timeout: 15_000 });
             await trackRow.click();
 
@@ -290,6 +317,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
 
     test("5. the player states how many times you have heard this track", async () => {
         session.setJourney("5. Player play count");
+        if (lacksHistory("journey 5")) return;
 
         await session.step("the count in the bar is the count the API gives", async () => {
             // The track id comes from the bar's audio element; the stored
@@ -378,6 +406,10 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
         });
 
         await session.step("a queue longer than the limit is clamped, not rejected", async () => {
+            // A Kima page saves the playback state on its own (on pause, on leaving), so no Kima page is open while
+            // the probe is written and read back; the last save of leaving lands before it.
+            await page.goto("about:blank");
+            await page.waitForTimeout(1500);
             const limitRes = await page.request.get(`/api/playback-state/limit`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
@@ -400,6 +432,8 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
             const state = await read.json();
             expect(Array.isArray(state.queue)).toBe(true);
             expect(state.queue.length).toBe(maxQueueLength);
+            await page.goto("/");
+            await settle(page);
         });
 
         await session.step("the queue is not written to localStorage", async () => {
@@ -420,6 +454,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
 
     test("7. the play-history audit reports honestly and deletes only what it proves", async () => {
         session.setJourney("7. Play history audit");
+        if (lacksHistory("journey 7")) return;
 
         let before: {
             totalListens: number;
@@ -461,7 +496,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
         // run here would find the duplicates already consumed.
 
         await session.step("the stats page still agrees after the merge", async () => {
-            const res = await page.request.get(`/api/stats?tz=Europe/London&period=all`, {
+            const res = await page.request.get(`/api/stats?tz=${TZ}&period=all`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             const d = await res.json();
@@ -477,12 +512,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
 
             // The audit reads the whole history, so it is deliberately lazy —
             // "nothing runs until you ask". Asking is part of the journey.
-            const ask = page.getByRole("button", { name: /scan play history/i });
-            if (await ask.isVisible().catch(() => false)) await ask.click();
-
-            await expect(page.getByText(/total plays/i).first()).toBeVisible({
-                timeout: 30_000,
-            });
+            await scanPlayHistory(page);
 
             // The four buckets on screen must be the four the API returned, or
             // the panel is describing a different history than the one audited.
@@ -501,6 +531,17 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
     test("7b. the audit's buttons: merge, ignore, restore, remove", async () => {
         session.setJourney("7b. Audit buttons");
 
+        // The merge and remove buttons permanently delete play rows, so they only run on a marked test copy.
+        const verdict = await destructiveVerdict(baseUrl, async () => {
+            const res = await page.request.get("/api/playlists?limit=100", { headers: { Authorization: `Bearer ${token}` } });
+            const lists = res.ok() ? ((await res.json()) as Array<{ name: string; isOwner: boolean }>) : [];
+            return lists.filter((l) => l.isOwner).map((l) => l.name);
+        });
+        if (!verdict.ok) {
+            session.noteNotCovered(`stats 7b (merge, ignore, restore, remove play history) did not run: ${verdict.reason}`);
+            return;
+        }
+
         /** The audit as the server currently sees it. */
         const audit = async () =>
             (
@@ -517,18 +558,21 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
             return (await res.json()).totalRows;
         };
 
-        await session.step("scrobble three back-dated plays, five seconds apart", async () => {
-            // Five seconds of a track is a provable skip, so the first two plays
-            // give the audit something to act on in every run. The dates sit long
-            // before any real play; a repeat run's rows are refused as duplicates.
+        await session.step("plant back-dated plays from before the listen rule on three tracks, five seconds apart", async () => {
+            // Today's plays have all passed the listen rule and are stored as heard, so no request can make a skip. The audit
+            // exists for older history (rows not marked heard), so plant it in the stack's database: five seconds of a track is a
+            // provable skip, and three rows on the first make one duplicate to merge. Dates sit long before any real play; a
+            // repeat run first clears what an earlier run left.
+            if (stackSql("SELECT 1") === null) {
+                session.noteNotCovered("stats 7b (merge, ignore, restore, remove play history) did not run: KIMA_CONTAINER does not name the stack's container, so no old-style history could be planted");
+                test.skip(true, "no container to plant play history in");
+            }
+            const me = await (await page.request.get("/api/auth/me", { headers: { Authorization: `Bearer ${token}` } })).json();
             const tracksRes = await page.request.get("/api/library/tracks?limit=50", {
                 headers: { Authorization: `Bearer ${token}` },
             });
             expect(tracksRes.ok(), `track list returned ${tracksRes.status()}`).toBeTruthy();
-            const body = await tracksRes.json();
-            const listed: Array<{ id: string; duration: number }> = Array.isArray(body)
-                ? body
-                : (body.tracks ?? body.items ?? []);
+            const listed: Array<{ id: string; duration: number }> = (await tracksRes.json()).tracks;
             const picked = listed.filter((t) => t.duration > 60).slice(0, 3);
             expect(picked.length, "the library needs three tracks over a minute long").toBe(3);
 
@@ -539,41 +583,18 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
             });
             expect(restored.ok(), `putting the tracks back returned ${restored.status()}`).toBeTruthy();
 
-            const keyName = "dogfood-audit";
-            const made = await page.request.post("/api/api-keys", {
-                data: { deviceName: keyName },
-                headers: { Authorization: `Bearer ${token}` },
-            });
-            expect(made.ok(), `provisioning an API key returned ${made.status()}`).toBeTruthy();
-            const apiKey = (await made.json()).apiKey as string;
-
-            try {
-                const start = Date.UTC(2001, 0, 1);
-                for (const [i, track] of picked.entries()) {
-                    const res = await page.request.get(
-                        `/rest/scrobble.view?u=${encodeURIComponent(username)}` +
-                            `&apiKey=${encodeURIComponent(apiKey)}&id=${track.id}` +
-                            `&time=${start + i * 5000}&submission=true&v=1.16.1&c=kima-dogfood&f=json`,
-                    );
-                    const status = (await res.json())?.["subsonic-response"]?.status;
-                    expect(status, `scrobble ${i + 1} answered "${status}"`).toBe("ok");
-                }
-            } finally {
-                const list = await page.request.get("/api/api-keys", {
-                    headers: { Authorization: `Bearer ${token}` },
-                });
-                if (list.ok()) {
-                    const keys = (await list.json()).apiKeys as Array<{ id: string; name?: string }>;
-                    const mine = keys.find((k) => (k.name ?? "").includes(keyName));
-                    if (mine) {
-                        await page.request
-                            .delete(`/api/api-keys/${mine.id}`, {
-                                headers: { Authorization: `Bearer ${token}` },
-                            })
-                            .catch(() => {});
-                    }
-                }
-            }
+            const rows: Array<[string, number]> = [
+                [picked[0].id, 0],
+                [picked[0].id, 1],
+                [picked[0].id, 2],
+                [picked[1].id, 5],
+                [picked[2].id, 10],
+            ];
+            const values = rows
+                .map(([trackId, s], n) => `('dogfood-audit-${n}', '${me.id}', '${trackId}', TIMESTAMP '2000-01-01 00:00:00' + INTERVAL '${s} seconds', 'SUBSONIC', false)`)
+                .join(", ");
+            stackSql(`DELETE FROM "Play" WHERE id LIKE 'dogfood-audit-%'`);
+            stackSql(`INSERT INTO "Play" (id, "userId", "trackId", "playedAt", source, heard) VALUES ${values}`);
 
             const flagged = new Set((await audit()).tracks.map((t: { trackId: string }) => t.trackId));
             expect(
@@ -583,13 +604,12 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
         });
 
         await session.step("open the panel and ask it to look", async () => {
+            // The previous journey ends on this same address with its own scan showing; going there again only moves
+            // to the anchor, so the page is reloaded to scan the history just planted.
             await page.goto("/stats#false-starts");
+            await page.reload();
             await settle(page);
-            const ask = page.getByRole("button", { name: /scan play history/i });
-            if (await ask.isVisible().catch(() => false)) await ask.click();
-            await expect(page.getByText(/total plays/i).first()).toBeVisible({
-                timeout: 30_000,
-            });
+            await scanPlayHistory(page);
         });
 
         await session.step("the merge button removes exactly the number it names", async () => {
@@ -634,11 +654,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
         await session.step("leaving a track alone removes nothing and takes it off the list", async () => {
             await page.reload();
             await settle(page);
-            const ask = page.getByRole("button", { name: /scan play history/i });
-            if (await ask.isVisible().catch(() => false)) await ask.click();
-            await expect(page.getByText(/total plays/i).first()).toBeVisible({
-                timeout: 30_000,
-            });
+            await scanPlayHistory(page);
 
             const start = await audit();
             expect(start.tracks.length, "the seeded skips must be listed").toBeGreaterThan(0);
@@ -686,11 +702,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
         await session.step("remove deletes the provable skips, and only those", async () => {
             await page.reload();
             await settle(page);
-            const ask = page.getByRole("button", { name: /scan play history/i });
-            if (await ask.isVisible().catch(() => false)) await ask.click();
-            await expect(page.getByText(/total plays/i).first()).toBeVisible({
-                timeout: 30_000,
-            });
+            await scanPlayHistory(page);
 
             const start = await audit();
             expect(start.skipped, "the seeded skips must still be provable").toBeGreaterThan(0);
@@ -827,11 +839,7 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
             session.setActivePage(p);
             session.attach(p);
             try {
-                await p.goto(`${baseUrl}/login`);
-                await p.locator("#username").fill(username);
-                await p.locator("#password").fill(password);
-                await p.getByRole("button", { name: /sign in/i }).click();
-                await p.waitForURL((u) => !u.pathname.startsWith("/login"), { timeout: 30_000 });
+                await loginAsTestUser(p);
                 await p.goto(`${baseUrl}/stats`);
                 await settle(p);
 
@@ -845,7 +853,9 @@ test.describe("Dogfood: stats, filters, audit, queue", () => {
                 const periodSelect = p.getByRole("combobox", { name: "period" });
                 await expect(periodSelect).toBeVisible();
                 await periodSelect.selectOption("30d");
-                await expect(p.locator("main h1").first()).toHaveText(/last 30 days/i);
+                // The 30-day view's heading: the period's name, or its empty state on a user with no plays (the
+                // all-time empty state says "no plays yet" instead).
+                await expect(p.locator("main h1").first()).toHaveText(/last 30 days|no plays in this period/i);
             } finally {
                 session.setActivePage(page);
                 await phone.close();

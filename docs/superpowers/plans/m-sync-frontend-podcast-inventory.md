@@ -21,3 +21,7 @@ Inventory the rest of the upstream frontend delta against the fork rather than t
 From `frontend/`, after restoring the local sort control: `npx tsc --noEmit` exit 0; `npm run test:unit` exit 0 (56 files, 514 tests); `npm run build` exit 0 (41/41 Next static-generation units; 42 HTML files under `out`, including error/fallback files). The `out/podcasts` tree contains index, show, category and retained genre HTML. Vite emitted its existing native-config future compatibility warning. These gates test the comparison artifact only; they do not demonstrate live backend integration or visual parity.
 
 Full command logs and the 20-file pre-edit dirty snapshot: `~/.hermes/cache/scratch/frontend-repair-20261110/` (scratch is temporary). Baseline tsc failed eight diagnostics in `CategoryShelf`; baseline unit run had 507 passed and 2 failed (missing NextRouter). The playlist compile-time XOR/reply regression failed before its fix; the local episode-count sort regression failed before its fix.
+
+## Superseded (2026-11-11)
+
+The whole-tree refresh to v1.12.3 and its path inventory are in `m-sync-frontend-v1.12.3-inventory.md`; the gates listed above as remaining are tracked there.

@@ -5,8 +5,6 @@ import { usePlayerControls } from "@/hooks/usePlayerControls";
 import { PlayCountLine } from "@/features/stats/PlayCountLine";
 import Link from "next/link";
 import {
-    Play,
-    Pause,
     SkipBack,
     SkipForward,
     Volume2,
@@ -17,14 +15,13 @@ import {
     Repeat1,
     RotateCcw,
     RotateCw,
-    Loader2,
     AudioWaveform,
-    RefreshCw,
     MicVocal,
 } from "lucide-react";
 import { KeyboardShortcutsTooltip } from "./KeyboardShortcutsTooltip";
 import { shuffleState } from "@/lib/shuffle";
 import { cn } from "@/lib/cn";
+import { PlayPauseButton } from "./PlayPauseButton";
 import { formatTime, formatMediaDuration } from "@/lib/format";
 import { SeekSlider } from "./SeekSlider";
 import { SleepTimer } from "./SleepTimer";
@@ -45,8 +42,6 @@ export function FullPlayer() {
         currentIndex,
         isPlaying,
         isBuffering,
-        canSeek,
-        downloadProgress,
         audioError,
         duration,
         displayTime,
@@ -55,7 +50,7 @@ export function FullPlayer() {
         resumeWithGesture,
         next,
         previous,
-        setPlayerMode,
+        openOverlay,
         seek,
         skipForward,
         skipBackward,
@@ -80,8 +75,7 @@ export function FullPlayer() {
     };
 
     return (
-        <>
-        <div className="relative flex-shrink-0">
+        <div className="relative flex-shrink-0" role="region" aria-label="now playing">
             <div className="bg-black border-t border-white/[0.08] h-24">
                 <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-brand/40 to-transparent" />
                 <div className="flex items-center h-full px-6 gap-6">
@@ -99,14 +93,14 @@ export function FullPlayer() {
                                     href={mediaLink}
                                     className="block hover:underline"
                                 >
-                                    <h4 className="text-white font-semibold truncate text-sm">
+                                    <p data-player-title className="text-white font-semibold truncate text-sm">
                                         {title}
-                                    </h4>
+                                    </p>
                                 </Link>
                             ) : (
-                                <h4 className="text-white font-semibold truncate text-sm">
+                                <p data-player-title className="text-white font-semibold truncate text-sm">
                                     {title}
-                                </h4>
+                                </p>
                             )}
                             {artistLink ? (
                                 <Link
@@ -194,58 +188,22 @@ export function FullPlayer() {
                                 <SkipBack className="w-5 h-5" />
                             </button>
 
-                            <button
-                                onClick={isPlaying ? pause : resumeWithGesture}
-                                className={cn(
-                                    "w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 relative group",
-                                    audioError
-                                        ? "bg-danger text-white hover:scale-110 hover:bg-danger-light"
-                                        : hasMedia && !isBuffering
-                                        ? "bg-brand text-black hover:scale-110"
-                                        : isBuffering
-                                        ? "bg-brand/80 text-black"
-                                        : "bg-gray-700 text-[var(--text-muted)] cursor-not-allowed"
-                                )}
+                            <PlayPauseButton
+                                isPlaying={isPlaying}
+                                isBuffering={isBuffering}
+                                audioError={audioError}
+                                onPlay={resumeWithGesture}
+                                onPause={pause}
                                 disabled={!hasMedia}
-                                aria-label={
-                                    audioError
-                                        ? "Retry playback"
-                                        : isBuffering
-                                        ? "Buffering..."
-                                        : isPlaying
-                                        ? "Pause"
-                                        : "Play"
-                                }
-                                title={
-                                    audioError
-                                        ? "retry playback"
-                                        : isBuffering
-                                        ? "buffering..."
-                                        : isPlaying
-                                        ? "pause"
-                                        : "play"
-                                }
-                            >
-                                {hasMedia && !isBuffering && !audioError && (
-                                    <div className="absolute inset-0 rounded-full bg-brand blur-md opacity-0 group-hover:opacity-50 transition-opacity duration-200" />
-                                )}
-                                {audioError ? (
-                                    <RefreshCw className="w-5 h-5 relative z-(--z-raised)" />
-                                ) : isBuffering ? (
-                                    <Loader2 className="w-5 h-5 animate-spin relative z-(--z-raised)" />
-                                ) : isPlaying ? (
-                                    <span className="animate-pop"><Pause className="w-5 h-5 relative z-(--z-raised)" /></span>
-                                ) : (
-                                    <span className="animate-pop"><Play className="w-5 h-5 ml-0.5 relative z-(--z-raised)" /></span>
-                                )}
-                            </button>
+                                glow
+                            />
 
                             <button
                                 onClick={next}
                                 className="text-[var(--text-secondary)] hover:text-white transition-all duration-200 hover:scale-110 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100"
-                                disabled={!hasMedia || playbackType !== "track"}
-                                aria-label="Next track"
-                                title="next track"
+                                disabled={!hasMedia || (playbackType !== "track" && playbackType !== "podcast")}
+                                aria-label={playbackType === "podcast" ? "next episode" : "Next track"}
+                                title={playbackType === "podcast" ? "next episode" : "next track"}
                             >
                                 <SkipForward className="w-5 h-5" />
                             </button>
@@ -344,9 +302,7 @@ export function FullPlayer() {
                                 progress={progress}
                                 duration={duration}
                                 onSeek={seek}
-                                canSeek={canSeek}
                                 hasMedia={hasMedia}
-                                downloadProgress={downloadProgress}
                                 variant="default"
                                 className="flex-1"
                             />
@@ -401,7 +357,7 @@ export function FullPlayer() {
                         <KeyboardShortcutsTooltip />
 
                         <button
-                            onClick={() => setPlayerMode("overlay")}
+                            onClick={openOverlay}
                             className={cn(
                                 "transition-all duration-200 border-l border-white/[0.08] pl-3",
                                 hasMedia
@@ -418,6 +374,5 @@ export function FullPlayer() {
                 </div>
             </div>
         </div>
-        </>
     );
 }

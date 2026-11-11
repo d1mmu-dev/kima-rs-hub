@@ -1,42 +1,23 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useNotifications } from "@/hooks/useNotifications";
-import { useActiveDownloads } from "@/hooks/useNotifications";
-import { NotificationsTab } from "@/components/activity/NotificationsTab";
-import { ActiveDownloadsTab } from "@/components/activity/ActiveDownloadsTab";
-import { HistoryTab } from "@/components/activity/HistoryTab";
-import { ImportsTab } from "@/components/activity/ImportsTab";
-import {
-    Bell,
-    Download,
-    History,
-    ListMusic,
-    X,
-    type LucideIcon,
-} from "lucide-react";
+import { Bell, X } from "lucide-react";
+import { ActivityOptions, ActivityPane, useActivityCounts } from "@/components/activity/ActivityBody";
+import { panelTabId } from "./panelChrome";
 import { cn } from "@/lib/cn";
 import { useFeatures } from "@/lib/features-context";
 import { useIsMobile, useIsTablet } from "@/hooks/useMediaQuery";
 import { useActivityPanelSettings } from "@/lib/activity-panel-settings-context";
-import { useActivityPanelOpen } from "@/hooks/useActivityPanel";
-
-type ActivityTab = "notifications" | "active" | "imports" | "history" | "settings";
-
-const TABS: { id: ActivityTab; label: string; icon: LucideIcon }[] = [
-    { id: "notifications", label: "Notifications", icon: Bell },
-    { id: "active", label: "Active", icon: Download },
-    { id: "imports", label: "Imports", icon: ListMusic },
-    { id: "history", label: "History", icon: History },
-];
+import { openActivityPanel, useActivityPanelOpen, type ActivityPanelTab } from "@/hooks/useActivityPanel";
 
 interface ActivityPanelProps {
     isOpen: boolean;
     onToggle: () => void;
-    activeTab?: ActivityTab;
-    onTabChange?: (tab: ActivityTab) => void;
+    activeTab?: ActivityPanelTab;
+    onTabChange?: (tab: ActivityPanelTab) => void;
 }
 
+/** The phone and tablet activity overlay; the desktop layout shows the side panel (UnifiedPanel) instead. */
 export function ActivityPanel({
     isOpen,
     onToggle,
@@ -45,35 +26,24 @@ export function ActivityPanel({
 }: ActivityPanelProps) {
     const { settingsContent, setSettingsContent } = useActivityPanelSettings();
     const [internalActiveTab, setInternalActiveTab] =
-        useState<ActivityTab>("notifications");
+        useState<ActivityPanelTab>("notifications");
     const resolvedActiveTab = activeTab ?? internalActiveTab;
     const setResolvedActiveTab = onTabChange ?? setInternalActiveTab;
-    const { unreadCount } = useNotifications();
-    const { downloads: activeDownloads } = useActiveDownloads();
-    const features = useFeatures();
-    const tabs = TABS.filter(
-        (t) => (t.id !== "active" && t.id !== "history") || features.downloads,
-    ).filter((t) => t.id !== "imports" || features.imports);
 
-    const handleTabClick = useCallback((tab: ActivityTab) => {
+    const handleTabClick = useCallback((tab: ActivityPanelTab) => {
         if (tab !== "settings" && resolvedActiveTab === "settings" && settingsContent) {
             setSettingsContent(null);
         }
         setResolvedActiveTab(tab);
     }, [resolvedActiveTab, settingsContent, setSettingsContent, setResolvedActiveTab]);
 
-    // If settings tab is active but no settings content provided, default to notifications
+    // The settings tab with no page settings to show falls back to the alerts.
     useEffect(() => {
         if (resolvedActiveTab === "settings" && !settingsContent) {
             setResolvedActiveTab("notifications");
         }
     }, [resolvedActiveTab, settingsContent, setResolvedActiveTab]);
 
-    const notificationBadge = unreadCount > 0 ? unreadCount : null;
-    const activeBadge =
-        activeDownloads.length > 0 ? activeDownloads.length : null;
-
-    // A phone or tablet overlay: the desktop layout shows the side panel (UnifiedPanel).
     if (!isOpen) return null;
 
     return (
@@ -83,111 +53,72 @@ export function ActivityPanel({
                 onClick={onToggle}
             />
 
-            {/* Panel - slides in from right */}
             <div
                 id="activity-panel-mobile"
                 className="fixed inset-y-0 right-0 w-full max-w-md bg-[var(--bg-primary)] z-(--z-panel) flex flex-col"
                 style={{ paddingTop: "var(--standalone-safe-area-top, 0px)" }}
             >
-                <div className="flex items-center justify-between px-4 py-4 border-b border-white/10">
-                    <h2 className="text-lg font-semibold text-white">
-                        Activity
-                    </h2>
+                <div className="flex items-center justify-between px-4 py-3">
+                    <h2 className="text-lg font-semibold text-[var(--text-primary)]">activity</h2>
                     <button
+                        type="button"
                         onClick={onToggle}
-                        className="p-2 hover:bg-white/10 rounded-full transition-colors"
-                        title="close"
+                        aria-label="close activity"
+                        className="flex h-9 w-9 items-center justify-center rounded-full text-[var(--text-secondary)] outline-none transition-colors hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-brand/60"
                     >
-                        <X className="w-5 h-5 text-[var(--text-secondary)]" />
+                        <X aria-hidden="true" className="h-5 w-5" />
                     </button>
                 </div>
 
-                <div className="flex border-b border-white/10">
-                    {tabs.map((tab) => {
-                        const Icon = tab.icon;
-                        const badge =
-                            tab.id === "notifications"
-                                ? notificationBadge
-                                : tab.id === "active"
-                                ? activeBadge
-                                : null;
+                <ActivityOptions
+                    controls="activity-sheet-content"
+                    value={resolvedActiveTab === "settings" ? null : resolvedActiveTab}
+                    onChange={handleTabClick}
+                />
 
-                        return (
-                            <button
-                                key={tab.id}
-                                onClick={() => handleTabClick(tab.id)}
-                                className={cn(
-                                    "flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors duration-200 relative",
-                                    resolvedActiveTab === tab.id
-                                        ? "text-white border-b-2 border-[#f5c518]"
-                                        : "text-[var(--text-secondary)] hover:text-white/70"
-                                )}
-                            >
-                                <Icon className="w-4 h-4" />
-                                <span>{tab.label}</span>
-                                {badge && (
-                                    <span
-                                        className={cn(
-                                            "min-w-[18px] h-[18px] px-1 rounded-full text-xs font-semibold flex items-center justify-center ml-1",
-                                            tab.id === "active"
-                                                ? "bg-brand text-black"
-                                                : "bg-white/15 text-white"
-                                        )}
-                                    >
-                                        {badge > 99 ? "99+" : badge}
-                                    </span>
-                                )}
-                            </button>
-                        );
-                    })}
-                </div>
-
-                <div className="flex-1 overflow-hidden">
-                    {resolvedActiveTab === "notifications" && (
-                        <NotificationsTab />
+                {/* A page's settings are not one of the tabs: while they show, no tab is chosen and the region is named for them. */}
+                <div
+                    id="activity-sheet-content"
+                    {...(resolvedActiveTab === "settings"
+                        ? { role: "region", "aria-label": "settings" }
+                        : { role: "tabpanel", "aria-labelledby": panelTabId("activity-sheet-content", resolvedActiveTab) })}
+                    className={cn("flex-1", resolvedActiveTab === "settings" ? "overflow-hidden" : "overflow-y-auto")}
+                >
+                    {resolvedActiveTab === "settings" ? (
+                        settingsContent
+                    ) : (
+                        <ActivityPane view={resolvedActiveTab} onOpen={handleTabClick} />
                     )}
-                    {resolvedActiveTab === "active" && (
-                        <ActiveDownloadsTab />
-                    )}
-                    {resolvedActiveTab === "imports" && <ImportsTab />}
-                    {resolvedActiveTab === "history" && <HistoryTab />}
-                    {resolvedActiveTab === "settings" && settingsContent}
                 </div>
             </div>
         </>
     );
 }
 
+/** The top bar's activity button, with a dot while there are unread alerts or running downloads. */
 export function ActivityPanelToggle() {
-    const { unreadCount } = useNotifications();
-    const { downloads: activeDownloads } = useActiveDownloads();
+    const { any: hasActivity } = useActivityCounts();
     const isMobile = useIsMobile();
     const isTablet = useIsTablet();
     const isPanelOpen = useActivityPanelOpen();
-
-    if (isMobile || isTablet) {
-        return null;
-    }
-
-    const hasActivity = unreadCount > 0 || activeDownloads.length > 0;
+    const overlay = isMobile || isTablet;
 
     return (
         <button
-            onClick={() =>
-                window.dispatchEvent(new CustomEvent("toggle-activity-panel"))
-            }
+            type="button"
+            onClick={() => (isPanelOpen ? window.dispatchEvent(new CustomEvent("toggle-activity-panel")) : openActivityPanel("all"))}
             aria-expanded={isPanelOpen}
-            aria-controls="activity-panel"
+            aria-controls={overlay ? "activity-panel-mobile" : "activity-panel"}
             className={cn(
-                "relative p-2 rounded-full transition-all",
-                "text-[var(--text-secondary)] hover:text-white"
+                "relative flex shrink-0 items-center justify-center rounded-full text-[var(--text-secondary)] transition-colors duration-200 hover:text-white",
+                overlay ? "ml-2 h-11 w-11" : "p-2",
             )}
-            title="toggle activity panel"
+            title="activity"
             aria-label="Toggle activity panel"
         >
             <Bell className="w-5 h-5" />
             {hasActivity && (
-                <span className="absolute top-1.5 right-2 w-1 h-1 rounded-full bg-brand" />
+                <span aria-hidden="true" className={cn("absolute w-1 h-1 rounded-full bg-brand", overlay ? "top-2.5 right-3" : "top-1.5 right-2")} />
             )}
         </button>
     );

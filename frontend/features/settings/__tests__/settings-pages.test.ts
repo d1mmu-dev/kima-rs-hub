@@ -12,6 +12,14 @@ describe("settings navigation", () => {
         expect(addressForOldSection("lidarr")).toBe("/settings/sources#lidarr");
         expect(addressForOldSection("library-tools")).toBe("/settings/library#library-tools");
         expect(addressForOldSection("account")).toBeUndefined();
-        expect(settingsPage("library").sections.map((s) => s.id)).toEqual(["cache", "corrupt-tracks", "library-tools"]);
+        // v1.12.3's library anchors (CacheSection now draws them), then the local tools.
+        expect(settingsPage("library").sections.map((s) => s.id)).toEqual([
+            "cache",
+            "library-actions",
+            "corrupt-tracks",
+            "library-performance",
+            "library-start-over",
+            "library-tools",
+        ]);
     });
 });

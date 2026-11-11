@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { Search as SearchIcon } from "lucide-react";
 import { useIsTV } from "@/lib/tv-utils";
 import { cn } from "@/lib/cn";
@@ -16,24 +16,26 @@ export function TVSearchInput({ initialQuery = "", onSearch }: TVSearchInputProp
     const [query, setQuery] = useState(initialQuery);
     const [isFocused, setIsFocused] = useState(false);
 
-    useEffect(() => {
+    const [lastInitialQuery, setLastInitialQuery] = useState(initialQuery);
+    if (initialQuery !== lastInitialQuery) {
+        setLastInitialQuery(initialQuery);
         setQuery(initialQuery);
-    }, [initialQuery]);
+    }
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (query.trim()) {
             onSearch(query.trim());
-            // Blur the input after search to return to D-pad navigation
+            // Hand the remote back to the D-pad.
             inputRef.current?.blur();
         }
     };
 
+    // Enter submits the form.
     const handleKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key === "Enter") {
-            handleSubmit(e);
-        }
         if (e.key === "Escape") {
+            // First Back leaves the field; the next one reaches the tab row.
+            e.preventDefault();
             inputRef.current?.blur();
         }
     };

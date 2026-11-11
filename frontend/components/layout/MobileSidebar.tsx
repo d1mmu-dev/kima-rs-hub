@@ -1,17 +1,29 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { usePathname } from "@/lib/use-pathname";
-import { useEffect, useRef, useState } from "react";
-import { Settings, RefreshCw, LogOut, Compass, X, Radio, ChartNoAxesColumn } from "lucide-react";
+import { useSectionFlags } from "@/lib/section-flags";
+import { useEffect, useRef } from "react";
+import { Settings, RefreshCw, LogOut, X } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { notify } from "@/lib/notify";
 import { KimaMark } from "@/components/ui/KimaMark";
 import { APP_VERSION } from "@/lib/version";
-import { openWhatsNew } from "@/components/whats-new/WhatsNewGate";
-import { useFeatures } from "@/lib/features-context";
+import { openWhatsNewOrChangelog } from "@/components/whats-new/WhatsNewGate";
+import { useVersionChip } from "@/components/whats-new/useVersionChip";
+import { useLibrarySync } from "@/hooks/useLibrarySync";
+import { NAV, isCurrentNav, type NavItem } from "./navItems";
+
+/** What the phone menu adds to the tab bar's destinations. */
+const QUICK_LINKS: NavItem[] = [NAV.discover, NAV.radio, NAV.releases, NAV.stats];
+
+const linkClass = (current: boolean) =>
+    cn(
+        "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200",
+        current ? "bg-white/10 text-white" : "text-[var(--text-secondary)] hover:text-white hover:bg-white/5",
+    );
 
 interface MobileSidebarProps {
     isOpen: boolean;
@@ -20,11 +32,12 @@ interface MobileSidebarProps {
 
 export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
     const pathname = usePathname();
-    const { logout } = useAuth();
-    const features = useFeatures();
-    const [isSyncing, setIsSyncing] = useState(false);
+    const router = useRouter();
+    const features = useSectionFlags();
+    const { logout, user } = useAuth();
+    const chip = useVersionChip();
+    const { sync, syncing: isSyncing } = useLibrarySync();
     const isFirstRender = useRef(true);
-    const syncTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
     // Close on route change (skip initial mount)
     useEffect(() => {
@@ -35,24 +48,8 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
         onClose();
     }, [pathname]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    useEffect(() => {
-        return () => {
-            if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
-        };
-    }, []);
-
     const handleSync = async () => {
-        if (isSyncing) return;
-
-        try {
-            setIsSyncing(true);
-            await api.scanLibrary();
-            onClose();
-        } catch {
-            notify.error("Could not start the library scan");
-        } finally {
-            syncTimeoutRef.current = setTimeout(() => setIsSyncing(false), 2000);
-        }
+        if (await sync()) onClose();
     };
 
     const handleLogout = async () => {
@@ -60,7 +57,7 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
             await logout();
             onClose();
         } catch {
-            notify.error("Failed to logout");
+            notify.error("couldn't log out");
         }
     };
 
@@ -88,13 +85,13 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                     >
                         <KimaMark size={32} />
                         <span className="text-lg font-bold text-white tracking-tight">
-                            Kima
+                            kima
                         </span>
                     </Link>
                     <button
                         onClick={onClose}
-                className="w-9 h-9 flex items-center justify-center text-[var(--text-muted)] hover:text-white transition-colors duration-200 rounded-full hover:bg-white/10"
-                        aria-label="Close menu"
+                        className="w-9 h-9 flex items-center justify-center text-[var(--text-muted)] hover:text-white transition-colors duration-200 rounded-full hover:bg-white/10"
+                        aria-label="close menu"
                     >
                         <X className="w-5 h-5" />
                     </button>
@@ -103,78 +100,32 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                 <nav
                     className="flex-1 overflow-y-auto py-4"
                     role="navigation"
-                    aria-label="Mobile menu"
+                    aria-label="menu"
                 >
                     <div className="px-3 mb-6">
                         <div className="text-xs font-semibold text-[var(--text-muted)] px-3 mb-2">
-                            Quick Links
+                            quick links
                         </div>
 
-                        {features.discover && (
-                            <Link
-                                href="/discover"
-                                aria-current={
-                                    pathname === "/discover" ? "page" : undefined
-                                }
-                                aria-label="Discover"
-                                className={cn(
-                                    "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200",
-                                    pathname === "/discover" ?
-                                        "bg-white/10 text-white"
-                                    :   "text-[var(--text-secondary)] hover:text-white hover:bg-white/5",
-                            )}
-                        >
-                            <Compass className="w-5 h-5" />
-                            <span className="text-sm font-medium">
-                                Discover
-                            </span>
-                        </Link>
-                        )}
-
-                        {features.mixes && (
-                            <Link
-                                href="/radio"
-                                aria-current={
-                                    pathname === "/radio" ? "page" : undefined
-                                }
-                                aria-label="Radio"
-                                className={cn(
-                                    "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200",
-                                    pathname === "/radio" ?
-                                        "bg-white/10 text-white"
-                                    :   "text-[var(--text-secondary)] hover:text-white hover:bg-white/5",
-                            )}
-                        >
-                            <Radio className="w-5 h-5" />
-                            <span className="text-sm font-medium">
-                                Radio
-                            </span>
-                        </Link>
-                        )}
-
-                        <Link
-                            href="/stats"
-                            aria-current={
-                                pathname === "/stats" ? "page" : undefined
-                            }
-                            aria-label="Stats"
-                            className={cn(
-                                "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200",
-                                pathname === "/stats" ?
-                                    "bg-white/10 text-white"
-                                :   "text-[var(--text-secondary)] hover:text-white hover:bg-white/5",
-                            )}
-                        >
-                            <ChartNoAxesColumn className="w-5 h-5" />
-                            <span className="text-sm font-medium">
-                                Stats
-                            </span>
-                        </Link>
+                        {QUICK_LINKS.filter((item) => !item.feature || features[item.feature]).map((item) => {
+                            const current = isCurrentNav(item, pathname);
+                            return (
+                                <Link
+                                    key={item.href}
+                                    href={item.href}
+                                    aria-current={current ? "page" : undefined}
+                                    className={linkClass(current)}
+                                >
+                                    <item.icon className="w-5 h-5" />
+                                    <span className="text-sm font-medium">{item.name}</span>
+                                </Link>
+                            );
+                        })}
                     </div>
 
                     <div className="px-3">
                         <div className="text-xs font-semibold text-[var(--text-muted)] px-3 mb-2">
-                            Actions
+                            actions
                         </div>
 
                         <button
@@ -194,25 +145,18 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                                 )}
                             />
                             <span className="text-sm font-medium">
-                                {isSyncing ? "Syncing..." : "Sync Library"}
+                                {isSyncing ? "syncing..." : "sync library"}
                             </span>
                         </button>
 
                         <Link
                             href="/settings"
-                            aria-current={
-                                pathname === "/settings" ? "page" : undefined
-                            }
-                            className={cn(
-                                "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200",
-                                pathname === "/settings" ?
-                                    "bg-white/10 text-white"
-                                :   "text-[var(--text-secondary)] hover:text-white hover:bg-white/5",
-                            )}
+                            aria-current={pathname.startsWith("/settings") ? "page" : undefined}
+                            className={linkClass(pathname.startsWith("/settings"))}
                         >
                             <Settings className="w-5 h-5" />
                             <span className="text-sm font-medium">
-                                Settings
+                                settings
                             </span>
                         </Link>
                     </div>
@@ -223,12 +167,21 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                         type="button"
                         onClick={() => {
                             onClose();
-                            openWhatsNew();
+                            void openWhatsNewOrChangelog(user?.id, (href) => router.push(href));
                         }}
+                        aria-label={chip.label}
+                        title={chip.title}
                         className="w-full flex items-center gap-3 px-3 py-3 rounded-lg text-[var(--text-muted)] hover:text-white hover:bg-white/5 transition-colors duration-200"
                     >
-                        <span className="text-sm">
+                        <span className="relative text-sm">
                             What&apos;s new in <span className="text-brand/80">v{APP_VERSION}</span>
+                            {chip.openCount > 0 && <span className="ml-1 text-brand/80">· {chip.openCount} open</span>}
+                            {chip.update && (
+                                <span
+                                    aria-hidden
+                                    className="absolute -top-1 -right-3 w-2 h-2 rounded-full bg-warning"
+                                />
+                            )}
                         </span>
                     </button>
                     <button
@@ -236,7 +189,7 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                         className="w-full flex items-center gap-3 px-3 py-3 rounded-lg text-danger-light hover:brightness-125 hover:bg-danger/10 transition-colors duration-200"
                     >
                         <LogOut className="w-5 h-5" />
-                        <span className="text-sm font-medium">Logout</span>
+                        <span className="text-sm font-medium">log out</span>
                     </button>
                 </div>
             </div>

@@ -1,6 +1,8 @@
 "use client";
 
-import { useState, useEffect, type ReactNode } from "react";
+import { usePublicConfig } from "@/hooks/useQueries";
+import { useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Calendar, Clock, Download, Disc, ArrowRight, CheckCircle2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { GradientSpinner } from "@/components/ui/GradientSpinner";
@@ -18,11 +20,9 @@ interface ReleaseItem {
     id: number | string;
     title: string;
     artistName: string;
-    artistMbid?: string;
     albumMbid: string;
     releaseDate: string;
     coverUrl: string | null;
-    source: 'lidarr' | 'similar';
     status: 'upcoming' | 'released' | 'available';
     inLibrary: boolean;
     canDownload: boolean;
@@ -32,36 +32,26 @@ interface ReleaseRadarData {
     upcoming: ReleaseItem[];
     recent: ReleaseItem[];
     monitoredArtistCount: number;
-    similarArtistCount: number;
 }
 
 export default function ReleasesPage() {
-    const [data, setData] = useState<ReleaseRadarData | null>(null);
-    const [loading, setLoading] = useState(true);
     const [downloadingId, setDownloadingId] = useState<string | number | null>(null);
-    const [error, setError] = useState<string | null>(null);
-
-    const fetchReleases = async () => {
-        try {
-            setLoading(true);
-            const json = await api.get<ReleaseRadarData>("/releases/radar?daysBack=30&daysAhead=90");
-            setData(json);
-        } catch (err: unknown) {
-            setError(err instanceof Error ? err.message : "Failed to fetch releases");
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    useEffect(() => {
-        fetchReleases();
-    }, []);
+    const { canAcquire } = usePublicConfig();
+    const { data, isLoading, isFetching, error: loadError, refetch } = useQuery({
+        queryKey: ["release-radar"],
+        queryFn: () => api.get<ReleaseRadarData>("/releases/radar?daysBack=30&daysAhead=90"),
+        // Read again on every visit: a release can land in the library between two.
+        staleTime: 0,
+    });
+    // "Try again" after a failure shows the spinner while it asks.
+    const loading = isLoading || (isFetching && !!loadError);
+    const error = loadError ? loadError.message || "couldn't load releases" : null;
 
     const handleDownload = async (albumMbid: string, releaseId: string | number) => {
         try {
             setDownloadingId(releaseId);
             await api.post(`/releases/download/${encodeURIComponent(albumMbid)}`);
-            await fetchReleases();
+            await refetch();
         } catch (err) {
             notify.error("Couldn't start the download", { message: err instanceof Error ? err.message : undefined });
         } finally {
@@ -99,15 +89,14 @@ export default function ReleasesPage() {
             <PageMessage
                 title="Couldn't load releases"
                 description={error}
-                action={{ label: "Try again", onClick: () => { setError(null); fetchReleases(); } }}
+                action={{ label: "Try again", onClick: () => void refetch() }}
             />
         );
     }
 
     return (
-        <div className="min-h-screen pb-32">
+        <div className="min-h-screen page-end">
             <PageHeader
-                eyebrow="Release radar"
                 title="New and upcoming"
                 description={
                     data?.monitoredArtistCount
@@ -127,7 +116,7 @@ export default function ReleasesPage() {
                         title="Coming Soon"
                         releases={data.upcoming}
                         formatDate={formatDate}
-                        onDownload={handleDownload}
+                        onDownload={canAcquire ? handleDownload : undefined}
                         downloadingId={downloadingId}
                     />
                 )}
@@ -138,7 +127,7 @@ export default function ReleasesPage() {
                         title="Just Dropped"
                         releases={data.recent}
                         formatDate={formatDate}
-                        onDownload={handleDownload}
+                        onDownload={canAcquire ? handleDownload : undefined}
                         downloadingId={downloadingId}
                     />
                 )}
@@ -172,7 +161,7 @@ function ReleaseSection({
     title: string;
     releases: ReleaseItem[];
     formatDate: (date: string) => string;
-    onDownload: (albumMbid: string, releaseId: string | number) => void;
+    onDownload?: (albumMbid: string, releaseId: string | number) => void;
     downloadingId: string | number | null;
 }) {
     return (
@@ -206,7 +195,7 @@ function ReleaseCard({
 }: {
     release: ReleaseItem;
     formatDate: (date: string) => string;
-    onDownload: (albumMbid: string, releaseId: string | number) => void;
+    onDownload?: (albumMbid: string, releaseId: string | number) => void;
     isDownloading: boolean;
 }) {
     const isUpcoming = release.status === "upcoming";
@@ -229,12 +218,12 @@ function ReleaseCard({
                     {isUpcoming ? formatDate(release.releaseDate) : hasIt ? "In Library" : "Available"}
                 </span>
             }
-            corner={hasIt && <CheckCircle2 className="w-5 h-5 text-success" aria-label="In library" />}
+            corner={hasIt && <CheckCircle2 className="w-5 h-5 text-success" aria-label="in library" />}
             action={
-                release.canDownload && !hasIt
+                onDownload && release.canDownload && !hasIt
                     ? {
                           icon: Download,
-                          label: "Download",
+                          label: "download",
                           onClick: () => onDownload(release.albumMbid, release.id),
                           busy: isDownloading,
                       }

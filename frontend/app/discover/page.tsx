@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import { notify } from "@/lib/notify";
@@ -10,6 +10,8 @@ import { useAudioState, useAudioPlayback } from "@/lib/audio-context";
 import { useDiscoverData } from "@/features/discover/hooks/useDiscoverData";
 import { useDiscoverActions } from "@/features/discover/hooks/useDiscoverActions";
 import { usePreview } from "@/hooks/usePreview";
+import { usePublicConfig } from "@/hooks/useQueries";
+import { ACQUIRE_LOCKED } from "@/lib/acquire";
 import { DiscoverHero } from "@/features/discover/components/DiscoverHero";
 import { DiscoverActionBar } from "@/features/discover/components/DiscoverActionBar";
 import { TrackList } from "@/features/discover/components/TrackList";
@@ -21,7 +23,7 @@ import { api } from "@/lib/api";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { Button } from "@/components/ui/Button";
 import { plural } from "@/lib/format";
-import { openActivityPanel, setActivityPanelTab } from "@/hooks/useActivityPanel";
+import { leaveActivityPanelSettings, openActivityPanel } from "@/hooks/useActivityPanel";
 
 export default function DiscoverWeeklyPage() {
     // Use split hooks to avoid re-renders from currentTime updates
@@ -29,8 +31,8 @@ export default function DiscoverWeeklyPage() {
     const { isPlaying } = useAudioPlayback();
     const { setSettingsContent, settingsOwner } = useActivityPanelSettings();
     const queryClient = useQueryClient();
+    const { canAcquire } = usePublicConfig();
 
-    // Custom hooks - single source of truth for batch status from useDiscoverData
     const { playlist, config, setConfig, loading, loadError, reloadData, batchStatus, refreshBatchStatus, setPendingGeneration, markGenerationStart, updateTrackLiked, isGenerating } = useDiscoverData();
     const {
         handleGenerate,
@@ -47,7 +49,7 @@ export default function DiscoverWeeklyPage() {
         try {
             const result = await api.retryUnavailableAlbums();
             if (result.success && result.queued > 0) {
-                openActivityPanel("active");
+                openActivityPanel("downloads");
                 refreshBatchStatus();
                 setTimeout(() => reloadData(), 15000);
             } else {
@@ -69,14 +71,16 @@ export default function DiscoverWeeklyPage() {
         (t) => t.id === currentTrack?.id
     );
 
-    // Build discover settings element (stable across renders via the effect dep array)
+    // The settings element handed to the side panel; the refs keep it stable across renders.
     const discoverSettingsRef = useRef<React.ReactNode>(null);
     const settingsOwnerRef = useRef(settingsOwner);
-    settingsOwnerRef.current = settingsOwner;
+    useLayoutEffect(() => {
+        settingsOwnerRef.current = settingsOwner;
+    }, [settingsOwner]);
 
     useEffect(() => {
         const handleBackToActivity = () => {
-            setActivityPanelTab("active");
+            leaveActivityPanelSettings();
         };
 
         const handlePlaylistCleared = async () => {
@@ -187,7 +191,7 @@ export default function DiscoverWeeklyPage() {
                     onCancelGeneration={handleCancelGeneration}
                 />
 
-                <div className="page-shell pb-32">
+                <div className="page-shell page-end">
                     {playlist && playlist.tracks.length > 0 ? (
                             <div className="section-stack">
                                 <section>
@@ -209,7 +213,7 @@ export default function DiscoverWeeklyPage() {
                                         onTogglePreview={(albumId, artistName, title) =>
                                             preview.toggle(albumId, api.getTrackPreviewStreamUrl(artistName, title))
                                         }
-                                        onRetryAll={handleRetryUnavailable}
+                                        onRetryAll={canAcquire ? handleRetryUnavailable : undefined}
                                         isRetrying={retryingUnavailable}
                                     />
                                 </section>
@@ -221,79 +225,67 @@ export default function DiscoverWeeklyPage() {
                         ) : (
                             <div className="max-w-3xl mx-auto py-16">
                                 <div className="relative overflow-hidden rounded-lg border-2 border-white/10 bg-gradient-to-br from-[#0f0f0f] to-[#0a0a0a] p-12">
-                                    <div className="absolute top-0 left-0 w-1 h-full bg-brand" />
-
                                     <div className="flex items-center gap-3 mb-8 pb-4 border-b border-white/10">
-                                        <div className="w-2 h-2 bg-[var(--color-brand)]" />
+                                        <div className={cn("w-2 h-2", isGenerating ? "bg-white/30" : "bg-success")} />
                                         <span className="text-xs tabular-nums text-[var(--text-secondary)]">
                                             {isGenerating ? "Generating" : "Ready"}
                                         </span>
                                     </div>
 
-                                    <h3 className="text-4xl md:text-5xl font-bold tracking-tight text-white mb-4 leading-none">
-                                        This week&apos;s<br/>
-                                        <span className="text-[var(--color-brand)]">playlist</span>
-                                    </h3>
+                                    <h2 className="text-xl font-bold tracking-tight text-white mb-3">
+                                        This week&apos;s playlist
+                                    </h2>
 
                                     <p className="text-sm text-[var(--text-muted)] mb-6 leading-relaxed">
                                         Kima finds artists similar to ones you already love, picks a representative track
                                         from each, then builds your weekly playlist.
                                     </p>
 
-                                    {/* What this does -- disk disclosure, visible before generating */}
-                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+                                    {/* What building it does, including the downloads, shown before it starts. */}
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-8">
                                         <div className="border border-white/10 rounded-lg p-4 bg-white/[0.02]">
                                             <div className="text-xs text-[var(--text-muted)] mb-1">Finds</div>
-                                            <div className="text-xs text-[var(--text-secondary)] leading-snug">Similar artists via ListenBrainz + local similarity, grouped by similarity tier</div>
+                                            <div className="text-xs text-[var(--text-secondary)] leading-snug">Artists similar to the ones you play, from close matches to wild cards</div>
                                         </div>
                                         <div className="border border-white/10 rounded-lg p-4 bg-white/[0.02]">
                                             <div className="text-xs text-[var(--text-muted)] mb-1">Downloads</div>
-                                            <div className="text-xs text-[var(--text-secondary)] leading-snug">Full albums to <span className="text-[var(--text-muted)]">/music/discovery</span> on your server</div>
+                                            <div className="text-xs text-[var(--text-secondary)] leading-snug">Whole albums through Lidarr or Soulseek, kept apart from your library</div>
                                         </div>
                                         <div className="border border-white/10 rounded-lg p-4 bg-white/[0.02]">
                                             <div className="text-xs text-[var(--text-muted)] mb-1">Cleans up</div>
-                                            <div className="text-xs text-[var(--text-secondary)] leading-snug">Unliked albums are removed at week&apos;s end -- liked ones stay forever</div>
+                                            <div className="text-xs text-[var(--text-secondary)] leading-snug">Unliked albums are removed at the end of the week; like a song to keep its album</div>
                                         </div>
                                     </div>
 
-                                    <div className="grid grid-cols-3 gap-4 mb-8">
-                                        <div className="border border-white/10 rounded-lg p-4 bg-white/[0.02] hover:bg-white/[0.04] transition-colors">
-                                            <div className="text-2xl font-bold text-white mb-1">--</div>
-                                            <div className="text-xs text-[var(--text-muted)]">Tracks</div>
-                                        </div>
-                                        <div className="border border-white/10 rounded-lg p-4 bg-white/[0.02] hover:bg-white/[0.04] transition-colors">
-                                            <div className="text-2xl font-bold text-white mb-1">--</div>
-                                            <div className="text-xs text-[var(--text-muted)]">Duration</div>
-                                        </div>
-                                        <div className="border border-white/10 rounded-lg p-4 bg-white/[0.02] hover:bg-white/[0.04] transition-colors">
-                                            <div className="text-2xl font-bold text-white mb-1">--</div>
-                                            <div className="text-xs text-[var(--text-muted)]">Artists</div>
-                                        </div>
-                                    </div>
-
-                                    <button
-                                        onClick={handleGenerate}
-                                        disabled={isGenerating}
-                                        aria-label={isGenerating ? "Playlist generation in progress" : "Build this week's playlist"}
-                                        className={cn(
-                                            "w-full py-4 px-6 border-2 rounded-lg font-bold text-sm transition-all duration-300 min-h-[52px] focus-visible:outline-2 focus-visible:outline-[var(--color-brand)] focus-visible:outline-offset-2",
-                                            isGenerating
-                                                ? "border-white/20 bg-white/5 text-[var(--text-muted)] cursor-not-allowed"
-                                                : "border-[var(--color-brand)] bg-[var(--color-brand)] text-black hover:bg-[var(--color-brand-hover)] hover:border-[var(--color-brand-hover)] hover:scale-[1.02]"
-                                        )}
-                                    >
-                                        {isGenerating ? (
-                                            <span className="flex items-center justify-center gap-3">
-                                                <GradientSpinner size="sm" />
-                                                {getProgressLabel()}
-                                            </span>
-                                        ) : (
-                                            <span className="flex items-center justify-center gap-3">
-                                                <RefreshCw className="w-4 h-4" />
-                                                Build This Week&apos;s Playlist
-                                            </span>
-                                        )}
-                                    </button>
+                                    {canAcquire ? (
+                                        <button
+                                            onClick={handleGenerate}
+                                            disabled={isGenerating}
+                                            aria-label={isGenerating ? "Playlist generation in progress" : "Build this week's playlist"}
+                                            className={cn(
+                                                "w-full py-4 px-6 border-2 rounded-lg font-bold text-sm transition-all duration-300 min-h-[52px] focus-visible:outline-2 focus-visible:outline-[var(--color-brand)] focus-visible:outline-offset-2",
+                                                isGenerating
+                                                    ? "border-white/20 bg-white/5 text-[var(--text-muted)] cursor-not-allowed"
+                                                    : "border-[var(--color-brand)] bg-[var(--color-brand)] text-black hover:bg-[var(--color-brand-hover)] hover:border-[var(--color-brand-hover)] hover:scale-[1.02]"
+                                            )}
+                                        >
+                                            {isGenerating ? (
+                                                <span className="flex items-center justify-center gap-3">
+                                                    <GradientSpinner size="sm" />
+                                                    {getProgressLabel()}
+                                                </span>
+                                            ) : (
+                                                <span className="flex items-center justify-center gap-3">
+                                                    <RefreshCw className="w-4 h-4" />
+                                                    Build This Week&apos;s Playlist
+                                                </span>
+                                            )}
+                                        </button>
+                                    ) : (
+                                        <p className="text-sm text-[var(--text-muted)]">
+                                            Building this playlist downloads albums: {ACQUIRE_LOCKED}.
+                                        </p>
+                                    )}
                                 </div>
                             </div>
                         )}

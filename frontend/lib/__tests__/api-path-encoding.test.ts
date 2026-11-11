@@ -23,7 +23,8 @@ function ok(): Response {
 
 function requestedPath(): string {
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    return String(fetchMock.mock.calls[0][0]);
+    // The path only: v1.12.3 adds query parameters (a mix's `?tz=`) that are not path segments.
+    return String(fetchMock.mock.calls[0][0]).split("?")[0];
 }
 
 beforeEach(() => {

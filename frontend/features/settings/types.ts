@@ -1,8 +1,6 @@
 export interface UserSettings {
     playbackQuality: "original" | "high" | "medium" | "low";
     wifiOnly: boolean;
-    offlineEnabled: boolean;
-    maxCacheSizeMb: number;
     /** True when the user saved an LB scrobble token; the value itself is never returned. */
     hasListenbrainzToken?: boolean;
     /** Whether the public live feed shows what this user is playing. */
@@ -14,6 +12,8 @@ export interface UserSettings {
 export interface SystemSettings {
     // Lidarr
     lidarrEnabled: boolean;
+    /** Operator-only by default; on, signed-in members may acquire (never delete). */
+    allowMemberAcquire: boolean;
     lidarrUrl: string;
     lidarrApiKey: string;
     lidarrQualityProfileId: number | null;
@@ -31,24 +31,23 @@ export interface SystemSettings {
     audiobookshelfEnabled: boolean;
     audiobookshelfUrl: string;
     audiobookshelfApiKey: string;
-    // Soulseek (direct connection via slsk-client)
+    // Soulseek: the built-in direct connection, or an slskd server
     soulseekUsername: string;
     soulseekPassword: string;
-    // Soulseek backend: "p2p" = built-in client, "slskd" = external slskd REST API
+    // "p2p" = the built-in client, "slskd" = an external slskd REST API
     soulseekMode: "p2p" | "slskd";
     slskdUrl: string | null;
     slskdApiKey: string | null;
-    // Spotify (for playlist import)
-    spotifyClientId: string;
-    spotifyClientSecret: string;
+    /** slskd's download folder as Kima's container sees it; empty uses SLSKD_DOWNLOADS or /soulseek-downloads. */
+    soulseekDownloadPath?: string | null;
     // Storage
     musicPath: string;
-    downloadPath: string;
+    /** The server's MUSIC_PATH fixes the music folder, so it cannot be changed here. */
+    musicPathFixedByEnv?: boolean;
     // Advanced
     transcodeCacheMaxGb: number;
     /** How many tracks the play queue may hold, per user. */
     maxQueueLength: number;
-    maxCacheSizeMb: number;
     autoSync: boolean;
     autoEnrichMetadata: boolean;
     /** KIMA_IDENTIFY=off on the server: the setting cannot be turned on. */
@@ -59,6 +58,10 @@ export interface SystemSettings {
     primaryFailureFallback: "none" | "lidarr" | "soulseek";
     // Server
     publicUrl: string;
+    /** Whether people may create their own account (the first account can always be made). */
+    registrationOpen: boolean;
+    updateChecksEnabled: boolean;
+    podcastChartCountry: string;
 }
 
 export interface ConnectionTestResult {

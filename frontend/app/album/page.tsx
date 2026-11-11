@@ -5,7 +5,7 @@ import { useAudioState, useAudioPlayback, useAudioControls } from "@/lib/audio-c
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { useImageColor } from "@/hooks/useImageColor";
 import { api } from "@/lib/api";
-import { useAddToPlaylistMutation } from "@/hooks/useQueries";
+import { useAddToPlaylistMutation, usePublicConfig } from "@/hooks/useQueries";
 import { PlaylistSelector } from "@/components/ui/PlaylistSelector";
 import { useDownloadContext } from "@/lib/download-context";
 
@@ -18,10 +18,13 @@ import { AlbumHero } from "@/features/album/components/AlbumHero";
 import { AlbumActionBar } from "@/features/album/components/AlbumActionBar";
 import { TrackList } from "@/features/album/components/TrackList";
 import { SimilarAlbums } from "@/features/album/components/SimilarAlbums";
+import { DeleteLibraryItemDialog } from "@/features/library/components/DeleteLibraryItemDialog";
+import { useAuth } from "@/lib/auth-context";
 import { PageMessage } from "@/components/ui/PageMessage";
 
 function AlbumPageInner() {
     const addToPlaylist = useAddToPlaylistMutation();
+    const { canAcquire } = usePublicConfig();
     // Split hooks avoid re-renders from currentTime updates.
     const { currentTrack } = useAudioState();
     const { isPlaying } = useAudioPlayback();
@@ -35,6 +38,8 @@ function AlbumPageInner() {
         useAlbumActions();
     const { isPendingByMbid } = useDownloadContext();
     const preview = usePreview();
+    const { user } = useAuth();
+    const [confirmingDelete, setConfirmingDelete] = useState(false);
 
     const combinedTracks = useMemo<AlbumTrack[]>(() => {
         const ownedTracks = (album?.tracks || []).map((track: AlbumTrack) => ({
@@ -162,9 +167,7 @@ function AlbumPageInner() {
     const handlePlaylistSelected = async (playlistId: string) => {
         if (!pendingTrackIds.length) return;
 
-        // Errors propagate to the selector, which reports them and stays
-        // open. Swallowing here closed the dialog and made a rejected add
-        // look like success.
+        // Errors propagate to the selector, which reports them and stays open.
         await addToPlaylist.mutateAsync({ playlistId, trackIds: pendingTrackIds });
         setPendingTrackIds([]);
         setShowPlaylistSelector(false);
@@ -184,8 +187,9 @@ function AlbumPageInner() {
                     source={source || "discovery"}
                     onPlayAll={() => playAlbum(album, 0)}
                     onShuffle={() => shufflePlay(album)}
-                    onDownloadAlbum={() => downloadAlbum(album)}
+                    onDownloadAlbum={canAcquire ? () => downloadAlbum(album) : undefined}
                     onAddToPlaylist={handleAddAlbumToPlaylist}
+                    onDelete={user?.role === "admin" && album.location === "LIBRARY" ? () => setConfirmingDelete(true) : undefined}
                     isPendingDownload={isPendingByMbid(
                         album?.mbid || album?.rgMbid || ""
                     )}
@@ -195,18 +199,25 @@ function AlbumPageInner() {
                 />
             </AlbumHero>
 
-            <div className="relative min-h-[50vh] flex-1 animate-rise">
-                <div
-                    className="absolute inset-0 pointer-events-none"
-                    style={{
-                        background: `linear-gradient(180deg,
-              ${(colors || {}).vibrant}15 0%,
-              ${(colors || {}).darkVibrant}08 50%,
-              transparent 100%)`,
-                    }}
-                />
+            <DeleteLibraryItemDialog
+                kind="album"
+                id={album.id}
+                title={album.title}
+                isOpen={confirmingDelete}
+                onClose={() => setConfirmingDelete(false)}
+            />
 
-                <div className="relative page-shell py-6 space-y-8">
+            <div className="relative min-h-[50vh] flex-1 animate-rise">
+                {colors && (
+                    <div
+                        className="absolute inset-0 pointer-events-none"
+                        style={{
+                            background: `linear-gradient(180deg, ${colors.vibrant}15 0%, ${colors.darkVibrant}08 50%, transparent 100%)`,
+                        }}
+                    />
+                )}
+
+                <div className="relative page-shell pt-6 page-end space-y-8">
                     {combinedTracks.length > 0 && (
                         <TrackList
                             tracks={combinedTracks}

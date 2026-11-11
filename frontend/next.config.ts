@@ -7,7 +7,7 @@ const nextConfig: NextConfig = {
     turbopack: {
         root: __dirname,
     },
-    
+
     // Dev-server origins. Add your own (e.g. a LAN/tailnet address you browse
     // from) via KIMA_DEV_ORIGINS="host1,http://host2:3030" — never hard-coded here.
     allowedDevOrigins: [
@@ -19,7 +19,7 @@ const nextConfig: NextConfig = {
         "localhost",
         ...(process.env.KIMA_DEV_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean),
     ],
-    
+
     images: {
         unoptimized: true,
         remotePatterns: [
@@ -58,7 +58,7 @@ const nextConfig: NextConfig = {
         ],
         formats: ["image/avif", "image/webp"],
         deviceSizes: [640, 750, 828, 1080, 1200, 1920, 2048, 3840],
-        imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
+        imageSizes: [16, 32, 48, 64, 96, 128, 256, 384, 512],
         minimumCacheTTL: 60 * 60 * 24 * 7, // Cache for 7 days
         // SVG optimization disabled for security (prevents XSS via crafted SVGs)
     },

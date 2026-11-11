@@ -117,8 +117,8 @@ function ReviewAlbum({ id }: { id: string }) {
         search.isPending ||
         ["queued", "searching", "applying", "applied"].includes(d?.state ?? "");
     return (
-        <div className="min-h-screen pb-32">
-            <PageHeader eyebrow="Settings" title="Review album match" />
+        <div className="min-h-screen page-end">
+            <PageHeader title="Review album match" />
             <main className="page-shell section-stack">
                 <Link href="/settings/autotag">Match albums</Link>
                 {review.isLoading && <p>Loading…</p>}

@@ -1,19 +1,20 @@
 /**
  * Runs once before all tests: checks KIMA_TEST_USERNAME / KIMA_TEST_PASSWORD
- * can log in at KIMA_UI_BASE_URL (default http://127.0.0.1:3030), and aborts
+ * can log in at KIMA_UI_BASE_URL (required; never port 3030), and aborts
  * with setup instructions if not.
  */
 import { chromium } from "@playwright/test";
+import { requireBaseUrl } from "./fixtures/target";
 
 async function globalSetup(): Promise<void> {
     const username = process.env.KIMA_TEST_USERNAME;
     const password = process.env.KIMA_TEST_PASSWORD;
-    const baseUrl = process.env.KIMA_UI_BASE_URL || "http://127.0.0.1:3030";
+    const baseUrl = requireBaseUrl();
 
     if (!username || !password) {
         throw new Error(
             "E2E test user credentials not set.\n" +
-            "Set KIMA_TEST_USERNAME and KIMA_TEST_PASSWORD in .env.test or export them before running E2E tests.\n" +
+            "Export KIMA_TEST_USERNAME and KIMA_TEST_PASSWORD before running E2E tests.\n" +
             "To create a test user, run: bash scripts/create-e2e-user.sh"
         );
     }
@@ -28,8 +29,9 @@ async function globalSetup(): Promise<void> {
         await page.locator("#password").fill(password);
         await page.getByRole("button", { name: "Sign In" }).click();
 
-        // Wait for redirect to the home page (matches /, /?..., /home)
-        // Same pattern used by loginAsTestUser in test-helpers.ts
+        // Wait for redirect to the home page (matches /, /?..., /home), as loginAsTestUser does.
+        // This setup signs in itself: test-helpers reads the credentials when it is imported, which
+        // would fail before the instructions above could be shown.
         try {
             await page.waitForURL(/\/($|\?|home)/, { timeout: 20_000 });
         } catch {

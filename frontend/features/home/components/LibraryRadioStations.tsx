@@ -1,43 +1,28 @@
 "use client";
 
 import { useState, useRef, useMemo, useCallback, useEffect } from "react";
-import { Radio } from "lucide-react";
 import { TileCard } from "@/components/cards/TileCard";
+import { StationCard } from "./StationCard";
 import { HorizontalCarousel } from "@/components/ui/HorizontalCarousel";
 import { cn } from "@/lib/cn";
 import { useIsMobile, useIsTablet } from "@/hooks/useMediaQuery";
 import { cascadeStyle } from "@/lib/motion";
-import { useLibraryGenresQuery, useLibraryDecadesQuery } from "@/hooks/useQueries";
-import {
-    RadioStation,
-    STATIC_STATIONS,
-    buildGenreStations,
-    buildDecadeStations,
-    useRadioPlayer,
-} from "../radioData";
+import { useRadioRow } from "@/hooks/useQueries";
+import { DEFAULT_STYLE, RadioStation, useRadioPlayer } from "../radioData";
+
+/** A tile in the row: a station, or the retry for a row that did not load. */
+type RowItem = { kind: "station"; station: RadioStation } | { kind: "retry" };
 
 export function LibraryRadioStations() {
     const { loadingStation, startRadio } = useRadioPlayer();
-    const { data: genresData, isLoading: genresLoading } = useLibraryGenresQuery();
-    const { data: decadesData, isLoading: decadesLoading } = useLibraryDecadesQuery();
+    // One reply names the stations and carries their covers, so the tiles draw once, covers in place.
+    const { data: row, isLoading, isError, isFetching, refetch } = useRadioRow("home");
 
-    const isLoading = genresLoading || decadesLoading;
-    const genres = useMemo(
-        () => (genresData?.genres || []).filter((g) => g.count >= 15).slice(0, 6),
-        [genresData],
-    );
-    const decades = useMemo(
-        () => (decadesData?.decades || []).slice(0, 4),
-        [decadesData],
-    );
-
-    const allStations = useMemo(() => {
-        return [
-            ...STATIC_STATIONS,
-            ...buildGenreStations(genres),
-            ...buildDecadeStations(decades),
-        ];
-    }, [genres, decades]);
+    const allItems = useMemo((): RowItem[] => {
+        if (!row) return isError ? [{ kind: "retry" }] : [];
+        return [...row.quick, ...row.moods, ...row.genres, ...row.decades].map((station) => ({ kind: "station", station }));
+    }, [row, isError]);
+    const covers = row?.covers;
 
     const scrollRef = useRef<HTMLDivElement>(null);
     const [currentPage, setCurrentPage] = useState(0);
@@ -46,12 +31,12 @@ export function LibraryRadioStations() {
     const isMobileOrTablet = isMobile || isTablet;
 
     const stationPages = useMemo(() => {
-        const pages: RadioStation[][] = [];
-        for (let i = 0; i < allStations.length; i += 6) {
-            pages.push(allStations.slice(i, i + 6));
+        const pages: RowItem[][] = [];
+        for (let i = 0; i < allItems.length; i += 6) {
+            pages.push(allItems.slice(i, i + 6));
         }
         return pages;
-    }, [allStations]);
+    }, [allItems]);
 
     const updatePage = useCallback(() => {
         const el = scrollRef.current;
@@ -70,36 +55,46 @@ export function LibraryRadioStations() {
         };
     }, [stationPages, isMobileOrTablet, updatePage]);
 
-    const renderCard = (station: RadioStation, compact: boolean, globalIdx: number, delayIdx = globalIdx) => (
-        <TileCard
+    const tileSize = (compact: boolean) => (compact ? "flex-shrink-0 snap-start w-(--card-w) h-30" : "w-full h-30");
+
+    const renderCard = (station: RadioStation, compact: boolean, delayIdx: number) => (
+        <StationCard
             key={station.id}
-            title={station.name}
-            subtitle={station.description}
-            eyebrow={
-                <span className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)]">
-                    <Radio className="w-3 h-3" />
-                    Radio
-                </span>
-            }
-            tint={station.color}
-            hoverBorder={station.hoverBorder}
-            accent={station.accentGradient}
-            onClick={() => startRadio(station)}
-            playable
+            station={station}
+            cover={covers?.get(station.id)}
+            onStart={startRadio}
             busy={loadingStation === station.id}
             disabled={loadingStation !== null}
             index={delayIdx}
-            className={compact ? "flex-shrink-0 snap-start w-[180px] h-[80px]" : "w-full aspect-[5/3]"}
+            className={tileSize(compact)}
         />
     );
 
+    const renderItem = (item: RowItem, compact: boolean, delayIdx: number) => {
+        if (item.kind === "station") return renderCard(item.station, compact, delayIdx);
+        return (
+            <TileCard
+                key="row-retry"
+                title="Radio stations"
+                subtitle="Didn't load. Try again"
+                tint={DEFAULT_STYLE.color}
+                hoverBorder={DEFAULT_STYLE.hoverBorder}
+                accent={DEFAULT_STYLE.accentGradient}
+                onClick={() => void refetch()}
+                busy={isFetching}
+                index={delayIdx}
+                className={tileSize(compact)}
+            />
+        );
+    };
+
     if (!isMobileOrTablet) {
         return (
-            <HorizontalCarousel style={cascadeStyle(allStations.length)}>
-                {allStations.map((station, i) => renderCard(station, true, i))}
+            <HorizontalCarousel style={cascadeStyle(allItems.length)}>
+                {allItems.map((item, i) => renderItem(item, true, i))}
                 {isLoading &&
                     Array.from({ length: 6 }).map((_, i) => (
-                        <div key={i} className="flex-shrink-0 w-[180px] h-[80px] rounded-lg bg-[var(--bg-primary)] border border-white/10 animate-pulse" />
+                        <div key={i} className="flex-shrink-0 w-(--card-w) h-30 rounded-lg bg-[var(--bg-primary)] border border-white/10 animate-pulse" />
                     ))}
             </HorizontalCarousel>
         );
@@ -110,25 +105,25 @@ export function LibraryRadioStations() {
         <div className="relative">
             <div
                 ref={scrollRef}
-                className="flex overflow-x-auto scrollbar-hide scroll-smooth snap-x snap-mandatory gap-3"
+                className="flex overflow-x-auto scrollbar-hide scroll-smooth snap-x snap-mandatory gap-(--card-gap)"
             >
                 {stationPages.map((page, pageIndex) => (
                     <div
                         key={pageIndex}
-                        className="flex-shrink-0 snap-start w-full grid grid-cols-2 grid-rows-3 sm:grid-cols-3 sm:grid-rows-2 gap-2"
+                        className="flex-shrink-0 snap-start w-full grid grid-cols-2 grid-rows-3 sm:grid-cols-3 sm:grid-rows-2 gap-(--card-gap)"
                         style={cascadeStyle(page.length)}
                     >
-                        {page.map((station, i) => renderCard(station, false, pageIndex * 6 + i, i))}
+                        {page.map((item, i) => renderItem(item, false, i))}
                         {page.length < 6 &&
                             Array.from({ length: 6 - page.length }).map((_, i) => (
-                                <div key={`empty-${i}`} className="aspect-[5/3]" />
+                                <div key={`empty-${i}`} className="h-30" />
                             ))}
                     </div>
                 ))}
                 {isLoading && (
-                    <div className="flex-shrink-0 snap-start w-full grid grid-cols-2 grid-rows-3 sm:grid-cols-3 sm:grid-rows-2 gap-2">
+                    <div className="flex-shrink-0 snap-start w-full grid grid-cols-2 grid-rows-3 sm:grid-cols-3 sm:grid-rows-2 gap-(--card-gap)">
                         {Array.from({ length: 6 }).map((_, i) => (
-                            <div key={i} className="aspect-[5/3] rounded-lg bg-[var(--bg-primary)] border border-white/10 animate-pulse" />
+                            <div key={i} className="h-30 rounded-lg bg-[var(--bg-primary)] border border-white/10 animate-pulse" />
                         ))}
                     </div>
                 )}

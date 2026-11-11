@@ -23,10 +23,10 @@ export function useAudio() {
         currentIndex: state.currentIndex,
         isShuffle: state.isShuffle,
         repeatMode: state.repeatMode,
-        playerMode: state.playerMode,
+        overlayOpen: state.overlayOpen,
         volume: state.volume,
         isMuted: state.isMuted,
-        
+
         // Vibe operation state
         activeOperation: state.activeOperation,
 
@@ -35,17 +35,15 @@ export function useAudio() {
         currentTime: playback.currentTime,
         duration: playback.duration,
         isBuffering: playback.isBuffering,
-        canSeek: playback.canSeek,
-        downloadProgress: playback.downloadProgress,
         audioError: playback.audioError,
 
         // Controls
         playTrack: controls.playTrack,
         playTracks: controls.playTracks,
+        playStation: controls.playStation,
         playAudiobook: controls.playAudiobook,
         playPodcast: controls.playPodcast,
         pause: controls.pause,
-        resume: controls.resume,
         resumeWithGesture: controls.resumeWithGesture,
         next: controls.next,
         previous: controls.previous,
@@ -59,11 +57,11 @@ export function useAudio() {
         seek: controls.seek,
         skipForward: controls.skipForward,
         skipBackward: controls.skipBackward,
-        setPlayerMode: controls.setPlayerMode,
-        returnToPreviousMode: controls.returnToPreviousMode,
+        openOverlay: controls.openOverlay,
+        closeOverlay: controls.closeOverlay,
         setVolume: controls.setVolume,
         toggleMute: controls.toggleMute,
-        
+
         // Vibe mode controls
         startVibeMode: controls.startVibeMode,
         stopVibeMode: controls.stopVibeMode,

@@ -27,9 +27,10 @@ test("stored match: Database only apply then Undo restores stable album", async 
     page.on("request", (r) => {
         if (r.url().includes("/autotag/search")) searches.push(r.url());
     });
-    await page.goto("/settings/");
+    // v1.12.3 settings pages: the local tools sit on the library page.
+    await page.goto("/settings/library/");
     await page
-        .getByRole("button", { name: "Library Tools", exact: true })
+        .getByRole("button", { name: "Local library tools", exact: true })
         .click();
     await page.getByRole("link", { name: "Match albums", exact: true }).click();
     await page

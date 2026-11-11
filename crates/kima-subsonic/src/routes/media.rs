@@ -20,7 +20,10 @@ use crate::ctx::SubsonicCtx;
 use crate::error::SubsonicError;
 use crate::ids::{self, Prefix};
 use crate::map;
-use crate::media::{TRANSPARENT_PNG, content_disposition, hls_playlist, quality};
+use crate::media::{
+    DIRECT_PARAMS, Plan, SourceInfo, TRANSPARENT_PNG, content_disposition, hls_playlist, plan,
+    plan_for_stream, serve_from_params, settle, transcode_params_for,
+};
 use crate::params::Params;
 use crate::response::{Answer, Node};
 
@@ -44,33 +47,70 @@ fn track_id(raw: &str) -> Result<Uuid, SubsonicError> {
     ids::parse(raw, &[]).ok_or_else(|| SubsonicError::not_found(SONG_NOT_FOUND))
 }
 
-/// `maxBitRate` leniently: anything that is not a positive number counts as absent.
+/// `maxBitRate` as JavaScript's `parseInt(x || "0", 10)`: the leading digits count (`128abc` is
+/// 128), anything else, zero and negatives are no cap. A number too large for `u32` is the largest.
 fn max_bit_rate(params: &Params) -> Option<u32> {
-    params
-        .get("maxBitRate")
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|&n| n > 0)
+    cap_from(params.get("maxBitRate")?)
 }
 
-/// Looks the track up, picks the quality from the request and serves it.
+fn cap_from(raw: &str) -> Option<u32> {
+    let digits: String = raw
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let n = digits.parse::<u32>().unwrap_or(u32::MAX);
+    (n > 0).then_some(n)
+}
+
+/// The song's listed format and stored bitrate, for the plan.
+struct Source {
+    suffix: String,
+    bitrate_kbps: Option<u32>,
+}
+
+impl Source {
+    fn info(&self) -> SourceInfo<'_> {
+        SourceInfo {
+            suffix: &self.suffix,
+            bitrate_kbps: self.bitrate_kbps,
+        }
+    }
+}
+
+async fn source_of(
+    app: &AppState,
+    user: &SubsonicUser,
+    id: Uuid,
+    not_found: impl FnOnce() -> SubsonicError,
+) -> Result<Source, SubsonicError> {
+    let song = subsonic::track(&app.pool, user.user.id, id)
+        .await?
+        .ok_or_else(not_found)?;
+    Ok(Source {
+        suffix: map::suffix(&song.path),
+        bitrate_kbps: song.track.bitrate.and_then(|b| u32::try_from(b).ok()),
+    })
+}
+
+/// `stream.view` / `getTranscodeStream`: looks the song up, settles the plan against it and
+/// serves it. The plan is made before the transcode cache is consulted (`serve_track` is handed
+/// `Original` for the file itself), so a cached MP3 never stands in for the file a decision
+/// promised.
 async fn stream_track(
     app: &AppState,
     user: &SubsonicUser,
     id: Uuid,
-    params: &Params,
+    chosen: impl FnOnce(SourceInfo<'_>) -> Plan,
     headers: &HeaderMap,
 ) -> Result<Response, SubsonicError> {
-    let song = subsonic::track(&app.pool, user.user.id, id)
-        .await?
-        .ok_or_else(|| SubsonicError::not_found(SONG_NOT_FOUND))?;
+    let source = source_of(app, user, id, || SubsonicError::not_found(SONG_NOT_FOUND)).await?;
     let track = media::resolve_track(app, id).await.map_err(song_error)?;
-    let chosen = quality(
-        params.get("format"),
-        max_bit_rate(params),
-        song.track.bitrate.and_then(|b| u32::try_from(b).ok()),
-        &map::suffix(&song.path),
-    );
-    serve(app, &track, chosen, headers).await
+    let plan = chosen(source.info());
+    serve(app, &track, settle(&plan, source.info()), headers).await
 }
 
 async fn serve(
@@ -99,7 +139,15 @@ async fn stream(
     headers: HeaderMap,
 ) -> Result<Response, SubsonicError> {
     let id = track_id(params.required("id")?)?;
-    stream_track(&app, &user, id, &params, &headers).await
+    let (format, cap) = (params.get("format"), max_bit_rate(&params));
+    stream_track(
+        &app,
+        &user,
+        id,
+        |source| plan_for_stream(format, cap, source),
+        &headers,
+    )
+    .await
 }
 
 async fn download(
@@ -184,32 +232,54 @@ async fn get_transcode_decision(
     let song = subsonic::track(&app.pool, user.user.id, id)
         .await?
         .ok_or_else(not_found)?;
-    let wanted = params
-        .get("format")
+    let format = params.get("format");
+    let wanted = format
         .map(|f| f.trim().to_ascii_lowercase())
         .filter(|f| !f.is_empty());
-    let suffix = map::suffix(&song.path);
-    let codec = song.track.codec.to_ascii_lowercase();
-    let direct = wanted
-        .as_deref()
-        .is_none_or(|w| w == "raw" || w == suffix || w == codec);
-    let reasons = match (&wanted, direct) {
-        (Some(w), false) => vec![format!("source is {suffix}, client asked for {w}").into()],
-        _ => Vec::new(),
+    let source = Source {
+        suffix: map::suffix(&song.path),
+        bitrate_kbps: song.track.bitrate.and_then(|b| u32::try_from(b).ok()),
     };
-    let node = Node::new("transcodeDecision")
+    // The same plan `stream` and `getTranscodeStream` follow, so the stream is what this says.
+    let chosen = plan(
+        format,
+        params.get("maxBitRate").and_then(cap_from),
+        source.info(),
+    );
+    let direct = chosen == Plan::Direct;
+    let reasons = if direct {
+        Vec::new()
+    } else if let Some(w) = wanted
+        .as_deref()
+        .filter(|w| *w != source.suffix.to_ascii_lowercase())
+    {
+        let from = if source.suffix.is_empty() {
+            "unknown"
+        } else {
+            &source.suffix
+        };
+        vec![format!("source is {from}, client asked for {w}").into()]
+    } else {
+        let cap = params.get("maxBitRate").unwrap_or_default();
+        vec![format!("client capped the bitrate at {cap}").into()]
+    };
+    let mut node = Node::new("transcodeDecision")
         .attr("canDirectPlay", direct)
-        .attr("canTranscode", true)
-        .attr("errorReason", "")
+        .attr("canTranscode", !matches!(chosen, Plan::Refused(_)))
         .attr(
-            "transcodeParams",
-            match (&wanted, direct) {
-                (Some(w), false) => format!("format={w}"),
+            "errorReason",
+            match &chosen {
+                Plan::Refused(reason) => reason.clone(),
                 _ => String::new(),
             },
-        )
-        .scalars("transcodeReason", reasons);
-    Ok(Answer::node(node))
+        );
+    // Direct play still gets a value: `getTranscodeStream` requires one. A refusal has none.
+    match &chosen {
+        Plan::Direct => node = node.attr("transcodeParams", DIRECT_PARAMS),
+        Plan::Mp3(serve) => node = node.attr("transcodeParams", transcode_params_for(serve)),
+        Plan::Refused(_) => {}
+    }
+    Ok(Answer::node(node.scalars("transcodeReason", reasons)))
 }
 
 async fn get_transcode_stream(
@@ -220,11 +290,15 @@ async fn get_transcode_stream(
 ) -> Result<Response, SubsonicError> {
     let media_id = params.required("mediaId")?;
     let media_type = params.required("mediaType")?.to_ascii_lowercase();
-    params.required("transcodeParams")?;
+    let transcode_params = params.required("transcodeParams")?;
     match media_type.as_str() {
         "song" => {
+            // Only a value a decision would hand out; a forged one is an error, never a stream.
+            let chosen = serve_from_params(transcode_params).ok_or_else(|| {
+                SubsonicError::generic("Invalid transcodeParams: ask getTranscodeDecision again")
+            })?;
             let id = track_id(media_id)?;
-            stream_track(&app, &user, id, &params, &headers).await
+            stream_track(&app, &user, id, |_| chosen, &headers).await
         }
         "podcast" => Err(SubsonicError::not_found("Podcast episode not found")),
         _ => Err(SubsonicError::generic("Unsupported mediaType")),

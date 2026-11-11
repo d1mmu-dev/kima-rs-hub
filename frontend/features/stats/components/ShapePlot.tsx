@@ -9,9 +9,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import { useReveal } from "../useReveal";
+import { useInView } from "@/hooks/useInView";
 import { monthLabel, monthLong } from "../format";
 import type { ListeningStats } from "../types";
+import { StatCount, StatTrackRow } from "./StatTrackRow";
 
 const BUCKETS = 24;
 
@@ -46,7 +47,7 @@ const plays = (n: number) => `${n.toLocaleString()} ${n === 1 ? "play" : "plays"
 export function ShapePlot({ listening, period }: { listening: ListeningStats; period?: string }) {
     const { shape, drift } = listening;
     const [at, setAt] = useState<number | null>(null);
-    const { ref, shown } = useReveal<HTMLElement>({ threshold: 0.25 });
+    const { ref, shown } = useInView<HTMLElement>({ threshold: 0.25 });
 
     /* Pointing at the cloud asks the server what is there. Debounced, and
      * ticketed so an answer for a point already left never lands. */
@@ -389,13 +390,13 @@ export function ShapePlot({ listening, period }: { listening: ListeningStats; pe
                         </p>
                         <ul className="flex flex-col gap-1 mt-1">
                             {region.tracks.map((t) => (
-                                <li key={`${t.title}-${t.artist}`} className="flex items-baseline justify-between gap-4 max-w-[34ch]">
-                                    <span className="min-w-0 truncate text-sm text-[var(--text-secondary)]">
-                                        <span className="text-[var(--text-primary)]">{t.title}</span>
-                                        {" · "}{t.artist}
-                                    </span>
-                                    <span className="t-meta shrink-0">{t.listens}</span>
-                                </li>
+                                <StatTrackRow
+                                    key={`${t.title}-${t.artist}`}
+                                    className="max-w-[34ch]"
+                                    title={t.title}
+                                    artist={t.artist}
+                                    trailing={<StatCount>{t.listens}</StatCount>}
+                                />
                             ))}
                         </ul>
                     </>

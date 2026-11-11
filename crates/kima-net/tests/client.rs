@@ -447,4 +447,5 @@ async fn budget_blown_is_timeout(pool: PgPool) {
         .get_json::<Value>(Req::get(Host::Deezer, "/a").budget(Duration::ZERO))
         .await;
     assert_eq!(kind(&out), Kind::Transient("TIMEOUT"), "{out:?}");
+    assert!(replay.asked().is_empty(), "an expired budget must not send");
 }

@@ -16,10 +16,15 @@ const ROAD_TRIP: Uuid = fixture_id(5, 1);
 const PRIVATE_MIX: Uuid = fixture_id(5, 2);
 const ADMIN_PICKS: Uuid = fixture_id(5, 3);
 
-fn app(pool: PgPool) -> TestServer {
+fn app_with_state(pool: PgPool) -> (TestServer, kima_api::AppState) {
     let peer: SocketAddr = "10.0.0.1:4000".parse().unwrap();
-    let router = kima_subsonic::router(fixture_state(pool)).layer(MockConnectInfo(peer));
-    TestServer::new(router).unwrap()
+    let state = fixture_state(pool);
+    let router = kima_subsonic::router(state.clone()).layer(MockConnectInfo(peer));
+    (TestServer::new(router).unwrap(), state)
+}
+
+fn app(pool: PgPool) -> TestServer {
+    app_with_state(pool).0
 }
 
 /// A call as alice (her app token). `params` may repeat keys.
@@ -294,6 +299,25 @@ fixture_test!(get_private_of_other_70, |server, pool| {
     assert_eq!(entry_ids(&res), [tid(1), tid(10), tid(13)]);
 });
 
+fixture_test!(create_reply_matches_get_playlist, |server, _pool| {
+    for params in [
+        vec![
+            ("name", "Full".to_owned()),
+            ("songId", tid(5)),
+            ("songId", tid(1)),
+        ],
+        vec![("name", "Empty".to_owned())],
+        vec![("playlistId", ROAD_TRIP.to_string()), ("songId", tid(4))],
+    ] {
+        let created = call(&server, "createPlaylist", &params).await;
+        ok(&created);
+        let id = created["playlist"]["id"].as_str().unwrap();
+        let fetched = call(&server, "getPlaylist", &[("id", id.to_owned())]).await;
+        ok(&fetched);
+        assert_eq!(created["playlist"], fetched["playlist"]);
+    }
+});
+
 fixture_test!(create_with_name_private_full_answer, |server, pool| {
     let res = call(
         &server,
@@ -363,6 +387,18 @@ fixture_test!(
             .await,
             50,
         );
+        failed(
+            &call(
+                &server,
+                "createPlaylist",
+                &[
+                    ("playlistId", ADMIN_PICKS.to_string()),
+                    ("songId", "nonsense".into()),
+                ],
+            )
+            .await,
+            50,
+        );
         assert_eq!(rows(&pool, &ADMIN_PICKS.to_string()).await.len(), 1);
         let res = call_admin(
             &server,
@@ -383,27 +419,284 @@ fixture_test!(
     }
 );
 
-fixture_test!(create_skips_unknown_and_repeated_ids, |server, pool| {
-    let res = call(
+fixture_test!(
+    create_rejects_unknown_invalid_and_missing_ids,
+    |server, pool| {
+        let before: i64 = sqlx::query_scalar("SELECT count(*) FROM playlists")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let res = call(
+            &server,
+            "createPlaylist",
+            &[
+                ("name", "Skippy".into()),
+                ("songId", tid(3)),
+                ("songId", Uuid::now_v7().to_string()),
+                ("songId", tid(3)),
+                ("songId", "nonsense".into()),
+                ("songId", tid(20)),
+                ("songId", tid(1)),
+            ],
+        )
+        .await;
+        failed(&res, 70);
+        let after: i64 = sqlx::query_scalar("SELECT count(*) FROM playlists")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+    }
+);
+
+fixture_test!(
+    update_unknown_song_rolls_back_metadata_and_items,
+    |server, pool| {
+        let before = rows(&pool, &PRIVATE_MIX.to_string()).await;
+        let result = call(
+            &server,
+            "updatePlaylist",
+            &update(
+                &PRIVATE_MIX.to_string(),
+                vec![
+                    ("name", "Should Roll Back".into()),
+                    ("public", "true".into()),
+                    ("songIndexToRemove", "0".into()),
+                    ("songIdToAdd", Uuid::now_v7().to_string()),
+                ],
+            ),
+        )
+        .await;
+        failed(&result, 70);
+        let playlist = kima_db::playlists::find(&pool, PRIVATE_MIX)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(playlist.name, "Private Mix");
+        assert!(!playlist.is_public);
+        assert_eq!(rows(&pool, &PRIVATE_MIX.to_string()).await, before);
+    }
+);
+
+fixture_test!(concurrent_missing_song_rolls_back_update, |server, pool| {
+    let before = rows(&pool, &PRIVATE_MIX.to_string()).await;
+    // Pause the request after its presence check and before its second add check.
+    sqlx::query("CREATE FUNCTION pause_playlist_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(71317); RETURN OLD; END $$")
+        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER pause_delete BEFORE DELETE ON playlist_items FOR EACH ROW EXECUTE FUNCTION pause_playlist_delete()")
+        .execute(&pool).await.unwrap();
+    let mut gate = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(71317)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let request = update(
+        &PRIVATE_MIX.to_string(),
+        vec![
+            ("name", "Must Roll Back".into()),
+            ("public", "true".into()),
+            ("songIndexToRemove", "0".into()),
+            ("songIdToAdd", tid(3)),
+        ],
+    );
+    let (result, ()) = tokio::join!(call(&server, "updatePlaylist", &request), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event = 'advisory' AND query ILIKE '%DELETE FROM playlist_items%' AND pid <> pg_backend_pid())")
+                    .fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.expect("request reached delete after validation");
+        sqlx::query("UPDATE tracks SET missing_since = now() WHERE id = $1")
+            .bind(track_id(3))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("SELECT pg_advisory_unlock(71317)")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+    });
+    failed(&result, 70);
+    let playlist = kima_db::playlists::find(&pool, PRIVATE_MIX)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(playlist.name, "Private Mix");
+    assert!(!playlist.is_public);
+    assert_eq!(rows(&pool, &PRIVATE_MIX.to_string()).await, before);
+});
+
+fixture_test!(
+    missing_update_waits_for_playlist_insert_commit,
+    |server, pool| {
+        let id = make(&server, "Race gate", &[]).await;
+        // BEFORE INSERT runs after add_locked's final presence check.
+        sqlx::query("CREATE FUNCTION pause_playlist_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(71318); RETURN NEW; END $$")
+        .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER pause_insert BEFORE INSERT ON playlist_items FOR EACH ROW EXECUTE FUNCTION pause_playlist_insert()")
+        .execute(&pool).await.unwrap();
+        let mut gate = pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock(71318)")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        let request = update(&id, vec![("songIdToAdd", tid(3))]);
+        let (result, (blocked, update_task)) = tokio::join!(
+            call(&server, "updatePlaylist", &request),
+            async {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event = 'advisory' AND query ILIKE '%INSERT INTO playlist_items%' AND pid <> pg_backend_pid())")
+                            .fetch_one(&pool).await.unwrap();
+                        if waiting { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                }).await.expect("request reached INSERT after final check");
+                let update_pool = pool.clone();
+                let update_task = tokio::spawn(async move {
+                    sqlx::query("UPDATE tracks SET missing_since = now() WHERE id = $1")
+                        .bind(track_id(3))
+                        .execute(&update_pool)
+                        .await
+                        .unwrap()
+                });
+                // Observe either a real PostgreSQL row-lock wait or a completed update.
+                let blocked = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        if update_task.is_finished() { break false; }
+                        let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE 'UPDATE tracks SET missing_since%' AND pid <> pg_backend_pid())")
+                            .fetch_one(&pool).await.unwrap();
+                        if waiting { break true; }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                }).await.expect("updater either waited or finished");
+                sqlx::query("SELECT pg_advisory_unlock(71318)")
+                    .execute(&mut *gate)
+                    .await
+                    .unwrap();
+                (blocked, update_task)
+            }
+        );
+        ok(&result);
+        let updated = tokio::time::timeout(std::time::Duration::from_secs(10), update_task)
+            .await
+            .expect("missing update finished")
+            .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+        assert!(
+            blocked,
+            "missing update passed final check before INSERT committed"
+        );
+        assert_eq!(rows(&pool, &id).await, vec![(track_id(3), 0)]);
+    }
+);
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn playlist_events_only_on_committed_changes(pool: PgPool) {
+    let (server, state) = app_with_state(pool.clone());
+    let mut rx = state.events.subscribe();
+    let id = make(&server, "Events", &[1, 2]).await;
+    let check =
+        |rx: &mut tokio::sync::broadcast::Receiver<kima_core::events::Event>, id: &str, deleted| {
+            let event = rx.try_recv().expect("one event");
+            assert_eq!(event.user_id, Some(ALICE_ID));
+            assert_eq!(
+                event.data,
+                serde_json::json!({"type":"playlist:updated", "playlistId":id, "deleted":deleted})
+            );
+            assert!(rx.try_recv().is_err(), "exactly one event");
+        };
+    check(&mut rx, &id, false);
+    let before: Vec<(Uuid, Uuid, i32)> = sqlx::query_as(
+        "SELECT id, track_id, sort FROM playlist_items WHERE playlist_id = $1::uuid ORDER BY sort, id",
+    ).bind(&id).fetch_all(&pool).await.unwrap();
+    let changed_before = kima_db::playlists::find(&pool, id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .updated_at;
+    ok(&call(
         &server,
         "createPlaylist",
         &[
-            ("name", "Skippy".into()),
-            ("songId", tid(3)),
-            ("songId", Uuid::now_v7().to_string()),
-            ("songId", tid(3)),
-            ("songId", "nonsense".into()),
-            ("songId", tid(20)),
+            ("playlistId", id.clone()),
             ("songId", tid(1)),
+            ("songId", tid(2)),
         ],
     )
-    .await;
-    ok(&res);
-    assert_eq!(entry_ids(&res), [tid(3), tid(1)]);
-    assert_eq!(res["playlist"]["songCount"], 2);
-    let id = res["playlist"]["id"].as_str().unwrap();
-    assert_dense(&rows(&pool, id).await);
-});
+    .await);
+    ok(&call(
+        &server,
+        "updatePlaylist",
+        &update(
+            &id,
+            vec![
+                ("name", "Events".into()),
+                ("public", "false".into()),
+                ("songIdToAdd", tid(1)),
+            ],
+        ),
+    )
+    .await);
+    assert!(rx.try_recv().is_err(), "no-op events");
+    let after: Vec<(Uuid, Uuid, i32)> = sqlx::query_as(
+        "SELECT id, track_id, sort FROM playlist_items WHERE playlist_id = $1::uuid ORDER BY sort, id",
+    ).bind(&id).fetch_all(&pool).await.unwrap();
+    assert_eq!(after, before, "identical replace preserves item identities");
+    assert_eq!(
+        kima_db::playlists::find(&pool, id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .updated_at,
+        changed_before
+    );
+    failed(
+        &call(
+            &server,
+            "updatePlaylist",
+            &update(
+                &id,
+                vec![("name", "No".into()), ("songIdToAdd", "invalid".into())],
+            ),
+        )
+        .await,
+        70,
+    );
+    assert!(rx.try_recv().is_err(), "rollback event");
+    failed(
+        &call(
+            &server,
+            "createPlaylist",
+            &[
+                ("playlistId", id.clone()),
+                ("songId", tid(1)),
+                ("songId", Uuid::now_v7().to_string()),
+            ],
+        )
+        .await,
+        70,
+    );
+    assert!(rx.try_recv().is_err(), "failed replace event");
+    let after_failure: Vec<(Uuid, Uuid, i32)> = sqlx::query_as(
+        "SELECT id, track_id, sort FROM playlist_items WHERE playlist_id = $1::uuid ORDER BY sort, id",
+    ).bind(&id).fetch_all(&pool).await.unwrap();
+    assert_eq!(after_failure, before, "failed replace leaves items intact");
+    ok(&call(
+        &server,
+        "updatePlaylist",
+        &update(&id, vec![("name", "New".into()), ("songIdToAdd", tid(3))]),
+    )
+    .await);
+    check(&mut rx, &id, false);
+    ok(&call(&server, "deletePlaylist", &[("id", id.clone())]).await);
+    check(&mut rx, &id, true);
+}
 
 fixture_test!(update_name_public_owner_only_50, |server, pool| {
     let res = call(
@@ -531,7 +824,11 @@ fixture_test!(update_removal_and_add_land_together, |server, pool| {
         "updatePlaylist",
         &update(
             &id,
-            vec![("songIndexToRemove", "0".into()), ("songIdToAdd", tid(4))],
+            vec![
+                ("name", "Trigger Must Roll Back".into()),
+                ("songIndexToRemove", "0".into()),
+                ("songIdToAdd", tid(4)),
+            ],
         ),
     )
     .await;
@@ -541,6 +838,14 @@ fixture_test!(update_removal_and_add_land_together, |server, pool| {
     let tracks: Vec<Uuid> = got.iter().map(|r| r.0).collect();
     assert_eq!(tracks, [track_id(1), track_id(2), track_id(3)]);
     assert_dense(&got);
+    assert_eq!(
+        kima_db::playlists::find(&pool, id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .name,
+        "Atomic"
+    );
     sqlx::query("DROP TRIGGER refuse ON playlist_items")
         .execute(&pool)
         .await
@@ -550,7 +855,11 @@ fixture_test!(update_removal_and_add_land_together, |server, pool| {
         "updatePlaylist",
         &update(
             &id,
-            vec![("songIndexToRemove", "0".into()), ("songIdToAdd", tid(4))],
+            vec![
+                ("name", "Trigger Must Roll Back".into()),
+                ("songIndexToRemove", "0".into()),
+                ("songIdToAdd", tid(4)),
+            ],
         ),
     )
     .await);

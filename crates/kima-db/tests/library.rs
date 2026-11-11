@@ -40,6 +40,84 @@ async fn upsert(pool: &PgPool, t: &ResolvedTrack) -> uuid::Uuid {
     id
 }
 
+/// Scanner and playlist must take the same UUID lock order even if heap order differs.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn missing_scan_and_playlist_lock_two_tracks_without_deadlock(pool: PgPool) {
+    use tokio::time::{Instant, sleep, timeout};
+
+    let b = upsert(&pool, &track("A", "X", None, "B", "/m/b")).await;
+    let a = upsert(&pool, &track("A", "X", None, "A", "/m/a")).await;
+    let first = uuid::Uuid::from_u128(1);
+    let second = uuid::Uuid::from_u128(2);
+    // Insert B before A, then give B the larger ID: a heap scan updates B first.
+    // Disable index and bitmap scans only in this scanner transaction.
+    sqlx::query("UPDATE tracks SET id = $1 WHERE id = $2")
+        .bind(second)
+        .bind(b)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tracks SET id = $1 WHERE id = $2")
+        .bind(first)
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut playlist = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM tracks WHERE id = $1 FOR SHARE")
+        .bind(first)
+        .fetch_one(&mut *playlist)
+        .await
+        .unwrap();
+    let scan_pool = pool.clone();
+    let scanner = tokio::spawn(async move {
+        let mut tx = scan_pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL enable_indexscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("SET LOCAL enable_bitmapscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let n = library::mark_missing_in(&mut tx, &["/m/a".into(), "/m/b".into()]).await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(n)
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+             AND wait_event_type = 'Lock' AND query LIKE '%missing_since = now()%'
+             AND pid <> pg_backend_pid())",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scanner never waited for playlist track lock"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+    let locked = timeout(Duration::from_secs(5), sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT id FROM tracks WHERE id = ANY($1) AND missing_since IS NULL ORDER BY id FOR SHARE"
+    ).bind(&[first, second][..]).fetch_all(&mut *playlist)).await.unwrap();
+    assert_eq!(locked.unwrap(), vec![first, second]);
+    playlist.commit().await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(5), scanner)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        2
+    );
+}
+
 async fn count(pool: &PgPool, table: &str) -> i64 {
     sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
         .fetch_one(pool)

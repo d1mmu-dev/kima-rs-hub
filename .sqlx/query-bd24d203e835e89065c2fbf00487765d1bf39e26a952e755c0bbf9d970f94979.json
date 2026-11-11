@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH locked AS MATERIALIZED (\n             SELECT id FROM tracks WHERE path = ANY($1) AND missing_since IS NULL\n             ORDER BY id FOR NO KEY UPDATE\n         )\n         UPDATE tracks t SET missing_since = now()\n         FROM locked WHERE t.id = locked.id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bd24d203e835e89065c2fbf00487765d1bf39e26a952e755c0bbf9d970f94979"
+}

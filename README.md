@@ -14,12 +14,16 @@ does not match it yet, see [`crates/kima-web/README.md`](crates/kima-web/README.
 
 ## Status
 
-Milestones M1 (library and playback) and M2 (Subsonic) are done. On top of M0's accounts and
+Milestones M1 (library and playback) and M2 (Subsonic) are done. Most M-SYNC backend work
+through Task 18 is implemented locally, but M-SYNC is not accepted: Task 15's re-file route,
+the legacy frontend refresh (Task 19), runtime/upgrade checks and hosted CI remain open;
+see the [roadmap](docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md). On top of M0's accounts and
 login, kima-rs now scans and watches a music folder, shows it as Artist, then Year - Album, then songs, and lets you
 browse, search, stream (with transcodes), keep playlists and resume playback. An admin can also
 preview and apply a tidy on-disk layout. Music apps that speak Subsonic/OpenSubsonic can connect
 with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Identification and the album
-autotagger are built; audio analysis, podcasts and audiobooks, and integrations are not yet built. See
+autotagger and CLAP/analysis plumbing are built; private-model inference acceptance, podcasts,
+audiobooks and integrations are still open. See
 `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` for what comes next.
 
 ## Quick start
@@ -52,8 +56,13 @@ reconcile also runs at startup.
   names `fs.inotify.max_user_watches`). Raise it on the host, for example
   `sudo sysctl fs.inotify.max_user_watches=524288`, or use `poll`. Network mounts (SMB/NFS)
   usually do not deliver events, so use `poll` there.
-- Files that disappear are flagged missing, not deleted, and are purged only after 7 days, so
-  an unplugged disk loses nothing. Plays and playlists stay attached when it comes back.
+- Files that disappear are flagged missing and retired only after 7 days. A mass-missing guard
+  (at least 10 missing tracks and more than 10% of the library) prevents retirement; when a
+  same-slot copy exists, history is handed over. `GET /api/library/removals` is an admin-only,
+  newest-first audit of retired tracks (`count`, `removals`; optional `limit` and `offset`).
+  Restoring a file before retirement clears its missing flag.
+- `POST /api/library/scan` requests a normal reconcile. A forced album re-file route is **not**
+  available yet: `POST /api/library/refile` is planned, not a synonym for the scan route.
 
 **Streaming.** `GET /api/library/tracks/:id/stream?quality=...` supports `original` (the file as
 is, with range requests for seeking), `high` (MP3 320 kbps), `medium` (MP3 192 kbps) and `low`
@@ -110,6 +119,12 @@ MusicBrainz recording (from file tags first, then an AcoustID fingerprint match)
 artist photos, biographies, similar artists and genres, album cover fallbacks and synced lyrics.
 Progress shows under Settings > Library Tools; new files are picked up as they arrive. Identification
 itself only fills the database; the separate autotagger can write tags when explicitly configured.
+
+Admins can `POST /api/enrichment/rerun` with `{"step":"identification"}` or
+`{"step":"artists"}` to reset that step and its dependent answers; the reply includes
+`artists`, `tracks`, `vectors` and `message`. The other recognized steps (`analysis`,
+`vectors`, `moods`, `similarity`) currently return 409 without a reset; an unknown step returns
+400. This is a partial implementation of the upstream six-step route (D-112).
 
 - **Switch it off.** `KIMA_IDENTIFY=off` stops every outbound lookup for the whole server. An admin can
   also turn "Auto enrich metadata" off in Settings > Artwork; the environment switch wins and

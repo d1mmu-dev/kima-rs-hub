@@ -1,8 +1,8 @@
 import { api } from "@/lib/api";
 import { useAudioControls } from "@/lib/audio-controls-context";
 import { Track } from "@/lib/audio-state-context";
-import { shuffleArray } from "@/lib/shuffle";
 import { notify } from "@/lib/notify";
+import { stationBatches } from "@/lib/station-refill";
 import { useState } from "react";
 import { plural } from "@/lib/format";
 
@@ -14,10 +14,10 @@ export interface RadioStation {
     hoverBorder: string;
     accentGradient: string;
     filter: {
-        type: "genre" | "decade" | "discovery" | "favorites" | "all" | "workout";
+        type: "genre" | "decade" | "discovery" | "favorites" | "all" | "workout" | "mood";
         value?: string;
     };
-    minTracks?: number;
+    minTracks: number;
 }
 
 export interface GenreCount {
@@ -29,6 +29,12 @@ export interface DecadeCount {
     decade: number;
     count: number;
 }
+
+/**
+ * The mood, Wildcard and workout stations play every song that matches, however few (stationPage in
+ * backend/src/services/mixes/stationOrder.ts), so any song at all is enough to start one.
+ */
+const STATION_MIN_TRACKS = 1;
 
 export const STATIC_STATIONS: RadioStation[] = [
     {
@@ -49,7 +55,7 @@ export const STATIC_STATIONS: RadioStation[] = [
         hoverBorder: "hover:border-[#ef4444]/40",
         accentGradient: "from-[#ef4444] to-[#f97316]",
         filter: { type: "workout" },
-        minTracks: 15,
+        minTracks: STATION_MIN_TRACKS,
     },
     {
         id: "discovery",
@@ -73,16 +79,53 @@ export const STATIC_STATIONS: RadioStation[] = [
     },
 ];
 
+/** One mood station as the server lists it: its subtitle is generated from its recipe. */
+export interface MoodStationInfo {
+    value: string;
+    name: string;
+    description: string;
+}
+
+/**
+ * Each mood station's tile colours, from the vibe map's muted mood palette (features/vibe/mapUtils.ts), written out in
+ * full so Tailwind finds the classes. A station the server adds later plays in the default colours until it has a row.
+ */
+const MOOD_STATION_STYLES: Record<string, { color: string; hoverBorder: string; accentGradient: string }> = {
+    "calm": { color: "from-[#5bc2b4]/15 to-[#3f8f9c]/10", hoverBorder: "hover:border-[#5bc2b4]/40", accentGradient: "from-[#5bc2b4] to-[#3f8f9c]" },
+    "energy": { color: "from-[#e06ab0]/15 to-[#f0905a]/10", hoverBorder: "hover:border-[#e06ab0]/40", accentGradient: "from-[#e06ab0] to-[#f0905a]" },
+    "intense": { color: "from-[#e0685e]/15 to-[#8c3a4a]/10", hoverBorder: "hover:border-[#e0685e]/40", accentGradient: "from-[#e0685e] to-[#8c3a4a]" },
+    "happy": { color: "from-[#f0b25a]/15 to-[#e8875a]/10", hoverBorder: "hover:border-[#f0b25a]/40", accentGradient: "from-[#f0b25a] to-[#e8875a]" },
+    "melancholy": { color: "from-[#b98fe0]/15 to-[#6f6fc4]/10", hoverBorder: "hover:border-[#b98fe0]/40", accentGradient: "from-[#b98fe0] to-[#6f6fc4]" },
+    "focus-calm": { color: "from-[#7fa8d8]/15 to-[#5bc2b4]/10", hoverBorder: "hover:border-[#7fa8d8]/40", accentGradient: "from-[#7fa8d8] to-[#5bc2b4]" },
+    "focus-energy": { color: "from-[#7fa8d8]/15 to-[#e06ab0]/10", hoverBorder: "hover:border-[#7fa8d8]/40", accentGradient: "from-[#7fa8d8] to-[#e06ab0]" },
+    "feel-good": { color: "from-[#f0a05a]/15 to-[#e06ab0]/10", hoverBorder: "hover:border-[#f0a05a]/40", accentGradient: "from-[#f0a05a] to-[#e06ab0]" },
+    "late-night": { color: "from-[#6f6fc4]/15 to-[#3a3f7a]/10", hoverBorder: "hover:border-[#6f6fc4]/40", accentGradient: "from-[#6f6fc4] to-[#3a3f7a]" },
+    "romantic": { color: "from-[#e0789a]/15 to-[#b98fe0]/10", hoverBorder: "hover:border-[#e0789a]/40", accentGradient: "from-[#e0789a] to-[#b98fe0]" },
+    "road-trip": { color: "from-[#e8875a]/15 to-[#f0b25a]/10", hoverBorder: "hover:border-[#e8875a]/40", accentGradient: "from-[#e8875a] to-[#f0b25a]" },
+    "nostalgic": { color: "from-[#d8a878]/15 to-[#b98fe0]/10", hoverBorder: "hover:border-[#d8a878]/40", accentGradient: "from-[#d8a878] to-[#b98fe0]" },
+    "epic": { color: "from-[#e0685e]/15 to-[#f0b25a]/10", hoverBorder: "hover:border-[#e0685e]/40", accentGradient: "from-[#e0685e] to-[#f0b25a]" },
+    "wildcard": { color: "from-[#a3a3a3]/15 to-[#6b7280]/10", hoverBorder: "hover:border-[#a3a3a3]/40", accentGradient: "from-[#a3a3a3] to-[#6b7280]" },
+};
+
+/** The server's mood stations as tiles, in its order. */
+export function buildMoodStations(stations: MoodStationInfo[]): RadioStation[] {
+    return stations.map(({ value, name, description }) => ({
+        id: `mood-${value}`,
+        name,
+        description,
+        ...(MOOD_STATION_STYLES[value] ?? DEFAULT_STYLE),
+        filter: { type: "mood" as const, value },
+        minTracks: STATION_MIN_TRACKS,
+    }));
+}
+
 const GENRE_STYLES: Record<string, { color: string; hoverBorder: string; accentGradient: string }> = {
     rock: { color: "from-[#ef4444]/15 to-[#f97316]/10", hoverBorder: "hover:border-[#ef4444]/40", accentGradient: "from-[#ef4444] to-[#f97316]" },
     pop: { color: "from-[#facc15]/15 to-[#f43f5e]/10", hoverBorder: "hover:border-[#facc15]/40", accentGradient: "from-[#facc15] to-[#f43f5e]" },
     "hip hop": { color: "from-[#a855f7]/15 to-[#6366f1]/10", hoverBorder: "hover:border-[#a855f7]/40", accentGradient: "from-[#a855f7] to-[#6366f1]" },
-    "hip-hop": { color: "from-[#a855f7]/15 to-[#6366f1]/10", hoverBorder: "hover:border-[#a855f7]/40", accentGradient: "from-[#a855f7] to-[#6366f1]" },
     rap: { color: "from-[#a855f7]/15 to-[#6366f1]/10", hoverBorder: "hover:border-[#a855f7]/40", accentGradient: "from-[#a855f7] to-[#6366f1]" },
     electronic: { color: "from-[#06b6d4]/15 to-[#3b82f6]/10", hoverBorder: "hover:border-[#06b6d4]/40", accentGradient: "from-[#06b6d4] to-[#3b82f6]" },
     jazz: { color: "from-[#f59e0b]/15 to-[#eab308]/10", hoverBorder: "hover:border-[#f59e0b]/40", accentGradient: "from-[#f59e0b] to-[#eab308]" },
-    classical: { color: "from-[#94a3b8]/15 to-[#64748b]/10", hoverBorder: "hover:border-[#94a3b8]/40", accentGradient: "from-[#94a3b8] to-[#64748b]" },
-    metal: { color: "from-[#71717a]/15 to-[#52525b]/10", hoverBorder: "hover:border-[#71717a]/40", accentGradient: "from-[#71717a] to-[#52525b]" },
     country: { color: "from-[#fb923c]/15 to-[#f59e0b]/10", hoverBorder: "hover:border-[#fb923c]/40", accentGradient: "from-[#fb923c] to-[#f59e0b]" },
     folk: { color: "from-[#22c55e]/15 to-[#10b981]/10", hoverBorder: "hover:border-[#22c55e]/40", accentGradient: "from-[#22c55e] to-[#10b981]" },
     indie: { color: "from-[#8b5cf6]/15 to-[#a855f7]/10", hoverBorder: "hover:border-[#8b5cf6]/40", accentGradient: "from-[#8b5cf6] to-[#a855f7]" },
@@ -94,7 +137,7 @@ const GENRE_STYLES: Record<string, { color: string; hoverBorder: string; accentG
     reggae: { color: "from-[#4ade80]/15 to-[#eab308]/10", hoverBorder: "hover:border-[#4ade80]/40", accentGradient: "from-[#4ade80] to-[#eab308]" },
 };
 
-const DEFAULT_STYLE = { color: "from-[#6b7280]/15 to-[#4b5563]/10", hoverBorder: "hover:border-[#6b7280]/40", accentGradient: "from-[#6b7280] to-[#4b5563]" };
+export const DEFAULT_STYLE = { color: "from-[#6b7280]/15 to-[#4b5563]/10", hoverBorder: "hover:border-[#6b7280]/40", accentGradient: "from-[#6b7280] to-[#4b5563]" };
 
 const DECADE_ACCENT_COLORS: Record<number, { color: string; hoverBorder: string; accentGradient: string }> = {
     1700: { color: "from-[#92400e]/15 to-[#78350f]/10", hoverBorder: "hover:border-[#92400e]/40", accentGradient: "from-[#92400e] to-[#78350f]" },
@@ -112,8 +155,28 @@ const DECADE_ACCENT_COLORS: Record<number, { color: string; hoverBorder: string;
     2020: { color: "from-[#f97316]/15 to-[#d97706]/10", hoverBorder: "hover:border-[#f97316]/40", accentGradient: "from-[#f97316] to-[#d97706]" },
 };
 
+/** A genre name as the server keys it (genreKeySql in backend/src/utils/genreSql.ts), so every spelling gets one colour. */
+const genreKey = (genre: string) =>
+    genre
+        .normalize("NFKC")
+        .toLowerCase()
+        .replace(/[\s\u00a0\u202f\u00ad\u200b\ufeff_/.\u00b7'\u2018\u2019\u2010-\u2015\u2043\u2212-]+/g, "");
+
+const GENRE_STYLES_BY_KEY = new Map(Object.entries(GENRE_STYLES).map(([name, style]) => [genreKey(name), style]));
+
+/** The mood stations' colours, minus Wildcard's grey: the colours a genre without its own is given. */
+const SPARE_GENRE_STYLES = Object.entries(MOOD_STATION_STYLES)
+    .filter(([mood]) => mood !== "wildcard")
+    .map(([, style]) => style);
+
+/** A genre's colour: its own if it has one, otherwise one of the spare colours, picked from its name so it never changes. */
 function getGenreStyle(genre: string) {
-    return GENRE_STYLES[genre.toLowerCase()] || DEFAULT_STYLE;
+    const key = genreKey(genre);
+    const own = GENRE_STYLES_BY_KEY.get(key);
+    if (own) return own;
+    let hash = 0;
+    for (const char of key) hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
+    return SPARE_GENRE_STYLES[hash % SPARE_GENRE_STYLES.length];
 }
 
 function getDecadeStyle(decade: number) {
@@ -124,41 +187,75 @@ function getDecadeStyle(decade: number) {
     return DEFAULT_STYLE;
 }
 
+/** The twentieth century's decades by two digits ("80s"), every other by four ("1850s", "2010s"). */
 function getDecadeName(decade: number): string {
-    if (decade < 1900) return `${decade}s`;
-    if (decade < 2000) return `${decade.toString().slice(2)}s`;
-    return `${decade}s`;
+    return decade >= 1900 && decade < 2000 ? `${decade.toString().slice(2)}s` : `${decade}s`;
+}
+
+/** The request a station plays from (GET /library/radio): its type and value, and how many songs. */
+export function stationParams(station: RadioStation, limit: number): URLSearchParams {
+    const params = new URLSearchParams();
+    params.set("type", station.filter.type);
+    if (station.filter.value) params.set("value", station.filter.value);
+    params.set("limit", String(limit));
+    // Late Night plays this listener's own songs from after dark, read in their time zone.
+    params.set("tz", Intl.DateTimeFormat().resolvedOptions().timeZone);
+    return params;
+}
+
+/** One station in the server's reply for a page (GET /library/radio/row), with this listener's cover for it today. */
+export type RadioRowEntry =
+    | { type: "all" | "workout" | "discovery" | "favorites"; value: null; cover: string | null }
+    | { type: "mood"; value: string; name: string; description: string; cover: string | null }
+    | { type: "genre" | "decade"; value: string; count: number; cover: string | null };
+
+/** A page's tiles by section, from the server's reply, with each tile's cover by station id. */
+export function buildRadioRow(entries: RadioRowEntry[]) {
+    const listed = new Set(entries.map((e) => e.type));
+    const quick = STATIC_STATIONS.filter((s) => listed.has(s.filter.type));
+    const moods = buildMoodStations(entries.flatMap((e) => (e.type === "mood" ? [{ value: e.value, name: e.name, description: e.description }] : [])));
+    const genres = buildGenreStations(entries.flatMap((e) => (e.type === "genre" ? [{ genre: e.value, count: e.count }] : [])));
+    const decades = buildDecadeStations(entries.flatMap((e) => (e.type === "decade" ? [{ decade: Number(e.value), count: e.count }] : [])));
+    const coverOf = new Map(entries.map((e) => [`${e.type}:${e.value ?? ""}`, e.cover]));
+    const covers = new Map(
+        [...quick, ...moods, ...genres, ...decades].map((s) => [s.id, coverOf.get(`${s.filter.type}:${s.filter.value ?? ""}`) ?? null]),
+    );
+    return { quick, moods, genres, decades, covers };
+}
+
+/** A station's colour: the first in its accent (every style above writes it as `from-[#hex] to-[#hex]`). */
+export function stationHue(station: RadioStation): string {
+    return station.accentGradient.match(/#[0-9a-f]{6}/i)![0];
 }
 
 export function useRadioPlayer() {
-    const { playTracks } = useAudioControls();
+    const { playStation } = useAudioControls();
     const [loadingStation, setLoadingStation] = useState<string | null>(null);
 
     const startRadio = async (station: RadioStation) => {
         setLoadingStation(station.id);
         try {
-            const params = new URLSearchParams();
-            params.set("type", station.filter.type);
-            if (station.filter.value) params.set("value", station.filter.value);
-            params.set("limit", "100");
-
-            const response = await api.get<{ tracks: Track[] }>(
-                `/library/radio?${params.toString()}`
+            // Played in the server's order (stationBatches).
+            const fetchTracks = stationBatches(
+                (query) => api.get<{ tracks: Track[]; next?: number }>(`/library/radio?${query}`),
+                stationParams(station, 100)
             );
+            const response = await fetchTracks();
 
             if (!response.tracks || response.tracks.length === 0) {
                 notify.error("No tracks for this radio station", { message: station.name });
                 return;
             }
-            if (response.tracks.length < (station.minTracks || 10)) {
+            if (response.tracks.length < station.minTracks) {
                 notify.error("Not enough tracks for this radio station", {
-                    message: `${station.name}: found ${response.tracks.length}, needs ${station.minTracks || 10}`,
+                    message: `${station.name}: found ${response.tracks.length}, needs ${station.minTracks}`,
                 });
                 return;
             }
 
-            const shuffled = shuffleArray(response.tracks);
-            playTracks(shuffled, 0);
+            playStation(response.tracks, async () => (await fetchTracks()).tracks ?? [], {
+                serverOrdered: response.next !== undefined,
+            });
         } catch (error) {
             console.error("Failed to start radio:", error);
             notify.error("Failed to start radio station");

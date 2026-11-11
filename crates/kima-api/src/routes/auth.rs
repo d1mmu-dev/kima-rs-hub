@@ -161,7 +161,6 @@ async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<MeResp
         username: user.username,
         role: user.role,
         onboarding_complete: user.onboarding_complete,
-        enrichment_settings: None,
         created_at,
     }))
 }

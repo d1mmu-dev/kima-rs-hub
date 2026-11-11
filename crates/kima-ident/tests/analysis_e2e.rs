@@ -367,7 +367,7 @@ async fn missing_musicnn_model_dir_still_runs_dsp_and_marks_stage_done() {
 
 // ---- 3. Stale file_generation causes storage rejection; claim is NOT marked done -----------
 
-/// Polls `pg_stat_activity` until a `tracks ... FOR UPDATE` query is observed waiting on a
+/// Polls `pg_stat_activity` until a `tracks ... FOR NO KEY UPDATE` query is observed waiting on a
 /// lock, exactly like `embedding_e2e.rs`'s `superseded_worker_cannot_publish_using_replacement_token`.
 async fn wait_for_generation_fence_lock_wait(admin: &PgPool, db_name: &str) {
     let waiting = tokio::time::timeout(Duration::from_secs(180), async {
@@ -375,7 +375,7 @@ async fn wait_for_generation_fence_lock_wait(admin: &PgPool, db_name: &str) {
             let n: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity \
                  WHERE datname = $1 AND wait_event_type = 'Lock' \
-                   AND query ILIKE '%FROM tracks%FOR UPDATE%'",
+                   AND query ILIKE '%FROM tracks%FOR NO KEY UPDATE%'",
             )
             .bind(db_name)
             .fetch_one(admin)
@@ -421,7 +421,7 @@ async fn stale_file_generation_rejects_publication_and_claim_is_not_done() {
     // Hold an uncommitted bump of tracks.ml_generation (any identity-tracked field changes
     // trigger it): the worker already captured the OLD generation via its own MVCC
     // snapshot before this transaction started, so it decodes and computes against it, but
-    // its publish-time generation fence (`SELECT ... FOR UPDATE` on `tracks`) blocks on our
+    // its publish-time generation fence (`SELECT ... FOR NO KEY UPDATE` on `tracks`) blocks on our
     // held lock, then observes the NEW (mismatched) generation once we commit.
     let mut holder = pool.begin().await.unwrap();
     sqlx::query("UPDATE tracks SET mtime = mtime + interval '1 second' WHERE id = $1")

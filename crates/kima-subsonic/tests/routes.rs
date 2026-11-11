@@ -394,7 +394,7 @@ fixture_test!(
             ("fromYear", "2000"),
             ("toYear", "2001"),
             ("mediaType", "song"),
-            ("transcodeParams", "x"),
+            ("transcodeParams", "q-original"),
             ("mediaId", id.as_str()),
             ("action", "get"),
             ("size", "10"),

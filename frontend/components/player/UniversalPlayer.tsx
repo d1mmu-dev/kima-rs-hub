@@ -6,13 +6,18 @@ import { MiniPlayer } from "./MiniPlayer";
 import { FullPlayer } from "./FullPlayer";
 import { OverlayPlayer } from "./OverlayPlayer";
 import { useEffect, useRef } from "react";
+import { usePathname } from "@/lib/use-pathname";
 
 export function UniversalPlayer() {
-    const { playerMode, setPlayerMode, currentTrack, currentAudiobook, currentPodcast, isPlaying } =
+    const { overlayOpen, openOverlay, currentTrack, currentAudiobook, currentPodcast, isPlaying } =
         useAudio();
     const isMobile = useIsMobile();
     const isTablet = useIsTablet();
     const isMobileOrTablet = isMobile || isTablet;
+    const pathname = usePathname();
+    // The vibe page's sheet carries the now-playing row on phones, so the
+    // floating player would be a second bar over the same track.
+    const sheetOwnsPlayback = isMobileOrTablet && pathname === "/vibe";
     const lastMediaIdRef = useRef<string | null>(null);
     const hasAutoSwitchedRef = useRef(false);
 
@@ -30,25 +35,26 @@ export function UniversalPlayer() {
         const mediaChanged = currentMediaId && currentMediaId !== lastMediaIdRef.current;
 
         if (mediaChanged && isPlaying && !hasAutoSwitchedRef.current) {
-            setPlayerMode("overlay");
+            // Where the sheet carries the player, the track is already visible
+            // and controllable; spend the one automatic switch so that leaving
+            // the page does not open the overlay for a play the user just made.
+            if (!sheetOwnsPlayback) openOverlay();
             hasAutoSwitchedRef.current = true;
         }
 
         lastMediaIdRef.current = currentMediaId;
-    }, [currentTrack?.id, currentAudiobook?.id, currentPodcast?.id, isPlaying, isMobileOrTablet, setPlayerMode]);
+    }, [currentTrack?.id, currentAudiobook?.id, currentPodcast?.id, isPlaying, isMobileOrTablet, sheetOwnsPlayback, openOverlay]);
 
     const hasMedia = !!(currentTrack || currentAudiobook || currentPodcast);
 
     return (
         <>
-            {/* Conditional UI rendering based on mode and device */}
-            {/* Note: <audio> element is rendered by ConditionalAudioProvider */}
-            {/* Always show player UI (like Spotify), even when no media is playing */}
-            {playerMode === "overlay" && hasMedia ? (
+            {/* The desktop bar shows even with nothing playing; the <audio> element lives in ConditionalAudioProvider. */}
+            {overlayOpen && hasMedia ? (
                 <OverlayPlayer />
             ) : isMobileOrTablet ? (
-                /* On mobile/tablet: only mini player (no full player) */
-                <MiniPlayer />
+                /* On mobile/tablet: only mini player (no full player), except where the page owns it */
+                sheetOwnsPlayback ? null : <MiniPlayer />
             ) : (
                 /* Desktop: always show full-width bottom player */
                 <FullPlayer />

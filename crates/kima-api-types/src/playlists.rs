@@ -15,6 +15,9 @@ pub struct Playlist {
     pub mix_id: Option<Value>,
     pub name: String,
     pub is_public: bool,
+    /// Shown newest first. Absent in answers of a server older than the 1.12 base.
+    #[serde(default)]
+    pub reverse_order: bool,
     pub created_at: String,
     pub updated_at: String,
     pub spotify_playlist_id: Option<String>,
@@ -100,14 +103,16 @@ pub struct CreatePlaylist {
     pub is_public: bool,
 }
 
-/// Body of `PUT /playlists/:id`; absent fields are left alone.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Body of `PUT` / `PATCH /playlists/:id`; absent fields are left alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdatePlaylist {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_public: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse_order: Option<bool>,
 }
 
 /// Body of `POST /playlists/:id/items` (exactly one of `trackId` / `trackIds`).
@@ -151,3 +156,20 @@ pub struct RemoveItemResponse {
 pub struct MessageResponse {
     pub message: String,
 }
+
+/// Body of `POST /playlists/:id/items/:itemId/move`; malformed anchors reach handler validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveItemBody {
+    pub after_item_id: Option<String>,
+}
+
+/// Answer of `POST /playlists/:id/items/:itemId/move`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveItemResponse {
+    pub success: bool,
+    pub rank: String,
+}
+
+/// Compatibility name for the add-items request.
+pub type AddItemBody = AddItems;

@@ -2,55 +2,16 @@
 
 import Link from "next/link";
 import { usePathname } from "@/lib/use-pathname";
-import { Library, Sparkles, BookOpen, Mic, ListMusic } from "lucide-react";
+import { useSectionFlags } from "@/lib/section-flags";
 import { cn } from "@/lib/cn";
 import { useIsMobile, useIsTablet } from "@/hooks/useMediaQuery";
-import { useFeatures, type SectionFlag } from "@/lib/features-context";
+import { NAV, isCurrentNav, type NavItem } from "./navItems";
 
-const navigationItems: Array<{
-    name: string;
-    href: string;
-    icon: typeof Library;
-    matchPattern: string;
-    feature?: SectionFlag;
-}> = [
-    {
-        name: "Collection",
-        href: "/collection",
-        icon: Library,
-        matchPattern: "/collection"
-    },
-    {
-        name: "Vibe",
-        href: "/vibe",
-        icon: Sparkles,
-        matchPattern: "/vibe"
-    },
-    {
-        name: "Audiobooks",
-        href: "/audiobooks",
-        icon: BookOpen,
-        matchPattern: "/audiobooks",
-        feature: "audiobooks" as const,
-    },
-    {
-        name: "Podcasts",
-        href: "/podcasts",
-        icon: Mic,
-        matchPattern: "/podcasts",
-        feature: "podcasts" as const,
-    },
-    {
-        name: "Playlists",
-        href: "/playlists",
-        icon: ListMusic,
-        matchPattern: "/playlist" // Matches both /playlists and /playlist/[id]
-    },
-];
+const navigationItems: NavItem[] = [NAV.collection, NAV.vibe, NAV.audiobooks, NAV.podcasts, NAV.playlists];
 
 export function BottomNavigation() {
     const pathname = usePathname();
-    const features = useFeatures();
+    const features = useSectionFlags();
     const isMobile = useIsMobile();
     const isTablet = useIsTablet();
     const isMobileOrTablet = isMobile || isTablet;
@@ -68,7 +29,7 @@ export function BottomNavigation() {
         >
             <div className="flex items-center justify-around" style={{ height: "var(--nav-h)" }}>
                 {navigationItems.filter((item) => !item.feature || features[item.feature]).map((item) => {
-                    const isActive = pathname.startsWith(item.matchPattern);
+                    const isActive = isCurrentNav(item, pathname);
                     const Icon = item.icon;
 
                     return (

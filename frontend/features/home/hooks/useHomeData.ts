@@ -1,31 +1,37 @@
-/** Loads every Home section and refreshes the mixes. */
+/** Loads every Home section and refreshes the mixes. Each section reports its own loading state. */
 
-import { useEffect } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { useAuth } from "@/lib/auth-context";
-import { useFeatures } from "@/lib/features-context";
+import { useSectionFlags } from "@/lib/section-flags";
 import { notify } from "@/lib/notify";
 import type {
     Artist,
     ListenedItem,
-    Podcast,
     Audiobook,
     Mix,
     PopularArtist,
     PlaylistPreview,
 } from "../types";
+import type { DiscoveryPodcast } from "@/features/podcast/types";
 import {
     useRecentlyListenedQuery,
     useRecentlyAddedQuery,
     useRecommendationsQuery,
     useMixesQuery,
     usePopularArtistsQuery,
-    useTopPodcastsQuery,
+    usePodcastChartQuery,
     useAudiobooksQuery,
     useRefreshMixesMutation,
     useBrowseAllQuery,
-    queryKeys,
 } from "@/hooks/useQueries";
+
+interface HomeSectionLoading {
+    recentlyListened: boolean;
+    recentlyAdded: boolean;
+    recommended: boolean;
+    mixes: boolean;
+    popularArtists: boolean;
+    popularPodcasts: boolean;
+    recentAudiobooks: boolean;
+}
 
 export interface UseHomeDataReturn {
     // Data sections
@@ -34,12 +40,12 @@ export interface UseHomeDataReturn {
     recommended: Artist[];
     mixes: Mix[];
     popularArtists: PopularArtist[];
-    recentPodcasts: Podcast[];
+    popularPodcasts: DiscoveryPodcast[];
     recentAudiobooks: Audiobook[];
     featuredPlaylists: PlaylistPreview[];
 
-    // Loading states
-    isLoading: boolean;
+    // Loading states: each Home section is waiting on its own request, never on the others.
+    sectionLoading: HomeSectionLoading;
     isRefreshingMixes: boolean;
     isBrowseLoading: boolean;
 
@@ -49,24 +55,8 @@ export interface UseHomeDataReturn {
 
 /** Every Home section: continue listening, recently added, recommended, mixes, popular, podcasts, audiobooks. */
 export function useHomeData(): UseHomeDataReturn {
-    const { isAuthenticated } = useAuth();
     // Sections the server does not have are neither fetched nor shown (D-030).
-    const features = useFeatures();
-    const queryClient = useQueryClient();
-
-    // Listen for mixes-updated event (fired when user saves mood preferences)
-    // Use refetchQueries instead of invalidateQueries to force immediate UI update
-    useEffect(() => {
-        const handleMixesUpdated = () => {
-            // refetchQueries forces immediate refetch, unlike invalidateQueries which only marks stale
-            queryClient.refetchQueries({ queryKey: queryKeys.mixes() });
-        };
-
-        window.addEventListener("mixes-updated", handleMixesUpdated);
-        return () =>
-            window.removeEventListener("mixes-updated", handleMixesUpdated);
-    }, [queryClient]);
-
+    const features = useSectionFlags();
     // React Query hooks - these automatically handle caching, refetching, and loading states
     const { data: recentlyListenedData, isLoading: isLoadingListened } =
         useRecentlyListenedQuery(10);
@@ -78,7 +68,7 @@ export function useHomeData(): UseHomeDataReturn {
     const { data: popularData, isLoading: isLoadingPopular } =
         usePopularArtistsQuery(20, features.discover);
     const { data: podcastsData, isLoading: isLoadingPodcasts } =
-        useTopPodcastsQuery(10, undefined, features.podcasts);
+        usePodcastChartQuery(null, 10, features.podcasts);
     const { data: audiobooksData, isLoading: isLoadingAudiobooks } =
         useAudiobooksQuery(features.audiobooks);
     const { data: browseData, isLoading: isBrowseLoading } =
@@ -87,31 +77,26 @@ export function useHomeData(): UseHomeDataReturn {
     const { mutateAsync: refreshMixes, isPending: isRefreshingMixes } =
         useRefreshMixesMutation();
 
-    /**
-     * Refresh mixes and update cache
-     */
     const handleRefreshMixes = async () => {
         try {
             await refreshMixes();
-        } catch (error) {
-            console.error("Failed to refresh mixes:", error);
+        } catch {
             notify.error("Failed to refresh mixes");
         }
     };
 
-    // Process recently listened data - can contain artists, podcasts, or audiobooks
+    // Artists, podcasts and audiobooks, in the order they were last played.
     const items = recentlyListenedData?.items || [];
 
-    // Calculate overall loading state - true if any query is loading
-    const isLoading =
-        !isAuthenticated ||
-        isLoadingListened ||
-        isLoadingAdded ||
-        isLoadingRecommended ||
-        isLoadingMixes ||
-        isLoadingPopular ||
-        isLoadingPodcasts ||
-        isLoadingAudiobooks;
+    const sectionLoading: HomeSectionLoading = {
+        recentlyListened: isLoadingListened,
+        recentlyAdded: isLoadingAdded,
+        recommended: isLoadingRecommended,
+        mixes: isLoadingMixes,
+        popularArtists: isLoadingPopular,
+        popularPodcasts: isLoadingPodcasts,
+        recentAudiobooks: isLoadingAudiobooks,
+    };
 
     return {
         recentlyListened: items,
@@ -119,14 +104,14 @@ export function useHomeData(): UseHomeDataReturn {
         recommended: recommendedData?.artists || [],
         mixes: Array.isArray(mixesData) ? mixesData : [],
         popularArtists: popularData?.artists || [],
-        recentPodcasts: Array.isArray(podcastsData)
+        popularPodcasts: Array.isArray(podcastsData)
             ? podcastsData.slice(0, 10)
             : [],
         recentAudiobooks: Array.isArray(audiobooksData)
             ? audiobooksData.slice(0, 10)
             : [],
         featuredPlaylists: browseData?.playlists || [],
-        isLoading,
+        sectionLoading,
         isRefreshingMixes,
         isBrowseLoading,
         handleRefreshMixes,

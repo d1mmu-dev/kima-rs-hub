@@ -24,7 +24,7 @@ export function usePlayerControls() {
         currentIndex,
     } = useAudioState();
 
-    const { isPlaying, isBuffering, canSeek, downloadProgress, audioError } = useAudioPlayback();
+    const { isPlaying, isBuffering, audioError } = useAudioPlayback();
 
     const { duration, displayTime, progress } = usePlaybackProgress();
 
@@ -33,8 +33,8 @@ export function usePlayerControls() {
         resumeWithGesture,
         next,
         previous,
-        setPlayerMode,
-        returnToPreviousMode,
+        openOverlay,
+        closeOverlay,
         seek,
         skipForward,
         skipBackward,
@@ -58,8 +58,6 @@ export function usePlayerControls() {
         currentIndex,
         isPlaying,
         isBuffering,
-        canSeek,
-        downloadProgress,
         audioError,
         duration,
         displayTime,
@@ -68,8 +66,8 @@ export function usePlayerControls() {
         resumeWithGesture,
         next,
         previous,
-        setPlayerMode,
-        returnToPreviousMode,
+        openOverlay,
+        closeOverlay,
         seek,
         skipForward,
         skipBackward,

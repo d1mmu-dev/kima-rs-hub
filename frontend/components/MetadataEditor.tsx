@@ -1,12 +1,14 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Edit, X, Save } from "lucide-react";
 import { api } from "@/lib/api";
 import { notify } from "@/lib/notify";
 import { GradientSpinner } from "./ui/GradientSpinner";
 import { Button } from "@/components/ui/Button";
 import { useDialog } from "@/hooks/useDialog";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { CachedImage } from "@/components/ui/CachedImage";
 
 interface MetadataEditorProps {
@@ -61,15 +63,10 @@ export function MetadataEditor({
     const dialogRef = useRef<HTMLDivElement>(null);
     useDialog(dialogRef, isOpen, handleClose);
 
+    const [confirmReset, setConfirmReset] = useState(false);
+    // An album's MusicBrainz id is its release group's; artists and songs have their own.
+    const mbidField = type === "album" ? "rgMbid" : "mbid";
     const handleReset = async () => {
-        if (
-            !confirm(
-                "reset all metadata to original values? this cannot be undone."
-            )
-        ) {
-            return;
-        }
-
         setIsResetting(true);
         try {
             if (type === "artist") {
@@ -118,14 +115,16 @@ export function MetadataEditor({
         <>
             <button
                 onClick={handleOpen}
-                className="p-2 rounded-full bg-black/40 hover:bg-black/60 transition-all opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                className="p-2 rounded-full bg-black/40 hover:bg-black/60 transition-all opacity-0 group-hover:opacity-100 focus-visible:opacity-100 touch-reveal"
                 title={`Edit ${type} metadata`.toLowerCase()}
                 aria-label={`Edit ${type} metadata`}
             >
                 <Edit className="w-4 h-4 text-white" />
             </button>
 
-            {isOpen && (
+            {/* Drawn at the page's top level: opened from an animated header, a fixed overlay left in place is clipped
+                to the header and painted under the content after it. */}
+            {isOpen && createPortal(
                 <div
                     className="fixed inset-0 bg-black/80 flex items-center justify-center z-(--z-modal) p-4"
                     onClick={handleClose}
@@ -245,7 +244,7 @@ export function MetadataEditor({
                                         }
                                         className="w-full px-4 py-2 bg-[#181818] border border-white/10 rounded text-white focus:border-white/30 focus:outline-none"
                                     />
-                                    {currentData._originalYear &&
+                                    {!!currentData._originalYear &&
                                         currentData._originalYear !==
                                             (formData.year || null) && (
                                             <p className="mt-1 text-xs text-[var(--text-muted)]">
@@ -281,10 +280,10 @@ export function MetadataEditor({
                                 {currentData._originalGenres &&
                                     currentData._originalGenres.length > 0 &&
                                     JSON.stringify(
-                                        currentData._originalGenres.sort()
+                                        [...currentData._originalGenres].sort()
                                     ) !==
                                         JSON.stringify(
-                                            (formData.genres || []).sort()
+                                            [...(formData.genres || [])].sort()
                                         ) && (
                                         <p className="mt-1 text-xs text-[var(--text-muted)]">
                                             Original:{" "}
@@ -304,23 +303,8 @@ export function MetadataEditor({
                                 </label>
                                 <input
                                     type="text"
-                                    value={
-                                        type === "artist"
-                                            ? formData.mbid || ""
-                                            : type === "album"
-                                            ? formData.rgMbid || ""
-                                            : formData.mbid || ""
-                                    }
-                                    onChange={(e) =>
-                                        handleChange(
-                                            type === "artist"
-                                                ? "mbid"
-                                                : type === "album"
-                                                ? "rgMbid"
-                                                : "mbid",
-                                            e.target.value
-                                        )
-                                    }
+                                    value={formData[mbidField] || ""}
+                                    onChange={(e) => handleChange(mbidField, e.target.value)}
                                     placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                                     className="w-full px-4 py-2 bg-[#181818] border border-white/10 rounded text-white focus:border-white/30 focus:outline-none text-sm"
                                 />
@@ -400,7 +384,7 @@ export function MetadataEditor({
                             {hasOverrides && (
                                 <Button
                                     variant="danger"
-                                    onClick={handleReset}
+                                    onClick={() => setConfirmReset(true)}
                                     disabled={isSaving || isResetting}
                                 >
                                     {isResetting
@@ -434,8 +418,17 @@ export function MetadataEditor({
                             </Button>
                         </div>
                     </div>
-                </div>
+                </div>,
+                document.body,
             )}
+            <ConfirmDialog
+                isOpen={confirmReset}
+                onClose={() => setConfirmReset(false)}
+                onConfirm={() => void handleReset()}
+                title="reset metadata?"
+                message="every field goes back to its original value. this cannot be undone."
+                confirmText="reset"
+            />
         </>
     );
 }

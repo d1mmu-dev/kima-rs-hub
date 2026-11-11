@@ -1,17 +1,18 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { SettingsSection, SettingsRow, SettingsToggle } from "../ui";
 import { SystemSettings } from "../../types";
 import {
     api,
     type EnrichmentFailure,
+    type EnrichmentRerunStep,
     type GpuRuntimeStatus,
 } from "@/lib/api";
 import { useWorkerSetting } from "../../hooks/useWorkerSetting";
-import { useAuth } from "@/lib/auth-context";
 import { useFeatures } from "@/lib/features-context";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { BothAtOnceSwitch, BOTH_AT_ONCE_DESCRIPTION, BOTH_AT_ONCE_LABEL } from "@/components/enrichment/BothAtOnceSwitch";
 import {
     useQueryClient,
     useQuery,
@@ -21,7 +22,7 @@ import {
 import {
     CheckCircle,
     User,
-    Heart,
+    Fingerprint,
     Activity,
     Pause,
     Play,
@@ -29,6 +30,8 @@ import {
     AlertTriangle,
     Waves,
     Network,
+    Smile,
+    AudioLines,
     ChevronDown,
     type LucideIcon,
 } from "lucide-react";
@@ -38,16 +41,16 @@ import { GradientSpinner } from "@/components/ui/GradientSpinner";
 interface CacheSectionProps {
     settings: SystemSettings;
     onUpdate: (updates: Partial<SystemSettings>) => void;
+    /** Shown between the actions and the performance settings (the corrupt tracks list). */
+    children?: ReactNode;
 }
 
 function ProgressBar({
     progress,
     color = "bg-brand",
-    showPercentage = true,
 }: {
     progress: number;
     color?: string;
-    showPercentage?: boolean;
 }) {
     return (
         <div className="flex items-center gap-2 flex-1">
@@ -57,11 +60,7 @@ function ProgressBar({
                     style={{ width: `${Math.min(100, progress)}%` }}
                 />
             </div>
-            {showPercentage && (
-                <span className="text-xs tabular-nums text-[var(--text-muted)] w-10 text-right">
-                    {progress}%
-                </span>
-            )}
+            <span className="text-xs tabular-nums text-[var(--text-muted)] w-10 text-right">{progress}%</span>
         </div>
     );
 }
@@ -78,6 +77,7 @@ function EnrichmentStage({
     permanentlyFailed = 0,
     queued = 0,
     processing = 0,
+    missing = 0,
 }: {
     icon: LucideIcon;
     label: string;
@@ -90,6 +90,8 @@ function EnrichmentStage({
     permanentlyFailed?: number;
     queued?: number;
     processing?: number;
+    /** Songs whose files are gone: left out of the count, shown beside it. */
+    missing?: number;
 }) {
     const isComplete = progress === 100;
     const hasActivity = processing > 0;
@@ -135,8 +137,9 @@ function EnrichmentStage({
                 </div>
                 <div className="flex items-center gap-3 mt-1 text-xs tabular-nums text-[var(--text-muted)]">
                     <span>
-                        {completed} / {total}
+                        {completed} / {total - missing}
                     </span>
+                    {missing > 0 && <span>{missing} files missing</span>}
                     {queued > 0 && (
                         <span className="text-[var(--text-secondary)]">
                             {queued} queued
@@ -158,6 +161,8 @@ function EnrichmentStage({
         </div>
     );
 }
+
+const noopSubscribe = () => () => {};
 
 const sliderClass = `w-32 h-1.5 bg-white/5 rounded-lg appearance-none cursor-pointer
     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5
@@ -241,11 +246,63 @@ function EnrichmentFailuresList({ active = false }: { active?: boolean }) {
     );
 }
 
-type QueueResult = "retry" | "everything" | "wipe";
-type ConfirmTarget = "retryFailedAndBlocked" | "redecideEverything" | "wipeAndRerun" | null;
+type QueueResult = "retry" | "everything" | "wipe" | "rerun";
+type ConfirmTarget = "retryFailedAndBlocked" | "redecideEverything" | "wipeAndRerun" | "refileAlbums" | null;
+
+/**
+ * What each step a re-run can start from redoes (services/enrichmentRestart.ts); a step added to the API must be
+ * described here. `relaysMap`: the re-run lays the vibe map out again, which every step but the moods does.
+ */
+const RERUN_STEPS: Record<EnrichmentRerunStep, { label: string; message: string; relaysMap: boolean }> = {
+    moods: {
+        label: "moods",
+        message:
+            "Recomputes every song's moods from its stored sound vector; the mood mixes, stations and song tags " +
+            "follow. No audio is re-read.",
+        relaysMap: false,
+    },
+    similarity: {
+        label: "similarity + map",
+        message:
+            "Rebuilds the feel, the library statistics and the vibe map from scratch. " +
+            "Nothing about your tracks is measured again, so this is the quickest one.",
+        relaysMap: true,
+    },
+    vectors: {
+        label: "sound vectors",
+        message:
+            "Re-runs sound vectors for every track, then the moods and the vibe map. " +
+            "Audio analysis and identification are kept.",
+        relaysMap: true,
+    },
+    analysis: {
+        label: "audio analysis",
+        message:
+            "Re-runs audio analysis for every track, then sound vectors, the moods and the vibe map. " +
+            "Identification (which recording each track is) is kept.",
+        relaysMap: true,
+    },
+    artists: {
+        label: "artists",
+        message:
+            "Re-runs artist bios, genres and similar artists, then rebuilds the vibe map " +
+            "(its formula reads artist genres). Audio analysis, sound vectors and moods are kept.",
+        relaysMap: true,
+    },
+    identification: {
+        label: "identification (everything)",
+        message:
+            "Same as wiping and re-running everything: identification, artists, audio analysis, " +
+            "sound vectors, the moods and the vibe map, all from the start.",
+        relaysMap: true,
+    },
+};
+
+/** The order the steps are offered in, as written above: quickest first. */
+const RERUN_ORDER = Object.keys(RERUN_STEPS) as EnrichmentRerunStep[];
 
 const WIPE_MESSAGE =
-    "Clears what Kima worked out about your music: which recording each track is, audio analysis, vibe data, the vibe map, " +
+    "Clears what Kima worked out about your music: which recording each track is, audio analysis, vibe data, moods, the vibe map, " +
     "artist bios and similar artists. " +
     "Then it works it all out again with the new engine. Your music, playlists, plays, likes and edits stay. " +
     "Takes a few hours on a large library; the vibe map is back when it finishes.";
@@ -271,13 +328,77 @@ const confirmMeta: Record<
         message: WIPE_MESSAGE,
         confirmText: "Wipe and Re-run",
     },
+    refileAlbums: {
+        title: "Re-file Albums by Their Tags?",
+        message:
+            "Reads every song's tags again and files each album under the artist its songs name, joining it to that " +
+            "artist's copy of the album when there is one; artists left with no albums are removed. This fixes albums " +
+            "older versions filed under a cut-off name or split over a guest's name. Albums you edited and Discover's " +
+            "albums stay where they are. Plays, likes and playlists stay with their songs. It runs after any library " +
+            "scan and takes a few minutes on a large library.",
+        confirmText: "Re-file Albums",
+    },
 };
 
-// The analyzer installs the runtime while either switch is on and removes it when
-// both are off, so the status keeps polling until the runtime matches the switches.
-function gpuSettling(g: GpuRuntimeStatus): boolean {
+type EnrichmentProgress = Awaited<ReturnType<typeof api.getEnrichmentProgress>>;
+type EnrichmentPhase = NonNullable<NonNullable<Awaited<ReturnType<typeof api.getEnrichmentState>>>["currentPhase"]>;
+
+/**
+ * The steps that run after the core enrichment, in the order a cycle runs them, each done by the same counts the
+ * server's isFullyComplete waits on (getEnrichmentProgress). Fingerprints that failed and are due a retry are not
+ * told apart from given-up ones in the reply, so they are the one thing these cannot name.
+ */
+const BACKGROUND_STEPS: { label: string; done: (p: EnrichmentProgress) => boolean }[] = [
+    {
+        label: "Fingerprints",
+        done: (p) => (p.fingerprints?.pending ?? 0) === 0 && (p.fingerprints?.processing ?? 0) === 0,
+    },
+    {
+        label: "Audio analysis",
+        done: (p) =>
+            (p.audioAnalysis?.pending ?? 0) === 0 &&
+            (p.audioAnalysis?.queued ?? 0) === 0 &&
+            (p.audioAnalysis?.processing ?? 0) === 0 &&
+            (p.audioAnalysis?.failed ?? 0) === 0,
+    },
+    {
+        label: "Vibe embeddings",
+        done: (p) =>
+            (p.clapEmbeddings?.pending ?? 0) === 0 &&
+            (p.clapEmbeddings?.processing ?? 0) === 0 &&
+            (p.clapEmbeddings?.retrying ?? 0) === 0,
+    },
+    { label: "Moods", done: (p) => (p.moods?.pending ?? 0) === 0 },
+    { label: "Similarity", done: (p) => (p.similarity?.pending ?? 0) === 0 },
+];
+
+/** "<step> running" for the first background step with work left; "Enrichment running" when none of them has. */
+export function backgroundStepRunning(p: EnrichmentProgress): string {
+    const step = BACKGROUND_STEPS.find((s) => !s.done(p));
+    return step ? `${step.label} running` : "Enrichment running";
+}
+
+const PHASE_LABELS: Record<EnrichmentPhase, string> = {
+    artists: "artist metadata",
+    tracks: "song identification",
+    fingerprint: "fingerprints",
+    audio: "audio analysis",
+    podcasts: "podcasts",
+    vibe: "vibe embeddings",
+    mood: "moods",
+    similarity: "similarity",
+};
+
+/** The enrichment step a cycle is on, in the words the step list uses. */
+export function phaseLabel(phase: EnrichmentPhase | null | undefined): string {
+    return phase ? PHASE_LABELS[phase] : "enrichment";
+}
+
+// The analyzer installs the runtime while either switch is on and keeps it when both are off, so the
+// status keeps polling until the runtime matches the switches.
+export function gpuSettling(g: GpuRuntimeStatus): boolean {
     if (g.installing) return true;
-    if (!g.enabled && !g.analysis) return g.installed;
+    if (!g.enabled && !g.analysis) return false;
     if (!g.installed) return g.status !== "failed";
     return (g.enabled && !g.effective && !g.fellBack) || (g.analysis && !g.analysisEffective && !g.analysisFellBack);
 }
@@ -302,7 +423,7 @@ function GpuSwitchRow({ id, label, description, gpu, on, effective, fellBack, pe
                     <span
                         data-testid={`${id}-status`}
                         className={`text-xs text-right ${
-                            gpu.status === "failed" || (on && fellBack)
+                            on && (gpu.status === "failed" || fellBack)
                                 ? "text-warning"
                                 : effective
                                   ? "text-success"
@@ -317,8 +438,13 @@ function GpuSwitchRow({ id, label, description, gpu, on, effective, fellBack, pe
     );
 }
 
-function gpuStatusText(g: GpuRuntimeStatus, on: boolean, effective: boolean, fellBack: boolean): string {
+export function gpuStatusText(g: GpuRuntimeStatus, on: boolean, effective: boolean, fellBack: boolean): string {
     if (g.installing) return "Downloading GPU runtime (~2 GB)…";
+    // A failure only matters to a switch that wants the runtime; the analyzer forgets it once both are off.
+    if (!on)
+        return g.installed
+            ? "Runtime installed; GPU is off."
+            : "Off (CPU)";
     if (g.status === "failed") {
         switch (g.reason) {
             case "no_gpu":
@@ -331,16 +457,10 @@ function gpuStatusText(g: GpuRuntimeStatus, on: boolean, effective: boolean, fel
                 return "Failed: Linux x86_64 only";
             case "checksum_mismatch":
                 return "Failed: checksum mismatch";
-            case "removal_failed":
-                return "Failed: could not remove the GPU runtime from the data directory";
             default:
                 return `Failed: ${g.reason || "install error"}.`;
         }
     }
-    if (!on)
-        return g.installed
-            ? "Runtime installed; GPU is off."
-            : "Off (CPU)";
     if (effective) return "Active";
     if (fellBack) return "Installed, but the GPU session fell back to the CPU";
     if (g.installed)
@@ -350,9 +470,8 @@ function gpuStatusText(g: GpuRuntimeStatus, on: boolean, effective: boolean, fel
         : "Waiting for the vibe embeddings analyzer, which does the download";
 }
 
-export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
+export function CacheSection({ settings, onUpdate, children }: CacheSectionProps) {
     const { musicCNN, vibeEmbeddings, loading: featuresLoading } = useFeatures();
-    const { user: currentUser } = useAuth();
     const [syncing, setSyncing] = useState(false);
     const [clearingCaches, setClearingCaches] = useState(false);
     const [clearCachesResult, setClearCachesResult] = useState<string | null>(null);
@@ -364,7 +483,11 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
     const [queueResult, setQueueResult] = useState<QueueResult | null>(null);
     const [wiping, setWiping] = useState(false);
     const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget>(null);
-    const [maintenanceOpen, setMaintenanceOpen] = useState(false);
+    const [refileStarted, setRefileStarted] = useState(false);
+    const [refileStarting, setRefileStarting] = useState(false);
+    const [rerunStep, setRerunStep] = useState<EnrichmentRerunStep>("similarity");
+    const [rerunConfirmStep, setRerunConfirmStep] = useState<EnrichmentRerunStep | null>(null);
+    const [rerunningStep, setRerunningStep] = useState(false);
     const [cleanupResult, setCleanupResult] = useState<{
         totalCleaned: number;
         cleaned: {
@@ -375,15 +498,16 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
         };
     } | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [showInlineFailures, setShowInlineFailures] = useState(false);
+    // The #enrichment-failures link opens the list; the user's own toggle wins after that.
+    const openedByHash = useSyncExternalStore(
+        noopSubscribe,
+        () => window.location.hash === "#enrichment-failures",
+        () => false,
+    );
+    const [failuresToggle, setFailuresToggle] = useState<boolean | null>(null);
+    const showInlineFailures = failuresToggle ?? openedByHash;
     const queryClient = useQueryClient();
     const syncStartTimeRef = useRef<number>(0);
-
-    useEffect(() => {
-        if (window.location.hash === "#enrichment-failures") {
-            setShowInlineFailures(true);
-        }
-    }, []);
 
     // This query is the one that answers "is enrichment doing anything", so it
     // is the only one that keeps a heartbeat while idle -- and at 30s rather
@@ -399,7 +523,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
         staleTime: 1000,
     });
 
-    // Everything below only changes while a run is in flight, so it polls only then.
+    // Everything below only changes while a run is in flight (stopping and failed included), so it polls only then.
     const enrichmentActive =
         !!enrichmentState?.status && enrichmentState.status !== "idle";
 
@@ -443,10 +567,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
             const previousConcurrency = queryClient.getQueryData([
                 "enrichment-concurrency",
             ]);
-            queryClient.setQueryData(["enrichment-concurrency"], {
-                concurrency: newConcurrency,
-                artistsPerMin: newConcurrency * 6,
-            });
+            queryClient.setQueryData(["enrichment-concurrency"], { concurrency: newConcurrency });
             return { previousConcurrency };
         },
         onError: (_err, _newConcurrency, context) => {
@@ -529,8 +650,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
             }
             await api.syncLibraryEnrichment();
             refetchProgress();
-        } catch (err) {
-            console.error("Sync error:", err);
+        } catch {
             setError("Failed to sync");
             setSyncing(false);
         }
@@ -550,8 +670,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
             refetchProgress();
             void queryClient.invalidateQueries({ queryKey: ["enrichment-failure-counts"] });
             void queryClient.invalidateQueries({ queryKey: ["enrichment-failures-inline"] });
-        } catch (err) {
-            console.error(failure, err);
+        } catch {
             setError(failure);
         } finally {
             setBusy(false);
@@ -566,6 +685,9 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
 
     const execWipeAndRerun = () =>
         runQueueAction(() => api.wipeAndRerunEnrichment(), setWiping, "wipe", "Couldn't wipe and re-run");
+
+    const execRerunStep = (step: EnrichmentRerunStep) =>
+        runQueueAction(() => api.rerunEnrichment(step), setRerunningStep, "rerun", "Couldn't start the re-run");
 
     const handleClearCaches = async () => {
         setClearingCaches(true);
@@ -588,8 +710,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
         try {
             const result = await api.cleanupStaleJobs();
             setCleanupResult(result);
-        } catch (err) {
-            console.error("Stale job cleanup error:", err);
+        } catch {
             setError("Failed to cleanup stale jobs");
         } finally {
             setCleaningStaleJobs(false);
@@ -604,8 +725,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
             const result = await api.retryFailedAnalysis();
             setRetryResult({ reset: result.reset });
             refetchProgress();
-        } catch (err) {
-            console.error("Retry failed analysis error:", err);
+        } catch {
             setError("Failed to retry analysis");
         } finally {
             setRetryingFailed(false);
@@ -618,6 +738,21 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
         if (target === "retryFailedAndBlocked") await execRetryFailedAndBlocked();
         else if (target === "redecideEverything") await execRedecideEverything();
         else if (target === "wipeAndRerun") await execWipeAndRerun();
+        else if (target === "refileAlbums") await execRefileAlbums();
+    };
+
+    const execRefileAlbums = async () => {
+        setRefileStarted(false);
+        setRefileStarting(true);
+        setError(null);
+        try {
+            await api.refileAlbums();
+            setRefileStarted(true);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Failed to start re-filing albums");
+        } finally {
+            setRefileStarting(false);
+        }
     };
 
     const controlEnrichment = async (run: () => Promise<unknown>, failure: string, alsoRefresh: string[] = []) => {
@@ -626,8 +761,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
             for (const key of ["enrichment-status", ...alsoRefresh]) {
                 queryClient.invalidateQueries({ queryKey: [key] });
             }
-        } catch (err) {
-            console.error(failure, err);
+        } catch {
             setError(failure);
         }
     };
@@ -639,14 +773,16 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
     const handleStop = () =>
         controlEnrichment(() => api.stopEnrichment(), "Failed to stop enrichment", ["enrichment-progress"]);
 
+    // A run that can still be paused, resumed or stopped; it also holds back the buttons that would start another.
     const isEnrichmentActive =
         enrichmentState?.status === "running" ||
         enrichmentState?.status === "paused";
     const totalFailures = failureCounts?.total || 0;
+    const analysisFailures = (enrichmentProgress?.audioAnalysis?.failed ?? 0) + (enrichmentProgress?.audioAnalysis?.permanentlyFailed ?? 0);
 
     return (
         <>
-            <SettingsSection id="cache" title="Library Enrichment">
+            <SettingsSection id="cache" title="Status" description="What Kima has worked out about your music so far, step by step.">
                 {isProgressPending ? (
                     <div className="mb-6 p-4 bg-white/5 rounded-lg border border-white/10 flex items-center gap-2">
                         <GradientSpinner size="sm" />
@@ -661,17 +797,12 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                     </div>
                 ) : enrichmentProgress ? (
                     <div className="mb-6 p-4 bg-white/5 rounded-lg border border-white/10">
-                        <div className="flex items-center justify-between mb-4">
-                            <h3 className="text-sm font-medium text-white">
-                                Enrichment Status
-                            </h3>
+                        <div className="flex items-center justify-end mb-4 empty:hidden">
                             {enrichmentProgress.coreComplete &&
                                 !enrichmentProgress.isFullyComplete && (
                                     <span className="text-xs tabular-nums text-brand flex items-center gap-1">
                                         <GradientSpinner size="sm" />
-                                        {(enrichmentProgress.audioAnalysis?.pending ?? 0) > 0 || (enrichmentProgress.audioAnalysis?.processing ?? 0) > 0
-                                            ? "Audio analysis running"
-                                            : "Vibe embeddings running"}
+                                        {backgroundStepRunning(enrichmentProgress)}
                                     </span>
                                 )}
                             {enrichmentProgress.isFullyComplete && (
@@ -686,7 +817,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                             <EnrichmentStage
                                 icon={User}
                                 label="Artist Metadata"
-                                description="Bios, images, and similar artists from ListenBrainz + MusicBrainz"
+                                description="Bios, photos, genres, and similar artists from Wikipedia, Fanart.tv, Deezer, MusicBrainz, and ListenBrainz"
                                 completed={enrichmentProgress.artists.completed}
                                 total={enrichmentProgress.artists.total}
                                 progress={enrichmentProgress.artists.progress}
@@ -694,22 +825,38 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                             />
 
                             <EnrichmentStage
-                                icon={Heart}
-                                label="Mood Tags"
-                                description="Vibes and mood data from the enrichment pipeline"
+                                icon={Fingerprint}
+                                label="Song Identification"
+                                description="Which recording each song is, from AcoustID fingerprints and MusicBrainz"
                                 completed={
                                     enrichmentProgress.trackTags.enriched
                                 }
                                 total={enrichmentProgress.trackTags.total}
                                 progress={enrichmentProgress.trackTags.progress}
+                                missing={enrichmentProgress.trackTags.waitingMissing}
                             />
+
+                            {enrichmentProgress.fingerprints && (
+                                <EnrichmentStage
+                                    icon={AudioLines}
+                                    label="Fingerprints"
+                                    description="An AcoustID fingerprint of each song's audio, made on this server, for identification and spotting duplicates"
+                                    completed={enrichmentProgress.fingerprints.completed}
+                                    total={enrichmentProgress.fingerprints.total}
+                                    progress={enrichmentProgress.fingerprints.progress}
+                                    processing={enrichmentProgress.fingerprints.processing}
+                                    failed={enrichmentProgress.fingerprints.failed}
+                                    missing={enrichmentProgress.fingerprints.waitingMissing}
+                                    isBackground={true}
+                                />
+                            )}
 
                             {/* audioAnalysis is absent from the progress payload until the analyzer has run. */}
                             {!featuresLoading && musicCNN && enrichmentProgress.audioAnalysis ? (
                                 <EnrichmentStage
                                     icon={Activity}
                                     label="Audio Analysis"
-                                    description="BPM, key, energy, and danceability from audio files"
+                                    description="Tempo, key, danceability, and mood readings from each song's audio"
                                     completed={
                                         enrichmentProgress.audioAnalysis.completed
                                     }
@@ -723,6 +870,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                                     queued={enrichmentProgress.audioAnalysis.queued}
                                     failed={enrichmentProgress.audioAnalysis.failed}
                                     permanentlyFailed={enrichmentProgress.audioAnalysis.permanentlyFailed}
+                                    missing={enrichmentProgress.audioAnalysis.waitingMissing}
                                     isBackground={true}
                                 />
                             ) : !featuresLoading ? (
@@ -742,12 +890,24 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                                         <EnrichmentStage
                                             icon={Waves}
                                             label="Vibe Embeddings"
-                                            description="CLAP audio embeddings for similarity search"
+                                            description="CLAP sound vectors for similarity search and moods"
                                             completed={enrichmentProgress.clapEmbeddings.completed}
                                             total={enrichmentProgress.clapEmbeddings.total}
                                             progress={enrichmentProgress.clapEmbeddings.progress}
                                             processing={enrichmentProgress.clapEmbeddings.processing}
                                             failed={enrichmentProgress.clapEmbeddings.failed}
+                                            missing={enrichmentProgress.clapEmbeddings.waitingMissing}
+                                            isBackground={true}
+                                        />
+                                    )}
+                                    {enrichmentProgress.moods && (
+                                        <EnrichmentStage
+                                            icon={Smile}
+                                            label="Moods"
+                                            description="The 21 moods Kima learns for each song, scored from its sound vector, behind the mood mixes, mood stations and song tags"
+                                            completed={enrichmentProgress.moods.completed}
+                                            total={enrichmentProgress.moods.total}
+                                            progress={enrichmentProgress.moods.progress}
                                             isBackground={true}
                                         />
                                     )}
@@ -774,86 +934,39 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                             ) : null}
                         </div>
 
-                        <div className="flex flex-wrap gap-2 mt-4 pt-3 border-t border-white/10">
-                            <Button
-                                variant="primary"
-                                size="sm"
-                                onClick={handleSyncAndEnrich}
-                                disabled={
-                                    syncing || isEnrichmentActive
-                                }
-                            >
-                                {syncing ? "Syncing..." : "Sync New"}
-                            </Button>
-                            <Button
-                                size="sm"
-                                onClick={() => setConfirmTarget("retryFailedAndBlocked")}
-                                disabled={retryingAll || syncing || isEnrichmentActive}
-                            >
-                                {retryingAll ? "Queuing..." : "Retry what didn't work"}
-                            </Button>
-                            {currentUser?.role === "admin" && (
-                                <Button
-                                    size="sm"
-                                    onClick={() => setConfirmTarget("redecideEverything")}
-                                    disabled={redeciding || syncing || isEnrichmentActive}
-                                >
-                                    {redeciding ? "Queuing..." : "Start over on everything"}
-                                </Button>
-                            )}
-                            {currentUser?.role === "admin" && (
-                                <Button
-                                    size="sm"
-                                    onClick={() => setConfirmTarget("wipeAndRerun")}
-                                    disabled={wiping}
-                                    data-testid="enrichment-wipe"
-                                >
-                                    {wiping ? "Wiping..." : "Wipe and re-run"}
-                                </Button>
-                            )}
-                            {queueResult !== null && (
-                                <span className="self-center text-xs text-success" data-testid="enrichment-queue-result">
-                                    {queueResult === "wipe" ? "Wiped. Re-running." : "Queued"}
-                                </span>
-                            )}
-
-                            {isEnrichmentActive && (
-                                <>
-                                    {enrichmentState?.status === "running" ? (
-                                        <button
-                                            onClick={handlePause}
-                                            className="flex items-center gap-1.5 px-3 py-2.5 min-h-[44px] text-xs tabular-nums bg-warning/20 border border-warning/30 text-warning rounded-lg
-                                            hover:bg-warning/30 transition-colors"
-                                        >
-                                            <Pause className="w-3 h-3" />
-                                            Pause
-                                        </button>
-                                    ) : (
-                                        <button
-                                            onClick={handleResume}
-                                            className="flex items-center gap-1.5 px-3 py-2.5 min-h-[44px] text-xs tabular-nums bg-success/20 border border-success/30 text-success rounded-lg
-                                            hover:bg-success/30 transition-colors"
-                                        >
-                                            <Play className="w-3 h-3" />
-                                            Resume
-                                        </button>
-                                    )}
-                                    <button
-                                        onClick={handleStop}
-                                        className="flex items-center gap-1.5 px-3 py-2.5 min-h-[44px] text-xs tabular-nums bg-danger/20 border border-danger/30 text-danger-light rounded-lg
-                                        hover:bg-danger/30 transition-colors"
-                                    >
-                                        <StopCircle className="w-3 h-3" />
-                                        Stop
-                                    </button>
-                                </>
-                            )}
-                        </div>
+                        {(isEnrichmentActive || queueResult !== null) && (
+                            <div className="flex flex-wrap items-center gap-2 mt-4 pt-3 border-t border-white/10">
+                                {queueResult !== null && (
+                                    <span className="text-xs text-success" data-testid="enrichment-queue-result">
+                                        {queueResult === "wipe" ? "Wiped. Re-running." : "Queued"}
+                                    </span>
+                                )}
+                                {isEnrichmentActive && (
+                                    <>
+                                        {enrichmentState?.status === "running" ? (
+                                            <Button size="sm" onClick={handlePause}>
+                                                <Pause className="w-3 h-3" />
+                                                Pause
+                                            </Button>
+                                        ) : (
+                                            <Button size="sm" onClick={handleResume}>
+                                                <Play className="w-3 h-3" />
+                                                Resume
+                                            </Button>
+                                        )}
+                                        <Button size="sm" variant="danger" onClick={handleStop}>
+                                            <StopCircle className="w-3 h-3" />
+                                            Stop
+                                        </Button>
+                                    </>
+                                )}
+                            </div>
+                        )}
 
                         {totalFailures > 0 && (
-                            <div className="mt-4 pt-3 border-t border-white/10">
+                            <div id="enrichment-failures" className="mt-4 pt-3 border-t border-white/10 scroll-mt-24">
                                 <button
-                                    onClick={() => setShowInlineFailures(!showInlineFailures)}
+                                    onClick={() => setFailuresToggle(!showInlineFailures)}
                                     className="flex items-center gap-2 text-xs tabular-nums text-danger-light/70 hover:brightness-125 transition-colors"
                                 >
                                     <AlertTriangle className="w-3 h-3" />
@@ -889,32 +1002,30 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                                                 </p>
                                             </>
                                         ) : (
-                                            <>
-                                        <div className="flex items-center gap-2">
-                                            {enrichmentState.status ===
-                                                "running" && (
-                                                <GradientSpinner size="sm" />
-                                            )}
-                                            {enrichmentState.status ===
-                                                "paused" && (
-                                                <Pause className="w-3 h-3 text-warning" />
-                                            )}
-                                            {enrichmentState.status ===
-                                                "stopping" && (
-                                                <StopCircle className="w-3 h-3 text-danger-light animate-pulse" />
-                                            )}
-                                            <span className="text-[var(--text-secondary)] tabular-nums">
+                                            <div className="flex items-center gap-2">
                                                 {enrichmentState.status ===
-                                                    "running" &&
-                                                    `Processing ${enrichmentState.currentPhase}...`}
+                                                    "running" && (
+                                                    <GradientSpinner size="sm" />
+                                                )}
                                                 {enrichmentState.status ===
-                                                "paused" && "Enrichment paused"}
+                                                    "paused" && (
+                                                    <Pause className="w-3 h-3 text-warning" />
+                                                )}
                                                 {enrichmentState.status ===
-                                                    "stopping" &&
-                                                    "Stopping..."}
-                                            </span>
-                                        </div>
-                                            </>
+                                                    "stopping" && (
+                                                    <StopCircle className="w-3 h-3 text-danger-light animate-pulse" />
+                                                )}
+                                                <span className="text-[var(--text-secondary)] tabular-nums">
+                                                    {enrichmentState.status ===
+                                                        "running" &&
+                                                        `Processing ${phaseLabel(enrichmentState.currentPhase)}...`}
+                                                    {enrichmentState.status ===
+                                                    "paused" && "Enrichment paused"}
+                                                    {enrichmentState.status ===
+                                                        "stopping" &&
+                                                        "Stopping..."}
+                                                </span>
+                                            </div>
                                         )}
                                     </div>
                                 )}
@@ -922,34 +1033,113 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                     </div>
                 ) : null}
 
-                <SettingsRow
-                    label="User cache size"
-                    description="Maximum storage for offline content"
-                >
-                    <div className="flex items-center gap-3">
-                        <input
-                            type="range"
-                            min={512}
-                            max={20480}
-                            step={512}
-                            aria-label="User cache size"
-                            value={settings.maxCacheSizeMb}
-                            onChange={(e) =>
-                                onUpdate({
-                                    maxCacheSizeMb: parseInt(e.target.value),
-                                })
-                            }
-                            className={sliderClass}
-                        />
-                        <span className="text-xs tabular-nums text-[var(--text-secondary)] w-16 text-right">
-                            {(settings.maxCacheSizeMb / 1024).toFixed(1)} GB
-                        </span>
-                    </div>
-                </SettingsRow>
+            </SettingsSection>
 
+            <SettingsSection id="library-actions" title="Actions">
+                <SettingsRow
+                    label="Sync new"
+                    description="Starts enrichment now for anything not yet worked out, instead of waiting for its next run, and syncs Audiobookshelf when it is connected."
+                >
+                    <Button variant="primary" size="sm" onClick={handleSyncAndEnrich} disabled={syncing || isEnrichmentActive}>
+                        {syncing ? "Syncing..." : "Sync new"}
+                    </Button>
+                </SettingsRow>
+                <SettingsRow
+                    label="Retry what didn't work"
+                    description="Runs every step again for the songs that did not finish one. Finished songs are skipped."
+                >
+                    <Button
+                        size="sm"
+                        onClick={() => setConfirmTarget("retryFailedAndBlocked")}
+                        disabled={retryingAll || syncing || isEnrichmentActive}
+                    >
+                        {retryingAll ? "Queuing..." : "Retry"}
+                    </Button>
+                </SettingsRow>
+                {analysisFailures > 0 && (
+                    <SettingsRow
+                        label="Retry failed analysis"
+                        description={retryResult ? `Reset ${retryResult.reset} failed songs to pending.` : `${analysisFailures} songs whose audio analysis failed go back in line.`}
+                    >
+                        <Button size="sm" onClick={handleRetryFailedAnalysis} disabled={retryingFailed || isEnrichmentActive}>
+                            {retryingFailed ? "Retrying..." : "Retry"}
+                        </Button>
+                    </SettingsRow>
+                )}
+                <SettingsRow
+                    label="Re-run from a step"
+                    description="Does one step again for every song, and every step after it."
+                    htmlFor="enrichment-rerun-step"
+                >
+                    <span className="flex items-center gap-2">
+                        <select
+                            id="enrichment-rerun-step"
+                            value={rerunStep}
+                            onChange={(e) => setRerunStep(e.target.value as EnrichmentRerunStep)}
+                            disabled={rerunningStep}
+                            className="h-9 rounded-lg border border-white/10 bg-surface px-2 text-xs text-[var(--text-primary)] focus:border-[var(--color-brand)] focus:outline-none"
+                            data-testid="enrichment-rerun-select"
+                        >
+                            {RERUN_ORDER.map((step) => (
+                                <option key={step} value={step}>
+                                    {RERUN_STEPS[step].label}
+                                </option>
+                            ))}
+                        </select>
+                        <Button
+                            size="sm"
+                            onClick={() => setRerunConfirmStep(rerunStep)}
+                            disabled={rerunningStep || wiping}
+                            data-testid="enrichment-rerun"
+                        >
+                            {rerunningStep ? "Starting..." : "Re-run"}
+                        </Button>
+                    </span>
+                </SettingsRow>
+                <SettingsRow
+                    label="Re-file albums by tags"
+                    description={
+                        refileStarted
+                            ? "Re-filing albums. The result will show in your notifications."
+                            : "Reads every song's tags again and files each album under the artist its songs name. Run it any time."
+                    }
+                >
+                    <Button size="sm" onClick={() => setConfirmTarget("refileAlbums")} disabled={refileStarting}>
+                        {refileStarting ? "Starting..." : "Re-file albums"}
+                    </Button>
+                </SettingsRow>
+                <SettingsRow
+                    label="Clear caches"
+                    description={clearCachesResult ?? "Empties what the server saved to answer faster (lookups, covers picked for the day). Sign-ins and running work are kept; the rest is worked out again as needed."}
+                >
+                    <Button size="sm" onClick={handleClearCaches} disabled={clearingCaches}>
+                        {clearingCaches ? "Clearing..." : "Clear"}
+                    </Button>
+                </SettingsRow>
+                <SettingsRow
+                    label="Clean up stale jobs"
+                    description={
+                        cleanupResult
+                            ? cleanupResult.totalCleaned > 0
+                                ? `Cleaned ${cleanupResult.cleaned.discoveryBatches.cleaned} batches, ${cleanupResult.cleaned.downloadJobs.cleaned} downloads, ${cleanupResult.cleaned.spotifyImportJobs.cleaned} imports, ${cleanupResult.cleaned.bullQueues.cleaned} queue jobs.`
+                                : "No stale jobs found."
+                            : "Clears downloads, imports and queued work that stopped without finishing."
+                    }
+                >
+                    <Button size="sm" onClick={handleCleanupStaleJobs} disabled={cleaningStaleJobs}>
+                        {cleaningStaleJobs ? "Cleaning..." : "Clean up"}
+                    </Button>
+                </SettingsRow>
+                {/* Every action on this page reports here. */}
+                {error && <p role="alert" className="px-1 text-xs tabular-nums text-danger-light">{error}</p>}
+            </SettingsSection>
+
+            {children}
+
+            <SettingsSection id="library-performance" title="Performance" description="How hard Kima works this machine while it enriches the library.">
                 <SettingsRow
                     label="Transcode cache size"
-                    description="Server restart required for changes"
+                    description="The most disk space transcoded copies may use. Applies when saved."
                 >
                     <div className="flex items-center gap-3">
                         <input
@@ -985,6 +1175,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                     />
                 </SettingsRow>
 
+                {/* kima-rs keeps the online-lookup switch (and its KIMA_IDENTIFY=off lock) that upstream removed. */}
                 <SettingsRow
                     label="Auto enrich metadata"
                     description={
@@ -998,66 +1189,51 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                         id="auto-enrich"
                         disabled={settings.autoEnrichMetadataLocked}
                         checked={settings.autoEnrichMetadata}
-                        onChange={(checked) =>
-                            onUpdate({ autoEnrichMetadata: checked })
-                        }
+                        onChange={(checked) => onUpdate({ autoEnrichMetadata: checked })}
                     />
                 </SettingsRow>
 
-                {settings.autoEnrichMetadata && (
-                    <SettingsRow
-                        label="Metadata Fetch Speed"
-                        description="Parallel MusicBrainz/enrichment requests for artist bios and mood tags"
-                    >
-                        <div className="flex items-center gap-3">
-                            <input
-                                type="range"
-                                min={1}
-                                max={5}
-                                aria-label="Metadata Fetch Speed"
-                                value={enrichmentSpeed}
-                                disabled={isConcurrencyLoading}
-                                onChange={(e) => {
-                                    const newSpeed = parseInt(e.target.value);
-                                    setConcurrencyMutation.mutate(newSpeed);
-                                }}
-                                className={`${sliderClass} disabled:opacity-50 disabled:cursor-not-allowed`}
-                            />
-                            <div className="flex flex-col items-end gap-0.5">
-                                {isConcurrencyLoading ? (
-                                    <span className="text-xs text-[var(--text-muted)] w-24 text-right">
-                                        Loading...
-                                    </span>
-                                ) : (
-                                    <>
-                                        <span className="text-xs tabular-nums text-[var(--text-secondary)] w-24 text-right">
-                                            {enrichmentSpeed === 1
-                                                ? "Conservative"
-                                                : enrichmentSpeed === 2
-                                                ? "Moderate"
-                                                : enrichmentSpeed === 3
-                                                ? "Balanced"
-                                                : enrichmentSpeed === 4
-                                                ? "Fast"
-                                                : "Maximum"}
-                                        </span>
-                                        {concurrencyConfig && (
-                                            <span className="text-xs tabular-nums text-[var(--text-muted)] w-24 text-right">
-                                                ~
-                                                {
-                                                    concurrencyConfig.artistsPerMin
-                                                }{" "}
-                                                artists/min
-                                            </span>
-                                        )}
-                                    </>
-                                )}
-                            </div>
+                <SettingsRow
+                    label="Metadata Fetch Speed"
+                    description="Parallel MusicBrainz/enrichment requests for artist bios and song identification"
+                >
+                    <div className="flex items-center gap-3">
+                        <input
+                            type="range"
+                            min={1}
+                            max={5}
+                            aria-label="Metadata Fetch Speed"
+                            value={enrichmentSpeed}
+                            disabled={isConcurrencyLoading}
+                            onChange={(e) => {
+                                const newSpeed = parseInt(e.target.value);
+                                setConcurrencyMutation.mutate(newSpeed);
+                            }}
+                            className={`${sliderClass} disabled:opacity-50 disabled:cursor-not-allowed`}
+                        />
+                        <div className="flex flex-col items-end gap-0.5">
+                            {isConcurrencyLoading ? (
+                                <span className="text-xs text-[var(--text-muted)] w-24 text-right">
+                                    Loading...
+                                </span>
+                            ) : (
+                                <span className="text-xs tabular-nums text-[var(--text-secondary)] w-24 text-right">
+                                    {enrichmentSpeed === 1
+                                        ? "Conservative"
+                                        : enrichmentSpeed === 2
+                                        ? "Moderate"
+                                        : enrichmentSpeed === 3
+                                        ? "Balanced"
+                                        : enrichmentSpeed === 4
+                                        ? "Fast"
+                                        : "Maximum"}
+                                </span>
+                            )}
                         </div>
-                    </SettingsRow>
-                )}
+                    </div>
+                </SettingsRow>
 
-                {settings.autoEnrichMetadata && !featuresLoading && musicCNN && (
+                {!featuresLoading && musicCNN && (
                     <WorkerSliderRow
                         label="Audio Analysis Workers"
                         description="CPU workers for Essentia ML analysis"
@@ -1065,7 +1241,7 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                     />
                 )}
 
-                {settings.autoEnrichMetadata && !featuresLoading && vibeEmbeddings && (
+                {!featuresLoading && vibeEmbeddings && (
                     <WorkerSliderRow
                         label="Vibe Embedding Workers"
                         description="CPU workers for CLAP embeddings (vibe similarity)"
@@ -1073,107 +1249,66 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                     />
                 )}
 
+                {!featuresLoading && musicCNN && vibeEmbeddings && (
+                    <SettingsRow label={BOTH_AT_ONCE_LABEL} description={BOTH_AT_ONCE_DESCRIPTION} htmlFor="analysis-together">
+                        <BothAtOnceSwitch id="analysis-together" />
+                    </SettingsRow>
+                )}
+
                 {/* Each GPU switch row shows only measured state; on hosts the
                     CUDA runtime cannot exist for (arm, macOS), the rows are
                     not offered at all. */}
-                {settings.autoEnrichMetadata && !featuresLoading && vibeEmbeddings && gpuStatus?.supported && (
+                {!featuresLoading && vibeEmbeddings && gpuStatus?.supported && (
                     <GpuSwitchRow
                         id="gpu-onnx-toggle"
                         label="NVIDIA GPU for vibe embeddings"
                         description="Run vibe embeddings on an NVIDIA GPU. Downloads about 2 GB of pinned packages into the data directory (they take about 3.4 GB) the first time. Applies on its own within a minute: the analyzer finishes the songs it is on, then restarts."
-                        gpu={gpuStatus ?? null}
-                        on={gpuStatus?.enabled ?? false}
-                        effective={gpuStatus?.effective ?? false}
-                        fellBack={gpuStatus?.fellBack ?? false}
+                        gpu={gpuStatus}
+                        on={gpuStatus.enabled}
+                        effective={gpuStatus.effective}
+                        fellBack={gpuStatus.fellBack}
                         pending={setGpuMutation.isPending}
                         onChange={(checked) => setGpuMutation.mutate(checked)}
                     />
                 )}
-                {settings.autoEnrichMetadata && !featuresLoading && musicCNN && gpuStatus?.supported && (
+                {!featuresLoading && musicCNN && gpuStatus?.supported && (
                     <GpuSwitchRow
                         id="gpu-analysis-toggle"
                         label="NVIDIA GPU for audio analysis"
                         description="Run the mood, valence and arousal models on an NVIDIA GPU. Uses the same download as vibe embeddings. Applies on its own within a minute: the analyzer finishes the songs it is on, then restarts."
-                        gpu={gpuStatus ?? null}
-                        on={gpuStatus?.analysis ?? false}
-                        effective={gpuStatus?.analysisEffective ?? false}
-                        fellBack={gpuStatus?.analysisFellBack ?? false}
+                        gpu={gpuStatus}
+                        on={gpuStatus.analysis}
+                        effective={gpuStatus.analysisEffective}
+                        fellBack={gpuStatus.analysisFellBack}
                         pending={setGpuAnalysisMutation.isPending}
                         onChange={(checked) => setGpuAnalysisMutation.mutate(checked)}
                     />
                 )}
 
-                <div className="mt-6 rounded-lg border border-white/10 overflow-hidden">
-                    <button
-                        onClick={() => setMaintenanceOpen((o) => !o)}
-                        aria-expanded={maintenanceOpen}
-                        className="w-full flex items-center justify-between px-4 py-3 bg-white/[0.03] hover:bg-white/[0.06] transition-colors text-left"
-                    >
-                        <div>
-                            <span className="text-xs text-[var(--text-secondary)]">
-                                Maintenance Operations
-                            </span>
-                            <p className="text-xs text-[var(--text-muted)] mt-0.5">
-                                Cache clearing, stale job cleanup, failed-analysis retry
-                            </p>
-                        </div>
-                        <ChevronDown
-                            className={`w-4 h-4 text-[var(--text-muted)] transition-transform shrink-0 ${maintenanceOpen ? "rotate-180" : ""}`}
-                        />
-                    </button>
+            </SettingsSection>
 
-                    {maintenanceOpen && (
-                        <div className="px-4 pt-3 pb-4 space-y-3 border-t border-white/10">
-                            <Button size="sm" onClick={handleClearCaches} disabled={clearingCaches}>
-                                {clearingCaches ? "Clearing..." : "Clear All Caches"}
-                            </Button>
-                            <Button size="sm" onClick={handleCleanupStaleJobs} disabled={cleaningStaleJobs}>
-                                {cleaningStaleJobs ? "Cleaning..." : "Cleanup Stale Jobs"}
-                            </Button>
-                            {((enrichmentProgress?.audioAnalysis?.failed ?? 0) > 0 || (enrichmentProgress?.audioAnalysis?.permanentlyFailed ?? 0) > 0) && (
-                                <Button
-                                    size="sm"
-                                    onClick={handleRetryFailedAnalysis}
-                                    disabled={retryingFailed || isEnrichmentActive}
-                                >
-                                    {retryingFailed
-                                        ? "Retrying..."
-                                        : `Retry Failed Analysis (${(enrichmentProgress?.audioAnalysis?.failed || 0) + (enrichmentProgress?.audioAnalysis?.permanentlyFailed || 0)})`}
-                                </Button>
-                            )}
-
-                            {retryResult && (
-                                <p className="text-xs tabular-nums text-success">
-                                    Reset {retryResult.reset} failed tracks to pending
-                                </p>
-                            )}
-                            {clearCachesResult && (
-                                <p className="text-xs tabular-nums text-success">
-                                    {clearCachesResult}
-                                </p>
-                            )}
-                            {cleanupResult && cleanupResult.totalCleaned > 0 && (
-                                <p className="text-xs tabular-nums text-success">
-                                    Cleaned:{" "}
-                                    {cleanupResult.cleaned.discoveryBatches.cleaned}{" "}
-                                    batches,{" "}
-                                    {cleanupResult.cleaned.downloadJobs.cleaned}{" "}
-                                    downloads,{" "}
-                                    {cleanupResult.cleaned.spotifyImportJobs.cleaned}{" "}
-                                    imports, {cleanupResult.cleaned.bullQueues.cleaned}{" "}
-                                    queue jobs
-                                </p>
-                            )}
-                            {cleanupResult && cleanupResult.totalCleaned === 0 && (
-                                <p className="text-xs text-[var(--text-muted)]">
-                                    No stale jobs found
-                                </p>
-                            )}
-                        </div>
-                    )}
-                </div>
-                {/* Outside the collapsible: every action in this section reports here. */}
-                {error && <p role="alert" className="mt-2 px-1 text-xs tabular-nums text-danger-light">{error}</p>}
+            <SettingsSection
+                id="library-start-over"
+                title="Start over"
+                description="These redo work Kima has already finished, for the whole library. Your music, playlists, plays, likes and edits stay."
+                showSeparator={false}
+            >
+                <SettingsRow
+                    label="Start over on everything"
+                    description="Works every step out again for every song, keeping the matches it has. Takes hours on a large library."
+                >
+                    <Button size="sm" variant="danger" onClick={() => setConfirmTarget("redecideEverything")} disabled={redeciding || syncing || isEnrichmentActive}>
+                        {redeciding ? "Queuing..." : "Start over"}
+                    </Button>
+                </SettingsRow>
+                <SettingsRow
+                    label="Wipe and re-run"
+                    description="Clears everything Kima worked out about your music, then works it all out again. Takes a few hours on a large library."
+                >
+                    <Button size="sm" variant="danger" onClick={() => setConfirmTarget("wipeAndRerun")} disabled={wiping} data-testid="enrichment-wipe">
+                        {wiping ? "Wiping..." : "Wipe and re-run"}
+                    </Button>
+                </SettingsRow>
             </SettingsSection>
 
             {confirmTarget && (
@@ -1184,6 +1319,28 @@ export function CacheSection({ settings, onUpdate }: CacheSectionProps) {
                     title={confirmMeta[confirmTarget].title}
                     message={confirmMeta[confirmTarget].message}
                     confirmText={confirmMeta[confirmTarget].confirmText}
+                    cancelText="Cancel"
+                    variant="danger"
+                />
+            )}
+            {rerunConfirmStep && (
+                <ConfirmDialog
+                    isOpen={true}
+                    onClose={() => setRerunConfirmStep(null)}
+                    onConfirm={() => {
+                        const step = rerunConfirmStep;
+                        setRerunConfirmStep(null);
+                        void execRerunStep(step);
+                    }}
+                    title={`Re-run from ${RERUN_STEPS[rerunConfirmStep].label}?`}
+                    message={
+                        RERUN_STEPS[rerunConfirmStep].message +
+                        (RERUN_STEPS[rerunConfirmStep].relaysMap
+                            ? " The vibe map is laid out again when it finishes."
+                            : " The vibe map stays as it is.") +
+                        " Your music, playlists, plays, likes and edits stay."
+                    }
+                    confirmText="Re-run"
                     cancelText="Cancel"
                     variant="danger"
                 />

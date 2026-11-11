@@ -906,3 +906,8 @@ fixture_test!(artist_exists_follows_visibility, |pool| {
             .unwrap()
     );
 });
+
+fixture_test!(browse_track_select_executes, |pool| {
+    let result = kima_db::browse::track(&pool, track(1)).await.unwrap();
+    assert!(result.is_some());
+});

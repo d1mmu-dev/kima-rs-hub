@@ -99,9 +99,8 @@ export default function OrganizePage() {
     const progressJob = "organize" as const;
 
     return (
-        <div className="min-h-screen pb-32">
+        <div className="min-h-screen page-end">
             <PageHeader
-                eyebrow="Settings"
                 title="Organize library"
                 description="Preview a tidy on-disk layout, then apply it. Nothing changes until you press Apply."
                 actions={

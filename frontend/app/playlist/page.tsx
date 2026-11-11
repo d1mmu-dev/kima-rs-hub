@@ -1,16 +1,18 @@
 "use client";
 
-import { Suspense, useState, useMemo, useRef, useEffect, useLayoutEffect } from "react";
+import { Suspense, useState, useMemo, useRef, useEffect, useLayoutEffect, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useSearchParams, useRouter } from "next/navigation";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { api } from "@/lib/api";
-import { useAudioState, useAudioPlayback, useAudioControls, Track as AudioTrack } from "@/lib/audio-context";
+import { useAudioState, useAudioPlayback, useAudioControls } from "@/lib/audio-context";
+import { playlistTrackToAudio } from "@/lib/playlist-track";
 import { cn } from "@/lib/cn";
 import { shuffleArray } from "@/lib/shuffle";
-import { formatTime, plural } from "@/lib/format";
-import { queryKeys, usePlaylistQuery, useRemoveFromPlaylistMutation, useDeletePlaylistMutation, useUpdatePlaylistMutation, useMoveTrackInPlaylistMutation } from "@/hooks/useQueries";
+import { formatHoursMinutes, formatTime, plural } from "@/lib/format";
+import { anchorForScreenMove, queryKeys, usePlaylistQuery, useRemoveFromPlaylistMutation, useDeletePlaylistMutation, useUpdatePlaylistMutation, useSetPlaylistReverseMutation, useMoveTrackInPlaylistMutation, usePublicConfig } from "@/hooks/useQueries";
 import { usePreview } from "@/hooks/usePreview";
+import { useLeaveDeletedPlaylist } from "@/hooks/useLeaveDeletedPlaylist";
 import { useQueryClient } from "@tanstack/react-query";
 import { notify } from "@/lib/notify";
 import { mosaicCovers } from "@/features/playlist/coverMosaic";
@@ -41,6 +43,7 @@ import {
     GripVertical,
     ChevronUp,
     ChevronDown,
+    ArrowDownUp,
 } from "lucide-react";
 import { useTrackFormat } from "@/hooks/useTrackFormat";
 import { formatTrackDisplay } from "@/lib/track-format";
@@ -48,13 +51,52 @@ import { useDoubleTapList } from "@/hooks/useDoubleTap";
 import { SectionHeader } from "@/components/ui/SectionHeader";
 import { Button } from "@/components/ui/Button";
 import { CachedImage } from "@/components/ui/CachedImage";
+import { CoverArt } from "@/components/cards/MediaCard";
 import { PageMessage } from "@/components/ui/PageMessage";
 import { copyText } from "@/lib/clipboard";
 import { openActivityPanel } from "@/hooks/useActivityPanel";
+import { shownTitle } from "@/lib/track-title";
+
+/** A track row's small icon button; its tooltip is the label in lower case. Clicks never reach the row. */
+function RowIconButton({
+    label,
+    onClick,
+    danger = false,
+    desktopOnly = false,
+    disabled,
+    children,
+}: {
+    label: string;
+    onClick: () => void;
+    danger?: boolean;
+    desktopOnly?: boolean;
+    disabled?: boolean;
+    children: ReactNode;
+}) {
+    return (
+        <button
+            aria-label={label}
+            title={label.toLowerCase()}
+            disabled={disabled}
+            onClick={(e) => {
+                e.stopPropagation();
+                onClick();
+            }}
+            className={cn(
+                "items-center justify-center rounded-lg hover:bg-white/10 text-[var(--text-muted)] transition-all",
+                desktopOnly ? "hidden md:flex w-9 h-9" : "flex w-11 h-11 md:w-9 md:h-9",
+                danger ? "hover:text-danger-light" : "hover:text-white",
+            )}
+        >
+            {children}
+        </button>
+    );
+}
 
 interface Track {
     id: string;
     title: string;
+    displayTitle?: string | null;
     duration: number;
     album: {
         id?: string;
@@ -67,16 +109,6 @@ interface Track {
     };
 }
 
-/** A playlist track as the player takes it. */
-function toAudioTrack(track: Track): AudioTrack {
-    return {
-        id: track.id,
-        title: track.title,
-        artist: { name: track.album.artist.name, id: track.album.artist.id },
-        album: { title: track.album.title, coverArt: track.album.coverArt, id: track.album.id },
-        duration: track.duration,
-    };
-}
 
 interface PlaylistItem {
     id: string;
@@ -120,6 +152,7 @@ function PlaylistDetailPageInner() {
     const { mutateAsync: removeTrack } = useRemoveFromPlaylistMutation();
     const { mutateAsync: deletePlaylistMut } = useDeletePlaylistMutation();
     const { mutateAsync: updatePlaylist, isPending: isUpdatingPlaylist } = useUpdatePlaylistMutation();
+    const { mutateAsync: setReverseOrder, isPending: isReordering } = useSetPlaylistReverseMutation();
     const { mutateAsync: moveTrack } = useMoveTrackInPlaylistMutation();
     const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
     const [dragOverItemId, setDragOverItemId] = useState<string | null>(null);
@@ -141,8 +174,8 @@ function PlaylistDetailPageInner() {
     const scrollContainerRef = useRef<HTMLElement | null>(null);
     const [scrollMargin, setScrollMargin] = useState(0);
 
-    // Capture the actual scroll container (#main-content) and measure the
-    // list's offset within it so the element virtualizer positions rows correctly.
+    // The page scrolls inside #main-content, so that is the virtualizer's scroll element; the list's offset in it is
+    // measured where the virtualizer is set up.
     useLayoutEffect(() => {
         const el = document.getElementById("main-content") as HTMLElement | null;
         scrollContainerRef.current = el;
@@ -169,7 +202,7 @@ function PlaylistDetailPageInner() {
         preview.toggle(pendingId, api.getPendingTrackPreviewStreamUrl(playlistId, pendingId));
 
     const showRetryProgress = (reloadAfterMs: number) => {
-        openActivityPanel("active");
+        openActivityPanel("downloads");
         queryClient.invalidateQueries({ queryKey: ["notifications"] });
         setTimeout(() => {
             queryClient.invalidateQueries({
@@ -228,7 +261,9 @@ function PlaylistDetailPageInner() {
         }
     };
 
-    const { data: playlist, isLoading } = usePlaylistQuery(playlistId);
+    const playlistQuery = usePlaylistQuery(playlistId);
+    const { data: playlist, isLoading } = playlistQuery;
+    useLeaveDeletedPlaylist(playlistId, playlistQuery);
 
     const isShared = playlist?.isOwner === false;
 
@@ -275,6 +310,21 @@ function PlaylistDetailPageInner() {
         }
     };
 
+    const reverseOrder = Boolean(playlist?.reverseOrder);
+    const { canAcquire } = usePublicConfig();
+
+    const handleToggleReverse = async () => {
+        if (!playlist?.isOwner) return;
+        try {
+            await setReverseOrder({
+                playlistId,
+                reverseOrder: !reverseOrder,
+            });
+        } catch {
+            notify.error("Failed to update playlist order");
+        }
+    };
+
     const coverUrls = useMemo(
         () => mosaicCovers((playlist?.items ?? []).map((item: PlaylistItem) => item.track.album?.coverArt)),
         [playlist],
@@ -293,11 +343,10 @@ function PlaylistDetailPageInner() {
         try {
             await deletePlaylistMut(playlistId);
 
+            // Every page showing this playlist, this one included, leaves for the list on this signal.
             window.dispatchEvent(
                 new CustomEvent("playlist-deleted", { detail: { playlistId } })
             );
-
-            router.push("/playlists");
         } catch (error) {
             console.error("Failed to delete playlist:", error);
             notify.error("Failed to delete playlist");
@@ -353,15 +402,6 @@ function PlaylistDetailPageInner() {
         );
     }, [playlist?.items]);
 
-    const formatTotalDuration = (seconds: number) => {
-        const hours = Math.floor(seconds / 3600);
-        const mins = Math.floor((seconds % 3600) / 60);
-        if (hours > 0) {
-            return `${hours} hr ${mins} min`;
-        }
-        return `${mins} min`;
-    };
-
     const handlePlayPlaylist = () => {
         if (!playlist?.items || playlist.items.length === 0) return;
 
@@ -374,20 +414,20 @@ function PlaylistDetailPageInner() {
             return;
         }
 
-        const tracks = playlist.items.map((item: PlaylistItem) => toAudioTrack(item.track));
+        const tracks = playlist.items.map((item: PlaylistItem) => playlistTrackToAudio(item.track));
         playTracks(tracks, 0);
     };
 
     const handlePlayTrack = (index: number) => {
         if (!playlist?.items || playlist.items.length === 0) return;
 
-        const tracks = playlist.items.map((item: PlaylistItem) => toAudioTrack(item.track));
+        const tracks = playlist.items.map((item: PlaylistItem) => playlistTrackToAudio(item.track));
         playTracks(tracks, index);
     };
 
     const handleRowTouchEnd = useDoubleTapList(handlePlayTrack);
 
-    const handleAddToQueue = (track: Track) => addToQueue(toAudioTrack(track));
+    const handleAddToQueue = (track: Track) => addToQueue(playlistTrackToAudio(track));
 
     // ── Drag-to-reorder ──────────────────────────────────────────────────────
 
@@ -413,11 +453,13 @@ function PlaylistDetailPageInner() {
             handleDragEnd();
             return;
         }
+        const shownIds = (playlist?.items ?? []).map((i: PlaylistItem) => i.id);
+        const afterItemId = anchorForScreenMove(shownIds, draggedItemId, targetItemId, reverseOrder);
         try {
             await moveTrack({
                 playlistId,
                 itemId: draggedItemId,
-                afterItemId: targetItemId,
+                afterItemId,
             });
         } catch {
             notify.error("Failed to reorder track");
@@ -429,15 +471,15 @@ function PlaylistDetailPageInner() {
 
     const handleMoveTrackUp = async (itemId: string) => {
         if (!playlist?.items || playlist.items.length < 2) return;
-        const idx = playlist.items.findIndex((i: PlaylistItem) => i.id === itemId);
+        const shownIds = playlist.items.map((i: PlaylistItem) => i.id);
+        const idx = shownIds.indexOf(itemId);
         if (idx <= 0) return;
+        const afterItemId = anchorForScreenMove(shownIds, itemId, idx >= 2 ? shownIds[idx - 2] : null, reverseOrder);
         try {
             await moveTrack({
                 playlistId,
                 itemId,
-                // Move to position idx-1: place after the item two positions above,
-                // or null (first position) when idx === 1.
-                afterItemId: idx === 1 ? null : playlist.items[idx - 2].id,
+                afterItemId,
             });
         } catch {
             notify.error("Failed to move track");
@@ -446,13 +488,15 @@ function PlaylistDetailPageInner() {
 
     const handleMoveTrackDown = async (itemId: string) => {
         if (!playlist?.items || playlist.items.length < 2) return;
-        const idx = playlist.items.findIndex((i: PlaylistItem) => i.id === itemId);
-        if (idx === -1 || idx >= playlist.items.length - 1) return;
+        const shownIds = playlist.items.map((i: PlaylistItem) => i.id);
+        const idx = shownIds.indexOf(itemId);
+        if (idx === -1 || idx >= shownIds.length - 1) return;
+        const afterItemId = anchorForScreenMove(shownIds, itemId, shownIds[idx + 1], reverseOrder);
         try {
             await moveTrack({
                 playlistId,
                 itemId,
-                afterItemId: playlist.items[idx + 1].id,
+                afterItemId,
             });
         } catch {
             notify.error("Failed to move track");
@@ -490,293 +534,252 @@ function PlaylistDetailPageInner() {
     });
 
     const renderRow = (item: PlaylistItem | PendingTrack, index: number) => {
-            if (item.type === "pending") {
-                const pending = (item as PendingTrack).pending;
-                const isPreviewPlaying = preview.previewId === pending.id;
-                const isRetrying = retryingTrackId === pending.id;
-                const isRemoving = removingTrackId === pending.id;
-                const isMissing = pending.missingFromDisk === true;
-
-                return (
-                    <div
-                        key={`pending-${pending.id}`}
-                        className={cn("grid grid-cols-[40px_minmax(0,1fr)_96px]", TRACK_GRID_MD, "gap-2 md:gap-4 px-4 py-2 rounded-lg opacity-60 hover:opacity-80 group transition-opacity")}
-                    >
-                        <div className="flex items-center justify-center">
-                            {isMissing ? (
-                                <FileX className="w-4 h-4 text-warning" />
-                            ) : (
-                                <AlertCircle className="w-4 h-4 text-danger-light" />
-                            )}
-                        </div>
-
-                        <div className="flex items-center gap-3 min-w-0">
-                            <div className="w-10 h-10 bg-[var(--bg-primary)] border border-white/10 rounded-lg shrink-0 overflow-hidden flex items-center justify-center">
-                                <button
-                                    onClick={() => handlePlayPreview(pending.id)}
-                                    className="w-full h-full flex items-center justify-center hover:bg-white/5 transition-colors"
-                                    aria-label="Play a 30-second preview"
-                                    title="play a 30-second preview"
-                                >
-                                    {isPreviewPlaying ? (
-                                        <Volume2 className="w-5 h-5 text-brand animate-pulse" />
-                                    ) : (
-                                        <Play className="w-5 h-5 text-[var(--text-muted)] hover:text-white/60" />
-                                    )}
-                                </button>
-                            </div>
-                            <div className="min-w-0">
-                                <p className="text-sm font-medium truncate text-[var(--text-muted)]">
-                                    {pending.title}
-                                </p>
-                                <p className="text-xs tabular-nums text-[var(--text-muted)] truncate">
-                                    {pending.artist}
-                                </p>
-                            </div>
-                        </div>
-
-                        <p className="hidden md:block self-center text-xs tabular-nums text-[var(--text-muted)] truncate">
-                            {pending.album}
-                        </p>
-
-                        <span aria-hidden="true" className="hidden md:block" />
-
-                        <div className="flex items-center justify-end gap-1">
-                            <span className={cn(
-                                "text-xs tabular-nums mr-2 hidden sm:inline",
-                                isMissing ? "text-warning" : "text-danger-light"
-                            )}>
-                                {isMissing ? "Missing from disk" : "Failed"}
-                            </span>
-                            {!isMissing && (
-                                <button
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleRetryPendingTrack(pending.id);
-                                    }}
-                                    disabled={isRetrying}
-                                    className={cn(
-                                        "w-11 h-11 md:w-9 md:h-9 flex items-center justify-center rounded-lg hover:bg-white/10 transition-all",
-                                        isRetrying
-                                            ? "text-brand"
-                                            : "text-[var(--text-muted)] hover:text-white/60"
-                                    )}
-                                    aria-label="Retry download"
-                                    title="retry download"
-                                >
-                                    {isRetrying ? (
-                                        <GradientSpinner size="sm" />
-                                    ) : (
-                                        <RefreshCw className="w-4 h-4" />
-                                    )}
-                                </button>
-                            )}
-                            {playlist?.isOwner && (
-                                <button
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleRemovePendingTrack(pending.id);
-                                    }}
-                                    disabled={isRemoving}
-                                    className="w-11 h-11 md:w-9 md:h-9 flex items-center justify-center rounded-lg hover:bg-white/10 text-[var(--text-muted)] hover:text-danger-light transition-all"
-                                    aria-label="Remove from playlist"
-                                    title="remove from playlist"
-                                >
-                                    {isRemoving ? (
-                                        <GradientSpinner size="sm" />
-                                    ) : (
-                                        <X className="w-4 h-4" />
-                                    )}
-                                </button>
-                            )}
-                        </div>
-                    </div>
-                );
-            }
-
-            const playlistItem = item as PlaylistItem;
-            const isCurrentlyPlaying = currentTrack?.id === playlistItem.track.id;
-            const trackIndex = playlist?.items?.findIndex(
-                (i: PlaylistItem) => i.id === playlistItem.id
-            ) ?? index;
+        if (item.type === "pending") {
+            const pending = (item as PendingTrack).pending;
+            const isPreviewPlaying = preview.previewId === pending.id;
+            const isRetrying = retryingTrackId === pending.id;
+            const isRemoving = removingTrackId === pending.id;
+            const isMissing = pending.missingFromDisk === true;
 
             return (
                 <div
-                    key={playlistItem.id}
-                    data-track-index={trackIndex}
-                    draggable={!!playlist?.isOwner}
-                    onDragStart={(e) => {
-                        e.dataTransfer.setData("text/plain", playlistItem.id);
-                        e.dataTransfer.effectAllowed = "move";
-                        handleDragStart(playlistItem.id);
-                    }}
-                    onDragOver={(e) => handleDragOver(e, playlistItem.id)}
-                    onDragEnd={handleDragEnd}
-                    onDrop={(e) => {
-                        e.preventDefault();
-                        handleDrop(playlistItem.id);
-                    }}
-                    onDoubleClick={() => handlePlayTrack(trackIndex)}
-                    onTouchEnd={handleRowTouchEnd}
-                    className={cn(
-                        "grid grid-cols-[40px_minmax(0,1fr)_96px]",
-                        TRACK_GRID_MD,
-                        "gap-2 md:gap-4 px-4 py-2 rounded-lg hover:bg-white/[0.03] transition-all group cursor-pointer border border-transparent hover:border-white/5 touch-manipulation",
-                        draggedItemId === playlistItem.id && "opacity-50",
-                        dragOverItemId === playlistItem.id && "border-brand/40 bg-brand/5",
-                        isCurrentlyPlaying && "bg-white/5 border-brand/30"
-                    )}
+                    key={`pending-${pending.id}`}
+                    className={cn("grid grid-cols-[40px_minmax(0,1fr)_96px]", TRACK_GRID_MD, "gap-2 md:gap-4 px-4 py-2 rounded-lg opacity-60 hover:opacity-80 group transition-opacity")}
                 >
-                    <div className="flex items-center justify-center gap-1">
-                        <button
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                handlePlayTrack(trackIndex);
-                            }}
-                            className="w-8 h-8 flex items-center justify-center"
-                            aria-label={isCurrentlyPlaying && isPlaying ? "Pause" : "Play"}
-                        >
-                            <span
-                                className={cn(
-                                    "text-xs group-hover:hidden",
-                                    isCurrentlyPlaying
-                                        ? "text-brand font-bold"
-                                        : "text-[var(--text-muted)]"
-                                )}
-                            >
-                                {isCurrentlyPlaying && isPlaying ? (
-                                    <Music className="w-4 h-4 text-brand animate-pulse" />
-                                ) : (
-                                    trackIndex + 1
-                                )}
-                            </span>
-                            <Play className="w-4 h-4 text-white hidden group-hover:block" />
-                        </button>
-                        {playlist?.isOwner && (
-                            <button
-                                draggable={false}
-                                onDragStart={(e) => {
-                                    e.stopPropagation();
-                                    e.dataTransfer.setData("text/plain", playlistItem.id);
-                                    e.dataTransfer.effectAllowed = "move";
-                                    handleDragStart(playlistItem.id);
-                                }}
-                                onDragEnd={handleDragEnd}
-                                aria-label="Drag to reorder"
-                                className="touch-reveal w-6 h-6 flex items-center justify-center rounded opacity-0 group-hover:opacity-60 hover:opacity-100 focus-visible:opacity-100 transition-all cursor-grab active:cursor-grabbing text-[var(--text-muted)] hover:text-white"
-                            >
-                                <GripVertical className="w-4 h-4" />
-                            </button>
+                    <div className="flex items-center justify-center">
+                        {isMissing ? (
+                            <FileX className="w-4 h-4 text-warning" />
+                        ) : (
+                            <AlertCircle className="w-4 h-4 text-danger-light" />
                         )}
                     </div>
 
                     <div className="flex items-center gap-3 min-w-0">
-                        <div className="relative w-10 h-10 bg-[var(--bg-primary)] rounded-lg shrink-0 overflow-hidden border border-white/10">
-                            {playlistItem.track.album?.coverArt ? (
-                                <CachedImage
-                                    src={api.getCoverArtUrl(
-                                        playlistItem.track.album.coverArt,
-                                        100
-                                    )}
-                                    alt={playlistItem.track.title}
-                                    fill
-                                    sizes="40px"
-                                    className="object-cover"
-                                />
-                            ) : (
-                                <div className="w-full h-full flex items-center justify-center">
-                                    <Music className="w-5 h-5 text-white/10" />
-                                </div>
-                            )}
+                        <div className="w-10 h-10 bg-[var(--bg-primary)] border border-white/10 rounded-lg shrink-0 overflow-hidden flex items-center justify-center">
+                            <button
+                                onClick={() => handlePlayPreview(pending.id)}
+                                className="w-full h-full flex items-center justify-center hover:bg-white/5 transition-colors"
+                                aria-label="Play a 30-second preview"
+                                title="play a 30-second preview"
+                            >
+                                {isPreviewPlaying ? (
+                                    <Volume2 className="w-5 h-5 text-brand animate-pulse" />
+                                ) : (
+                                    <Play className="w-5 h-5 text-[var(--text-muted)] hover:text-white/60" />
+                                )}
+                            </button>
                         </div>
                         <div className="min-w-0">
-                            <p
-                                className={cn(
-                                    "text-sm font-bold truncate tracking-tight",
-                                    isCurrentlyPlaying
-                                        ? "text-brand"
-                                        : "text-white"
-                                )}
-                            >
-                                {formatTrackDisplay(
-                                    {
-                                        title: playlistItem.track.title,
-                                        artist: playlistItem.track.album.artist.name,
-                                        album: playlistItem.track.album.title,
-                                    },
-                                    trackFormat,
-                                )}
+                            <p className="text-sm font-medium truncate text-[var(--text-muted)]">
+                                {pending.title}
                             </p>
                             <p className="text-xs tabular-nums text-[var(--text-muted)] truncate">
-                                {playlistItem.track.album.artist.name}
-                                <span className="md:hidden">
-                                    {" · "}
-                                    {formatTime(playlistItem.track.duration)}
-                                </span>
+                                {pending.artist}
                             </p>
                         </div>
                     </div>
 
                     <p className="hidden md:block self-center text-xs tabular-nums text-[var(--text-muted)] truncate">
-                        {playlistItem.track.album.title}
+                        {pending.album}
                     </p>
 
-                    <span className="hidden md:block self-center text-xs tabular-nums text-[var(--text-muted)] text-right">
-                        {formatTime(playlistItem.track.duration)}
-                    </span>
+                    <span aria-hidden="true" className="hidden md:block" />
 
                     <div className="flex items-center justify-end gap-1">
-                        <button
-                            className="w-11 h-11 md:w-9 md:h-9 flex items-center justify-center rounded-lg hover:bg-white/10 text-[var(--text-muted)] hover:text-white transition-all"
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                handleAddToQueue(playlistItem.track);
-                            }}
-                            aria-label="Add to queue"
-                            title="add to queue"
-                        >
-                            <ListPlus className="w-4 h-4" />
-                        </button>
+                        <span className={cn(
+                            "text-xs tabular-nums mr-2 hidden sm:inline",
+                            isMissing ? "text-warning" : "text-danger-light"
+                        )}>
+                            {isMissing ? "Missing from disk" : "Failed"}
+                        </span>
+                        {!isMissing && canAcquire && (
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRetryPendingTrack(pending.id);
+                                }}
+                                disabled={isRetrying}
+                                className={cn(
+                                    "w-11 h-11 md:w-9 md:h-9 flex items-center justify-center rounded-lg hover:bg-white/10 transition-all",
+                                    isRetrying
+                                        ? "text-brand"
+                                        : "text-[var(--text-muted)] hover:text-white/60"
+                                )}
+                                aria-label="Retry download"
+                                title="retry download"
+                            >
+                                {isRetrying ? (
+                                    <GradientSpinner size="sm" />
+                                ) : (
+                                    <RefreshCw className="w-4 h-4" />
+                                )}
+                            </button>
+                        )}
                         {playlist?.isOwner && (
-                            <>
-                                <button
-                                    aria-label="Move up"
-                                    className="hidden md:flex w-9 h-9 items-center justify-center rounded-lg hover:bg-white/10 text-[var(--text-muted)] hover:text-white transition-all"
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleMoveTrackUp(playlistItem.id);
-                                    }}
-                                    title="move up"
-                                >
-                                    <ChevronUp className="w-4 h-4" />
-                                </button>
-                                <button
-                                    aria-label="Move down"
-                                    className="hidden md:flex w-9 h-9 items-center justify-center rounded-lg hover:bg-white/10 text-[var(--text-muted)] hover:text-white transition-all"
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleMoveTrackDown(playlistItem.id);
-                                    }}
-                                    title="move down"
-                                >
-                                    <ChevronDown className="w-4 h-4" />
-                                </button>
-                                <button
-                                    className="w-11 h-11 md:w-9 md:h-9 flex items-center justify-center rounded-lg hover:bg-white/10 text-[var(--text-muted)] hover:text-danger-light transition-all"
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleRemoveTrack(playlistItem.track.id);
-                                    }}
-                                    aria-label="Remove from playlist"
-                                    title="remove from playlist"
-                                >
+                            <RowIconButton label="Remove from playlist" danger disabled={isRemoving} onClick={() => handleRemovePendingTrack(pending.id)}>
+                                {isRemoving ? (
+                                    <GradientSpinner size="sm" />
+                                ) : (
                                     <X className="w-4 h-4" />
-                                </button>
-                            </>
+                                )}
+                            </RowIconButton>
                         )}
                     </div>
                 </div>
             );
+        }
+
+        const playlistItem = item as PlaylistItem;
+        const isCurrentlyPlaying = currentTrack?.id === playlistItem.track.id;
+        const trackIndex = playlist?.items?.findIndex(
+            (i: PlaylistItem) => i.id === playlistItem.id
+        ) ?? index;
+
+        return (
+            <div
+                key={playlistItem.id}
+                data-track-index={trackIndex}
+                draggable={!!playlist?.isOwner}
+                onDragStart={(e) => {
+                    e.dataTransfer.setData("text/plain", playlistItem.id);
+                    e.dataTransfer.effectAllowed = "move";
+                    handleDragStart(playlistItem.id);
+                }}
+                onDragOver={(e) => handleDragOver(e, playlistItem.id)}
+                onDragEnd={handleDragEnd}
+                onDrop={(e) => {
+                    e.preventDefault();
+                    handleDrop(playlistItem.id);
+                }}
+                onDoubleClick={() => handlePlayTrack(trackIndex)}
+                onTouchEnd={handleRowTouchEnd}
+                className={cn(
+                    "grid grid-cols-[40px_minmax(0,1fr)_96px]",
+                    TRACK_GRID_MD,
+                    "gap-2 md:gap-4 px-4 py-2 rounded-lg hover:bg-white/[0.03] transition-all group cursor-pointer border border-transparent hover:border-white/5 touch-manipulation",
+                    draggedItemId === playlistItem.id && "opacity-50",
+                    dragOverItemId === playlistItem.id && "border-brand/40 bg-brand/5",
+                    isCurrentlyPlaying && "bg-white/5 border-brand/30"
+                )}
+            >
+                <div className="flex items-center justify-center gap-1">
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            handlePlayTrack(trackIndex);
+                        }}
+                        className="w-8 h-8 flex items-center justify-center"
+                        aria-label={isCurrentlyPlaying && isPlaying ? "Pause" : "Play"}
+                    >
+                        <span
+                            className={cn(
+                                "text-xs group-hover:hidden",
+                                isCurrentlyPlaying
+                                    ? "text-brand font-bold"
+                                    : "text-[var(--text-muted)]"
+                            )}
+                        >
+                            {isCurrentlyPlaying && isPlaying ? (
+                                <Music className="w-4 h-4 text-brand animate-pulse" />
+                            ) : (
+                                trackIndex + 1
+                            )}
+                        </span>
+                        <Play className="w-4 h-4 text-white hidden group-hover:block" />
+                    </button>
+                    {playlist?.isOwner && (
+                        <button
+                            draggable={false}
+                            onDragStart={(e) => {
+                                e.stopPropagation();
+                                e.dataTransfer.setData("text/plain", playlistItem.id);
+                                e.dataTransfer.effectAllowed = "move";
+                                handleDragStart(playlistItem.id);
+                            }}
+                            onDragEnd={handleDragEnd}
+                            aria-label="Drag to reorder"
+                            className="touch-reveal w-6 h-6 flex items-center justify-center rounded opacity-0 group-hover:opacity-60 hover:opacity-100 focus-visible:opacity-100 transition-all cursor-grab active:cursor-grabbing text-[var(--text-muted)] hover:text-white"
+                        >
+                            <GripVertical className="w-4 h-4" />
+                        </button>
+                    )}
+                </div>
+
+                <div className="flex items-center gap-3 min-w-0">
+                    <div className="relative w-10 h-10 bg-[var(--bg-primary)] rounded-lg shrink-0 overflow-hidden border border-white/10">
+                        {playlistItem.track.album?.coverArt ? (
+                            <CachedImage
+                                src={api.getCoverArtUrl(
+                                    playlistItem.track.album.coverArt,
+                                    100
+                                )}
+                                alt={shownTitle(playlistItem.track)}
+                                fill
+                                sizes="40px"
+                                className="object-cover"
+                            />
+                        ) : (
+                            <div className="w-full h-full flex items-center justify-center">
+                                <Music className="w-5 h-5 text-white/10" />
+                            </div>
+                        )}
+                    </div>
+                    <div className="min-w-0">
+                        <p
+                            className={cn(
+                                "text-sm font-bold truncate tracking-tight",
+                                isCurrentlyPlaying
+                                    ? "text-brand"
+                                    : "text-white"
+                            )}
+                        >
+                            {formatTrackDisplay(
+                                {
+                                    title: shownTitle(playlistItem.track),
+                                    artist: playlistItem.track.album.artist.name,
+                                    album: playlistItem.track.album.title,
+                                },
+                                trackFormat,
+                            )}
+                        </p>
+                        <p className="text-xs tabular-nums text-[var(--text-muted)] truncate">
+                            {playlistItem.track.album.artist.name}
+                            <span className="md:hidden">
+                                {" · "}
+                                {formatTime(playlistItem.track.duration)}
+                            </span>
+                        </p>
+                    </div>
+                </div>
+
+                <p className="hidden md:block self-center text-xs tabular-nums text-[var(--text-muted)] truncate">
+                    {playlistItem.track.album.title}
+                </p>
+
+                <span className="hidden md:block self-center text-xs tabular-nums text-[var(--text-muted)] text-right">
+                    {formatTime(playlistItem.track.duration)}
+                </span>
+
+                <div className="flex items-center justify-end gap-1">
+                    <RowIconButton label="Add to queue" onClick={() => handleAddToQueue(playlistItem.track)}>
+                        <ListPlus className="w-4 h-4" />
+                    </RowIconButton>
+                    {playlist?.isOwner && (
+                        <>
+                            <RowIconButton label="Move up" desktopOnly onClick={() => handleMoveTrackUp(playlistItem.id)}>
+                                <ChevronUp className="w-4 h-4" />
+                            </RowIconButton>
+                            <RowIconButton label="Move down" desktopOnly onClick={() => handleMoveTrackDown(playlistItem.id)}>
+                                <ChevronDown className="w-4 h-4" />
+                            </RowIconButton>
+                            <RowIconButton label="Remove from playlist" danger onClick={() => handleRemoveTrack(playlistItem.track.id)}>
+                                <X className="w-4 h-4" />
+                            </RowIconButton>
+                        </>
+                    )}
+                </div>
+            </div>
+        );
     };
 
     if (isLoading) {
@@ -805,7 +808,6 @@ function PlaylistDetailPageInner() {
                                 src={heroImage}
                                 alt=""
                                 fill
-                                sizes="100vw"
                                 className="object-cover"
                                 priority
                             />
@@ -825,44 +827,21 @@ function PlaylistDetailPageInner() {
                         </button>
 
                         <div className="flex items-center gap-2 mb-4">
-                            <div className="w-1.5 h-1.5 bg-brand rounded-full" />
+                            <div className="w-1.5 h-1.5 bg-type-track rounded-full" />
                             <span className="t-eyebrow">
                                 {isShared ? "Public Playlist" : "Playlist"}
                             </span>
                         </div>
 
                         <div className="flex items-end gap-6">
-                            <div className="w-[140px] h-[140px] md:w-[192px] md:h-[192px] bg-[var(--bg-primary)] rounded-lg shrink-0 overflow-hidden relative border-2 border-white/10">
-                                {coverUrls.length === 1 ? (
-                                    <CachedImage
-                                        src={api.getCoverArtUrl(coverUrls[0], 400)}
-                                        alt=""
-                                        fill
-                                        className="object-cover"
-                                        sizes="192px"
-                                    />
-                                ) : coverUrls.length > 1 ? (
-                                    <div className="grid grid-cols-2 gap-0 w-full h-full">
-                                        {coverUrls.map((url, index) => {
-                                            const proxiedUrl = api.getCoverArtUrl(url, 200);
-                                            return (
-                                                <div key={index} className="relative bg-[var(--bg-primary)]">
-                                                    <CachedImage
-                                                        src={proxiedUrl}
-                                                        alt=""
-                                                        fill
-                                                        className="object-cover"
-                                                        sizes="96px"
-                                                    />
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                ) : (
-                                    <div className="w-full h-full flex items-center justify-center">
-                                        <ListMusic className="w-16 h-16 text-white/10" />
-                                    </div>
-                                )}
+                            <div className="relative flex items-center justify-center w-[140px] h-[140px] md:w-[192px] md:h-[192px] bg-[var(--bg-primary)] rounded-lg shrink-0 overflow-hidden border-2 border-white/10">
+                                <CoverArt
+                                    key={playlistId}
+                                    imageUrl={coverUrls.map((url) => api.getCoverArtUrl(url, 300))}
+                                    title=""
+                                    sizes="192px"
+                                    FallbackIcon={ListMusic}
+                                />
                             </div>
 
                             <div className="flex-1 min-w-0 pb-1">
@@ -888,6 +867,8 @@ function PlaylistDetailPageInner() {
                                                     setIsEditingName(false);
                                                 }
                                             } else if (e.key === "Escape") {
+                                                // Used here: page-wide Escape handlers (TV Back) leave a handled key alone.
+                                                e.preventDefault();
                                                 editSaveRef.current = true;
                                                 setIsEditingName(false);
                                             }
@@ -939,7 +920,7 @@ function PlaylistDetailPageInner() {
                                     {totalDuration > 0 && (
                                         <>
                                             <span className="text-[var(--text-muted)]">|</span>
-                                            <span>{formatTotalDuration(totalDuration)}</span>
+                                            <span>{formatHoursMinutes(totalDuration)}</span>
                                         </>
                                     )}
                                 </div>
@@ -967,11 +948,35 @@ function PlaylistDetailPageInner() {
 
                     {playlist.items && playlist.items.length > 1 && (
                         <button
-                            onClick={() => playTracks(shuffleArray(playlist.items.map((item: PlaylistItem) => toAudioTrack(item.track))), 0)}
+                            onClick={() => playTracks(shuffleArray(playlist.items.map((item: PlaylistItem) => playlistTrackToAudio(item.track))), 0)}
                             className="h-8 w-8 rounded-lg hover:bg-white/10 flex items-center justify-center text-[var(--text-muted)] hover:text-white transition-all"
                             title="shuffle play"
                         >
                             <Shuffle className="w-5 h-5" />
+                        </button>
+                    )}
+
+                    {playlist.isOwner && playlist.items && playlist.items.length > 1 && (
+                        <button
+                            onClick={handleToggleReverse}
+                            disabled={isReordering}
+                            aria-label="reverse order"
+                            aria-pressed={reverseOrder}
+                            className={cn(
+                                "h-8 w-8 rounded-lg flex items-center justify-center transition-all",
+                                reverseOrder
+                                    ? "text-brand"
+                                    : "text-[var(--text-muted)] hover:text-white/60",
+                                isReordering && "opacity-50 cursor-not-allowed"
+                            )}
+                            title={reverseOrder ? "restore order" : "reverse order"}
+                        >
+                            <ArrowDownUp
+                                className={cn(
+                                    "w-5 h-5 transition-transform duration-200",
+                                    reverseOrder && "rotate-180"
+                                )}
+                            />
                         </button>
                     )}
 
@@ -1107,7 +1112,7 @@ function PlaylistDetailPageInner() {
                 </div>
             </div>
 
-            <div className="relative page-shell pb-32">
+            <div className="relative page-shell page-end">
                 <div>
                     {playlist.pendingCount > 0 && (
                         <div className="mb-4 px-4 py-2 bg-danger/10 border border-danger/20 rounded-lg flex items-center justify-between">
@@ -1119,14 +1124,16 @@ function PlaylistDetailPageInner() {
                                     download
                                 </span>
                             </div>
-                            <button
-                                onClick={handleRetryAllPending}
-                                disabled={retryingAll}
-                                className="flex items-center gap-1.5 px-3 py-1 text-xs tabular-nums text-danger-light hover:brightness-125 hover:bg-danger/20 rounded transition-colors disabled:opacity-50"
-                            >
-                                <RefreshCw className={cn("w-3 h-3", retryingAll && "animate-spin")} />
-                                Retry All
-                            </button>
+                            {canAcquire && (
+                                <button
+                                    onClick={handleRetryAllPending}
+                                    disabled={retryingAll}
+                                    className="flex items-center gap-1.5 px-3 py-1 text-xs tabular-nums text-danger-light hover:brightness-125 hover:bg-danger/20 rounded transition-colors disabled:opacity-50"
+                                >
+                                    <RefreshCw className={cn("w-3 h-3", retryingAll && "animate-spin")} />
+                                    Retry All
+                                </button>
+                            )}
                         </div>
                     )}
 
@@ -1172,10 +1179,8 @@ function PlaylistDetailPageInner() {
                     ) : (
                         <div>
                             <div className="relative overflow-hidden rounded-lg border-2 border-white/10 bg-gradient-to-br from-[#0f0f0f] to-[#0a0a0a] p-12">
-                                <div className="absolute top-0 left-0 w-1 h-full bg-gradient-to-b from-brand to-brand-dark" />
-
                                 <div className="flex items-center gap-3 mb-8 pb-4 border-b border-white/10">
-                                    <div className="w-2 h-2 bg-brand" />
+                                    <div className="w-2 h-2 bg-white/30" />
                                     <span className="text-xs text-[var(--text-secondary)]">
                                         Empty Playlist
                                     </span>

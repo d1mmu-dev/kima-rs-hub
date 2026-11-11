@@ -3,7 +3,7 @@
 # places where it is history or provenance. See docs/DIVERGENCES.md (re-pin note).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-allowed='^(docs/DIVERGENCES\.md|docs/superpowers/plans/2026-11-05-m-sync\.md|docs/superpowers/specs/2026-11-03-m4-ml-analysis-design\.md):|^crates/kima-ml/|^tools/check-pin-refs\.sh:'
+allowed='^(docs/DIVERGENCES\.md|docs/superpowers/plans/2026-11-05-m-sync\.md|docs/superpowers/plans/m-sync-frontend-v1\.12\.3-inventory\.md|docs/superpowers/specs/2026-11-03-m4-ml-analysis-design\.md):|^crates/kima-ml/|^tools/check-pin-refs\.sh:'
 bad=$(grep -rIn '12faf1cd' . --exclude-dir=.git --exclude-dir=target --exclude-dir=node_modules --exclude-dir=.next \
   | sed 's|^\./||' | grep -Ev "$allowed" \
   | grep -Ev '^docs/superpowers/plans/2026-10-16-m0-skeleton\.md:[0-9]+:git commit -m "chore\(frontend\): fork upstream frontend @ 12faf1cd"$' \

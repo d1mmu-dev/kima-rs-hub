@@ -3,30 +3,40 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { usePathname } from "@/lib/use-pathname";
-import { Suspense, useState, useEffect, useRef } from "react";
-import { Plus } from "lucide-react";
+import { Suspense, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import {
+    ChevronLeft,
+    ChevronRight,
+    ListMusic,
+    Music,
+    Plus,
+    RefreshCw,
+} from "lucide-react";
 import { cn } from "@/lib/cn";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { queryKeys } from "@/hooks/useQueries";
+import {
+    queryKeys,
+    useMixesQuery,
+    useRefreshMixesMutation,
+} from "@/hooks/useQueries";
 import { useIsMobile, useIsTablet } from "@/hooks/useMediaQuery";
+import { useClickOutside } from "@/hooks/useClickOutside";
 import { notify } from "@/lib/notify";
-import { useFeatures } from "@/lib/features-context";
+import { useSectionFlags } from "@/lib/section-flags";
+import { mosaicCovers } from "@/features/playlist/coverMosaic";
+import { CachedImage } from "@/components/ui/CachedImage";
+import { SectionHeader } from "@/components/ui/SectionHeader";
+import { SideTooltip } from "@/components/ui/SideTooltip";
+import { CoverArt } from "@/components/cards/MediaCard";
 import { MobileSidebar } from "./MobileSidebar";
-import { Button } from "@/components/ui/Button";
+import { NAV, isCurrentNav, type NavItem } from "./navItems";
+import { panelCurrentBar, panelIconButton } from "./panelChrome";
+import type { Mix } from "@/features/home/types";
 
-const allNavigation = [
-    { name: "Collection", href: "/collection", feature: null },
-    { name: "Queue", href: "/queue", feature: null },
-    { name: "Radio", href: "/radio", feature: "mixes" as const },
-    { name: "Discovery", href: "/discover", feature: "discover" as const },
-    { name: "Vibe", href: "/vibe", feature: null },
-    { name: "Audiobooks", href: "/audiobooks", feature: "audiobooks" as const },
-    { name: "Podcasts", href: "/podcasts", feature: "podcasts" as const },
-    { name: "Browse", href: "/browse/playlists", feature: null },
-    { name: "Stats", href: "/stats", feature: null },
-];
+const primaryNavigation: NavItem[] = [NAV.collection, NAV.radio, NAV.discover, NAV.releases, NAV.vibe];
+const secondaryNavigation: NavItem[] = [NAV.audiobooks, NAV.podcasts, NAV.browse, NAV.stats];
 
 interface Playlist {
     id: string;
@@ -35,16 +45,67 @@ interface Playlist {
     isHidden?: boolean;
     isOwner?: boolean;
     user?: { username: string };
+    items?: {
+        track?: { album?: { coverUrl?: string } };
+    }[];
+}
+
+/** A next step the empty library offers. */
+const libraryAction =
+    "rounded text-sm font-medium text-brand outline-none transition-colors duration-150 hover:text-brand-hover focus-visible:ring-2 focus-visible:ring-brand/60 disabled:opacity-60";
+
+const COLLAPSE_KEY = "kima:library-collapsed";
+const OPEN_WIDTH = 280;
+const CLOSED_WIDTH = 80;
+/** The collapsed handle's width (its `w-6`); the panel slides to exactly this far from the rail so its edge travels with the box's. */
+const HANDLE_WIDTH = 24;
+/** The library panel's own width beside the 56px rail: fixed, so a slide never squeezes it. */
+const PANEL_WIDTH = OPEN_WIDTH - 56;
+
+// The stored choice is read before the first paint: the server has no
+// localStorage, so the server snapshot is the open shelf and the client snapshot
+// replaces it before paint instead of animating the shelf shut on every load.
+let storedCollapsed: boolean | null = null;
+const collapseListeners = new Set<() => void>();
+
+function readCollapsed(): boolean {
+    if (storedCollapsed === null) {
+        try {
+            storedCollapsed = localStorage.getItem(COLLAPSE_KEY) === "1";
+        } catch {
+            // A blocked storage API leaves the shelf open, which is the safe default.
+            return false;
+        }
+    }
+    return storedCollapsed;
+}
+
+function subscribeCollapsed(listener: () => void) {
+    collapseListeners.add(listener);
+    return () => {
+        collapseListeners.delete(listener);
+    };
+}
+
+function writeCollapsed(next: boolean) {
+    storedCollapsed = next;
+    try {
+        localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
+    } catch {
+        // The choice simply does not survive this session.
+    }
+    collapseListeners.forEach((listener) => listener());
 }
 
 function SidebarInner() {
     const pathname = usePathname();
+    // Detail pages are query routes in the static export (D-011): the open playlist or mix is `?id=`.
     const searchParams = useSearchParams();
-    const activePlaylistId = pathname === "/playlist" ? searchParams.get("id") : null;
+    const openId = searchParams.get("id");
     const router = useRouter();
     const queryClient = useQueryClient();
     const { isAuthenticated } = useAuth();
-    const features = useFeatures();
+    const features = useSectionFlags();
     const isMobile = useIsMobile();
     const isTablet = useIsTablet();
     const isMobileOrTablet = isMobile || isTablet;
@@ -52,23 +113,76 @@ function SidebarInner() {
     const [showCreatePlaylist, setShowCreatePlaylist] = useState(false);
     const [newPlaylistName, setNewPlaylistName] = useState("");
     const [isCreating, setIsCreating] = useState(false);
-    const createPopoverRef = useRef<HTMLDivElement>(null);
+    const [filter, setFilter] = useState("");
+    const collapsed = useSyncExternalStore(subscribeCollapsed, readCollapsed, () => false);
+    const createButtonRef = useRef<HTMLButtonElement>(null);
+    const createInputRef = useRef<HTMLInputElement>(null);
+    const handleRef = useRef<HTMLButtonElement>(null);
+    const collapseButtonRef = useRef<HTMLButtonElement>(null);
 
-    const { data: playlists = [], isLoading: isLoadingPlaylists } = useQuery<
-        Playlist[]
-    >({
+    const {
+        data: playlists = [],
+        isLoading: isLoadingPlaylists,
+        isError: isErrorPlaylists,
+        refetch: refetchPlaylists,
+    } = useQuery<Playlist[]>({
         queryKey: ["playlists"],
         queryFn: () => api.getPlaylists(),
         enabled: isAuthenticated,
     });
 
-    useEffect(() => {
+    const {
+        data: mixes = [],
+        isLoading: isLoadingMixes,
+        isError: isErrorMixes,
+        refetch: refetchMixes,
+    } = useMixesQuery(features.mixes);
+    const { mutate: refreshMixes, isPending: isRefreshingMixes } =
+        useRefreshMixesMutation();
+
+    const visiblePlaylists = playlists.filter((p) => !p.isHidden);
+    const ownPlaylists = visiblePlaylists.filter((p) => p.isOwner !== false);
+    const sharedPlaylists = visiblePlaylists.filter((p) => p.isOwner === false);
+
+    const query = filter.trim().toLowerCase();
+    const matches = (name: string) =>
+        query.length === 0 || name.toLowerCase().includes(query);
+
+    const shownOwn = ownPlaylists.filter((p) => matches(p.name));
+    const shownShared = sharedPlaylists.filter((p) => matches(p.name));
+    const shownMixes = mixes.filter((m) => matches(m.name));
+    // Nothing to show at all: one line and what to do about it, not one empty message per section.
+    const libraryEmpty =
+        query.length === 0 &&
+        visiblePlaylists.length === 0 &&
+        mixes.length === 0 &&
+        !isLoadingMixes &&
+        !isErrorPlaylists &&
+        !isErrorMixes;
+    const nothingMatches =
+        query.length > 0 &&
+        shownOwn.length === 0 &&
+        shownShared.length === 0 &&
+        shownMixes.length === 0;
+
+    const isCurrent = (item: NavItem) => isCurrentNav(item, pathname);
+
+    const secondaryItems = secondaryNavigation.filter(
+        (item) =>
+            !item.feature || features[item.feature]
+    );
+
+    const [lastPathname, setLastPathname] = useState(pathname);
+    if (pathname !== lastPathname) {
+        setLastPathname(pathname);
         setIsMobileMenuOpen(false);
-    }, [pathname]);
+    }
 
     useEffect(() => {
         const handleEscape = (e: KeyboardEvent) => {
-            if (e.key === "Escape") setIsMobileMenuOpen(false);
+            if (e.key !== "Escape") return;
+            e.preventDefault();
+            setIsMobileMenuOpen(false);
         };
 
         if (isMobileMenuOpen) {
@@ -89,21 +203,20 @@ function SidebarInner() {
             window.removeEventListener("toggle-mobile-menu", handleToggle);
     }, []);
 
-    useEffect(() => {
-        if (!showCreatePlaylist) return;
-        const handleClickOutside = (e: MouseEvent) => {
-            if (
-                createPopoverRef.current &&
-                !createPopoverRef.current.contains(e.target as Node)
-            ) {
-                setShowCreatePlaylist(false);
-                setNewPlaylistName("");
-            }
-        };
-        document.addEventListener("mousedown", handleClickOutside);
-        return () =>
-            document.removeEventListener("mousedown", handleClickOutside);
-    }, [showCreatePlaylist]);
+    useClickOutside(
+        [createButtonRef, createInputRef],
+        () => {
+            setShowCreatePlaylist(false);
+            setNewPlaylistName("");
+        },
+        showCreatePlaylist,
+    );
+
+    const closeCreate = () => {
+        setShowCreatePlaylist(false);
+        setNewPlaylistName("");
+        createButtonRef.current?.focus();
+    };
 
     const handleCreatePlaylist = async () => {
         const name = newPlaylistName.trim();
@@ -118,245 +231,464 @@ function SidebarInner() {
             setNewPlaylistName("");
             router.push(`/playlist/?id=${encodeURIComponent(result.id)}`);
         } catch {
-            notify.error("Failed to create playlist");
+            notify.error("couldn't create the playlist");
         } finally {
             setIsCreating(false);
         }
     };
 
-    if (pathname === "/login") {
-        return null;
-    }
+    const collapse = () => {
+        writeCollapsed(true);
+        requestAnimationFrame(() => handleRef.current?.focus());
+    };
+
+    const coverFor = (playlist: Playlist) =>
+        mosaicCovers(
+            (playlist.items ?? []).map((item) => item.track?.album?.coverUrl)
+        )[0];
+
+    const playlistRow = (playlist: Playlist) => {
+        const isActive = pathname === "/playlist" && openId === playlist.id;
+        const cover = coverFor(playlist);
+        const shared = playlist.isOwner === false;
+        return (
+            <Link
+                key={playlist.id}
+                href={`/playlist/?id=${encodeURIComponent(playlist.id)}`}
+                prefetch={false}
+                aria-current={isActive ? "page" : undefined}
+                aria-label={`${playlist.name}, ${playlist.trackCount} ${
+                    playlist.trackCount === 1 ? "song" : "songs"
+                }${shared ? `, shared by ${playlist.user?.username || "someone else"}` : ""}`}
+                title={playlist.name}
+                className={cn(
+                    "group flex h-12 items-center gap-2.5 rounded-lg px-2 outline-none",
+                    "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/60",
+                    isActive && panelCurrentBar
+                )}
+            >
+                <span className="relative h-10 w-10 shrink-0 overflow-hidden rounded-md bg-white/[0.05] transition-[filter] duration-150 group-hover:brightness-110">
+                    {cover ? (
+                        <CachedImage
+                            src={api.getCoverArtUrl(cover, 96)}
+                            alt=""
+                            fill
+                            sizes="40px"
+                            className="object-cover"
+                        />
+                    ) : (
+                        <ListMusic
+                            aria-hidden="true"
+                            className="absolute inset-0 m-auto h-3.5 w-3.5 text-[var(--text-muted)]"
+                        />
+                    )}
+                </span>
+                <span
+                    className={cn(
+                        "min-w-0 flex-1 truncate text-sm font-medium tracking-tight transition-colors duration-150",
+                        isActive
+                            ? "text-brand"
+                            : "text-[var(--text-primary)] group-hover:text-white"
+                    )}
+                >
+                    {playlist.name}
+                </span>
+                <span
+                    className={cn(
+                        "t-meta shrink-0 transition-colors duration-150",
+                        isActive
+                            ? "text-brand/80"
+                            : "group-hover:text-[var(--text-secondary)]"
+                    )}
+                >
+                    {playlist.trackCount}
+                </span>
+            </Link>
+        );
+    };
+
+    const sectionLabel = (label: string, count: number, action?: ReactNode) => (
+        <SectionHeader
+            size="xs"
+            type="track"
+            title={label}
+            count={count}
+            action={action}
+            className="sticky top-0 z-[2] bg-[var(--bg-chrome)] px-2 pb-1 pt-4"
+        />
+    );
+
+    const allPlaylistsLink = (
+        <Link
+            href="/playlists"
+            prefetch={false}
+            aria-label="all playlists"
+            className="flex items-center gap-0.5 rounded text-xs text-[var(--text-secondary)] outline-none transition-colors duration-150 hover:text-white focus-visible:ring-2 focus-visible:ring-brand/60"
+        >
+            show all
+            <ChevronRight aria-hidden="true" className="h-3.5 w-3.5" />
+        </Link>
+    );
+
+    const refreshMixesButton = (
+        <button
+            type="button"
+            onClick={() => refreshMixes()}
+            disabled={isRefreshingMixes}
+            aria-label="refresh today's mixes"
+            className={cn(panelIconButton, "-my-1 h-6 w-6")}
+        >
+            <RefreshCw
+                aria-hidden="true"
+                className={cn("h-3 w-3", isRefreshingMixes && "animate-spin text-brand")}
+            />
+        </button>
+    );
+
+    // The same artwork as the home page's mixes: the covers of the mix's albums, as one cover or a 2x2 mosaic.
+    const mixTiles = (items: Mix[]) => (
+        <div className="grid grid-cols-2 gap-x-2 gap-y-2.5 pb-1 pt-0.5">
+            {items.map((mix) => {
+                const isActive = pathname === "/mix" && openId === mix.id;
+                return (
+                    <Link
+                        key={mix.id}
+                        href={`/mix/?id=${encodeURIComponent(mix.id)}`}
+                        prefetch={false}
+                        aria-current={isActive ? "page" : undefined}
+                        title={(mix.description || mix.name).toLowerCase()}
+                        className="group min-w-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-brand/60"
+                    >
+                        <span
+                            className={cn(
+                                "relative flex aspect-square items-center justify-center overflow-hidden rounded-lg bg-white/[0.04] transition-[filter] duration-150 group-hover:brightness-110",
+                            )}
+                        >
+                            <CoverArt
+                                key={mix.id}
+                                imageUrl={(mix.coverUrls ?? []).slice(0, 4).map((url) => api.getCoverArtUrl(url, 200))}
+                                title=""
+                                sizes="112px"
+                                FallbackIcon={Music}
+                            />
+                        </span>
+                        <span
+                            className={cn(
+                                "mt-1.5 line-clamp-2 text-xs font-medium leading-[1.25] transition-colors duration-150",
+                                isActive
+                                    ? "text-brand"
+                                    : "text-[var(--text-secondary)] group-hover:text-white"
+                            )}
+                        >
+                            {mix.name}
+                        </span>
+                    </Link>
+                );
+            })}
+        </div>
+    );
+
+    const railLink = (item: NavItem) => {
+        const isActive = isCurrent(item);
+        const Icon = item.icon;
+        return (
+            <SideTooltip key={item.href} label={item.name}>
+                <Link
+                    href={item.href}
+                    prefetch={false}
+                    aria-current={isActive ? "page" : undefined}
+                    aria-label={item.name}
+                    className={cn(
+                        "group flex h-10 w-10 items-center justify-center rounded-full outline-none transition-colors duration-150",
+                        "focus-visible:ring-2 focus-visible:ring-brand/60",
+                        isActive
+                            ? cn("text-brand", panelCurrentBar)
+                            : "text-[var(--text-secondary)] hover:text-white"
+                    )}
+                >
+                    <Icon
+                        aria-hidden="true"
+                        strokeWidth={isActive ? 2 : 1.6}
+                        className="h-5 w-5 transition-transform duration-150 group-hover:scale-[1.06]"
+                    />
+                </Link>
+            </SideTooltip>
+        );
+    };
 
     // Render sidebar content inline to prevent component recreation
     const sidebarContent = (
         <>
-
+            {/* The rail: surfaces at the top, the four corners of the library at
+                the foot. */}
             <nav
-                className="pt-6 px-3"
-                role="navigation"
-                aria-label="Main navigation"
+                className="relative z-[1] flex w-14 shrink-0 flex-col items-center justify-between bg-[var(--bg-chrome)] py-2.5"
+                aria-label="main navigation"
             >
-                <div className="mb-3 flex items-center gap-2 px-2 animate-rise">
-                    <div className="w-1.5 h-1.5 bg-brand rounded-full" />
-                    <span className="t-eyebrow">
-                        Navigation Index
-                    </span>
+                <div className="flex flex-col items-center gap-1">
+                    {primaryNavigation.filter((item) => !item.feature || features[item.feature]).map(railLink)}
                 </div>
-                <div className="space-y-0.5">
-                    {allNavigation.filter((item) =>
-                        item.feature === null || features[item.feature]
-                    ).map((item, index) => {
-                        const isActive = pathname === item.href;
-
-                        return (
-                            <Link
-                                key={item.name}
-                                href={item.href}
-                                prefetch={false}
-                                aria-current={isActive ? "page" : undefined}
-                                className={cn(
-                                    "flex items-center gap-3 py-2.5 px-2 border-l-2 transition-all duration-200 group relative",
-                                    isActive ?
-                                        "bg-[var(--bg-primary)] border-brand text-white"
-                                    :   "border-transparent text-[var(--text-muted)] hover:text-white hover:bg-white/5 hover:border-white/20",
-                                )}
-                            >
-                                <span
-                                    className={cn(
-                                        "w-6 text-xs tabular-nums font-semibold text-center shrink-0 transition-colors duration-200",
-                                        isActive ? "text-brand" : (
-                                            "text-[var(--text-muted)] group-hover:text-[var(--text-secondary)]"
-                                        ),
-                                    )}
-                                >
-                                    {String(index + 1).padStart(2, "0")}
-                                </span>
-
-                                <div
-                                    className={cn(
-                                        "w-px h-4 shrink-0",
-                                        isActive ? "bg-brand/30" : (
-                                            "bg-white/10 group-hover:bg-white/20"
-                                        ),
-                                    )}
-                                />
-
-                                <span
-                                    className={cn(
-                                        "font-bold text-sm tracking-tight",
-                                        isActive ? "text-white" : (
-                                            "group-hover:text-white"
-                                        ),
-                                    )}
-                                >
-                                    {item.name}
-                                </span>
-                            </Link>
-                        );
-                    })}
+                <div className="flex flex-col items-center gap-1">
+                    {secondaryItems.map(railLink)}
                 </div>
-
-                <div className="mt-4 mb-4 border-t-2 border-white/10" />
             </nav>
 
-            {/* Playlists Section - Data Stack */}
-            <div className="flex-1 overflow-hidden flex flex-col">
-                <div
-                    className="mb-3 flex items-center justify-between px-3"
-                >
-                    <div className="flex items-center gap-2 px-2 animate-rise">
-                        <div className="w-1.5 h-1.5 bg-type-track rounded-full" />
-                        <Link
-                            href="/playlists"
-                            prefetch={false}
-                            className="group/link"
-                        >
-                            <span className="text-xs font-medium text-[var(--text-muted)] group-hover/link:text-brand transition-colors">
-                                Playlist Stack
-                            </span>
-                        </Link>
-                    </div>
-                    <div className="relative" ref={createPopoverRef}>
+            {/* The panel slides out from under the rail and back; collapsed, it leaves the row so the handle takes its
+                place. */}
+            <div
+                className={cn(
+                    "flex shrink-0 flex-col overflow-hidden bg-[var(--bg-chrome)] transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.25,1,0.5,1)] motion-reduce:transition-none",
+                    collapsed && "pointer-events-none absolute inset-y-0 left-14 opacity-0"
+                )}
+                style={{ width: PANEL_WIDTH, transform: collapsed ? `translateX(-${PANEL_WIDTH - HANDLE_WIDTH}px)` : "none" }}
+                inert={collapsed}
+                aria-hidden={collapsed || undefined}
+            >
+                <div className="flex h-12 shrink-0 items-center justify-between pl-3 pr-1.5">
+                    <span className="truncate text-lg font-bold tracking-tight text-white">
+                        library
+                    </span>
+                    <span className="flex items-center gap-0.5">
                         <button
+                            ref={createButtonRef}
+                            type="button"
                             onClick={() => {
                                 setShowCreatePlaylist((v) => !v);
                                 setNewPlaylistName("");
                             }}
-                            className="w-6 h-6 flex items-center justify-center bg-[var(--bg-primary)] border-2 border-white/10 text-[var(--text-muted)] hover:text-brand hover:border-brand/50 hover:bg-brand/5 transition-all duration-200"
-                            aria-label="Create playlist"
+                            aria-label="create playlist"
+                            aria-expanded={showCreatePlaylist}
                             title="create playlist"
+                            className={cn(panelIconButton, showCreatePlaylist && "text-brand hover:text-brand")}
                         >
-                            <Plus className="w-3.5 h-3.5" />
+                            <Plus
+                                aria-hidden="true"
+                                strokeWidth={2}
+                                className={cn(
+                                    "h-3.5 w-3.5 transition-transform duration-200 ease-[cubic-bezier(0.25,1,0.5,1)]",
+                                    showCreatePlaylist && "rotate-45"
+                                )}
+                            />
                         </button>
-                        {showCreatePlaylist && (
-                            <div className="absolute right-0 top-8 z-(--z-dropdown) w-56 bg-[var(--bg-hover)] border border-white/10 rounded-lg p-3">
-                                <input
-                                    type="text"
-                                    value={newPlaylistName}
-                                    onChange={(e) =>
-                                        setNewPlaylistName(e.target.value)
-                                    }
-                                    onKeyDown={(e) => {
-                                        if (e.key === "Enter")
-                                            handleCreatePlaylist();
-                                        if (e.key === "Escape") {
-                                            setShowCreatePlaylist(false);
-                                            setNewPlaylistName("");
-                                        }
-                                    }}
-                                    placeholder="Playlist name"
-                                    autoFocus
-                                    className="w-full bg-[var(--bg-primary)] border border-white/10 rounded px-2.5 py-1.5 text-xs text-white placeholder-gray-600 outline-none focus:border-brand/50 transition-colors"
-                                />
-                                <Button
-                                    variant="primary"
-                                    size="sm"
-                                    onClick={handleCreatePlaylist}
-                                    disabled={
-                                        !newPlaylistName.trim() || isCreating
-                                    }
-                                    className="mt-2 w-full"
-                                >
-                                    {isCreating ? "Creating..." : "Create"}
-                                </Button>
-                            </div>
-                        )}
-                    </div>
+                        <button
+                            ref={collapseButtonRef}
+                            type="button"
+                            onClick={collapse}
+                            aria-label="hide library"
+                            title="hide library"
+                            className={panelIconButton}
+                        >
+                            <ChevronLeft
+                                aria-hidden="true"
+                                className="h-4 w-4"
+                            />
+                        </button>
+                    </span>
                 </div>
-                <div
-                    className="flex-1 overflow-y-auto space-y-0.5 scrollbar-thin scrollbar-thumb-[#1c1c1c] scrollbar-track-transparent px-3"
+
+                <div className="mx-2 mb-1 flex h-9 shrink-0 items-center gap-2 rounded-full bg-[var(--bg-hover)] px-3 text-[var(--text-secondary)] focus-within:ring-2 focus-within:ring-brand/60">
+                    <svg
+                        aria-hidden="true"
+                        viewBox="0 0 24 24"
+                        className="h-3.5 w-3.5 shrink-0"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={1.8}
+                        strokeLinecap="round"
+                    >
+                        <circle cx="11" cy="11" r="8" />
+                        <path d="m21 21-4.3-4.3" />
+                    </svg>
+                    <input
+                        type="text"
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                        placeholder="filter library"
+                        aria-label="filter library"
+                        className="min-w-0 flex-1 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-secondary)]"
+                    />
+                </div>
+
+                {showCreatePlaylist && (
+                    <input
+                        ref={createInputRef}
+                        type="text"
+                        value={newPlaylistName}
+                        onChange={(e) => setNewPlaylistName(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter") handleCreatePlaylist();
+                            if (e.key === "Escape") {
+                                e.preventDefault();
+                                closeCreate();
+                            }
+                        }}
+                        placeholder="playlist name"
+                        autoFocus
+                        enterKeyHint="done"
+                        aria-label="new playlist name"
+                        className="mx-2 mb-1 h-8 shrink-0 rounded-lg border border-white/10 bg-[var(--bg-tertiary)] px-2 text-[13px] text-[var(--text-primary)] outline-none transition-colors duration-150 placeholder:text-[var(--text-muted)] focus:border-brand/50"
+                    />
+                )}
+
+                <nav
+                    className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-2 [scrollbar-color:rgba(255,255,255,0.12)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent"
+                    aria-label="library"
                 >
-                    {isLoadingPlaylists ?
-                        <>
-                            {[1, 2, 3, 4, 5].map((i) => (
+                    {isLoadingPlaylists ? (
+                        <div className="space-y-1 pt-1">
+                            {[1, 2, 3].map((i) => (
                                 <div
                                     key={i}
-                                    className="px-2 py-2 bg-[var(--bg-primary)] border-l-2 border-transparent"
+                                    className="flex h-12 animate-pulse items-center gap-2.5 rounded-lg px-2"
                                 >
-                                    <div className="h-3.5 bg-white/5 rounded w-3/4 mb-1.5"></div>
-                                    <div className="h-2.5 bg-white/5 rounded w-1/2"></div>
+                                    <div className="h-10 w-10 rounded-md bg-white/[0.05]" />
+                                    <div className="h-2.5 flex-1 rounded bg-white/[0.05]" />
                                 </div>
                             ))}
-                        </>
-                    : playlists.filter((p) => !p.isHidden).length > 0 ?
-                        playlists
-                            .filter((p) => !p.isHidden)
-                            .map((playlist, index) => {
-                                const isActive = activePlaylistId === playlist.id;
-                                const isShared = playlist.isOwner === false;
-                                return (
-                                    <Link
-                                        key={playlist.id}
-                                        href={`/playlist/?id=${encodeURIComponent(playlist.id)}`}
-                                        prefetch={false}
-                                        className={cn(
-                                            "flex items-center gap-3 py-2 px-2 border-l-2 transition-all duration-200 group",
-                                            isActive ?
-                                                "bg-[var(--bg-primary)] border-brand text-white"
-                                            :   "border-transparent text-[var(--text-muted)] hover:text-white hover:bg-white/5 hover:border-white/20",
-                                        )}
-                                    >
-                                        <span
-                                            className={cn(
-                                                "w-5 t-meta font-semibold text-center shrink-0 transition-colors duration-200",
-                                                isActive ? "text-brand" : (
-                                                    "text-[var(--text-muted)] group-hover:text-[var(--text-secondary)]"
-                                                ),
-                                            )}
-                                        >
-                                            {String(index + 1).padStart(2, "0")}
-                                        </span>
-
-                                        <div className="flex-1 min-w-0">
-                                            <div className="flex items-center gap-1.5">
-                                                <div
-                                                    className={cn(
-                                                        "text-xs font-semibold tracking-tight truncate transition-colors duration-200",
-                                                        isActive ? "text-white"
-                                                        :   "group-hover:text-white",
-                                                    )}
-                                                >
-                                                    {playlist.name}
-                                                </div>
-                                                {isShared && (
-                                                    <span
-                                                        className="shrink-0 w-1 h-1 rounded-full bg-brand"
-                                                        title={`Shared by ${
-                                                            playlist.user
-                                                                ?.username ||
-                                                            "someone"
-                                                        }`.toLowerCase()}
-                                                    />
-                                                )}
-                                            </div>
-                                            <div
-                                                className={cn(
-                                                    "t-meta truncate mt-0.5 transition-colors duration-200",
-                                                    isActive ? ""
-                                                    : "group-hover:text-[var(--text-secondary)]",
-                                                )}
-                                            >
-                                                {playlist.trackCount}{" "}
-                                                {playlist.trackCount === 1 ? "track" : "tracks"}
-                                                {isShared &&
-                                                    ` • ${playlist.user?.username || "Shared"}`}
-                                            </div>
-                                        </div>
-                                    </Link>
-                                );
-                            })
-                    :   <div className="px-2 py-6 border-l-2 border-transparent">
-                            <div className="text-xs text-[var(--text-muted)] mb-1">
-                                Empty Stack
-                            </div>
-                            <div className="text-micro text-[var(--text-muted)]">
-                                Create first entry
-                            </div>
                         </div>
-                    }
-                </div>
+                    ) : (
+                        <>
+                            {libraryEmpty && (
+                                <div className="px-2 pt-4">
+                                    <p className="t-body">your playlists and daily mixes will show up here.</p>
+                                    <div className="mt-2 flex flex-col items-start gap-1.5">
+                                        {[
+                                            { label: "make a playlist", run: () => { setShowCreatePlaylist(true); setNewPlaylistName(""); } },
+                                            { label: "make today's mixes", run: () => refreshMixes(), busy: isRefreshingMixes },
+                                        ].map(({ label, run, busy }) => (
+                                            <button
+                                                key={label}
+                                                type="button"
+                                                onClick={run}
+                                                disabled={busy}
+                                                className={libraryAction}
+                                            >
+                                                {label}
+                                            </button>
+                                        ))}
+                                        {playlists.length > 0 && allPlaylistsLink}
+                                    </div>
+                                </div>
+                            )}
+
+                            {!libraryEmpty && (query.length === 0 || shownOwn.length > 0 || isErrorPlaylists) && (
+                                <section>
+                                    {sectionLabel("playlists", shownOwn.length, allPlaylistsLink)}
+                                    {isErrorPlaylists ? (
+                                        <div className="px-2 py-3">
+                                            <p className="text-xs text-[var(--text-muted)]">
+                                                couldn&apos;t load playlists
+                                            </p>
+                                            <button
+                                                type="button"
+                                                onClick={() => refetchPlaylists()}
+                                                className="mt-1 rounded text-xs text-[var(--text-secondary)] outline-none transition-colors hover:text-brand focus-visible:ring-2 focus-visible:ring-brand/60"
+                                            >
+                                                try again
+                                            </button>
+                                        </div>
+                                    ) : shownOwn.length > 0 ? (
+                                        shownOwn.map(playlistRow)
+                                    ) : query.length === 0 ? (
+                                        <div className="px-2 py-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setShowCreatePlaylist(true);
+                                                    setNewPlaylistName("");
+                                                }}
+                                                className={libraryAction}
+                                            >
+                                                make your first playlist
+                                            </button>
+                                        </div>
+                                    ) : null}
+                                </section>
+                            )}
+
+                            {shownShared.length > 0 && (
+                                <section>
+                                    {sectionLabel(
+                                        "shared",
+                                        shownShared.length
+                                    )}
+                                    {shownShared.map(playlistRow)}
+                                </section>
+                            )}
+
+                            {!libraryEmpty && features.mixes && (shownMixes.length > 0 ||
+                                (query.length === 0 &&
+                                    (isLoadingMixes ||
+                                        isErrorMixes ||
+                                        mixes.length === 0))) && (
+                                <section>
+                                    {sectionLabel(
+                                        "daily mixes",
+                                        shownMixes.length,
+                                        refreshMixesButton
+                                    )}
+                                    {isLoadingMixes ? (
+                                        <div className="grid grid-cols-2 gap-2 pb-1 pt-0.5">
+                                            {[1, 2, 3, 4, 5, 6].map((i) => (
+                                                <div key={i}>
+                                                    <div className="aspect-square animate-pulse rounded-lg bg-white/[0.05]" />
+                                                    <div className="mt-1 h-2 w-3/4 animate-pulse rounded bg-white/[0.04]" />
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : isErrorMixes ? (
+                                        <div className="px-2 py-3">
+                                            <p className="text-xs text-[var(--text-muted)]">
+                                                couldn&apos;t load today&apos;s mixes
+                                            </p>
+                                            <button
+                                                type="button"
+                                                onClick={() => refetchMixes()}
+                                                className="mt-1 rounded text-xs text-[var(--text-secondary)] outline-none transition-colors hover:text-brand focus-visible:ring-2 focus-visible:ring-brand/60"
+                                            >
+                                                try again
+                                            </button>
+                                        </div>
+                                    ) : shownMixes.length > 0 ? (
+                                        mixTiles(shownMixes)
+                                    ) : (
+                                        <p className="px-2 py-2 text-xs text-[var(--text-muted)]">
+                                            refresh to make today&apos;s mixes
+                                        </p>
+                                    )}
+                                </section>
+                            )}
+
+                            {nothingMatches && (
+                                <p className="px-2 py-3 text-xs text-[var(--text-muted)]">
+                                    nothing matches that filter
+                                </p>
+                            )}
+                        </>
+                    )}
+                </nav>
             </div>
+
+            {collapsed && (
+                <button
+                    ref={handleRef}
+                    type="button"
+                    onClick={() => {
+                        writeCollapsed(false);
+                        requestAnimationFrame(() =>
+                            collapseButtonRef.current?.focus()
+                        );
+                    }}
+                    aria-label="show library"
+                    title="show library"
+                    className="group flex w-6 shrink-0 flex-col items-center bg-[var(--bg-chrome)] pt-3 outline-none transition-colors duration-150 hover:bg-white/[0.04] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/60 animate-fade-soft"
+                >
+                    <ChevronRight
+                        aria-hidden="true"
+                        className="h-3.5 w-3.5 text-[var(--text-secondary)] transition-colors duration-150 group-hover:text-white"
+                    />
+                </button>
+            )}
         </>
     );
 
@@ -370,16 +702,27 @@ function SidebarInner() {
             )}
 
             {!isMobileOrTablet && (
-                <aside className="w-64 bg-[var(--bg-primary)] flex flex-col overflow-hidden relative z-(--z-raised) rounded-lg">
-                    {sidebarContent}
-                </aside>
+                <div
+                    // This placeholder's width pushes and pulls the page beside the sidebar, on the same curve and timing as
+                    // the visible box below, so the page follows the slide; the box sits above the page's raised content
+                    // and under the top bar.
+                    className="relative z-(--z-scene-panel) shrink-0 transition-[width] duration-300 ease-[cubic-bezier(0.25,1,0.5,1)] motion-reduce:transition-none"
+                    style={{ width: collapsed ? CLOSED_WIDTH : OPEN_WIDTH }}
+                >
+                    <aside
+                        className="absolute inset-y-0 left-0 flex overflow-hidden bg-[var(--bg-chrome)] transition-[width] duration-300 ease-[cubic-bezier(0.25,1,0.5,1)] motion-reduce:transition-none"
+                        style={{ width: collapsed ? CLOSED_WIDTH : OPEN_WIDTH }}
+                    >
+                        {sidebarContent}
+                    </aside>
+                </div>
             )}
         </>
     );
 }
 
-// SidebarInner reads search params (active playlist), which a static export
-// only allows below a Suspense boundary.
+// SidebarInner reads the search params (the open playlist or mix), which a static export
+// only allows below a Suspense boundary (D-011).
 export function Sidebar() {
     return (
         <Suspense fallback={null}>

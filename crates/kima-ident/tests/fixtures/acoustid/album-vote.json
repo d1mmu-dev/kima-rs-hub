@@ -1,0 +1,9 @@
+{
+  "provenance": "SYNTHETIC, hand-written album vote example; not an AcoustID recording",
+  "songs": [
+    {"index": 0, "title": "Fixture One", "recording": "b0000000-0000-4000-8000-000000000001", "releasegroups": [{"id": "d0000000-0000-4000-8000-000000000001", "title": "Fixture Album"}]},
+    {"index": 1, "title": "Fixture Two", "recording": "b0000000-0000-4000-8000-000000000002", "releasegroups": [{"id": "d0000000-0000-4000-8000-000000000001", "title": "Fixture Album"}]},
+    {"index": 2, "title": "Fixture Three", "recording": "b0000000-0000-4000-8000-000000000003", "releasegroups": [{"id": "d0000000-0000-4000-8000-000000000002", "title": "Other Album"}]}
+  ],
+  "winningReleasegroup": "d0000000-0000-4000-8000-000000000001"
+}

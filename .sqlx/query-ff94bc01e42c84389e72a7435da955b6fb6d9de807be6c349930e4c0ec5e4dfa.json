@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT track_id FROM track_stages WHERE stage = 'recording' AND track_id = ANY($1)\n         ORDER BY track_id FOR NO KEY UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "track_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ff94bc01e42c84389e72a7435da955b6fb6d9de807be6c349930e4c0ec5e4dfa"
+}

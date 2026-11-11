@@ -1,6 +1,6 @@
 import { useAudioState } from "@/lib/audio-state-context";
 import { useAudioPlayback } from "@/lib/audio-playback-context";
-import { clampTime } from "@/lib/format";
+import { clampTime, playbackLength } from "@/lib/format";
 
 /**
  * Duration, display time and progress for every player. Prefers the engine's
@@ -22,11 +22,11 @@ export function usePlaybackProgress() {
 
     const isMultiTrack = playbackType === "audiobook" && (currentAudiobook?.tracks?.length ?? 0) > 1;
 
-    const duration = isMultiTrack
-        ? (currentAudiobook?.duration || playbackDuration || 0)
-        : playbackDuration > 0
-            ? playbackDuration
-            : (currentTrack?.duration || currentAudiobook?.duration || currentPodcast?.duration || 0);
+    const duration = playbackLength({
+        multiFile: isMultiTrack,
+        stored: currentTrack?.duration || currentAudiobook?.duration || currentPodcast?.duration || 0,
+        engine: playbackDuration,
+    });
 
     let time = currentTime;
     if (time <= 0) {
@@ -36,11 +36,14 @@ export function usePlaybackProgress() {
             time = currentPodcast.progress.currentTime;
         }
     }
-    const displayTime = clampTime(time, duration);
+    // Without the engine's length the metadata's stands in, and it can be short (a feed's length
+    // misses stitched-in ads): the clock keeps running past it instead of freezing there.
+    const shownDuration = playbackDuration > 0 || isMultiTrack ? duration : Math.max(duration, time);
+    const displayTime = clampTime(time, shownDuration);
 
-    const progress = duration > 0
-        ? Math.min(100, Math.max(0, (displayTime / duration) * 100))
+    const progress = shownDuration > 0
+        ? Math.min(100, Math.max(0, (displayTime / shownDuration) * 100))
         : 0;
 
-    return { duration, displayTime, progress };
+    return { duration: shownDuration, displayTime, progress };
 }

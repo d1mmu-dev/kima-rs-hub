@@ -462,6 +462,10 @@ impl Net {
                     .map_or(now + Duration::from_secs(86_400), |b| now + b)
             });
             let ends = budget_ends.min(now + per_request);
+            if now >= ends {
+                drop(permit);
+                return transient("TIMEOUT", format!("no answer within {per_request:?}"));
+            }
             let sent = tokio::time::timeout_at(ends, live.send(req, secrets)).await;
             drop(permit);
             let raw = match sent {

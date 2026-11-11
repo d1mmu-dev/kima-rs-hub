@@ -439,6 +439,77 @@ async fn scan_requires_admin(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_is_admin_only_and_one_at_a_time(pool: PgPool) {
+    let e = env(pool.clone()).await;
+    e.server
+        .post("/api/library/refile")
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
+    e.server
+        .post("/api/library/refile")
+        .authorization_bearer(&e.user)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    let first = e
+        .server
+        .post("/api/library/refile")
+        .authorization_bearer(&e.admin)
+        .await;
+    first.assert_status(StatusCode::ACCEPTED);
+    assert_eq!(
+        first.json::<Value>()["message"],
+        "Re-filing albums by their tags"
+    );
+    let payload: Value = sqlx::query_scalar("SELECT payload FROM jobs WHERE queue = 'library'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload, serde_json::json!({"kind": "reread_all"}));
+    for state in ["queued", "running"] {
+        sqlx::query("UPDATE jobs SET state = $1")
+            .bind(state)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let res = e
+            .server
+            .post("/api/library/refile")
+            .authorization_bearer(&e.admin)
+            .await;
+        res.assert_status(StatusCode::CONFLICT);
+        assert!(
+            res.json::<Value>()["error"]
+                .as_str()
+                .unwrap()
+                .contains("already being re-filed")
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    sqlx::query("UPDATE jobs SET state = 'done'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    e.server
+        .post("/api/library/refile")
+        .authorization_bearer(&e.admin)
+        .await
+        .assert_status(StatusCode::ACCEPTED);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn unknown_id_404(pool: PgPool) {
     let e = env(pool).await;
     let missing = Uuid::now_v7();

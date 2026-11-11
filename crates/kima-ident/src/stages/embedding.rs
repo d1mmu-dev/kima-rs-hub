@@ -846,27 +846,45 @@ pub(crate) fn closed(accepted: bool) -> sqlx::Result<ClaimResult> {
 
 #[cfg(test)]
 mod tests {
+    /// Temporary directory for snapshot tests: under `KIMA_TEST_REFLINK_DIR` when set (CI's
+    /// reflink mount), otherwise in this crate (inside the checkout).
+    #[cfg(target_os = "linux")]
+    fn snapshot_tmp() -> tempfile::TempDir {
+        tempfile::tempdir_in(kima_test_support::reflink_test_dir(env!(
+            "CARGO_MANIFEST_DIR"
+        )))
+        .unwrap()
+    }
+
+    /// Positive snapshot tests need a reflink-capable filesystem. Without one this panics
+    /// with an explicit message, unless `KIMA_TEST_ALLOW_NO_REFLINK=1`, in which case it
+    /// prints `SKIPPED` to stderr and returns `false` (the caller must return early).
+    #[cfg(target_os = "linux")]
+    fn require_reflink(dir: &std::path::Path) -> bool {
+        match kima_ml::input_snapshot::reflink_supported_in(dir) {
+            Ok(true) => true,
+            other => {
+                let msg = format!("NO REFLINK SUPPORT in {} ({other:?})", dir.display());
+                if std::env::var("KIMA_TEST_ALLOW_NO_REFLINK").as_deref() == Ok("1") {
+                    eprintln!("SKIPPED: {msg}");
+                    false
+                } else {
+                    panic!("{msg}; run on btrfs/XFS-reflink or set KIMA_TEST_ALLOW_NO_REFLINK=1");
+                }
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancellation_keeps_snapshot_until_blocking_worker_exits() {
         use std::os::unix::fs::PermissionsExt;
         use std::sync::{Arc, mpsc};
-        let dir = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-        let snap = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let dir = snapshot_tmp();
+        let snap = snapshot_tmp();
         std::fs::set_permissions(snap.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        match kima_ml::input_snapshot::reflink_supported_in(snap.path()) {
-            Ok(true) => {}
-            other => {
-                let msg = format!(
-                    "NO REFLINK SUPPORT in {} ({other:?})",
-                    snap.path().display()
-                );
-                if std::env::var("KIMA_TEST_ALLOW_NO_REFLINK").as_deref() == Ok("1") {
-                    eprintln!("SKIPPED: {msg}");
-                    return;
-                }
-                panic!("{msg}; run on btrfs/XFS-reflink or set KIMA_TEST_ALLOW_NO_REFLINK=1");
-            }
+        if !require_reflink(snap.path()) {
+            return;
         }
         std::fs::write(dir.path().join("audio"), b"audio").unwrap();
         let store = Arc::new(
@@ -1087,8 +1105,8 @@ mod tests {
     #[test]
     fn startup_check_blocks_audio_for_a_bad_snapshot_dir_but_not_a_good_one() {
         use std::os::unix::fs::PermissionsExt;
-        let lib = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-        let snap = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let lib = snapshot_tmp();
+        let snap = snapshot_tmp();
         let mode = |dir: &std::path::Path, m| {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(m)).unwrap()
         };
@@ -1097,12 +1115,8 @@ mod tests {
             snapshot_dir: Some(dir),
             ..Default::default()
         };
-        // Good: unchanged.
-        let mut good = with_dir(snap.path().to_path_buf());
-        assert!(super::check_snapshot_setup(&mut good, lib.path()).is_ok());
-        assert!(!good.disabled);
-        assert!(good.snapshot_dir.is_some());
         // Bad permissions, missing dir, `..` in the dir, `..` in the root: audio blocked + error.
+        // These fail before the reflink probe, so they hold on any filesystem.
         mode(snap.path(), 0o755);
         let dotdot = snap
             .path()
@@ -1136,6 +1150,16 @@ mod tests {
         let mut unset = crate::EmbeddingConfig::default();
         assert!(super::check_snapshot_setup(&mut unset, lib.path()).is_ok());
         assert!(!unset.disabled);
+        // Good: unchanged. The startup check probes reflink support, so this needs it.
+        mode(snap.path(), 0o700);
+        if !require_reflink(snap.path()) {
+            return;
+        }
+        let mut good = with_dir(snap.path().to_path_buf());
+        assert!(super::check_snapshot_setup(&mut good, lib.path()).is_ok());
+        assert!(!good.disabled);
+        assert!(good.snapshot_dir.is_some());
+        assert!(good.audio_blocked_reason.is_none());
     }
 
     #[test]
@@ -1191,8 +1215,8 @@ mod tests {
     #[test]
     fn startup_block_leaves_text_and_the_operator_switch_alone() {
         use std::os::unix::fs::PermissionsExt;
-        let lib = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-        let snap = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let lib = snapshot_tmp();
+        let snap = snapshot_tmp();
         std::fs::set_permissions(snap.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut cfg = crate::EmbeddingConfig {
             snapshot_dir: Some(snap.path().to_path_buf()),
@@ -1266,9 +1290,9 @@ mod tests {
         if !shm.is_dir() {
             return;
         }
-        let snap = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let snap = snapshot_tmp();
         std::fs::set_permissions(snap.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let same = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let same = snapshot_tmp();
         let other = tempfile::tempdir_in(shm).unwrap();
         let cfg = crate::EmbeddingConfig {
             snapshot_dir: Some(snap.path().to_path_buf()),

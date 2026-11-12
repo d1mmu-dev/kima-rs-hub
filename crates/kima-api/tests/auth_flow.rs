@@ -242,7 +242,10 @@ async fn features_m1_flags(pool: PgPool) {
     server.get("/api/system/features").authorization_bearer(token).await.assert_json(&json!({
         "musicCNN": false, "vibeEmbeddings": false, "audiobookshelfEnabled": false, "fpcalc": false,
         "library": true, "podcasts": false, "audiobooks": false, "discover": false,
-        "mixes": false, "downloads": false, "imports": false
+        "mixes": false, "downloads": false, "imports": false,
+        // M-STATS S1: every `/stats/*` route the v1.12.3 page calls is served. `changelog`
+        // and `accountDeletion` stay unsent (= off in the frontend, D-170).
+        "stats": true
     }));
     let stub: Value = server
         .get("/api/notifications/downloads/active")

@@ -1181,6 +1181,29 @@ async fn malformed_json_matches_upstream_body_parser(pool: PgPool) {
     }
 }
 
+/// D-178: `serde_json` refuses a number outside `f64`; `JSON.parse` reads it as
+/// `Infinity`, so upstream answers `Bad request` (zod) or 200 (`collapse`).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn number_overflow_is_an_invalid_body(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "overflow_user").await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    for action in ACTIONS {
+        let response = server
+            .post(&format!("/api/stats/false-starts/{action}"))
+            .authorization_bearer(&token)
+            .content_type("application/json")
+            .bytes(b"{\"trackIds\":[1e400]}".to_vec().into())
+            .await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.json::<Value>(),
+            json!({"error":"Invalid request body"}),
+            "{action}"
+        );
+    }
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn bodies_over_one_mebibyte_are_too_large(pool: PgPool) {
     let state = common::state(pool);

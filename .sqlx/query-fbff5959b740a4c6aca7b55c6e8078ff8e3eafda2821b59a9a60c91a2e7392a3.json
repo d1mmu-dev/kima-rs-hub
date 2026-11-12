@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO podcasts (id, feed_url, title, author, description, image_url, itunes_id,\n                               category_ids, language, explicit)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n         RETURNING id, feed_url, title, author, description, image_url, itunes_id, category_ids,\n                   language, explicit, episode_count, last_refreshed, feed_etag,\n                   feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,\n                   created_at, updated_at",
+  "query": "INSERT INTO podcasts (id, feed_url, title, author, description, image_url, itunes_id,\n                               category_ids, language, explicit, episode_count, feed_etag,\n                               feed_last_modified)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)\n         RETURNING id, feed_url, title, author, description, image_url, itunes_id, category_ids,\n                   language, explicit, episode_count, last_refreshed, feed_etag,\n                   feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,\n                   created_at, updated_at",
   "describe": {
     "columns": [
       {
@@ -110,7 +110,10 @@
         "Text",
         "Int4Array",
         "Text",
-        "Bool"
+        "Bool",
+        "Int4",
+        "Text",
+        "Text"
       ]
     },
     "nullable": [
@@ -135,5 +138,5 @@
       false
     ]
   },
-  "hash": "5eb2f114893ea540b617934a7da313ebeaf1489b82996b98bdb5c97d220a4124"
+  "hash": "fbff5959b740a4c6aca7b55c6e8078ff8e3eafda2821b59a9a60c91a2e7392a3"
 }

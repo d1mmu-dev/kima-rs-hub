@@ -16,6 +16,7 @@ mod onboarding;
 mod playback_state;
 mod playlists;
 mod plays;
+mod podcasts;
 mod search;
 mod settings;
 mod stats;
@@ -42,6 +43,7 @@ pub fn router(state: AppState) -> Router {
         .merge(stats::routes())
         .merge(playlists::routes())
         .merge(playback_state::routes())
+        .merge(podcasts::routes())
         .merge(settings::routes())
         .fallback(|| async { ApiError::NotFound("Not found") });
 

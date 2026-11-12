@@ -2728,6 +2728,7 @@ dependencies = [
  "kima-jobs",
  "kima-library",
  "kima-net",
+ "kima-podcast",
  "kima-test-support",
  "lofty",
  "serde",

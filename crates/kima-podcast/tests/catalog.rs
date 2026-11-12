@@ -81,6 +81,9 @@ async fn store(pool: &PgPool, feed: &str, itunes: Option<&str>) -> Uuid {
             category_ids: &[],
             language: None,
             explicit: false,
+            episode_count: 0,
+            feed_etag: None,
+            feed_last_modified: None,
         },
     )
     .await

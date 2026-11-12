@@ -42,6 +42,11 @@ pub struct NewShow<'a> {
     pub category_ids: &'a [i32],
     pub language: Option<&'a str>,
     pub explicit: bool,
+    /// How many episodes the feed listed when the show was stored.
+    pub episode_count: i32,
+    /// The feed's validators, for the next conditional refresh.
+    pub feed_etag: Option<&'a str>,
+    pub feed_last_modified: Option<&'a str>,
 }
 
 /// An episode to store.
@@ -67,8 +72,9 @@ pub async fn insert_show(pool: &PgPool, id: Uuid, s: &NewShow<'_>) -> sqlx::Resu
     sqlx::query_as!(
         Show,
         "INSERT INTO podcasts (id, feed_url, title, author, description, image_url, itunes_id,
-                               category_ids, language, explicit)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                               category_ids, language, explicit, episode_count, feed_etag,
+                               feed_last_modified)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING id, feed_url, title, author, description, image_url, itunes_id, category_ids,
                    language, explicit, episode_count, last_refreshed, feed_etag,
                    feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,
@@ -82,7 +88,10 @@ pub async fn insert_show(pool: &PgPool, id: Uuid, s: &NewShow<'_>) -> sqlx::Resu
         s.itunes_id,
         s.category_ids,
         s.language,
-        s.explicit
+        s.explicit,
+        s.episode_count,
+        s.feed_etag,
+        s.feed_last_modified
     )
     .fetch_one(pool)
     .await
@@ -179,14 +188,31 @@ pub async fn subscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result
 
 /// Stops following a show; `false` when the user did not follow it.
 pub async fn unsubscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result<bool> {
-    let done = sqlx::query!(
-        "DELETE FROM podcast_subscriptions WHERE user_id = $1 AND podcast_id = $2",
-        user,
-        podcast
-    )
-    .execute(pool)
-    .await?;
-    Ok(done.rows_affected() == 1)
+    let mut tx = pool.begin().await?;
+    let done =
+        sqlx::query("DELETE FROM podcast_subscriptions WHERE user_id = $1 AND podcast_id = $2")
+            .bind(user)
+            .bind(podcast)
+            .execute(&mut *tx)
+            .await?;
+    if done.rows_affected() == 0 {
+        tx.commit().await?;
+        return Ok(false);
+    }
+    for table in ["podcast_progress", "podcast_downloads"] {
+        let query = format!(
+            "DELETE FROM {table} WHERE user_id = $1 AND episode_id IN             (SELECT id FROM podcast_episodes WHERE podcast_id = $2)"
+        );
+        sqlx::query(&query)
+            .bind(user)
+            .bind(podcast)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM playback_state WHERE user_id = $1 AND playback_type = 'podcast'                  AND left(podcast_id, length($2)) = $2")
+        .bind(user).bind(format!("{podcast}:")).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 pub async fn is_subscribed(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result<bool> {
@@ -254,4 +280,44 @@ pub async fn chart_country(pool: &PgPool) -> sqlx::Result<Option<String>> {
     .fetch_optional(pool)
     .await?
     .flatten())
+}
+
+/// A subscribed show in newest-subscription-first order.
+#[derive(sqlx::FromRow)]
+pub struct FollowedShowRow {
+    pub id: Uuid,
+    pub title: String,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub image_url: Option<String>,
+    pub episode_count: i32,
+}
+
+/// The caller's most recent episodes of one show with only their own progress.
+#[derive(sqlx::FromRow)]
+pub struct SummaryRow {
+    pub id: Uuid,
+    pub title: String,
+    pub description: Option<String>,
+    pub duration: i32,
+    pub published_at: OffsetDateTime,
+    pub image_url: Option<String>,
+    pub current_time: Option<f64>,
+    pub progress_duration: Option<f64>,
+    pub is_finished: Option<bool>,
+    pub last_played_at: Option<OffsetDateTime>,
+}
+
+pub async fn followed_shows(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<FollowedShowRow>> {
+    sqlx::query_as("SELECT p.id, p.title, p.author, p.description, p.image_url, p.episode_count         FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id         WHERE s.user_id = $1 ORDER BY s.subscribed_at DESC, p.id DESC")
+        .bind(user).fetch_all(pool).await
+}
+
+pub async fn recent_episodes(
+    pool: &PgPool,
+    user: Uuid,
+    show: Uuid,
+) -> sqlx::Result<Vec<SummaryRow>> {
+    sqlx::query_as("SELECT e.id, e.title, e.description, e.duration, e.published_at, e.image_url,         p.\"current_time\", p.duration AS progress_duration, p.is_finished, p.last_played_at         FROM podcast_episodes e LEFT JOIN podcast_progress p ON p.episode_id = e.id AND p.user_id = $1         WHERE e.podcast_id = $2 ORDER BY e.published_at DESC, e.id DESC LIMIT 5")
+        .bind(user).bind(show).fetch_all(pool).await
 }

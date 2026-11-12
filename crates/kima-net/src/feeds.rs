@@ -45,6 +45,32 @@ pub enum FeedFetch {
 }
 
 impl Net {
+    /// Validate the initial feed URL before subscription, without fetching it. Fetches still
+    /// validate and pin each hop independently, so this check is not a DNS-rebinding boundary.
+    pub async fn validate_feed_url(&self, input: &str) -> Result<(), String> {
+        let url = reqwest::Url::parse(input).map_err(|_| "Invalid URL".to_string())?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(format!("Blocked scheme: {}:", url.scheme()));
+        }
+        let Some(live) = &self.live else {
+            return Err("Network disabled".into());
+        };
+        if url.host_str() == Some("localhost") && !live.cfg.allow_private_images {
+            return Err("Blocked hostname: localhost".into());
+        }
+        match live.checked_addrs::<()>(&url).await {
+            Ok(_) => Ok(()),
+            Err(Outcome::Permanent(f)) if f.code == "NOT_PUBLIC" => {
+                Err("Blocked: internal address".into())
+            }
+            Err(Outcome::Transient(f)) if f.code == "NETWORK" => Err(format!(
+                "DNS resolution failed for {}",
+                url.host_str().unwrap_or("")
+            )),
+            Err(_) => Err("Invalid URL".into()),
+        }
+    }
+
     /// Fetches a feed (source `feeds`, never cached, not stopped by the identification switch:
     /// a person follows the show). `Absent` for a 4xx other than 429 or a refused address;
     /// `Transient` for a 429, 5xx, timeout (`budget`, at most the source's 30 s) or a 304 to a
@@ -144,4 +170,22 @@ impl Live {
             last_modified,
         })
     }
+}
+
+/// Compare feed identities the way upstream does: ignore scheme and trailing slashes, but
+/// retain host, port, path and query. Invalid URLs compare as trimmed text.
+pub fn same_feed(a: &str, b: &str) -> bool {
+    fn key(s: &str) -> String {
+        match reqwest::Url::parse(s.trim()) {
+            Ok(u) => format!(
+                "{}{}{}{}",
+                u.host_str().unwrap_or(""),
+                u.port().map(|p| format!(":{p}")).unwrap_or_default(),
+                u.path().trim_end_matches('/'),
+                u.query().map(|q| format!("?{q}")).unwrap_or_default()
+            ),
+            Err(_) => s.trim().to_string(),
+        }
+    }
+    key(a) == key(b)
 }

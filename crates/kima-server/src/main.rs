@@ -82,15 +82,13 @@ async fn main() -> anyhow::Result<()> {
     let identify =
         kima_core::identify::IdentifySwitch::new(config.identify_env_off, kv.auto_enrich_metadata);
     // The one outbound HTTP client (spec §5): pauses survive restarts.
-    let net = kima_net::Net::new(
-        kima_net::NetConfig::production(
-            env!("CARGO_PKG_VERSION"),
-            &config.contact,
-            &config.musicbrainz_base_url,
-        ),
-        pool.clone(),
-        identify.clone(),
+    let mut net_config = kima_net::NetConfig::production(
+        env!("CARGO_PKG_VERSION"),
+        &config.contact,
+        &config.musicbrainz_base_url,
     );
+    net_config.bases.itunes = config.itunes_base_url.clone();
+    let net = kima_net::Net::new(net_config, pool.clone(), identify.clone());
     net.load_pauses()
         .await
         .context("reading the source pauses")?;

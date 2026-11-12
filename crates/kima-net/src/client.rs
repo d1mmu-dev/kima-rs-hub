@@ -362,7 +362,7 @@ impl Net {
         let Some(live) = &self.live else {
             return disabled();
         };
-        if !live.switch.enabled() {
+        if !live.switch.enabled() && !req.user_facing {
             return disabled();
         }
         let secrets = Secrets::of(&req);
@@ -377,7 +377,7 @@ impl Net {
         secrets: &Secrets,
     ) -> Outcome<T> {
         let source = req.host.source();
-        let cached = match (req.no_cache, source.ttl()) {
+        let cached = match (req.no_cache, req.ttl.or(source.ttl())) {
             (false, Some(ttl)) => {
                 let canonical = cache::canonical(req, live.cfg.bases.get(req.host));
                 Some((cache::key(source, &canonical), canonical, ttl))

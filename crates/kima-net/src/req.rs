@@ -61,6 +61,8 @@ pub struct Req {
     pub(crate) timeout: Option<Duration>,
     pub(crate) max_wait: Option<Duration>,
     pub(crate) no_cache: bool,
+    pub(crate) ttl: Option<(Duration, Duration)>,
+    pub(crate) user_facing: bool,
 }
 
 // Never prints a secret: query values and form pairs under a secret key are redacted.
@@ -90,6 +92,8 @@ impl std::fmt::Debug for Req {
             .field("timeout", &self.timeout)
             .field("max_wait", &self.max_wait)
             .field("no_cache", &self.no_cache)
+            .field("ttl", &self.ttl)
+            .field("user_facing", &self.user_facing)
             .finish()
     }
 }
@@ -108,6 +112,8 @@ impl Req {
             timeout: None,
             max_wait: None,
             no_cache: false,
+            ttl: None,
+            user_facing: false,
         }
     }
 
@@ -161,6 +167,20 @@ impl Req {
     /// Skip the response cache (read and write).
     pub fn no_cache(mut self) -> Req {
         self.no_cache = true;
+        self
+    }
+
+    /// How long the response cache keeps this request's answer and its absence, instead of the
+    /// source's [`Source::ttl`](crate::Source::ttl).
+    pub fn ttl(mut self, answered: Duration, absent: Duration) -> Req {
+        self.ttl = Some((answered, absent));
+        self
+    }
+
+    /// A request a person is waiting on (podcasts): the identification switch, which stops
+    /// enrichment lookups, does not stop it. The network guard, pauses and limits still apply.
+    pub fn user_facing(mut self) -> Req {
+        self.user_facing = true;
         self
     }
 

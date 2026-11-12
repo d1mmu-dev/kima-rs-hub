@@ -14,6 +14,8 @@ pub enum Source {
     Lrclib,
     CoverArtArchive,
     Images,
+    /// Apple's iTunes Search/Lookup API and podcast charts (M6).
+    Apple,
 }
 
 /// How hard kima may use a source: `burst` requests per `period` (GCRA), `concurrency` in
@@ -53,7 +55,7 @@ const fn limits(
 }
 
 impl Source {
-    pub const ALL: [Source; 9] = [
+    pub const ALL: [Source; 10] = [
         Source::MusicBrainz,
         Source::AcoustId,
         Source::Wikidata,
@@ -63,6 +65,7 @@ impl Source {
         Source::Lrclib,
         Source::CoverArtArchive,
         Source::Images,
+        Source::Apple,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -76,6 +79,7 @@ impl Source {
             Source::Lrclib => "lrclib",
             Source::CoverArtArchive => "coverartarchive",
             Source::Images => "images",
+            Source::Apple => "apple",
         }
     }
 
@@ -98,6 +102,9 @@ impl Source {
             Source::Fanart => pair(7 * DAY, 7 * DAY),
             Source::Deezer => pair(24 * HOUR, 24 * HOUR),
             Source::ListenBrainz => pair(7 * DAY, DAY),
+            // The shortest Apple answer (a chart, `podcastCatalog.ts:161`); a lookup absence is
+            // remembered a week (`:255`). Each request names its own with `Req::ttl`.
+            Source::Apple => pair(6 * HOUR, 7 * DAY),
             Source::Lrclib | Source::Images => None,
         }
     }
@@ -114,6 +121,8 @@ impl Source {
             Source::Lrclib => limits(3000, 1, 1, 5, 1),
             Source::CoverArtArchive => limits(1000, 2, 2, 15, 1),
             Source::Images => limits(1000, 4, 2, 30, 0),
+            // `rateLimiter.ts:121-127` (itunes) and the 15 s of `podcastCatalog.ts:58-66`.
+            Source::Apple => limits(3000, 1, 1, 15, 2),
         }
     }
 }
@@ -131,10 +140,11 @@ pub enum Host {
     ListenBrainz,
     Lrclib,
     CoverArtArchive,
+    Itunes,
 }
 
 impl Host {
-    pub const ALL: [Host; 10] = [
+    pub const ALL: [Host; 11] = [
         Host::MusicBrainz,
         Host::AcoustId,
         Host::WikidataSparql,
@@ -145,6 +155,7 @@ impl Host {
         Host::ListenBrainz,
         Host::Lrclib,
         Host::CoverArtArchive,
+        Host::Itunes,
     ];
 
     /// The name a fixture request file uses (`musicbrainz`, `wikidata_sparql`, ...).
@@ -160,6 +171,7 @@ impl Host {
             Host::ListenBrainz => "listenbrainz",
             Host::Lrclib => "lrclib",
             Host::CoverArtArchive => "coverartarchive",
+            Host::Itunes => "itunes",
         }
     }
 
@@ -177,6 +189,7 @@ impl Host {
             Host::ListenBrainz => Source::ListenBrainz,
             Host::Lrclib => Source::Lrclib,
             Host::CoverArtArchive => Source::CoverArtArchive,
+            Host::Itunes => Source::Apple,
         }
     }
 }
@@ -194,6 +207,8 @@ pub struct Bases {
     pub listenbrainz: String,
     pub lrclib: String,
     pub coverartarchive: String,
+    /// Apple's iTunes API (`KIMA_ITUNES_BASE_URL`, upstream `ITUNES_BASE_URL`).
+    pub itunes: String,
     /// Wikimedia Commons' file host. Not a [`Host`] (no JSON is read from it): only the base of
     /// the image URLs Wikidata's `P18` claims become, which are downloaded with `get_bytes`.
     pub commons: String,
@@ -201,6 +216,9 @@ pub struct Bases {
 
 /// Wikimedia Commons' file host in production.
 pub const COMMONS_BASE: &str = "https://upload.wikimedia.org";
+
+/// Apple's iTunes API in production (`podcastCatalog.ts:64`).
+pub const ITUNES_BASE: &str = "https://itunes.apple.com";
 
 impl Bases {
     /// The real services; MusicBrainz from `MUSICBRAINZ_BASE_URL`.
@@ -216,6 +234,7 @@ impl Bases {
             listenbrainz: "https://labs.api.listenbrainz.org".into(),
             lrclib: "https://lrclib.net/api".into(),
             coverartarchive: "https://coverartarchive.org".into(),
+            itunes: ITUNES_BASE.into(),
             commons: COMMONS_BASE.into(),
         }
     }
@@ -234,6 +253,7 @@ impl Bases {
             listenbrainz: url.clone(),
             lrclib: url.clone(),
             coverartarchive: url.clone(),
+            itunes: url.clone(),
             commons: url,
         }
     }
@@ -250,6 +270,7 @@ impl Bases {
             Host::ListenBrainz => &self.listenbrainz,
             Host::Lrclib => &self.lrclib,
             Host::CoverArtArchive => &self.coverartarchive,
+            Host::Itunes => &self.itunes,
         }
     }
 }
@@ -281,6 +302,52 @@ mod tests {
         assert_eq!(row(Source::Lrclib), (s(3), 1, 1, s(5), 1));
         assert_eq!(row(Source::CoverArtArchive), (s(1), 2, 2, s(15), 1));
         assert_eq!(row(Source::Images), (s(1), 4, 2, s(30), 0));
+    }
+
+    /// `rateLimiter.ts:121-127` (itunes: 1 request per 3000 ms, concurrency 1, `maxRetries: 2`)
+    /// and `podcastCatalog.ts:58-66` (15 s timeout).
+    #[test]
+    fn apple_limits_match_upstream() {
+        let l = Source::Apple.limits();
+        assert_eq!(
+            (
+                l.period,
+                l.burst,
+                l.concurrency,
+                l.timeout,
+                l.rate_limit_retries
+            ),
+            (
+                Duration::from_millis(3000),
+                1,
+                1,
+                Duration::from_secs(15),
+                2
+            )
+        );
+        assert_eq!(Source::from_name("apple"), Some(Source::Apple));
+        assert_eq!(Host::Itunes.source(), Source::Apple);
+        assert_eq!(Host::from_name("itunes"), Some(Host::Itunes));
+        // Charts are the shortest-lived Apple answer (6 h); lookups remember an absence 7 d.
+        assert_eq!(
+            Source::Apple.ttl(),
+            Some((
+                Duration::from_secs(6 * 3600),
+                Duration::from_secs(7 * 86_400)
+            ))
+        );
+        assert_eq!(
+            Bases::production("https://musicbrainz.org/ws/2").itunes,
+            "https://itunes.apple.com"
+        );
+        assert_eq!(
+            Bases::all("http://127.0.0.1:9/").itunes,
+            "http://127.0.0.1:9"
+        );
+        assert_eq!(
+            Bases::all("http://127.0.0.1:9").get(Host::Itunes),
+            "http://127.0.0.1:9"
+        );
     }
 
     #[test]

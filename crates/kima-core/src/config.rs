@@ -34,6 +34,9 @@ pub struct Config {
     pub contact: String,
     /// `MUSICBRAINZ_BASE_URL`: MusicBrainz or a mirror, without a trailing slash.
     pub musicbrainz_base_url: String,
+    /// `KIMA_ITUNES_BASE_URL` (upstream `ITUNES_BASE_URL`): Apple's iTunes API, without a
+    /// trailing slash; tests and fixture capture point it at a replay.
+    pub itunes_base_url: String,
     /// `KIMA_FINGERPRINT_WORKERS`: fingerprint pool size; half the cores, at least 1 (spec §9.3).
     pub fingerprint_workers: usize,
     /// `KIMA_CLAP_MODEL_DIR`: directory containing the pinned CLAP audio model.
@@ -92,6 +95,7 @@ impl std::fmt::Debug for Config {
             .field("identify_env_off", &self.identify_env_off)
             .field("contact", &self.contact)
             .field("musicbrainz_base_url", &self.musicbrainz_base_url)
+            .field("itunes_base_url", &self.itunes_base_url)
             .field("fingerprint_workers", &self.fingerprint_workers)
             .field("clap_model_dir", &self.clap_model_dir)
             .field("disable_clap", &self.disable_clap)
@@ -114,6 +118,9 @@ pub const DEFAULT_WEB_SSR_PORT: u16 = 3031;
 pub const DEFAULT_CONTACT: &str = "https://github.com/d1mmu-dev/kima-rs-hub";
 /// `MUSICBRAINZ_BASE_URL` when unset.
 pub const DEFAULT_MUSICBRAINZ_BASE_URL: &str = "https://musicbrainz.org/ws/2";
+
+/// `KIMA_ITUNES_BASE_URL` when unset (`podcastCatalog.ts:64`).
+pub const DEFAULT_ITUNES_BASE_URL: &str = "https://itunes.apple.com";
 
 /// `raw` without trailing slashes, when it is an `http://` or `https://` URL with a host.
 fn http_base(raw: &str) -> Option<String> {
@@ -225,6 +232,14 @@ impl Config {
             None => DEFAULT_MUSICBRAINZ_BASE_URL.to_string(),
             Some(raw) => http_base(&raw).ok_or(ConfigError::Invalid {
                 name: "MUSICBRAINZ_BASE_URL",
+                value: raw,
+            })?,
+        };
+
+        let itunes_base_url = match value("KIMA_ITUNES_BASE_URL") {
+            None => DEFAULT_ITUNES_BASE_URL.to_string(),
+            Some(raw) => http_base(&raw).ok_or(ConfigError::Invalid {
+                name: "KIMA_ITUNES_BASE_URL",
                 value: raw,
             })?,
         };
@@ -342,6 +357,7 @@ impl Config {
             identify_env_off,
             contact: value("KIMA_CONTACT").unwrap_or_else(|| DEFAULT_CONTACT.into()),
             musicbrainz_base_url,
+            itunes_base_url,
             fingerprint_workers,
             clap_model_dir: value("KIMA_CLAP_MODEL_DIR").map(PathBuf::from),
             disable_clap: value("DISABLE_CLAP").is_some_and(|v| v.eq_ignore_ascii_case("true")),
@@ -597,6 +613,28 @@ mod tests {
                 })
             );
         }
+    }
+
+    /// `KIMA_ITUNES_BASE_URL` (upstream `ITUNES_BASE_URL`, `podcastCatalog.ts:58-66`).
+    #[test]
+    fn itunes_base_default_and_override() {
+        let base = |pairs: &[(&str, &str)]| {
+            let mut all = vec![("DATABASE_URL", "postgres://x")];
+            all.extend_from_slice(pairs);
+            Config::from_lookup(lookup(&all)).map(|c| c.itunes_base_url)
+        };
+        assert_eq!(base(&[]), Ok("https://itunes.apple.com".into()));
+        assert_eq!(
+            base(&[("KIMA_ITUNES_BASE_URL", "http://127.0.0.1:4100/")]),
+            Ok("http://127.0.0.1:4100".into())
+        );
+        assert_eq!(
+            base(&[("KIMA_ITUNES_BASE_URL", "itunes.lan")]),
+            Err(ConfigError::Invalid {
+                name: "KIMA_ITUNES_BASE_URL",
+                value: "itunes.lan".into()
+            })
+        );
     }
 
     #[test]

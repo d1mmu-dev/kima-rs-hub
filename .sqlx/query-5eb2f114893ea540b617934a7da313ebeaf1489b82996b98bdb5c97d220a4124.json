@@ -1,0 +1,139 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO podcasts (id, feed_url, title, author, description, image_url, itunes_id,\n                               category_ids, language, explicit)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n         RETURNING id, feed_url, title, author, description, image_url, itunes_id, category_ids,\n                   language, explicit, episode_count, last_refreshed, feed_etag,\n                   feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,\n                   created_at, updated_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "feed_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "author",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "image_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "itunes_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "category_ids",
+        "type_info": "Int4Array"
+      },
+      {
+        "ordinal": 8,
+        "name": "language",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "explicit",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "episode_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "last_refreshed",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "feed_etag",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "feed_last_modified",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "refresh_error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "refresh_failed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "refresh_failures",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 17,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int4Array",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5eb2f114893ea540b617934a7da313ebeaf1489b82996b98bdb5c97d220a4124"
+}

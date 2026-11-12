@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO podcast_episodes (id, podcast_id, guid, title, description, audio_url,\n                                           duration, published_at, episode_number, season,\n                                           image_url, file_size, mime_type)\n             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,\n                     COALESCE($13, 'audio/mpeg'))\n             ON CONFLICT (podcast_id, guid) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Timestamptz",
+        "Int4",
+        "Int4",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a6814e2f48127472e3f53fd009adfb6001392a2d284f4d5d62a9b6e59e1b9cb4"
+}

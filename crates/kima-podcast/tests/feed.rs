@@ -35,6 +35,27 @@ fn item(inner: &str) -> String {
     format!("<item>{inner}<enclosure url=\"https://c.example/a.mp3\" type=\"audio/mpeg\"/></item>")
 }
 
+#[test]
+fn rejects_excessive_attributes_on_an_element() {
+    let attrs = (0..65).map(|n| format!(" a{n}=\"x\"")).collect::<String>();
+    let xml = rss(&format!("<extra{attrs}/>"), "");
+    assert!(matches!(parse(&xml, now()), Err(FeedError::NotAFeed(_))));
+}
+
+#[test]
+fn accepts_attribute_boundary_and_rejects_duplicates() {
+    let attrs = (0..64).map(|n| format!(" a{n}=\"x\"")).collect::<String>();
+    assert!(parse(&rss(&format!("<extra{attrs}/>"), ""), now()).is_ok());
+    assert!(parse(&rss("<extra a=\"1\" a=\"2\"/>", ""), now()).is_err());
+}
+
+#[test]
+fn rejects_excessive_total_attributes() {
+    let attrs = (0..64).map(|n| format!(" a{n}=\"x\"")).collect::<String>();
+    let xml = rss(&format!("<extra{attrs}/>").repeat(1563), "");
+    assert!(matches!(parse(&xml, now()), Err(FeedError::NotAFeed(_))));
+}
+
 fn one(channel: &str, inner: &str) -> Feed {
     parse(&rss(channel, &item(inner)), now()).unwrap()
 }
@@ -381,4 +402,31 @@ fn not_xml_is_not_a_feed() {
         let err = parse(bad, now()).expect_err(bad);
         assert!(matches!(err, FeedError::NotAFeed(_)), "{bad:?}: {err}");
     }
+}
+
+#[test]
+fn duration_overflow_is_zero() {
+    assert_eq!(
+        kima_podcast::feed::parse_duration("999999999999999999999999999999999999999999:59:59"),
+        0
+    );
+}
+
+#[test]
+fn rejects_excessive_xml_nesting_and_elements() {
+    let deep = format!(
+        r#"<rss version="2.0"><channel>{}{}</channel></rss>"#,
+        "<x>".repeat(128),
+        "</x>".repeat(128)
+    );
+    assert!(kima_podcast::feed::parse(&deep, time::OffsetDateTime::now_utc()).is_err());
+}
+
+#[test]
+fn rejects_excessive_xml_elements() {
+    let wide = format!(
+        r#"<rss version="2.0"><channel>{}</channel></rss>"#,
+        "<x/>".repeat(100_000)
+    );
+    assert!(kima_podcast::feed::parse(&wide, time::OffsetDateTime::now_utc()).is_err());
 }

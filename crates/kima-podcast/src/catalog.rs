@@ -4,12 +4,11 @@
 //! their way are shared by later askers, and a person's requests go before background work.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::FutureExt;
-use futures::future::{BoxFuture, Shared};
+use futures::future::{BoxFuture, Shared, WeakShared};
 use kima_db::PgPool;
 use kima_db::http_cache::{self, CacheOutcome};
 use kima_net::{Host, Net, Req};
@@ -18,7 +17,6 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::feed::FeedEpisode;
-use crate::lanes::{Lanes, Turn};
 use crate::upstream::{Upstream, classify};
 
 /// Apple's root "Podcasts" genre: every show carries it, so it says nothing.
@@ -100,16 +98,15 @@ pub struct ForYouRow {
 type Load = Shared<BoxFuture<'static, Result<Value, Arc<Upstream>>>>;
 
 struct Flight {
-    load: Load,
+    load: WeakShared<BoxFuture<'static, Result<Value, Arc<Upstream>>>>,
     /// Set once a person waits on this load.
-    interactive: Arc<AtomicBool>,
+    interactive: Arc<kima_net::gate::Priority>,
 }
 
 struct Inner {
     net: Arc<Net>,
     pool: PgPool,
     inflight: Mutex<HashMap<String, Flight>>,
-    lanes: Lanes,
 }
 
 /// The catalogue; cheap to clone (one per process, shared).
@@ -121,12 +118,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Ends a flight however its load ends (answered, failed, or dropped unpolled): the entry
-/// leaves the map, so a failure is never handed to a later asker, and an interactive flight
-/// leaves its lane.
+/// leaves the map, so a failure is never handed to a later asker; any queued gate waiter
+/// is also removed when its future is dropped.
 struct Landing {
     inner: Arc<Inner>,
     key: String,
-    flag: Arc<AtomicBool>,
+    flag: Arc<kima_net::gate::Priority>,
 }
 
 impl Drop for Landing {
@@ -137,9 +134,6 @@ impl Drop for Landing {
             .is_some_and(|f| Arc::ptr_eq(&f.interactive, &self.flag))
         {
             map.remove(&self.key);
-        }
-        if self.flag.load(Ordering::SeqCst) {
-            self.inner.lanes.leave();
         }
     }
 }
@@ -349,7 +343,6 @@ impl Catalog {
             net,
             pool,
             inflight: Mutex::new(HashMap::new()),
-            lanes: Lanes::default(),
         }))
     }
 
@@ -359,35 +352,46 @@ impl Catalog {
         let interactive = priority == Priority::Interactive;
         let load = {
             let mut map = lock(&self.0.inflight);
-            match map.get(&key) {
-                Some(flight) => {
+            match map.get(&key).and_then(|flight| {
+                flight
+                    .load
+                    .upgrade()
+                    .map(|load| (load, &flight.interactive))
+            }) {
+                Some((load, flag)) => {
                     if interactive {
-                        self.0.lanes.raise(&flight.interactive);
+                        flag.raise();
                     }
-                    flight.load.clone()
+                    load
                 }
                 None => {
-                    let flag = Arc::new(AtomicBool::new(interactive));
-                    if interactive {
-                        self.0.lanes.enter();
-                    }
+                    let flag = Arc::new(if interactive {
+                        kima_net::gate::Priority::interactive()
+                    } else {
+                        kima_net::gate::Priority::background()
+                    });
                     let landing = Landing {
                         inner: self.0.clone(),
                         key: key.clone(),
                         flag: flag.clone(),
                     };
                     let inner = self.0.clone();
-                    let load = async move {
+                    let load: Load = async move {
                         let landing = landing;
-                        inner.lanes.wait_turn(&landing.flag).await;
-                        classify(inner.net.get_json::<Value>(req).await).map_err(Arc::new)
+                        classify(
+                            inner
+                                .net
+                                .get_json_with_priority::<Value>(req, &landing.flag)
+                                .await,
+                        )
+                        .map_err(Arc::new)
                     }
                     .boxed()
                     .shared();
                     map.insert(
                         key,
                         Flight {
-                            load: load.clone(),
+                            load: load.downgrade().expect("new shared future has an owner"),
                             interactive: flag,
                         },
                     );
@@ -398,17 +402,10 @@ impl Catalog {
         load.await.map_err(|e| e.copy())
     }
 
-    /// Runs `f` in `priority`'s lane, unshared (lookups and searches).
-    async fn in_lane<T>(&self, priority: Priority, f: impl Future<Output = T>) -> T {
+    fn gate_priority(priority: Priority) -> kima_net::gate::Priority {
         match priority {
-            Priority::Interactive => {
-                let _turn = Turn::interactive(&self.0.lanes);
-                f.await
-            }
-            Priority::Background => {
-                self.0.lanes.wait_turn(&AtomicBool::new(false)).await;
-                f.await
-            }
+            Priority::Interactive => kima_net::gate::Priority::interactive(),
+            Priority::Background => kima_net::gate::Priority::background(),
         }
     }
 
@@ -475,7 +472,11 @@ impl Catalog {
             .no_retry()
             .budget(SEARCH_DEADLINE)
             .user_facing();
-        let asked = self.in_lane(Priority::Interactive, self.0.net.get_json::<Value>(req));
+        let gate_priority = Self::gate_priority(Priority::Interactive);
+        let asked = self
+            .0
+            .net
+            .get_json_with_priority::<Value>(req, &gate_priority);
         let out = tokio::time::timeout(SEARCH_DEADLINE, asked)
             .await
             .map_err(|_| Upstream::Down("Apple podcast search took longer than 5 s".into()))?;
@@ -526,7 +527,9 @@ impl Catalog {
                 .valid_when(has_results)
                 .user_facing();
             let data = classify(
-                self.in_lane(priority, self.0.net.get_json::<Value>(req))
+                self.0
+                    .net
+                    .get_json_with_priority::<Value>(req, &Self::gate_priority(priority))
                     .await,
             )?;
             let mut found: HashMap<String, LookupShow> = HashMap::new();
@@ -582,6 +585,28 @@ impl Catalog {
         Ok(ids)
     }
 
+    /// Resolve Apple's categories or fall back to feed names, without a database transaction.
+    pub async fn resolve_categories(
+        &self,
+        itunes: Option<&str>,
+        names: &[String],
+        priority: Priority,
+    ) -> Result<Vec<i32>, Upstream> {
+        let mut ids = Vec::new();
+        if let Some(itunes) = itunes {
+            ids = self
+                .lookup(&[itunes.to_string()], priority)
+                .await?
+                .remove(itunes)
+                .map(|s| s.category_ids)
+                .unwrap_or_default();
+        }
+        if ids.is_empty() {
+            ids = self.category_ids_for_names(names).await?;
+        }
+        Ok(ids)
+    }
+
     /// Stores a show's categories: Apple's record when it has an Apple id, else its feed's own
     /// names (`assignCategories`). Never fails; a show Apple cannot answer for keeps what it had.
     pub async fn assign_categories(
@@ -592,18 +617,7 @@ impl Catalog {
         priority: Priority,
     ) -> Vec<i32> {
         let assigned: Result<Vec<i32>, Upstream> = async {
-            let mut ids = Vec::new();
-            if let Some(itunes) = itunes {
-                ids = self
-                    .lookup(&[itunes.to_string()], priority)
-                    .await?
-                    .remove(itunes)
-                    .map(|s| s.category_ids)
-                    .unwrap_or_default();
-            }
-            if ids.is_empty() {
-                ids = self.category_ids_for_names(names).await?;
-            }
+            let ids = self.resolve_categories(itunes, names, priority).await?;
             if !ids.is_empty() {
                 kima_db::podcasts::set_category_ids(&self.0.pool, show, &ids)
                     .await

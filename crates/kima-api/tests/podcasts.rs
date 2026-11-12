@@ -20,6 +20,59 @@ use time::OffsetDateTime;
 use time::macros::datetime;
 use uuid::Uuid;
 
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn failed_episode_import_rolls_back_show(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    sqlx::query("CREATE FUNCTION reject_episode() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected episode failure'; END $$")
+        .execute(&pool).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_episode BEFORE INSERT ON podcast_episodes FOR EACH ROW EXECUTE FUNCTION reject_episode()")
+        .execute(&pool).await.unwrap();
+    let url = env.host.url("/failure.xml");
+    let res = env.subscribe(json!({"feedUrl": url})).await;
+    assert!(res.status_code().is_server_error());
+    let show = podcasts::show_by_feed_or_itunes(&pool, &url, None)
+        .await
+        .unwrap();
+    assert!(show.is_none(), "failed import left a visible show");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cancelling_category_lookup_never_commits_an_uncategorized_import(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let url = env.host.url("/cancel.xml");
+    {
+        let request = env.subscribe(json!({"feedUrl": url}));
+        tokio::pin!(request);
+        tokio::select! {
+            _ = env.host.category_requested.notified() => {},
+            _ = &mut request => panic!("import completed before category lookup"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => panic!("category lookup did not start"),
+        }
+        assert!(
+            podcasts::show_by_feed_or_itunes(&pool, &url, None)
+                .await
+                .unwrap()
+                .is_none(),
+            "show committed before its feed categories were resolved"
+        );
+    }
+    assert!(
+        podcasts::show_by_feed_or_itunes(&pool, &url, None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    env.host.category_release.notify_waiters();
+    env.host.category_release.notify_one();
+    let result = env.subscribe(json!({"feedUrl": url})).await;
+    assert_eq!(result.status_code(), StatusCode::OK);
+    let show = podcasts::show_by_feed_or_itunes(&pool, &url, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(show.category_ids, vec![1310]);
+}
+
 const STORED_ITUNES: &str = "1450241676";
 
 const FEED: &str = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Race Show</title><description>d</description>
@@ -32,6 +85,8 @@ const FEED: &str = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Ra
 struct FeedHost {
     base: String,
     task: tokio::task::JoinHandle<()>,
+    category_requested: Arc<tokio::sync::Notify>,
+    category_release: Arc<tokio::sync::Notify>,
 }
 
 impl FeedHost {
@@ -40,15 +95,41 @@ impl FeedHost {
         let addr = listener.local_addr().unwrap();
         let base = format!("http://{addr}");
         let race = Arc::new(tokio::sync::Barrier::new(2));
+        let category_requested = Arc::new(tokio::sync::Notify::new());
+        let signal = category_requested.clone();
+        let category_release = Arc::new(tokio::sync::Notify::new());
+        let release = category_release.clone();
+        let gated = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let me = base.clone();
         let app = Router::new().fallback(move |uri: Uri| {
             let (me, race) = (me.clone(), race.clone());
-            async move { answer(&me, &race, &uri).await }
+            let signal = signal.clone();
+            let release = release.clone();
+            let gated = gated.clone();
+            async move {
+                if uri.path() == "/cancel.xml" {
+                    gated.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                if uri.path().ends_with("/ws/genres")
+                    && gated.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    signal.notify_one();
+                    release.notified().await;
+                    return axum::Json(json!({"26":{"subgenres":{"1310":{"name":"Music"}}}}))
+                        .into_response();
+                }
+                answer(&me, &race, &uri).await
+            }
         });
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        FeedHost { base, task }
+        FeedHost {
+            base,
+            task,
+            category_requested,
+            category_release,
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -76,6 +157,18 @@ async fn answer(base: &str, race: &tokio::sync::Barrier, uri: &Uri) -> Response 
         return axum::Json(body).into_response();
     }
     match path {
+        "/cancel.xml" => (
+            [(header::CONTENT_TYPE, "application/rss+xml")],
+            FEED.replace(
+                "<rss version=\"2.0\">",
+                "<rss version=\"2.0\" xmlns:itunes=\"http://www.itunes.com/dtds/podcast-1.0.dtd\">",
+            )
+            .replace(
+                "<title>Race Show</title>",
+                "<title>Race Show</title><itunes:category text=\"Music\"/>",
+            ),
+        )
+            .into_response(),
         "/down.xml" => (StatusCode::SERVICE_UNAVAILABLE, "maintenance").into_response(),
         "/gone.xml" => (StatusCode::NOT_FOUND, "not here").into_response(),
         "/real.xml/" => {
@@ -311,6 +404,109 @@ async fn follows_once_however_often_it_is_asked(pool: PgPool) {
             &format!("SELECT count(*) FROM podcast_subscriptions WHERE podcast_id = '{stored}'")
         )
         .await,
+        1
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn concurrent_import_recovers_after_episode_rollback(pool: PgPool) {
+    use std::time::Duration;
+
+    let env = env(pool.clone()).await;
+    // nextval survives rollback, so only the first importer fails.
+    sqlx::raw_sql("CREATE SEQUENCE race_attempt; CREATE FUNCTION race_episode() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('race_attempt') = 1 THEN PERFORM pg_advisory_xact_lock(83472819); RAISE EXCEPTION 'injected first import failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER race_episode BEFORE INSERT ON podcast_episodes FOR EACH ROW EXECUTE FUNCTION race_episode()")
+        .execute(&pool).await.unwrap();
+    let mut gate = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(83472819)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let url = env.host.url("/race.xml");
+    let control = async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let (advisory, transaction): (i64, i64) = sqlx::query_as(
+                    "SELECT count(*) FILTER (WHERE wait_event = 'advisory'), count(*) FILTER (WHERE wait_event = 'transactionid') FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'",
+                ).fetch_one(&pool).await.unwrap();
+                if advisory >= 1 && transaction >= 1 { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("importers did not reach advisory and unique-index transaction waits");
+        sqlx::query("SELECT pg_advisory_unlock(83472819)")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+    };
+    let (a, b, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(
+            env.subscribe(json!({"feedUrl": url})),
+            env.subscribe(json!({"feedUrl": url})),
+            control
+        )
+    })
+    .await
+    .expect("concurrent imports did not finish");
+    let (failed, winner) = if a.status_code().is_server_error() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    assert!(failed.status_code().is_server_error());
+    winner.assert_status_ok();
+    let id: Uuid = winner.json::<Value>()["podcast"]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let stored = podcasts::show_by_feed_or_itunes(&pool, &url, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.id, id);
+    assert_eq!(stored.episode_count, 1);
+    assert_eq!(count(&pool, "SELECT count(*) FROM podcasts").await, 1);
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM podcast_episodes").await,
+        1
+    );
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM podcast_subscriptions").await,
+        1
+    );
+    assert!(podcasts::is_subscribed(&pool, env.user, id).await.unwrap());
+    let episode: (Uuid, String) = sqlx::query_as("SELECT podcast_id, guid FROM podcast_episodes")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(episode, (id, "race-1".to_string()));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn concurrent_follow_conflict_releases_single_connection(pool: PgPool) {
+    let small = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let env = env(small).await;
+    let url = env.host.url("/race.xml");
+    let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(
+            env.subscribe(json!({"feedUrl": url})),
+            env.subscribe(json!({"feedUrl": url}))
+        )
+    })
+    .await
+    .expect("conflicting import starved the single-connection pool");
+    a.assert_status_ok();
+    b.assert_status_ok();
+    assert_eq!(
+        a.json::<Value>()["podcast"]["id"],
+        b.json::<Value>()["podcast"]["id"]
+    );
+    assert_eq!(count(env.pool(), "SELECT count(*) FROM podcasts").await, 1);
+    assert_eq!(
+        count(env.pool(), "SELECT count(*) FROM podcast_episodes").await,
         1
     );
 }

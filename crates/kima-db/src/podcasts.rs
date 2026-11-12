@@ -69,6 +69,15 @@ pub struct NewEpisode {
 /// Stores a new show. A second show with the same feed URL or Apple id is a unique violation
 /// (23505); callers that race resolve it with [`show_by_feed_or_itunes`].
 pub async fn insert_show(pool: &PgPool, id: Uuid, s: &NewShow<'_>) -> sqlx::Result<Show> {
+    let mut connection = pool.acquire().await?;
+    insert_show_on(&mut connection, id, s).await
+}
+
+pub async fn insert_show_on(
+    connection: &mut sqlx::PgConnection,
+    id: Uuid,
+    s: &NewShow<'_>,
+) -> sqlx::Result<Show> {
     sqlx::query_as!(
         Show,
         "INSERT INTO podcasts (id, feed_url, title, author, description, image_url, itunes_id,
@@ -93,7 +102,7 @@ pub async fn insert_show(pool: &PgPool, id: Uuid, s: &NewShow<'_>) -> sqlx::Resu
         s.feed_etag,
         s.feed_last_modified
     )
-    .fetch_one(pool)
+    .fetch_one(connection)
     .await
 }
 
@@ -142,6 +151,16 @@ pub async fn insert_episodes(
     episodes: &[NewEpisode],
 ) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
+    let stored = insert_episodes_on(&mut tx, podcast, episodes).await?;
+    tx.commit().await?;
+    Ok(stored)
+}
+
+pub async fn insert_episodes_on(
+    connection: &mut sqlx::PgConnection,
+    podcast: Uuid,
+    episodes: &[NewEpisode],
+) -> sqlx::Result<u64> {
     let mut stored = 0;
     for e in episodes {
         stored += sqlx::query!(
@@ -165,11 +184,10 @@ pub async fn insert_episodes(
             e.file_size,
             e.mime_type
         )
-        .execute(&mut *tx)
+        .execute(&mut *connection)
         .await?
         .rows_affected();
     }
-    tx.commit().await?;
     Ok(stored)
 }
 

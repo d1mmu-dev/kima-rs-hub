@@ -19,7 +19,7 @@ use time::OffsetDateTime;
 use tokio::time::Instant;
 
 use crate::cache;
-use crate::gate::{Busy, Gate};
+use crate::gate::{Busy, Gate, Priority};
 use crate::guard;
 use crate::outcome::{Evidence, Failure, Outcome};
 use crate::record::Entry;
@@ -361,6 +361,12 @@ impl Net {
         Some(self.live.as_ref()?.gates[&source].concurrency())
     }
 
+    /// Snapshot of a source gate's registered waiter priorities, for diagnostics.
+    #[doc(hidden)]
+    pub fn queued_priorities(&self, source: Source) -> Option<Vec<bool>> {
+        Some(self.live.as_ref()?.gates[&source].queued_priorities())
+    }
+
     /// Whether outbound lookups may run now: a live client with the identification switch on
     /// (spec §15.3). A disabled client never is.
     pub fn enabled(&self) -> bool {
@@ -375,16 +381,40 @@ impl Net {
     }
 
     pub async fn get_json<T: DeserializeOwned>(&self, req: Req) -> Outcome<T> {
-        self.json(req).await
+        self.json(req, || async {}, None).await
+    }
+
+    /// Wait for caller admission only on a cache miss, before any live request.
+    pub async fn get_json_with_admission<T, F, Fut>(&self, req: Req, admit: F) -> Outcome<T>
+    where
+        T: DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        self.json(req, admit, None).await
+    }
+
+    /// Apply priority at the source gate, after cache lookup.
+    pub async fn get_json_with_priority<T: DeserializeOwned>(
+        &self,
+        req: Req,
+        priority: &Priority,
+    ) -> Outcome<T> {
+        self.json(req, || async {}, Some(priority)).await
     }
 
     pub async fn post_form_json<T: DeserializeOwned>(&self, req: Req) -> Outcome<T> {
-        self.json(req).await
+        self.json(req, || async {}, None).await
     }
 
     /// Switch, cache, pause, slot, cell, send (spec §7.3-§7.4). The switch comes first, so an
     /// off switch answers `DISABLED` whatever is cached.
-    async fn json<T: DeserializeOwned>(&self, req: Req) -> Outcome<T> {
+    async fn json<T, F, Fut>(&self, req: Req, admit: F, priority: Option<&Priority>) -> Outcome<T>
+    where
+        T: DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let Some(live) = &self.live else {
             return disabled();
         };
@@ -392,16 +422,25 @@ impl Net {
             return disabled();
         }
         let secrets = Secrets::of(&req);
-        let out = self.json_cached(live, &req, &secrets).await;
+        let out = self
+            .json_cached(live, &req, &secrets, admit, priority)
+            .await;
         scrubbed(out, &secrets)
     }
 
-    async fn json_cached<T: DeserializeOwned>(
+    async fn json_cached<T, F, Fut>(
         &self,
         live: &Live,
         req: &Req,
         secrets: &Secrets,
-    ) -> Outcome<T> {
+        admit: F,
+        priority: Option<&Priority>,
+    ) -> Outcome<T>
+    where
+        T: DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let source = req.host.source();
         let cached = match (req.no_cache, req.ttl.or(source.ttl())) {
             (false, Some(ttl)) => {
@@ -425,8 +464,9 @@ impl Net {
                 }
             }
         }
+        admit().await;
         // An echoed key is scrubbed before anything is parsed, stored or returned.
-        let fetched = match self.json_live(live, req, secrets).await {
+        let fetched = match self.json_live(live, req, secrets, priority).await {
             Outcome::Answered(value) => Outcome::Answered(secrets.scrub_json(value)),
             Outcome::Absent(evidence) => Outcome::Absent(Evidence(secrets.scrub_json(evidence.0))),
             other => other,
@@ -465,7 +505,13 @@ impl Net {
     }
 
     /// Pause, slot, cell, send, with the rate-limit retries; the answer as JSON.
-    async fn json_live(&self, live: &Live, req: &Req, secrets: &Secrets) -> Outcome<Value> {
+    async fn json_live(
+        &self,
+        live: &Live,
+        req: &Req,
+        secrets: &Secrets,
+        priority: Option<&Priority>,
+    ) -> Outcome<Value> {
         let source = req.host.source();
         if let Some(until) = self.paused_until(source) {
             return Outcome::RateLimited { until };
@@ -475,8 +521,10 @@ impl Net {
         let per_request = req.timeout.unwrap_or(limits.timeout);
         let mut budget_ends: Option<Instant> = None;
         let mut attempt = 0;
+        let default_priority = Priority::background();
+        let priority = priority.unwrap_or(&default_priority);
         loop {
-            let permit = match gate.acquire(req.max_wait).await {
+            let permit = match gate.acquire_with_priority(req.max_wait, priority).await {
                 Ok(p) => p,
                 Err(Busy) => {
                     return transient("BUSY", format!("{} is busy", source.as_str()));

@@ -40,6 +40,205 @@ fn answered(out: Outcome<AudioResponse>) -> AudioResponse {
     }
 }
 
+async fn stalled_host() -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/ep.mp3", listener.local_addr().unwrap());
+    let count = Arc::new(AtomicUsize::new(0));
+    let observed = count.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let observed = observed.clone();
+            tokio::spawn(async move {
+                let mut request = [0; 4096];
+                if socket.read(&mut request).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                observed.fetch_add(1, Ordering::SeqCst);
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\na")
+                    .await;
+                let _ = socket.read(&mut request).await;
+            });
+        }
+    });
+    (url, count, task)
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn backpressure_timeout_reports_error_and_restores_slot_retry(pool: PgPool) {
+    let host = AudioHost::start(bytes(16 * 1024 * 1024), AudioMode::Normal).await;
+    let net = net(&pool);
+    let url = format!("{}/ep.mp3", host.url());
+    let mut responses = Vec::new();
+    for _ in 0..16 {
+        responses.push(answered(net.open_audio(&url, None, FIRST_BYTE).await));
+    }
+    assert_eq!(
+        net.open_audio(&url, None, Duration::from_millis(100))
+            .await
+            .code(),
+        Some("BUSY")
+    );
+    tokio::time::timeout(Duration::from_secs(38), async {
+        while host.closed_early() < 16 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("backpressure must close upstreams");
+    let mut stream = responses.pop().unwrap().body;
+    let mut count = 0;
+    let error = loop {
+        match stream.next().await {
+            Some(Ok(chunk)) => count += chunk.len(),
+            Some(Err(error)) => break error,
+            None => panic!("backpressure timeout was masked as EOF"),
+        }
+    };
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(count <= 65536, "unbounded channel: {count}");
+    assert!(stream.next().await.is_none());
+    drop(answered(net.open_audio(&url, None, FIRST_BYTE).await));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unpolled_stalled_bodies_close_and_restore_admission_retry(pool: PgPool) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let closed_tx = closed_tx.clone();
+            tokio::spawn(async move {
+                let mut buf = [0; 4096];
+                assert!(socket.read(&mut buf).await.unwrap() > 0);
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\na")
+                    .await
+                    .unwrap();
+                let _ = socket.read(&mut buf).await;
+                let _ = closed_tx.send(());
+            });
+        }
+    });
+    let net = net(&pool);
+    let url = format!("http://{addr}/audio");
+    let mut responses = Vec::new();
+    for _ in 0..16 {
+        responses.push(answered(net.open_audio(&url, None, FIRST_BYTE).await));
+    }
+    assert_eq!(
+        net.open_audio(&url, None, Duration::from_millis(100))
+            .await
+            .code(),
+        Some("BUSY")
+    );
+    tokio::time::timeout(Duration::from_secs(36), async {
+        for _ in 0..16 {
+            closed_rx.recv().await.unwrap();
+        }
+    })
+    .await
+    .expect("unpolled upstream connections must close");
+    let replacement = answered(net.open_audio(&url, None, FIRST_BYTE).await);
+    drop(replacement);
+    for response in responses {
+        let mut stream = response.body;
+        assert_eq!(stream.next().await.unwrap().unwrap(), "a");
+        assert_eq!(
+            stream.next().await.unwrap().unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert!(stream.next().await.is_none());
+    }
+    server.abort();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unpolled_audio_responses_bound_admission_wait(pool: PgPool) {
+    let (url, count, server) = stalled_host().await;
+    let net = net(&pool);
+    let mut responses = Vec::new();
+    for _ in 0..16 {
+        responses.push(answered(net.open_audio(&url, None, FIRST_BYTE).await));
+    }
+    for _ in 0..2 {
+        let out = tokio::time::timeout(
+            Duration::from_secs(2),
+            net.open_audio(&url, None, Duration::from_millis(100)),
+        )
+        .await
+        .expect("admission must be bounded even when bodies are not polled");
+        assert_eq!(out.code(), Some("BUSY"));
+        assert!(matches!(out, Outcome::Transient(_)));
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 16);
+    }
+    drop(responses.pop());
+    let replacement = answered(net.open_audio(&url, None, FIRST_BYTE).await);
+    drop(replacement);
+    drop(answered(net.open_audio(&url, None, FIRST_BYTE).await));
+    server.abort();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn audio_slots_survive_headers_and_release_on_drop_or_eof(pool: PgPool) {
+    let (url, count, server) = stalled_host().await;
+    let net = std::sync::Arc::new(net(&pool));
+    let mut bodies = Vec::new();
+    for _ in 0..16 {
+        bodies.push(answered(net.open_audio(&url, None, FIRST_BYTE).await));
+    }
+    let other = net.clone();
+    let other_url = url.clone();
+    let mut next =
+        tokio::spawn(async move { other.open_audio(&other_url, None, FIRST_BYTE).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if next.is_finished()
+                || !net
+                    .queued_priorities(kima_net::Source::Audio)
+                    .unwrap()
+                    .is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("waiter registered");
+    assert!(!next.is_finished(), "17th audio stream exceeded the cap");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 16);
+    drop(bodies.pop());
+    let replacement = answered(
+        tokio::time::timeout(Duration::from_secs(5), &mut next)
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    drop(replacement);
+    let final_body = tokio::time::timeout(
+        Duration::from_secs(5),
+        net.open_audio(&url, None, FIRST_BYTE),
+    )
+    .await
+    .unwrap();
+    drop(answered(final_body));
+    server.abort();
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn range_passes_through_206(pool: PgPool) {
     let data = bytes(1000);
@@ -147,6 +346,34 @@ async fn connection_cut_is_a_body_error(pool: PgPool) {
         failed,
         "a cut connection must not look like the end of the file"
     );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stalled_audio_body_times_out_after_headers(pool: PgPool) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(socket.read(&mut request).await.unwrap() > 0);
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(40)).await;
+    });
+    let mut res = answered(
+        net(&pool)
+            .open_audio(&format!("http://{addr}/audio"), None, FIRST_BYTE)
+            .await,
+    );
+    assert_eq!(res.body.next().await.unwrap().unwrap(), "a");
+    let next = tokio::time::timeout(Duration::from_secs(33), res.body.next())
+        .await
+        .expect("stalled body never timed out");
+    assert!(next.unwrap().is_err());
+    server.abort();
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

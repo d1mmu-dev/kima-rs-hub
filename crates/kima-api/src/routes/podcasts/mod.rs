@@ -10,6 +10,7 @@ use crate::extract::ApiJson;
 use crate::state::AppState;
 
 mod discovery;
+mod preview;
 mod progress;
 mod stream;
 
@@ -28,6 +29,7 @@ pub fn routes() -> Router<AppState> {
         )
         .merge(stream::routes())
         .merge(discovery::routes())
+        .merge(preview::routes())
 }
 
 async fn subscribe(

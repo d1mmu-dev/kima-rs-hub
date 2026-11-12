@@ -4,4 +4,5 @@ pub mod cache;
 pub mod catalog;
 pub mod ctx;
 pub mod feed;
+pub mod preview;
 pub mod upstream;

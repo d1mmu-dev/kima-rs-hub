@@ -33,7 +33,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// An upstream failure is never kima's own 500 (`appleFailure`).
-fn apple_failure(e: Upstream) -> ApiError {
+pub(crate) fn apple_failure(e: Upstream) -> ApiError {
     match e {
         Upstream::Missing(_) => ApiError::NotFound("Apple Podcasts has no such chart or show"),
         Upstream::Down(_) => {

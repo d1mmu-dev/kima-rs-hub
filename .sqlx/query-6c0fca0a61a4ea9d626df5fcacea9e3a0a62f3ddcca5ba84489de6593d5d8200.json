@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO podcast_downloads (user_id, episode_id, local_path, file_size_mb, downloaded_at, last_accessed_at)\n         VALUES ($1, $2, $3, $4, now(), now())\n         ON CONFLICT (user_id, episode_id) DO UPDATE\n         SET local_path = $3, file_size_mb = $4, downloaded_at = now(), last_accessed_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6c0fca0a61a4ea9d626df5fcacea9e3a0a62f3ddcca5ba84489de6593d5d8200"
+}

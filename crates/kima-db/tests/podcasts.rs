@@ -338,3 +338,166 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
         .and_then(|d| d.code())
         .is_some_and(|c| c == "23505")
 }
+
+// M6 Task 12: the episode cache's download-record helpers.
+
+async fn show_and_episode(pool: &PgPool) -> (Uuid, Uuid) {
+    let s = podcasts::insert_show(
+        pool,
+        Uuid::now_v7(),
+        &show("https://cache.example/feed", "Cache Show", None),
+    )
+    .await
+    .unwrap();
+    podcasts::insert_episodes(
+        pool,
+        s.id,
+        &[episode("c1", "Cached One", at(1_767_225_600))],
+    )
+    .await
+    .unwrap();
+    let episode_id: Uuid = sqlx::query_scalar("SELECT id FROM podcast_episodes WHERE guid = 'c1'")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (s.id, episode_id)
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn upsert_download_then_fetch_the_record(pool: PgPool) {
+    let ana = user(&pool, "ana").await;
+    let (_, ep) = show_and_episode(&pool).await;
+    assert!(
+        podcasts::download_record(&pool, ep)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    podcasts::upsert_download(&pool, ana, ep, "podcast-audio/x.audio", 12.5)
+        .await
+        .unwrap();
+    let rec = podcasts::download_record(&pool, ep).await.unwrap().unwrap();
+    assert_eq!(rec.file_size_mb, 12.5);
+    // Upsert again for the same user replaces the row, not adds another.
+    podcasts::upsert_download(&pool, ana, ep, "podcast-audio/x.audio", 13.0)
+        .await
+        .unwrap();
+    assert_eq!(count(&pool, "podcast_downloads").await, 1);
+    assert_eq!(
+        podcasts::download_record(&pool, ep)
+            .await
+            .unwrap()
+            .unwrap()
+            .file_size_mb,
+        13.0
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn touch_download_updates_every_user_row_for_the_episode(pool: PgPool) {
+    let ana = user(&pool, "ana").await;
+    let bo = user(&pool, "bo").await;
+    let (_, ep) = show_and_episode(&pool).await;
+    podcasts::upsert_download(&pool, ana, ep, "podcast-audio/x.audio", 1.0)
+        .await
+        .unwrap();
+    podcasts::upsert_download(&pool, bo, ep, "podcast-audio/x.audio", 1.0)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE podcast_downloads SET last_accessed_at = now() - interval '40 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    podcasts::touch_download(&pool, ep).await.unwrap();
+    let stale: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM podcast_downloads WHERE episode_id = $1 AND last_accessed_at < now() - interval '1 day'",
+    )
+    .bind(ep)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stale, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn delete_downloads_for_episode_removes_every_users_row(pool: PgPool) {
+    let ana = user(&pool, "ana").await;
+    let bo = user(&pool, "bo").await;
+    let (_, ep) = show_and_episode(&pool).await;
+    podcasts::upsert_download(&pool, ana, ep, "podcast-audio/x.audio", 1.0)
+        .await
+        .unwrap();
+    podcasts::upsert_download(&pool, bo, ep, "podcast-audio/x.audio", 1.0)
+        .await
+        .unwrap();
+    assert_eq!(
+        podcasts::delete_downloads_for_episode(&pool, ep)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(count(&pool, "podcast_downloads").await, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn set_episode_file_size_and_duration(pool: PgPool) {
+    let (_, ep) = show_and_episode(&pool).await;
+    podcasts::set_episode_file_size(&pool, ep, 123_456)
+        .await
+        .unwrap();
+    let size: i64 = sqlx::query_scalar("SELECT file_size FROM podcast_episodes WHERE id = $1")
+        .bind(ep)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(size, 123_456);
+    assert!(
+        podcasts::set_episode_duration(&pool, ep, 5344)
+            .await
+            .unwrap()
+    );
+    let duration: i32 = sqlx::query_scalar("SELECT duration FROM podcast_episodes WHERE id = $1")
+        .bind(ep)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(duration, 5344);
+    // No such episode: no row changed.
+    assert!(
+        !podcasts::set_episode_duration(&pool, Uuid::now_v7(), 1)
+            .await
+            .unwrap()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn expired_downloads_lists_only_rows_past_their_last_access_cutoff(pool: PgPool) {
+    let ana = user(&pool, "ana").await;
+    let (_, ep) = show_and_episode(&pool).await;
+    podcasts::upsert_download(&pool, ana, ep, "podcast-audio/x.audio", 2.0)
+        .await
+        .unwrap();
+    let cutoff_future = OffsetDateTime::now_utc() + time::Duration::days(1);
+    let expired = podcasts::expired_downloads(&pool, cutoff_future)
+        .await
+        .unwrap();
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].episode_id, ep);
+    assert_eq!(expired[0].user_id, ana);
+    assert_eq!(expired[0].local_path, "podcast-audio/x.audio");
+    assert_eq!(expired[0].file_size_mb, 2.0);
+    let cutoff_past = OffsetDateTime::now_utc() - time::Duration::days(1);
+    assert!(
+        podcasts::expired_downloads(&pool, cutoff_past)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    podcasts::delete_download_row(&pool, ana, ep).await.unwrap();
+    assert!(
+        podcasts::expired_downloads(&pool, cutoff_future)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

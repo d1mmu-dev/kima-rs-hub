@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE podcast_episodes SET duration = $2 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f0ecbecae9e4f9aec4a9e5a7618c5ab2b305e3f86f0b219ca8aa9e70144c6d8a"
+}

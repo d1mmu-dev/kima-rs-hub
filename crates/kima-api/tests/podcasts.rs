@@ -760,3 +760,250 @@ async fn unique_apple_id_race_falls_back_to_the_stored_show(pool: PgPool) {
     assert_eq!(res.json::<Value>()["podcast"]["id"], stored.to_string());
     assert_eq!(count(env.pool(), "SELECT count(*) FROM podcasts").await, 1);
 }
+
+// Task 7: show detail and bounded episode pages.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn episode_pages_are_bounded_report_the_true_total_and_order_on_the_server(pool: PgPool) {
+    let env = env(pool).await;
+    let show = store(env.pool(), "https://f.invalid/pages", "Paged", None).await;
+    let episodes: Vec<NewEpisode> = (0..120)
+        .map(|n| episode(&format!("page-{n:03}"), day(1) + time::Duration::seconds(n)))
+        .collect();
+    podcasts::insert_episodes(env.pool(), show, &episodes)
+        .await
+        .unwrap();
+    podcasts::subscribe(env.pool(), env.user, show)
+        .await
+        .unwrap();
+    for (suffix, key) in [("", "episodeTotal"), ("/episodes", "total")] {
+        let res = env
+            .get(&format!(
+                "/api/podcasts/{show}{suffix}?limit=2&offset=3&order=oldest"
+            ))
+            .await;
+        res.assert_status_ok();
+        let body = res.json::<Value>();
+        assert_eq!(body[key], 120);
+        assert_eq!(body["episodes"].as_array().unwrap().len(), 2);
+        assert_eq!(body["episodes"][0]["title"], "page-003");
+        assert_eq!(body["episodes"][1]["title"], "page-004");
+        assert_eq!(body["episodes"][0]["isDownloaded"], false);
+        assert_eq!(body["episodes"][0]["progress"], Value::Null);
+    }
+    let res = env
+        .get(&format!("/api/podcasts/{show}"))
+        .await
+        .json::<Value>();
+    assert_eq!(res["episodes"].as_array().unwrap().len(), 50);
+    assert_eq!(res["episodes"][0]["title"], "page-119");
+    assert_eq!(res["episodeLimit"], 50);
+    assert_eq!(res["episodeOffset"], 0);
+    let res = env
+        .get(&format!("/api/podcasts/{show}/episodes?limit=500"))
+        .await
+        .json::<Value>();
+    assert_eq!(res["limit"], 200);
+    assert_eq!(res["episodes"].as_array().unwrap().len(), 120);
+    for bad in ["abc", "-3", "0"] {
+        let res = env
+            .get(&format!(
+                "/api/podcasts/{show}/episodes?limit={bad}&offset=-5"
+            ))
+            .await
+            .json::<Value>();
+        assert_eq!(
+            (res["limit"].clone(), res["offset"].clone()),
+            (json!(50), json!(0))
+        );
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn next_episode_skips_finished_resumes_progress_and_works_without_subscription(pool: PgPool) {
+    let env = env(pool).await;
+    let show = store(env.pool(), "https://f.invalid/next2", "Next", None).await;
+    add_episodes(
+        env.pool(),
+        show,
+        &[
+            ("nx1", day(1)),
+            ("nx2", day(8)),
+            ("nx3", day(15)),
+            ("nx4", day(22)),
+        ],
+    )
+    .await;
+    progress(env.pool(), env.user, "nx2", 600.0, 600.0, true).await;
+    progress(env.pool(), env.user, "nx3", 120.0, 600.0, false).await;
+    let id1 = episode_id(env.pool(), "nx1").await;
+    let id3 = episode_id(env.pool(), "nx3").await;
+    let id4 = episode_id(env.pool(), "nx4").await;
+    let res = env
+        .get(&format!("/api/podcasts/{show}/episodes/{id1}/next"))
+        .await;
+    res.assert_status_ok();
+    let body = res.json::<Value>();
+    assert_eq!(body["podcast"]["id"], show.to_string());
+    assert_eq!(body["episode"]["id"], id3.to_string());
+    assert_eq!(body["episode"]["progress"]["currentTime"], 120);
+    assert_eq!(body["episode"]["progress"]["progress"], 20);
+    let end = env
+        .get(&format!("/api/podcasts/{show}/episodes/{id4}/next"))
+        .await;
+    assert_eq!(end.json::<Value>(), json!({"episode": null}));
+    for (s, e) in [(Uuid::now_v7(), id1), (show, Uuid::now_v7())] {
+        let r = env
+            .get(&format!("/api/podcasts/{s}/episodes/{e}/next"))
+            .await;
+        r.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(r.json::<Value>(), json!({"error": "Episode not found"}));
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn listening_lists_progress_and_newest_unplayed_only_for_followed_shows(pool: PgPool) {
+    let env = env(pool).await;
+    let a = store(env.pool(), "https://f.invalid/listen-a", "A", None).await;
+    let b = store(env.pool(), "https://f.invalid/listen-b", "B", None).await;
+    let c = store(env.pool(), "https://f.invalid/listen-c", "C", None).await;
+    let other = store(env.pool(), "https://f.invalid/listen-other", "Other", None).await;
+    add_episodes(
+        env.pool(),
+        a,
+        &[("a-new", day(10)), ("a-half", day(5)), ("a-done", day(1))],
+    )
+    .await;
+    add_episodes(env.pool(), b, &[("b-new", day(11)), ("b-half", day(8))]).await;
+    add_episodes(env.pool(), c, &[("c-new", day(9)), ("c-old", day(2))]).await;
+    add_episodes(env.pool(), other, &[("other", day(12))]).await;
+    for id in [a, b, c] {
+        podcasts::subscribe(env.pool(), env.user, id).await.unwrap();
+    }
+    progress(env.pool(), env.user, "a-half", 300.0, 600.0, false).await;
+    progress(env.pool(), env.user, "b-half", 60.0, 600.0, false).await;
+    progress(env.pool(), env.user, "a-done", 600.0, 600.0, true).await;
+    progress(env.pool(), env.user, "c-new", 600.0, 600.0, true).await;
+    progress(env.pool(), env.user, "other", 60.0, 600.0, false).await;
+    sqlx::query("UPDATE podcast_progress SET last_played_at = $1 WHERE episode_id = $2")
+        .bind(day(13))
+        .bind(episode_id(env.pool(), "a-half").await)
+        .execute(env.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE podcast_progress SET last_played_at = $1 WHERE episode_id = $2")
+        .bind(day(14))
+        .bind(episode_id(env.pool(), "b-half").await)
+        .execute(env.pool())
+        .await
+        .unwrap();
+    let res = env.get("/api/podcasts/listening").await;
+    res.assert_status_ok();
+    let body = res.json::<Value>();
+    let titles = |key: &str| {
+        body[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["episode"]["title"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(titles("inProgress"), ["b-half", "a-half"]);
+    assert_eq!(body["inProgress"][1]["episode"]["progress"]["progress"], 50);
+    assert_eq!(titles("newEpisodes"), ["b-new", "a-new"]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn detail_requires_follow_and_survives_apple_down_with_user_progress_and_downloads(
+    pool: PgPool,
+) {
+    let env = env(pool).await;
+    let show = store(
+        env.pool(),
+        "https://f.invalid/detail",
+        "Detail",
+        Some("555"),
+    )
+    .await;
+    add_episodes(env.pool(), show, &[("detail-ep", day(1))]).await;
+    let ep = episode_id(env.pool(), "detail-ep").await;
+    for path in [
+        format!("/api/podcasts/{show}"),
+        format!("/api/podcasts/{show}/episodes"),
+    ] {
+        let res = env.get(&path).await;
+        res.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(
+            res.json::<Value>(),
+            json!({"error":"Podcast not found or not subscribed"})
+        );
+    }
+    podcasts::subscribe(env.pool(), env.user, show)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE podcasts SET category_ids='{1495}' WHERE id=$1")
+        .bind(show)
+        .execute(env.pool())
+        .await
+        .unwrap();
+    progress(env.pool(), env.user, "detail-ep", 30.0, 60.0, false).await;
+    sqlx::query("INSERT INTO podcast_downloads(user_id,episode_id,local_path,file_size_mb) VALUES ($1,$2,'test',1)")
+        .bind(env.user).bind(ep).execute(env.pool()).await.unwrap();
+    let res = env.get(&format!("/api/podcasts/{show}")).await;
+    res.assert_status_ok();
+    let body = res.json::<Value>();
+    assert_eq!(body["genres"], json!([]));
+    assert_eq!(body["categories"], json!([]));
+    assert_eq!(body["isSubscribed"], true);
+    assert_eq!(body["feedUrl"], "https://f.invalid/detail");
+    assert_eq!(body["episodes"][0]["isDownloaded"], true);
+    assert_eq!(body["episodes"][0]["progress"]["progress"], 50);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn next_and_episode_pages_break_equal_date_ties_by_id(pool: PgPool) {
+    let env = env(pool).await;
+    let show = store(env.pool(), "https://f.invalid/ties", "Ties", None).await;
+    add_episodes(
+        env.pool(),
+        show,
+        &[("tie-a", day(1)), ("tie-b", day(1)), ("tie-c", day(1))],
+    )
+    .await;
+    podcasts::subscribe(env.pool(), env.user, show)
+        .await
+        .unwrap();
+    let mut ids = vec![
+        episode_id(env.pool(), "tie-a").await,
+        episode_id(env.pool(), "tie-b").await,
+        episode_id(env.pool(), "tie-c").await,
+    ];
+    ids.sort();
+    let next = env
+        .get(&format!("/api/podcasts/{show}/episodes/{}/next", ids[0]))
+        .await
+        .json::<Value>();
+    assert_eq!(next["episode"]["id"], ids[1].to_string());
+    let page = env
+        .get(&format!("/api/podcasts/{show}/episodes?order=oldest"))
+        .await
+        .json::<Value>();
+    let got: Vec<_> = page["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+        .collect();
+    assert_eq!(got, ids);
+    let page = env
+        .get(&format!("/api/podcasts/{show}/episodes"))
+        .await
+        .json::<Value>();
+    let got: Vec<_> = page["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+        .collect();
+    ids.reverse();
+    assert_eq!(got, ids);
+}

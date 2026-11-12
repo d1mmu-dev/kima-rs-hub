@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.id, p.track_id, p.played_at, p.heard, coalesce(t.display_title,t.title) AS \"title!\", coalesce(ar.display_name,ar.name) AS \"artist!\", t.duration_secs AS duration FROM plays p JOIN tracks t ON t.id=p.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE p.user_id=$1 ORDER BY p.played_at,p.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "track_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "played_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "heard",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "title!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "artist!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "duration",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      false
+    ]
+  },
+  "hash": "0bf48b0e817851b560bef6988d4980a8cb3e4792d26696aa691e45025d59759a"
+}

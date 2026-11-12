@@ -790,6 +790,17 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     )
     .execute(&mut *conn)
     .await?;
+    // Copy in user order so concurrent handovers acquire unique-index locks consistently.
+    // A destination row, including one committed after our snapshot, wins unchanged.
+    sqlx::query!(
+        "INSERT INTO play_audit_ignore (user_id, track_id, ignored_at)
+         SELECT user_id, $2, ignored_at FROM play_audit_ignore WHERE track_id = $1
+         ORDER BY user_id ON CONFLICT (user_id, track_id) DO NOTHING",
+        from,
+        to
+    )
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 

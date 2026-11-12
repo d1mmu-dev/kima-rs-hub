@@ -1,0 +1,316 @@
+{
+  "listening": {
+    "bySource": {
+      "LIBRARY": 3
+    },
+    "clock": [
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ],
+    "distinctAlbums": 1,
+    "distinctArtists": 1,
+    "distinctTracks": 2,
+    "drift": [
+      {
+        "bpm": null,
+        "energy": null,
+        "month": "2026-11",
+        "plays": 3,
+        "valence": null
+      }
+    ],
+    "estimatedSeconds": 1206,
+    "firstPlay": "2026-11-11T06:51:22.584Z",
+    "lastPlay": "2026-11-12T06:51:22.517Z",
+    "peak": {
+      "hour": 6,
+      "plays": 2,
+      "weekday": 3
+    },
+    "plays": 3,
+    "shape": [],
+    "topArtists": [
+      {
+        "estimatedSeconds": 1206,
+        "id": "01a1ce86-77a7-765b-a0ed-4191dc5e4b34",
+        "name": "Untagged Artist",
+        "plays": 3
+      }
+    ],
+    "topTracks": [
+      {
+        "artist": "Untagged Artist",
+        "id": "01a1ce86-77a9-7417-a90d-948be534416d",
+        "plays": 2,
+        "title": "First"
+      },
+      {
+        "artist": "Untagged Artist",
+        "id": "01a1ce86-77c5-72a8-af00-f96dff5c4273",
+        "plays": 1,
+        "title": "Third"
+      }
+    ]
+  },
+  "period": "all",
+  "shelf": {
+    "albums": {
+      "heard": 1,
+      "total": 4
+    },
+    "analysis": {
+      "done": 0,
+      "failed": 0,
+      "pending": 14,
+      "total": 14
+    },
+    "artists": {
+      "heard": 1,
+      "total": 4
+    },
+    "decades": [
+      {
+        "albums": 1,
+        "decade": 1990,
+        "heard": 1
+      },
+      {
+        "albums": 2,
+        "decade": 2000,
+        "heard": 0
+      },
+      {
+        "albums": 1,
+        "decade": 2010,
+        "heard": 0
+      }
+    ],
+    "neverPlayed": 12,
+    "tracks": {
+      "heard": 2,
+      "total": 14
+    }
+  },
+  "signature": {
+    "albumHabit": {
+      "inOrderPct": 0,
+      "moves": 1,
+      "sameAlbumPct": 100
+    },
+    "concentration": {
+      "distinct": 2,
+      "forEighty": 2,
+      "forHalf": 1
+    },
+    "era": {
+      "buckets": [
+        {
+          "label": "before 2000",
+          "percent": 100,
+          "plays": 3
+        }
+      ],
+      "medianYear": 1999
+    },
+    "hourly": [],
+    "key": null,
+    "ownedVsPlayed": []
+  },
+  "spoken": {
+    "audiobooks": {
+      "current": null,
+      "finished": 0,
+      "inProgress": 0,
+      "seconds": 0,
+      "setAside": 0,
+      "topAuthors": []
+    },
+    "podcasts": {
+      "backlog": 0,
+      "finished": 0,
+      "inProgress": 0,
+      "seconds": 0,
+      "subscriptions": 0
+    }
+  }
+}

@@ -18,6 +18,7 @@ mod playlists;
 mod plays;
 mod search;
 mod settings;
+mod stats;
 mod stubs;
 mod system;
 mod system_settings;
@@ -38,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .merge(library::routes())
         .merge(search::routes())
         .merge(plays::routes())
+        .merge(stats::routes())
         .merge(playlists::routes())
         .merge(playback_state::routes())
         .merge(settings::routes())

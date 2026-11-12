@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Capture M-SYNC wire fixtures from THIS checkout's server and a fresh run-owned pgvector cluster.
+# Capture M-SYNC and M-STATS wire fixtures from THIS checkout's server and a fresh run-owned pgvector cluster.
 # No caller database is accepted. Requires docker, ffmpeg, jq, curl, psql and cargo.
 set -euo pipefail
 if [[ -n "${DATABASE_URL:-}" || -n "${PGDATABASE:-}" ]]; then
@@ -89,7 +89,32 @@ capture playlists_list GET /playlists
 capture playlist_detail GET "/playlists/$id"
 # Valid rerun on the fresh cluster; no external provider traffic (KIMA_IDENTIFY=off).
 capture enrichment_rerun POST /enrichment/rerun '{"step":"identification"}'
-for name in me settings public_config library_removals playlist_create playlist_update playlists_list playlist_detail enrichment_rerun; do
+# M-STATS: the ten /stats routes. Two plays through the API (kima-rs records them heard), then
+# two heard=false rows by SQL (no kima-rs writer produces one, and only they can be a provable
+# skip): "First" (900 s) left after 60 s for "Third" (6 s, too short to count).
+id_of() { jq -er --arg t "$1" '.tracks[] | select(.title == $t) | .id' <<< "$tracks"; }
+first="$(id_of First)"; second="$(id_of Second)"; third="$(id_of Third)"
+request POST /plays "$(jq -nc --arg id "$first" '{trackId:$id,secondsListened:900}')" >/dev/null
+request POST /plays "$(jq -nc --arg id "$second" '{trackId:$id,secondsListened:6}')" >/dev/null
+user="$(request GET /auth/me '' | jq -er .id)"
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -qX -v u="$user" -v a="$first" -v b="$third" <<'SQL'
+INSERT INTO plays (id, user_id, track_id, played_at, source, heard) VALUES
+  (gen_random_uuid(), :'u', :'a', now() - interval '1 day', 'LIBRARY', false),
+  (gen_random_uuid(), :'u', :'b', now() - interval '1 day' + interval '60 seconds', 'LIBRARY', false);
+SQL
+capture stats_response_s1 GET '/stats?period=all&tz=UTC'
+last="$(jq -er '.listening.lastPlay' "$stage/stats_response_s1_response.json")"
+capture stats_hour GET "/stats/hour?dow=$(date -u -d "$last" +%w)&hour=$(date -u -d "$last" +%-H)&tz=UTC"
+capture stats_tracks GET '/stats/tracks?of=top'
+capture stats_track_plays GET "/stats/track/$first/plays"
+capture stats_region GET '/stats/region?x=12&y=12'
+capture stats_ignore POST /stats/false-starts/ignore "$(jq -nc --arg id "$second" '{trackIds:[$id]}')"
+capture stats_false_starts GET /stats/false-starts
+capture stats_collapse POST /stats/false-starts/collapse '{"trackIds":[]}'
+capture stats_remove POST /stats/false-starts/remove "$(jq -nc --arg id "$first" '{trackIds:[$id]}')"
+capture stats_restore POST /stats/false-starts/restore "$(jq -nc --arg id "$second" '{trackIds:[$id]}')"
+for name in me settings public_config library_removals playlist_create playlist_update playlists_list playlist_detail enrichment_rerun \
+    stats_response_s1 stats_hour stats_tracks stats_track_plays stats_region stats_false_starts stats_collapse stats_remove stats_ignore stats_restore; do
   cp "$stage/${name}_response.json" "crates/kima-api-types/tests/fixtures/${name}_response.json"
 done
 echo 'Capture complete (raw dynamic UUIDs/timestamps retained); DB and server removed on exit.' >&2

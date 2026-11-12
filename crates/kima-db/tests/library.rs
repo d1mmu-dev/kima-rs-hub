@@ -821,9 +821,27 @@ async fn replaced_file_hands_history_to_copy(pool: PgPool) {
     rate(&pool, u, mp3, 4).await;
     bookmark(&pool, u, mp3, 1234).await;
     let p = playlist(&pool, u, &[mp3]).await;
+    let ben = user(&pool, "ben").await;
+    sqlx::query("INSERT INTO play_audit_ignore (user_id, track_id, ignored_at) VALUES ($1, $3, '2020-01-01'), ($2, $3, '2021-01-01'), ($2, $4, '2022-01-01')")
+        .bind(u).bind(ben).bind(mp3).bind(flac).execute(&pool).await.unwrap();
     make_missing(&pool, mp3, 8).await;
 
     let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    let ignores: Vec<(uuid::Uuid, uuid::Uuid, OffsetDateTime)> = sqlx::query_as(
+        "SELECT user_id, track_id, ignored_at FROM play_audit_ignore ORDER BY ignored_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ignores.len(), 2);
+    assert_eq!(
+        (ignores[0].0, ignores[0].1, ignores[0].2.year()),
+        (u, flac, 2020)
+    );
+    assert_eq!(
+        (ignores[1].0, ignores[1].1, ignores[1].2.year()),
+        (ben, flac, 2022)
+    );
     assert_eq!(r.tracks, 1);
     assert_eq!(r.playlists, vec![(u, p)]);
 
@@ -846,6 +864,103 @@ async fn replaced_file_hands_history_to_copy(pool: PgPool) {
     let log = log_rows(&pool).await;
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].4, "replaced-by-another-file");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn concurrent_destination_ignore_does_not_abort_retirement(pool: PgPool) {
+    use tokio::time::{Instant, sleep, timeout};
+
+    let Upgrade { u, mp3, flac } = upgrade_fixture(&pool).await;
+    sqlx::query("INSERT INTO play_audit_ignore VALUES ($1, $2, '2020-01-01')")
+        .bind(u)
+        .bind(mp3)
+        .execute(&pool)
+        .await
+        .unwrap();
+    make_missing(&pool, mp3, 8).await;
+    sqlx::raw_sql("CREATE FUNCTION gate_ignore() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.ignored_at = '2020-01-01'::timestamptz THEN PERFORM pg_advisory_xact_lock(784399); END IF; RETURN NEW; END $$; CREATE TRIGGER gate_ignore BEFORE INSERT OR UPDATE ON play_audit_ignore FOR EACH ROW EXECUTE FUNCTION gate_ignore()")
+        .execute(&pool).await.unwrap();
+    let mut gate = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(784399)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let mut writer = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO play_audit_ignore VALUES ($1, $2, '2022-01-01')")
+        .bind(u)
+        .bind(flac)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let retire_pool = pool.clone();
+    let retirement =
+        tokio::spawn(async move { library::retire_missing(&retire_pool, WEEK, None).await });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'advisory' AND query LIKE '%play_audit_ignore%' AND pid <> pg_backend_pid())")
+            .fetch_one(&pool).await.unwrap();
+        if waiting {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "retirement never reached ignore trigger"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+    writer.commit().await.unwrap();
+    gate.commit().await.unwrap();
+    let result = timeout(Duration::from_secs(10), retirement)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        result.is_ok(),
+        "retirement failed after concurrent destination insert: {result:?}"
+    );
+    assert_eq!(result.unwrap().tracks, 1);
+    let rows: Vec<(uuid::Uuid, OffsetDateTime)> =
+        sqlx::query_as("SELECT track_id, ignored_at FROM play_audit_ignore WHERE user_id = $1")
+            .bind(u)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].0, rows[0].1.year()), (flac, 2022));
+    let old_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tracks WHERE id = $1)")
+        .bind(mp3)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!old_exists);
+    assert_eq!(log_rows(&pool).await.len(), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn failed_retirement_rolls_back_ignore_handover(pool: PgPool) {
+    let Upgrade { u, mp3, flac } = upgrade_fixture(&pool).await;
+    sqlx::query("INSERT INTO play_audit_ignore VALUES ($1, $2, '2020-01-01')")
+        .bind(u)
+        .bind(mp3)
+        .execute(&pool)
+        .await
+        .unwrap();
+    play(&pool, u, mp3, true).await;
+    make_missing(&pool, mp3, 8).await;
+    sqlx::raw_sql("CREATE FUNCTION fail_removal() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected failure'; END $$; CREATE TRIGGER fail_removal BEFORE INSERT ON removal_log FOR EACH ROW EXECUTE FUNCTION fail_removal()")
+        .execute(&pool).await.unwrap();
+    assert!(library::retire_missing(&pool, WEEK, None).await.is_err());
+    let rows: Vec<(uuid::Uuid, OffsetDateTime)> =
+        sqlx::query_as("SELECT track_id, ignored_at FROM play_audit_ignore WHERE user_id = $1")
+            .bind(u)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].0, rows[0].1.year()), (mp3, 2020));
+    assert_eq!(count_for(&pool, "plays", mp3).await, 1);
+    assert_eq!(count_for(&pool, "plays", flac).await, 0);
+    assert!(log_rows(&pool).await.is_empty());
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

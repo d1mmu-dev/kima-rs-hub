@@ -81,6 +81,7 @@ pub struct AppState {
     pub identify: IdentifySwitch,
     /// The one outbound HTTP client (spec §7). `Net::disabled()` unless `with_net` is used.
     pub net: Arc<Net>,
+    pub podcast_catalog: kima_podcast::catalog::Catalog,
     /// Whether fingerprints can be made: ffmpeg was found at startup and `ACOUSTID_DISABLED`
     /// is not set (spec §9.4). `GET /api/system/features` answers it as `fpcalc`.
     pub fpcalc: bool,
@@ -112,10 +113,13 @@ impl AppState {
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
         let cipher = Arc::new(Cipher::random());
         let events = EventBus::new(1024);
+        let net = Arc::new(Net::disabled());
+        let podcast_catalog = kima_podcast::catalog::Catalog::new(net.clone(), pool.clone());
         Self {
+            podcast_catalog,
             settings: SettingsCache::new(pool.clone(), cipher.clone()),
             identify: IdentifySwitch::new(false, true),
-            net: Arc::new(Net::disabled()),
+            net,
             pool,
             jwt: Arc::new(JwtKeys::new(session_secret)),
             progress_events: ProgressEvents::new(events.clone()),
@@ -157,6 +161,7 @@ impl AppState {
     }
 
     pub fn with_net(mut self, net: Arc<Net>) -> Self {
+        self.podcast_catalog = kima_podcast::catalog::Catalog::new(net.clone(), self.pool.clone());
         self.net = net;
         self
     }

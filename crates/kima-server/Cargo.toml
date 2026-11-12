@@ -21,6 +21,7 @@ kima-ident.workspace = true
 kima-jobs.workspace = true
 kima-library.workspace = true
 kima-net.workspace = true
+kima-podcast.workspace = true
 kima-subsonic.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 sqlx.workspace = true
@@ -30,10 +31,12 @@ tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 vertigo-cli.workspace = true
 
 [dev-dependencies]
 axum-test.workspace = true
+kima-net = { workspace = true, features = ["testing"] }
 kima-test-support.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

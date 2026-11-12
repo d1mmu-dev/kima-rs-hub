@@ -502,3 +502,140 @@ pub async fn episode_audio(pool: &PgPool, episode: Uuid) -> sqlx::Result<Option<
     .fetch_optional(pool)
     .await
 }
+
+// M6 Task 12: the episode cache (`kima_podcast::cache`). The cached file on disk is shared by
+// every follower of the show, but `podcast_downloads` keeps one row per (user, episode), as
+// upstream's `PodcastDownload` does; helpers below that validate or expire the cache act on
+// every row for the episode, not just one user's.
+
+/// A download record's stored size, to validate the cached file against (D-204).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DownloadRecord {
+    pub file_size_mb: f64,
+}
+
+/// Any one download record for `episode` (upstream's `findFirst`): the file is shared, so one
+/// row's recorded size validates it for everyone. `None` when nobody has downloaded it yet.
+pub async fn download_record(pool: &PgPool, episode: Uuid) -> sqlx::Result<Option<DownloadRecord>> {
+    sqlx::query_as!(
+        DownloadRecord,
+        "SELECT file_size_mb FROM podcast_downloads WHERE episode_id = $1
+         ORDER BY downloaded_at LIMIT 1",
+        episode
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// Creates or refreshes `user`'s download record for `episode` with the file it now holds.
+pub async fn upsert_download(
+    pool: &PgPool,
+    user: Uuid,
+    episode: Uuid,
+    local_path: &str,
+    file_size_mb: f64,
+) -> sqlx::Result<()> {
+    sqlx::query!(
+        "INSERT INTO podcast_downloads (user_id, episode_id, local_path, file_size_mb, downloaded_at, last_accessed_at)
+         VALUES ($1, $2, $3, $4, now(), now())
+         ON CONFLICT (user_id, episode_id) DO UPDATE
+         SET local_path = $3, file_size_mb = $4, downloaded_at = now(), last_accessed_at = now()",
+        user,
+        episode,
+        local_path,
+        file_size_mb
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Marks `episode`'s cached file accessed now, for every follower's download record (the file
+/// is shared, so a read by any of them keeps it alive for all).
+pub async fn touch_download(pool: &PgPool, episode: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE podcast_downloads SET last_accessed_at = now() WHERE episode_id = $1",
+        episode
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Deletes every download record for `episode` (its cached file no longer validates).
+/// Returns how many rows were removed.
+pub async fn delete_downloads_for_episode(pool: &PgPool, episode: Uuid) -> sqlx::Result<u64> {
+    let done = sqlx::query!(
+        "DELETE FROM podcast_downloads WHERE episode_id = $1",
+        episode
+    )
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected())
+}
+
+/// Removes one (user, episode) download record (cleanup, after its file is deleted).
+pub async fn delete_download_row(pool: &PgPool, user: Uuid, episode: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        "DELETE FROM podcast_downloads WHERE user_id = $1 AND episode_id = $2",
+        user,
+        episode
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Stores the audio file's own byte count on its episode row (the cached download's size,
+/// which can differ from a feed's declared enclosure length).
+pub async fn set_episode_file_size(pool: &PgPool, episode: Uuid, bytes: i64) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE podcast_episodes SET file_size = $2 WHERE id = $1",
+        episode,
+        bytes
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Stores the audio's measured length on its episode row (`recordMeasuredLength`). Returns
+/// whether the episode still exists.
+pub async fn set_episode_duration(
+    pool: &PgPool,
+    episode: Uuid,
+    seconds: i32,
+) -> sqlx::Result<bool> {
+    let done = sqlx::query!(
+        "UPDATE podcast_episodes SET duration = $2 WHERE id = $1",
+        episode,
+        seconds
+    )
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected() > 0)
+}
+
+/// A download record whose cached file [`cleanup`] is about to delete.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpiredDownload {
+    pub user_id: Uuid,
+    pub episode_id: Uuid,
+    pub local_path: String,
+    pub file_size_mb: f64,
+}
+
+/// Every download record not accessed since before `cutoff` (`cleanupExpiredCache`'s 30 days).
+pub async fn expired_downloads(
+    pool: &PgPool,
+    cutoff: OffsetDateTime,
+) -> sqlx::Result<Vec<ExpiredDownload>> {
+    sqlx::query_as!(
+        ExpiredDownload,
+        "SELECT user_id, episode_id, local_path, file_size_mb FROM podcast_downloads
+         WHERE last_accessed_at < $1",
+        cutoff
+    )
+    .fetch_all(pool)
+    .await
+}

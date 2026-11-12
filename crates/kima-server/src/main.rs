@@ -199,6 +199,12 @@ async fn main() -> anyhow::Result<()> {
     let state = state.with_ident(ident_ctx.clone());
     registry.register_autotag(ident_ctx.clone());
     registry.register_enrich(ident_ctx);
+    let podcast_ctx = kima_podcast::ctx::PodcastCtx {
+        pool: pool.clone(),
+        net: state.net.clone(),
+        data_dir: config.data_dir.clone(),
+    };
+    registry.register_podcast_cache(podcast_ctx.clone());
     // Before any worker starts: recover library jobs a dead process left running, then queue
     // the safety-net reconcile (spec §4.4).
     kima_server::jobs::prepare_library_queue(&pool)
@@ -212,6 +218,9 @@ async fn main() -> anyhow::Result<()> {
     kima_server::jobs::prepare_autotag_queue(&pool)
         .await
         .context("preparing the autotag queue")?;
+    // Episode cache (Task 12): measure lengths left unmeasured once, then an immediate cleanup
+    // so a restart does not wait for the next 04:00 UTC fire.
+    kima_server::jobs::prepare_podcast_cache(&podcast_ctx).await;
     let workers = kima_server::jobs::spawn_all(&pool, registry, shutdown.clone());
     // Stopped by the shutdown token. With `KIMA_WATCH_MODE=off` this only records the status.
     let watcher = kima_library::watch::spawn(
@@ -222,9 +231,16 @@ async fn main() -> anyhow::Result<()> {
         state.library.watch_status.clone(),
         shutdown.clone(),
     );
-    // Always runs: the safety-net reconcile when enabled (D-091), the cache prune and the
-    // enrichment backstop kick. Stopped by the shutdown token.
-    let scheduler = kima_server::schedule_entries(&config, sync_cron)
+    // Always runs: the safety-net reconcile when enabled (D-091), the cache prune, the
+    // enrichment backstop kick, and daily podcast-cache cleanup (04:00 UTC). Stopped by the
+    // shutdown token.
+    let mut schedule = kima_server::schedule_entries(&config, sync_cron);
+    schedule.push((
+        "podcast-cache-cleanup",
+        kima_jobs::schedule::Cron::parse("0 4 * * *").expect("a valid cron expression"),
+        podcast_cache_cleanup_job(podcast_ctx),
+    ));
+    let scheduler = schedule
         .into_iter()
         .fold(
             kima_jobs::schedule::Scheduler::new(),
@@ -265,6 +281,26 @@ async fn main() -> anyhow::Result<()> {
 
 /// How long in-flight requests get to finish after a shutdown signal.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// The scheduler passes only a `PgPool` to its entries; `ctx` already carries its own pool
+/// clone (and `net`/`data_dir`), so the one the scheduler hands over is unused here.
+fn podcast_cache_cleanup_job(ctx: kima_podcast::ctx::PodcastCtx) -> kima_jobs::schedule::EnqueueFn {
+    std::sync::Arc::new(move |_pool| {
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            let (deleted, freed_mb) = kima_podcast::cache::cleanup(&ctx)
+                .await
+                .map_err(|e| e.to_string())?;
+            if deleted > 0 {
+                info!(
+                    deleted,
+                    freed_mb, "cleaned up expired podcast episode cache"
+                );
+            }
+            Ok(())
+        })
+    })
+}
 
 async fn shutdown_signal() {
     let ctrl_c = async {

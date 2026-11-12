@@ -3,10 +3,15 @@ pub mod args;
 
 use axum::{
     Json, Router,
-    extract::{Path, RawQuery, State},
-    routing::get,
+    extract::{Path, RawQuery, Request, State},
+    http::header,
+    routing::{get, post},
 };
-use kima_api_types::stats::{HourDetail, HourTrack, NamedListens, TrackPlays, js_iso};
+use kima_api_types::stats::{
+    HourDetail, HourTrack, Ignored, NamedListens, Removed, RemovedFrom, Restored, TrackPlays,
+    js_iso,
+};
+use kima_db::stats::audit;
 use uuid::Uuid;
 
 use crate::{auth::AuthUser, error::ApiError, state::AppState};
@@ -19,6 +24,129 @@ pub fn routes() -> Router<AppState> {
         .route("/stats/region", get(region_detail))
         .route("/stats/hour", get(hour_detail))
         .route("/stats/false-starts", get(false_starts))
+        .route("/stats/false-starts/collapse", post(collapse))
+        .route("/stats/false-starts/ignore", post(ignore))
+        .route("/stats/false-starts/remove", post(remove))
+        .route("/stats/false-starts/restore", post(restore))
+}
+
+/// Upstream's `express.json({ limit: "1mb" })` (`index.ts:104`).
+const BODY_LIMIT: usize = 1024 * 1024;
+
+/// The body as upstream's global `express.json()` parser leaves it, in front of
+/// every handler: `None` when it does not parse (`Content-Type` other than
+/// `application/json`), `{}` for an empty body, and the error handler's answers
+/// (`errorHandler.ts:71-79`) for a malformed (strict: object or array only) or
+/// oversized one.
+async fn express_json(request: Request) -> Result<Option<serde_json::Value>, ApiError> {
+    let is_json = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"));
+    if !is_json {
+        return Ok(None);
+    }
+    let bytes = axum::body::to_bytes(request.into_body(), BODY_LIMIT)
+        .await
+        // Past the limit (the only read error a client that still waits can see).
+        .map_err(|_| ApiError::PayloadTooLarge)?;
+    let text = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&bytes);
+    if text.is_empty() {
+        return Ok(Some(serde_json::json!({})));
+    }
+    let invalid = || ApiError::BadRequest("Invalid request body".into());
+    let first = text
+        .iter()
+        .find(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'));
+    if !matches!(first, Some(b'{' | b'[')) {
+        return Err(invalid());
+    }
+    serde_json::from_slice(text)
+        .map(Some)
+        .map_err(|_| invalid())
+}
+
+/// Upstream's `trackListSchema` (`stats.ts:153-155`): an object whose `trackIds`
+/// is 1–2000 strings of 1–64 UTF-16 units, other keys ignored. Strings that are
+/// no UUID can match no track and are dropped after validation.
+fn track_ids(body: Option<&serde_json::Value>) -> Result<Vec<Uuid>, ApiError> {
+    let bad = || ApiError::BadRequest("Bad request".into());
+    let ids = body
+        .filter(|v| v.is_object())
+        .and_then(|v| v.get("trackIds"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(bad)?;
+    if ids.is_empty() || ids.len() > 2000 {
+        return Err(bad());
+    }
+    let mut result = Vec::new();
+    for id in ids {
+        let id = id.as_str().ok_or_else(bad)?;
+        if !(1..=64).contains(&id.encode_utf16().count()) {
+            return Err(bad());
+        }
+        if let Ok(id) = Uuid::parse_str(id) {
+            result.push(id);
+        }
+    }
+    Ok(result)
+}
+
+fn action_failed(action: &'static str) -> impl FnOnce(sqlx::Error) -> ApiError {
+    move |error| {
+        tracing::error!(?error, action, "false-start action failed");
+        ApiError::Failed("That didn't finish")
+    }
+}
+
+async fn collapse(
+    State(state): State<AppState>,
+    user: AuthUser,
+    request: Request,
+) -> Result<Json<Removed>, ApiError> {
+    express_json(request).await?;
+    let removed = audit::collapse(&state.pool, user.id)
+        .await
+        .map_err(action_failed("collapse"))?;
+    Ok(Json(Removed { removed }))
+}
+
+async fn remove(
+    State(state): State<AppState>,
+    user: AuthUser,
+    request: Request,
+) -> Result<Json<RemovedFrom>, ApiError> {
+    let tracks = track_ids(express_json(request).await?.as_ref())?;
+    let (removed, tracks) = audit::remove(&state.pool, user.id, &tracks)
+        .await
+        .map_err(action_failed("remove"))?;
+    Ok(Json(RemovedFrom { removed, tracks }))
+}
+
+async fn ignore(
+    State(state): State<AppState>,
+    user: AuthUser,
+    request: Request,
+) -> Result<Json<Ignored>, ApiError> {
+    let tracks = track_ids(express_json(request).await?.as_ref())?;
+    let ignored = audit::ignore(&state.pool, user.id, &tracks)
+        .await
+        .map_err(action_failed("ignore"))?;
+    Ok(Json(Ignored { ignored }))
+}
+
+async fn restore(
+    State(state): State<AppState>,
+    user: AuthUser,
+    request: Request,
+) -> Result<Json<Restored>, ApiError> {
+    let tracks = track_ids(express_json(request).await?.as_ref())?;
+    let restored = audit::restore(&state.pool, user.id, &tracks)
+        .await
+        .map_err(action_failed("restore"))?;
+    Ok(Json(Restored { restored }))
 }
 
 async fn tracks(
@@ -382,7 +510,6 @@ async fn false_starts(
     user: AuthUser,
 ) -> Result<Json<kima_api_types::stats::FalseStartAudit>, ApiError> {
     use kima_api_types::stats::{FalseStartAudit, FalseStartTrack, IgnoredTrack};
-    use kima_db::stats::audit;
     let (rows, ignored) = tokio::try_join!(
         audit::audit_rows(&state.pool, user.id),
         audit::ignored(&state.pool, user.id)

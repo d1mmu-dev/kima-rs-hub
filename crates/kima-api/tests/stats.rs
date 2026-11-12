@@ -718,3 +718,580 @@ async fn false_starts_native_history_is_all_heard(pool: PgPool) {
     assert_eq!(v["heard"], 2);
     assert_eq!(v["skipped"], 0);
 }
+
+// ---- Task 10: POST /api/stats/false-starts/{collapse,remove,ignore,restore} ----
+
+const ACTIONS: [&str; 4] = ["collapse", "remove", "ignore", "restore"];
+
+/// One `plays` row at 2026-03-01T12:00:00Z + `second`.
+async fn play(pool: &PgPool, user: Uuid, track: Uuid, second: i64, heard: bool) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at,heard) VALUES ($1,$2,$3,'2026-03-01T12:00:00Z'::timestamptz + $4 * interval '1 second',$5)")
+        .bind(id)
+        .bind(user)
+        .bind(track)
+        .bind(second as f64)
+        .bind(heard)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn play_ids(pool: &PgPool) -> Vec<Uuid> {
+    sqlx::query_scalar("SELECT id FROM plays ORDER BY id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+fn sorted(mut ids: Vec<Uuid>) -> Vec<Uuid> {
+    ids.sort();
+    ids
+}
+
+async fn audit(server: &TestServer, token: &str) -> Value {
+    let response = server
+        .get("/api/stats/false-starts")
+        .authorization_bearer(token)
+        .await;
+    response.assert_status_ok();
+    response.json::<Value>()
+}
+
+async fn track(pool: &PgPool, title: &str) -> Uuid {
+    seed(pool, Seed::new("Artist", "Album", Some(1994), title))
+        .await
+        .track
+}
+
+fn verdicts(v: &Value) -> Value {
+    json!([
+        v["totalListens"],
+        v["heard"],
+        v["skipped"],
+        v["tooShort"],
+        v["unclear"]
+    ])
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn collapse_keeps_first_and_last_row(pool: PgPool) {
+    let song = track(&pool, "Song").await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "collapse_user").await;
+    let (other, other_token) = common::user_with_token(&state, "collapse_other").await;
+    let mut ids = Vec::new();
+    for second in [0, 10, 20, 30] {
+        ids.push(play(&pool, user.id, song, second, false).await);
+    }
+    let theirs = vec![
+        play(&pool, other.id, song, 0, false).await,
+        play(&pool, other.id, song, 5, false).await,
+        play(&pool, other.id, song, 6, false).await,
+    ];
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let before = audit(&server, &token).await;
+    assert_eq!(before["collapsibleRows"], 2);
+    assert_eq!(verdicts(&before), json!([1, 0, 0, 0, 1]));
+    let response = server
+        .post("/api/stats/false-starts/collapse")
+        .authorization_bearer(&token)
+        .json(&json!({"trackIds":[]}))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>(), json!({"removed":2}));
+    let mut expected = vec![ids[0], ids[3]];
+    expected.extend(&theirs);
+    assert_eq!(play_ids(&pool).await, sorted(expected));
+    let after = audit(&server, &token).await;
+    assert_eq!(verdicts(&after), verdicts(&before));
+    assert_eq!(
+        (
+            &after["totalRows"],
+            &after["duplicateRows"],
+            &after["collapsibleRows"]
+        ),
+        (&json!(2), &json!(1), &json!(0))
+    );
+    assert_eq!(audit(&server, &other_token).await["collapsibleRows"], 1);
+    let response = server
+        .post("/api/stats/false-starts/collapse")
+        .authorization_bearer(&token)
+        .json(&json!({}))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>(), json!({"removed":0}));
+}
+
+/// Owner decision 2026-11-12 (D-179): upstream would delete the only heard row
+/// and turn the listen into a skip; kima-rs keeps it so the verdict holds.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn collapse_keeps_a_heard_middle_row(pool: PgPool) {
+    let song = track(&pool, "Song").await;
+    let next = track(&pool, "Next").await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "collapse_heard").await;
+    let ids = [
+        play(&pool, user.id, song, 0, false).await,
+        play(&pool, user.id, song, 1, true).await,
+        play(&pool, user.id, song, 2, false).await,
+        play(&pool, user.id, song, 3, false).await,
+        play(&pool, user.id, next, 4, false).await,
+    ];
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let before = audit(&server, &token).await;
+    assert_eq!(before["collapsibleRows"], 1);
+    assert_eq!(verdicts(&before), json!([2, 1, 0, 0, 1]));
+    let response = server
+        .post("/api/stats/false-starts/collapse")
+        .authorization_bearer(&token)
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>(), json!({"removed":1}));
+    assert_eq!(
+        play_ids(&pool).await,
+        sorted(vec![ids[0], ids[1], ids[3], ids[4]])
+    );
+    let after = audit(&server, &token).await;
+    assert_eq!(verdicts(&after), verdicts(&before));
+    assert_eq!(after["tracks"], json!([]));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn collapse_ignores_its_body(pool: PgPool) {
+    let song = track(&pool, "Song").await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "collapse_body").await;
+    for second in [0, 10, 20] {
+        play(&pool, user.id, song, second, false).await;
+    }
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let response = server
+        .post("/api/stats/false-starts/collapse")
+        .authorization_bearer(&token)
+        .json(&json!({"trackIds":"junk","extra":[1]}))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>(), json!({"removed":1}));
+    for (content_type, body) in [
+        ("application/json", "[]"),
+        ("application/json", "{\"trackIds\":[]}"),
+        ("application/json", ""),
+        ("application/json", "\u{feff}{}"),
+        ("text/plain", "{"),
+        ("application/vnd.api+json", "{"),
+    ] {
+        let response = server
+            .post("/api/stats/false-starts/collapse")
+            .authorization_bearer(&token)
+            .content_type(content_type)
+            .bytes(body.as_bytes().to_vec().into())
+            .await;
+        response.assert_status_ok();
+        assert_eq!(response.json::<Value>(), json!({"removed":0}), "{body:?}");
+    }
+    let response = server
+        .post("/api/stats/false-starts/collapse")
+        .authorization_bearer(&token)
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>(), json!({"removed":0}));
+    assert_eq!(play_ids(&pool).await.len(), 2);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn remove_deletes_only_provable_skips_of_named_tracks(pool: PgPool) {
+    let a = track(&pool, "A").await;
+    let b = track(&pool, "B").await;
+    let c = track(&pool, "C").await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "remove_user").await;
+    let (other, other_token) = common::user_with_token(&state, "remove_other").await;
+    let doomed = [
+        play(&pool, user.id, a, 0, false).await,
+        play(&pool, user.id, a, 10, false).await,
+    ];
+    let kept = vec![
+        play(&pool, user.id, b, 20, false).await,
+        play(&pool, user.id, c, 40, true).await,
+        play(&pool, user.id, a, 300, true).await,
+        play(&pool, other.id, a, 0, false).await,
+        play(&pool, other.id, c, 10, true).await,
+    ];
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let before = audit(&server, &token).await;
+    assert_eq!(before["skipped"], 2);
+    assert_eq!(audit(&server, &other_token).await["skipped"], 1);
+    let response = server
+        .post("/api/stats/false-starts/remove")
+        .authorization_bearer(&token)
+        .json(&json!({"trackIds":[a.to_string(), a.to_string(), "not-a-uuid"]}))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>(), json!({"removed":2,"tracks":1}));
+    let remaining = play_ids(&pool).await;
+    assert_eq!(remaining, sorted(kept));
+    assert!(doomed.iter().all(|id| !remaining.contains(id)));
+    let after = audit(&server, &token).await;
+    assert_eq!(after["skipped"], 1);
+    assert_eq!(after["tracks"][0]["trackId"], b.to_string());
+    assert_eq!(audit(&server, &other_token).await["skipped"], 1);
+    let response = server
+        .post("/api/stats/false-starts/remove")
+        .authorization_bearer(&token)
+        .json(&json!({"trackIds":[a.to_string()]}))
+        .await;
+    assert_eq!(response.json::<Value>(), json!({"removed":0,"tracks":0}));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn remove_skips_ignored_tracks(pool: PgPool) {
+    let a = track(&pool, "A").await;
+    let b = track(&pool, "B").await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "remove_ignored").await;
+    play(&pool, user.id, a, 0, false).await;
+    play(&pool, user.id, b, 10, true).await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let ids = json!({"trackIds":[a.to_string()]});
+    let response = server
+        .post("/api/stats/false-starts/ignore")
+        .authorization_bearer(&token)
+        .json(&ids)
+        .await;
+    assert_eq!(response.json::<Value>(), json!({"ignored":1}));
+    let response = server
+        .post("/api/stats/false-starts/remove")
+        .authorization_bearer(&token)
+        .json(&ids)
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>(), json!({"removed":0,"tracks":0}));
+    assert_eq!(play_ids(&pool).await.len(), 2);
+    let after = audit(&server, &token).await;
+    assert_eq!(after["skipped"], 1);
+    assert_eq!(after["tracks"], json!([]));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn remove_rejudges_current_rows(pool: PgPool) {
+    let a = track(&pool, "A").await;
+    let b = track(&pool, "B").await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "remove_rejudge").await;
+    play(&pool, user.id, a, 0, false).await;
+    play(&pool, user.id, b, 10, true).await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    assert_eq!(audit(&server, &token).await["skipped"], 1);
+    play(&pool, user.id, a, 5, true).await;
+    let response = server
+        .post("/api/stats/false-starts/remove")
+        .authorization_bearer(&token)
+        .json(&json!({"trackIds":[a.to_string()]}))
+        .await;
+    response.assert_status_ok();
+    assert_eq!(response.json::<Value>(), json!({"removed":0,"tracks":0}));
+    assert_eq!(play_ids(&pool).await.len(), 3);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn remove_never_touches_another_user(pool: PgPool) {
+    let a = track(&pool, "A").await;
+    let b = track(&pool, "B").await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "remove_mine").await;
+    let (other, other_token) = common::user_with_token(&state, "remove_theirs").await;
+    let theirs = [
+        play(&pool, other.id, a, 0, false).await,
+        play(&pool, other.id, b, 10, true).await,
+    ];
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let body = json!({"trackIds":[a.to_string()]});
+    let response = server
+        .post("/api/stats/false-starts/remove")
+        .authorization_bearer(&token)
+        .json(&body)
+        .await;
+    assert_eq!(response.json::<Value>(), json!({"removed":0,"tracks":0}));
+    let mine = play(&pool, user.id, a, 0, false).await;
+    play(&pool, user.id, b, 10, true).await;
+    let response = server
+        .post("/api/stats/false-starts/remove")
+        .authorization_bearer(&token)
+        .json(&body)
+        .await;
+    assert_eq!(response.json::<Value>(), json!({"removed":1,"tracks":1}));
+    let remaining = play_ids(&pool).await;
+    assert!(!remaining.contains(&mine));
+    assert!(theirs.iter().all(|id| remaining.contains(id)));
+    assert_eq!(audit(&server, &other_token).await["skipped"], 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn ignore_skips_unknown_ids_and_duplicates_and_restore_counts(pool: PgPool) {
+    let song = track(&pool, "Song").await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "ignore_user").await;
+    let (other, other_token) = common::user_with_token(&state, "ignore_other").await;
+    let kept = play(&pool, user.id, song, 0, false).await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let body = json!({"trackIds":[song.to_string(), song.to_string(), Uuid::now_v7().to_string(), "invalid"], "extra": 1});
+    for (auth, expected) in [(&token, 1), (&token, 0), (&other_token, 1)] {
+        let response = server
+            .post("/api/stats/false-starts/ignore")
+            .authorization_bearer(auth)
+            .json(&body)
+            .await;
+        response.assert_status_ok();
+        assert_eq!(response.json::<Value>(), json!({"ignored":expected}));
+    }
+    assert_eq!(play_ids(&pool).await, vec![kept]);
+    for expected in [1, 0] {
+        let response = server
+            .post("/api/stats/false-starts/restore")
+            .authorization_bearer(&token)
+            .json(&body)
+            .await;
+        response.assert_status_ok();
+        assert_eq!(response.json::<Value>(), json!({"restored":expected}));
+    }
+    let users: Vec<Uuid> =
+        sqlx::query_scalar("SELECT user_id FROM play_audit_ignore WHERE track_id=$1")
+            .bind(song)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(users, vec![other.id]);
+    assert_ne!(user.id, other.id);
+    assert_eq!(audit(&server, &token).await["ignored"], json!([]));
+    assert_eq!(
+        audit(&server, &other_token).await["ignored"][0]["trackId"],
+        song.to_string()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn track_ids_schema_like_zod(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "zod_user").await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let many = |n: usize| json!({"trackIds": vec!["x"; n]});
+    let text = |s: String| json!({"trackIds": [s]});
+    let bad = [
+        json!({"trackIds":[]}),
+        json!({}),
+        json!({"trackIds":"a"}),
+        json!({"trackIds":null}),
+        json!({"trackIds":[1]}),
+        json!({"trackIds":["a", null]}),
+        json!([{"trackIds":["a"]}]),
+        many(2001),
+        text(String::new()),
+        text("a".repeat(65)),
+        text("\u{e9}".repeat(65)),
+        text("\u{1f3b5}".repeat(33)),
+    ];
+    let good = [
+        json!({"trackIds":["a"],"extra":1}),
+        many(2000),
+        text("a".repeat(64)),
+        text("\u{e9}".repeat(64)),
+        text("\u{1f3b5}".repeat(32)),
+    ];
+    for action in ["remove", "ignore", "restore"] {
+        let url = format!("/api/stats/false-starts/{action}");
+        for body in &bad {
+            let response = server
+                .post(&url)
+                .authorization_bearer(&token)
+                .json(body)
+                .await;
+            response.assert_status(StatusCode::BAD_REQUEST);
+            assert_eq!(response.json::<Value>(), json!({"error":"Bad request"}));
+        }
+        for (content_type, body) in [
+            ("text/plain", "{\"trackIds\":[\"a\"]}"),
+            ("application/json", ""),
+        ] {
+            let response = server
+                .post(&url)
+                .authorization_bearer(&token)
+                .content_type(content_type)
+                .bytes(body.as_bytes().to_vec().into())
+                .await;
+            response.assert_status(StatusCode::BAD_REQUEST);
+            assert_eq!(response.json::<Value>(), json!({"error":"Bad request"}));
+        }
+        let response = server.post(&url).authorization_bearer(&token).await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(response.json::<Value>(), json!({"error":"Bad request"}));
+        for body in &good {
+            server
+                .post(&url)
+                .authorization_bearer(&token)
+                .json(body)
+                .await
+                .assert_status_ok();
+        }
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn malformed_json_matches_upstream_body_parser(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "malformed_user").await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    for action in ACTIONS {
+        for content_type in [
+            "application/json",
+            "application/json; charset=utf-8",
+            "Application/JSON",
+        ] {
+            for body in [
+                "{",
+                "   ",
+                "5",
+                "\"x\"",
+                "null",
+                "true",
+                "{\"trackIds\":[\"a\"],}",
+            ] {
+                let response = server
+                    .post(&format!("/api/stats/false-starts/{action}"))
+                    .authorization_bearer(&token)
+                    .content_type(content_type)
+                    .bytes(body.as_bytes().to_vec().into())
+                    .await;
+                response.assert_status(StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    response.json::<Value>(),
+                    json!({"error":"Invalid request body"}),
+                    "{action} {content_type} {body:?}"
+                );
+            }
+        }
+        let response = server
+            .post(&format!("/api/stats/false-starts/{action}"))
+            .authorization_bearer(&token)
+            .content_type("application/json")
+            .bytes(b"\xef\xbb\xbf {\"trackIds\":[\"a\"]}".to_vec().into())
+            .await;
+        response.assert_status_ok();
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn bodies_over_one_mebibyte_are_too_large(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "limit_user").await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let padded = |len: usize| {
+        let mut body = b"{\"trackIds\":[\"a\"]}".to_vec();
+        body.resize(len, b' ');
+        body
+    };
+    for action in ACTIONS {
+        let url = format!("/api/stats/false-starts/{action}");
+        let response = server
+            .post(&url)
+            .authorization_bearer(&token)
+            .content_type("application/json")
+            .bytes(padded(1024 * 1024 + 1).into())
+            .await;
+        response.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response.json::<Value>(),
+            json!({"error":"Request body too large"})
+        );
+        server
+            .post(&url)
+            .authorization_bearer(&token)
+            .content_type("application/json")
+            .bytes(padded(1024 * 1024).into())
+            .await
+            .assert_status_ok();
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn actions_require_auth(pool: PgPool) {
+    let song = track(&pool, "Song").await;
+    let state = common::state(pool.clone());
+    let (user, _) = common::user_with_token(&state, "auth_user").await;
+    for second in [0, 10, 20] {
+        play(&pool, user.id, song, second, false).await;
+    }
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    for action in ACTIONS {
+        server
+            .post(&format!("/api/stats/false-starts/{action}"))
+            .json(&json!({"trackIds":[song.to_string()]}))
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(play_ids(&pool).await.len(), 3);
+    let ignored: i64 = sqlx::query_scalar("SELECT count(*) FROM play_audit_ignore")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ignored, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn failed_deletes_roll_back_and_answer_500(pool: PgPool) {
+    let a = track(&pool, "A").await;
+    let b = track(&pool, "B").await;
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "rollback_user").await;
+    for second in [0, 10, 20, 30] {
+        play(&pool, user.id, a, second, false).await;
+    }
+    play(&pool, user.id, b, 40, true).await;
+    sqlx::raw_sql(
+        "CREATE TABLE fail_on (id uuid PRIMARY KEY);
+         CREATE FUNCTION fail_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF EXISTS (SELECT 1 FROM fail_on WHERE id = OLD.id) THEN
+             RAISE EXCEPTION 'injected delete failure';
+           END IF;
+           RETURN OLD;
+         END $$;
+         CREATE TRIGGER fail_delete BEFORE DELETE ON plays
+           FOR EACH ROW EXECUTE FUNCTION fail_delete();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Fail on the last row each action would delete, after the others went.
+    let last: Uuid = sqlx::query_scalar(
+        "SELECT id FROM plays WHERE track_id=$1 ORDER BY played_at OFFSET 2 LIMIT 1",
+    )
+    .bind(a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO fail_on VALUES ($1)")
+        .bind(last)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = play_ids(&pool).await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    for (action, ids) in [
+        ("collapse", json!({})),
+        ("remove", json!({"trackIds":[a.to_string()]})),
+    ] {
+        let response = server
+            .post(&format!("/api/stats/false-starts/{action}"))
+            .authorization_bearer(&token)
+            .json(&ids)
+            .await;
+        response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            response.json::<Value>(),
+            json!({"error":"That didn't finish"})
+        );
+        assert_eq!(play_ids(&pool).await, before, "{action}");
+    }
+}

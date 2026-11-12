@@ -400,3 +400,167 @@ async fn walk_agrees_with_audit_grouping(pool: PgPool) {
         assert_eq!(db, counts.into_iter().collect::<Vec<_>>(), "case {case}");
     }
 }
+
+// ---- Task 10: transaction boundary and concurrency of collapse/remove ----
+
+/// A user and `n` 180 s tracks.
+async fn audit_fixture(pool: &PgPool, n: usize) -> (Uuid, Vec<Uuid>) {
+    let user = Uuid::now_v7();
+    let artist = Uuid::now_v7();
+    let album = Uuid::now_v7();
+    sqlx::query("INSERT INTO users (id,username,password_hash) VALUES ($1,'audit','h')")
+        .bind(user)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO artists (id,name,name_key) VALUES ($1,'artist','artist')")
+        .bind(artist)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO albums (id,artist_id,title,title_key) VALUES ($1,$2,'album','album')")
+        .bind(album)
+        .bind(artist)
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut tracks = Vec::new();
+    for i in 0..n {
+        let id = Uuid::now_v7();
+        sqlx::query("INSERT INTO tracks (id,album_id,artist_name,title,duration_secs,codec,path,size,mtime,fingerprint) VALUES ($1,$2,'artist',$3,180,'flac',$3,0,now(),decode('','hex'))")
+            .bind(id)
+            .bind(album)
+            .bind(format!("t{i}"))
+            .execute(pool)
+            .await
+            .unwrap();
+        tracks.push(id);
+    }
+    (user, tracks)
+}
+
+async fn audit_play<'e>(
+    conn: impl sqlx::PgExecutor<'e>,
+    user: Uuid,
+    track: Uuid,
+    second: i64,
+    heard: bool,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at,heard) VALUES ($1,$2,$3,'2026-03-01T12:00:00Z'::timestamptz + $4 * interval '1 second',$5)")
+        .bind(id)
+        .bind(user)
+        .bind(track)
+        .bind(second as f64)
+        .bind(heard)
+        .execute(conn)
+        .await
+        .unwrap();
+    id
+}
+
+/// Hold `plays` in SHARE mode: a request's reads go through, its `DELETE` waits
+/// for the lock before it takes its snapshot, so whatever this transaction
+/// writes before committing is visible to that `DELETE`.
+async fn hold_plays(pool: &PgPool) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE plays IN SHARE MODE")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx
+}
+
+/// Wait until `n` sessions sit on that lock with their `DELETE`.
+async fn parked(pool: &PgPool, n: i64) {
+    for _ in 0..500 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
+             AND wait_event_type = 'Lock' AND wait_event = 'relation' \
+             AND query LIKE 'DELETE FROM plays%'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting == n {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("{n} DELETE statements never waited on the plays lock");
+}
+
+async fn all_plays(pool: &PgPool) -> Vec<Uuid> {
+    sqlx::query_scalar("SELECT id FROM plays ORDER BY id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn collapse_never_deletes_a_play_recorded_after_its_read(pool: PgPool) {
+    use kima_db::stats::audit;
+    let (user, tracks) = audit_fixture(&pool, 1).await;
+    let mut ids = Vec::new();
+    for second in [0, 10, 20, 30] {
+        ids.push(audit_play(&pool, user, tracks[0], second, false).await);
+    }
+    let mut holder = hold_plays(&pool).await;
+    let task = tokio::spawn({
+        let pool = pool.clone();
+        async move { audit::collapse(&pool, user).await.unwrap() }
+    });
+    parked(&pool, 1).await;
+    // A late (back-dated) row inside the same listen, committed after the read
+    // and before the DELETE's snapshot.
+    let late = audit_play(&mut *holder, user, tracks[0], 15, false).await;
+    holder.commit().await.unwrap();
+    assert_eq!(task.await.unwrap(), 2);
+    let mut expected = vec![ids[0], ids[3], late];
+    expected.sort();
+    assert_eq!(all_plays(&pool).await, expected);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn remove_never_deletes_a_play_recorded_after_its_read(pool: PgPool) {
+    use kima_db::stats::audit;
+    let (user, tracks) = audit_fixture(&pool, 2).await;
+    audit_play(&pool, user, tracks[0], 0, false).await;
+    audit_play(&pool, user, tracks[0], 10, false).await;
+    let next = audit_play(&pool, user, tracks[1], 20, true).await;
+    let mut holder = hold_plays(&pool).await;
+    let task = tokio::spawn({
+        let pool = pool.clone();
+        let wanted = vec![tracks[0]];
+        async move { audit::remove(&pool, user, &wanted).await.unwrap() }
+    });
+    parked(&pool, 1).await;
+    let late = audit_play(&mut *holder, user, tracks[0], 5, true).await;
+    holder.commit().await.unwrap();
+    assert_eq!(task.await.unwrap(), (2, 1));
+    let mut expected = vec![next, late];
+    expected.sort();
+    assert_eq!(all_plays(&pool).await, expected);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn concurrent_collapses_delete_each_row_once(pool: PgPool) {
+    use kima_db::stats::audit;
+    let (user, tracks) = audit_fixture(&pool, 1).await;
+    let mut ids = Vec::new();
+    for second in [0, 10, 20, 30] {
+        ids.push(audit_play(&pool, user, tracks[0], second, false).await);
+    }
+    let holder = hold_plays(&pool).await;
+    let spawn = || {
+        let pool = pool.clone();
+        tokio::spawn(async move { audit::collapse(&pool, user).await.unwrap() })
+    };
+    let (first, second) = (spawn(), spawn());
+    parked(&pool, 2).await;
+    holder.commit().await.unwrap();
+    let mut removed = vec![first.await.unwrap(), second.await.unwrap()];
+    removed.sort();
+    assert_eq!(removed, vec![0, 2]);
+    assert_eq!(all_plays(&pool).await, vec![ids[0], ids[3]]);
+}

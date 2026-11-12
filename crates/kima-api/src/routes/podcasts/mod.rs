@@ -10,6 +10,7 @@ use crate::extract::ApiJson;
 use crate::state::AppState;
 
 mod progress;
+mod stream;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -24,6 +25,7 @@ pub fn routes() -> Router<AppState> {
             "/podcasts/{podcast}/episodes/{episode}/progress",
             post(progress).delete(clear),
         )
+        .merge(stream::routes())
 }
 
 async fn subscribe(

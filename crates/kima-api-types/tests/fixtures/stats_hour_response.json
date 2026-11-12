@@ -1,0 +1,19 @@
+{
+  "artists": [
+    {
+      "listens": 1,
+      "name": "Untagged Artist"
+    }
+  ],
+  "hour": 6,
+  "lastAt": "2026-11-12T06:51:22.517Z",
+  "listens": 1,
+  "tracks": [
+    {
+      "artist": "Untagged Artist",
+      "listens": 1,
+      "title": "First"
+    }
+  ],
+  "weekday": 4
+}

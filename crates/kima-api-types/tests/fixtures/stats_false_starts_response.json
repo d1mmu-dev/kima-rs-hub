@@ -1,0 +1,35 @@
+{
+  "collapsibleRows": 0,
+  "duplicateRows": 0,
+  "earliest": "2026-11-11T06:51:22.584Z",
+  "heard": 1,
+  "ignored": [
+    {
+      "artist": "Untagged Artist",
+      "ignoredAt": "2026-11-12T06:51:23.017Z",
+      "title": "Second",
+      "trackId": "01a1ce86-77b7-712f-81eb-43cbb3119d63"
+    }
+  ],
+  "skipped": 1,
+  "tooShort": 1,
+  "totalListens": 3,
+  "totalRows": 3,
+  "tracks": [
+    {
+      "artist": "Untagged Artist",
+      "durationSeconds": 900,
+      "heard": 1,
+      "lastAt": "2026-11-12T06:51:22.517Z",
+      "listens": 2,
+      "requiredSeconds": 240,
+      "rows": 2,
+      "shortestRunSeconds": 60,
+      "skipped": 1,
+      "title": "First",
+      "tooShort": 0,
+      "trackId": "01a1ce86-77a9-7417-a90d-948be534416d"
+    }
+  ],
+  "unclear": 0
+}

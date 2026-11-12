@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO play_audit_ignore (user_id, track_id) SELECT $1, id FROM tracks WHERE id = ANY($2) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5804b57254101f77d36117695d656c39cb6921b3bb535abb436dbfb4693d54d5"
+}

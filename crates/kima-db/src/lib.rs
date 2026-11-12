@@ -156,3 +156,5 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 }
+
+pub mod stats;

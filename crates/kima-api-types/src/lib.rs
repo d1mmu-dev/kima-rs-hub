@@ -11,3 +11,4 @@ pub mod playback_state;
 pub mod playlists;
 pub mod search;
 pub mod settings;
+pub mod stats;

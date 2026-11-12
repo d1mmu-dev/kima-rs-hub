@@ -44,7 +44,11 @@ fn forwardable_range(raw: &str) -> Option<&str> {
         (true, true) => false,
         (true, false) => digits(b),
         (false, true) => digits(a),
-        (false, false) => digits(a) && digits(b),
+        (false, false) => {
+            digits(a)
+                && digits(b)
+                && matches!((a.parse::<u64>(), b.parse::<u64>()), (Ok(start), Ok(end)) if start <= end)
+        }
     };
     ok.then_some(raw)
 }

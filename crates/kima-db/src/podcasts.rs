@@ -199,3 +199,59 @@ pub async fn is_subscribed(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Re
     .fetch_one(pool)
     .await
 }
+
+/// Replaces a show's Apple category ids (upstream `podcast.updateMany`, `podcastCatalog.ts:285`).
+pub async fn set_category_ids(pool: &PgPool, podcast: Uuid, ids: &[i32]) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE podcasts SET category_ids = $2, updated_at = now() WHERE id = $1",
+        podcast,
+        ids
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Shows with an Apple id and no categories (`podcastCatalog.ts:298-301`): `(id, itunes_id)`.
+pub async fn missing_categories(pool: &PgPool) -> sqlx::Result<Vec<(Uuid, String)>> {
+    let rows = sqlx::query!(
+        r#"SELECT id, itunes_id AS "itunes_id!" FROM podcasts
+           WHERE category_ids = '{}' AND itunes_id IS NOT NULL ORDER BY id"#
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.id, r.itunes_id)).collect())
+}
+
+/// A followed show as "for you" weighs it (`podcastCatalog.ts:361-364`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Followed {
+    pub title: String,
+    pub itunes_id: Option<String>,
+    pub category_ids: Vec<i32>,
+}
+
+/// The shows `user` follows, oldest follow first.
+pub async fn followed(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<Followed>> {
+    sqlx::query_as!(
+        Followed,
+        "SELECT p.title, p.itunes_id, p.category_ids
+         FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id
+         WHERE s.user_id = $1 ORDER BY s.subscribed_at, p.id",
+        user
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// The stored `podcastChartCountry` setting as text, if it is a string
+/// (`SystemSettings.podcastChartCountry`; the settings route lands in M6 Task 17).
+pub async fn chart_country(pool: &PgPool) -> sqlx::Result<Option<String>> {
+    Ok(sqlx::query_scalar!(
+        r#"SELECT value #>> '{}' AS "value" FROM settings_kv
+           WHERE key = 'podcastChartCountry' AND jsonb_typeof(value) = 'string'"#
+    )
+    .fetch_optional(pool)
+    .await?
+    .flatten())
+}

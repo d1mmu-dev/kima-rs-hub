@@ -59,6 +59,8 @@ struct State {
     user_agents: Mutex<Vec<String>>,
     content_types: Mutex<Vec<String>>,
     headers: Mutex<Vec<Vec<(String, String)>>>,
+    /// Requests whose target contains the pattern wait until the semaphore is closed.
+    holds: Mutex<Vec<(String, Arc<tokio::sync::Semaphore>)>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -161,12 +163,28 @@ impl Replay {
             user_agents: Mutex::new(Vec::new()),
             content_types: Mutex::new(Vec::new()),
             headers: Mutex::new(Vec::new()),
+            holds: Mutex::new(Vec::new()),
         });
         let shared = state.clone();
         let app = Router::new().fallback(
             move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
                 let state = shared.clone();
-                async move { state.answer(&method, &uri, &headers, &body) }
+                async move {
+                    let target = uri
+                        .path_and_query()
+                        .map_or("", |pq| pq.as_str())
+                        .to_string();
+                    let held: Vec<_> = lock(&state.holds)
+                        .iter()
+                        .filter(|(pattern, _)| target.contains(pattern.as_str()))
+                        .map(|(_, sem)| sem.clone())
+                        .collect();
+                    for sem in held {
+                        // Closed on release: every waiter goes on.
+                        let _ = sem.acquire().await;
+                    }
+                    state.answer(&method, &uri, &headers, &body)
+                }
             },
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -203,6 +221,14 @@ impl Replay {
         lock(&self.state.content_types).clone()
     }
 
+    /// Holds every request whose path-and-query contains `pattern` (it is counted in
+    /// [`Replay::asked`] only once answered) until [`Held::release`] or the guard is dropped.
+    pub fn hold(&self, pattern: &str) -> Held {
+        let sem = Arc::new(tokio::sync::Semaphore::new(0));
+        lock(&self.state.holds).push((pattern.to_string(), sem.clone()));
+        Held(sem)
+    }
+
     /// The headers of every request received, in order (lowercase names).
     pub fn headers(&self) -> Vec<Vec<(String, String)>> {
         lock(&self.state.headers).clone()
@@ -215,6 +241,21 @@ impl Replay {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.clone())
+    }
+}
+
+/// Requests held by [`Replay::hold`]; released when this is released or dropped.
+pub struct Held(Arc<tokio::sync::Semaphore>);
+
+impl Held {
+    pub fn release(&self) {
+        self.0.close();
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 

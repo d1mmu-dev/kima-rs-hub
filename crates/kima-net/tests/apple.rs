@@ -184,3 +184,51 @@ async fn apple_rate_limit_retries_twice(pool: PgPool) {
     assert_eq!(replay.asked().len(), 3);
     assert!(net.paused_until(kima_net::Source::Apple).is_some());
 }
+
+fn has_feed(v: &Value) -> bool {
+    v.get("feed").is_some_and(|f| !f.is_null())
+}
+
+/// M6 Task 5: a reply that is not what was asked for (upstream `AppleReplyError`) fails and is
+/// never cached; the next good reply is used.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn valid_when_false_is_bad_response_and_not_cached(pool: PgPool) {
+    let replay = Replay::start(Recording(vec![
+        entry("/chart", 200, json!({"errorMessage": "busy"})),
+        entry("/chart", 200, json!({"feed": {}})),
+    ]))
+    .await;
+    let net = apple_net(&replay, &pool, IdentifySwitch::new(false, true));
+    let req = || {
+        Req::get(Host::Itunes, "/chart")
+            .valid_when(has_feed)
+            .user_facing()
+    };
+    let first = net.get_json::<Value>(req()).await;
+    assert_eq!(first.code(), Some("BAD_RESPONSE"), "{first:?}");
+    assert!(matches!(first, Outcome::Transient(_)));
+    assert_eq!(
+        net.get_json::<Value>(req()).await,
+        Outcome::Answered(json!({"feed": {}}))
+    );
+    // The good reply is cached now.
+    net.get_json::<Value>(req()).await;
+    assert_eq!(replay.asked().len(), 2);
+}
+
+/// M6 Task 5: Apple search's `skipRetry` (`podcastCatalog.ts:194-207`).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn no_retry_does_not_retry_a_rate_limit(pool: PgPool) {
+    let replay = Replay::start(Recording(vec![entry("/search", 429, json!({}))])).await;
+    let net = apple_net(&replay, &pool, IdentifySwitch::new(false, true));
+    let out = net
+        .get_json::<Value>(
+            Req::get(Host::Itunes, "/search")
+                .no_cache()
+                .no_retry()
+                .user_facing(),
+        )
+        .await;
+    assert!(matches!(out, Outcome::RateLimited { .. }), "{out:?}");
+    assert_eq!(replay.asked().len(), 1);
+}

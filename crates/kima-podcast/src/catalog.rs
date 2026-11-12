@@ -38,6 +38,7 @@ pub enum Priority {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Category {
     pub id: i32,
     pub name: String,
@@ -87,7 +88,7 @@ pub struct DiscoveryItem {
 }
 
 /// One "for you" row (`ForYouRow`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ForYouRow {
     pub category: Category,
     /// The followed shows that put this category here (at most two).
@@ -437,6 +438,11 @@ impl Catalog {
             .load("categories:v1".into(), req, Priority::Interactive)
             .await?;
         Ok(category_tree(&data))
+    }
+
+    /// Whether Apple has a podcast category with this id (`isCategory`).
+    pub async fn is_category(&self, id: i32) -> Result<bool, Upstream> {
+        Ok(self.categories().await?.iter().any(|c| c.id == id))
     }
 
     /// Apple's chart for one category (the overall chart without one), in rank order, up to

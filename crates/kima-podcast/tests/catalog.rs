@@ -119,6 +119,15 @@ async fn reads_apples_whole_category_tree_sub_categories_under_their_parents(poo
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn is_category_checks_apples_whole_tree(pool: PgPool) {
+    let replay = Replay::start(recording()).await;
+    let catalog = catalog_at(&replay, &pool);
+    assert!(catalog.is_category(1495).await.unwrap());
+    assert!(catalog.is_category(1303).await.unwrap());
+    assert!(!catalog.is_category(999_999).await.unwrap());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn reads_a_categorys_chart_in_rank_order_with_large_artwork_and_apples_description(
     pool: PgPool,
 ) {

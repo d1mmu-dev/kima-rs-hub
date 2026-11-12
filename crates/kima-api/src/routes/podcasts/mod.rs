@@ -9,6 +9,7 @@ use crate::error::ApiError;
 use crate::extract::ApiJson;
 use crate::state::AppState;
 
+mod discovery;
 mod progress;
 mod stream;
 
@@ -26,6 +27,7 @@ pub fn routes() -> Router<AppState> {
             post(progress).delete(clear),
         )
         .merge(stream::routes())
+        .merge(discovery::routes())
 }
 
 async fn subscribe(

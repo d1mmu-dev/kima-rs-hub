@@ -22,5 +22,14 @@ replies, not new recordings (owner decision Q5, taken by the controller under th
   `category.attributes`; lookup results `wrapperType`, `kind`, `collectionId`, `feedUrl`,
   `genreIds`, `genres`, `collectionName`, `artistName`, `artworkUrl600`, `artworkUrl100`,
   `trackCount`. `search.json` is unchanged apart from the provenance line.
+- **Extended (M6 Task 13, 2026-11-12):** `kima-api`'s `crates/kima-api/tests/podcast_discovery.rs`
+  exercises `similarShows` across all four of a show's categories (1495/1303/1502/1507), which
+  upstream's own `podcastDiscovery.route.test.ts` only reaches a few tests further down the same
+  file (after an earlier test has warmed the batched `/lookup` cache for the 1495 chart); same
+  trimming as above, same source fixture. Added: the 1303 chart
+  (`/us/rss/toppodcasts/limit=200/genre=1303/json`) and the four `/lookup` batch replies the
+  combined 1495/1303/1502/1507 candidate set needs (200+200+158 ids plus the existing 199). The
+  Rust test reproduces upstream's cache-warming order within one `#[sqlx::test]` (own-category
+  `/similar` first, then the preview-by-Apple-id case) rather than relying on cross-test state.
 - **Regenerate:** run the trimming over upstream's file again (a short script: load, keep the
   listed URLs and fields, write compact JSON); never record against Apple from a test.

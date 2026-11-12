@@ -63,6 +63,8 @@ pub struct Req {
     pub(crate) no_cache: bool,
     pub(crate) ttl: Option<(Duration, Duration)>,
     pub(crate) user_facing: bool,
+    pub(crate) valid_when: Option<fn(&serde_json::Value) -> bool>,
+    pub(crate) no_retry: bool,
 }
 
 // Never prints a secret: query values and form pairs under a secret key are redacted.
@@ -94,6 +96,8 @@ impl std::fmt::Debug for Req {
             .field("no_cache", &self.no_cache)
             .field("ttl", &self.ttl)
             .field("user_facing", &self.user_facing)
+            .field("valid_when", &self.valid_when.is_some())
+            .field("no_retry", &self.no_retry)
             .finish()
     }
 }
@@ -114,6 +118,8 @@ impl Req {
             no_cache: false,
             ttl: None,
             user_facing: false,
+            valid_when: None,
+            no_retry: false,
         }
     }
 
@@ -181,6 +187,19 @@ impl Req {
     /// enrichment lookups, does not stop it. The network guard, pauses and limits still apply.
     pub fn user_facing(mut self) -> Req {
         self.user_facing = true;
+        self
+    }
+
+    /// A 2xx body for which `f` is false is not what was asked for (an error page, a throttled
+    /// reply): `Transient("BAD_RESPONSE")`, never cached.
+    pub fn valid_when(mut self, f: fn(&serde_json::Value) -> bool) -> Req {
+        self.valid_when = Some(f);
+        self
+    }
+
+    /// A rate-limited answer is not retried here (upstream `skipRetry`): the caller is waiting.
+    pub fn no_retry(mut self) -> Req {
+        self.no_retry = true;
         self
     }
 

@@ -502,7 +502,7 @@ impl Net {
             match classify(req, source, raw, secrets) {
                 Step::Done(outcome) => return outcome,
                 Step::Limited(limited) => {
-                    if attempt < limits.rate_limit_retries {
+                    if attempt < limits.rate_limit_retries && !req.no_retry {
                         let jitter = Duration::from_millis(rand::thread_rng().gen_range(0..1000));
                         let delay = retry_delay(attempt, limited.retry_after.as_deref(), jitter)
                             .mul_f64(live.cfg.wait_scale.max(0.0));
@@ -786,6 +786,9 @@ fn classify(req: &Req, source: Source, raw: Raw, secrets: &Secrets) -> Step<Valu
         };
         if req.absent_when.is_some_and(|f| f(&value)) {
             return Step::Done(Outcome::Absent(Evidence(value)));
+        }
+        if req.valid_when.is_some_and(|f| !f(&value)) {
+            return Step::Done(transient("BAD_RESPONSE", "not the answer asked for"));
         }
         return Step::Done(Outcome::Answered(value));
     }

@@ -56,6 +56,7 @@ struct State {
     entries: HashMap<Key, Vec<Entry>>,
     served: Mutex<HashMap<Key, usize>>,
     asked: Mutex<Vec<String>>,
+    arrived: Mutex<Vec<String>>,
     user_agents: Mutex<Vec<String>>,
     content_types: Mutex<Vec<String>>,
     headers: Mutex<Vec<Vec<(String, String)>>>,
@@ -160,6 +161,7 @@ impl Replay {
             entries,
             served: Mutex::new(HashMap::new()),
             asked: Mutex::new(Vec::new()),
+            arrived: Mutex::new(Vec::new()),
             user_agents: Mutex::new(Vec::new()),
             content_types: Mutex::new(Vec::new()),
             headers: Mutex::new(Vec::new()),
@@ -174,6 +176,7 @@ impl Replay {
                         .path_and_query()
                         .map_or("", |pq| pq.as_str())
                         .to_string();
+                    lock(&state.arrived).push(target.clone());
                     let held: Vec<_> = lock(&state.holds)
                         .iter()
                         .filter(|(pattern, _)| target.contains(pattern.as_str()))
@@ -209,6 +212,11 @@ impl Replay {
     /// Every request received, in order, as `METHOD /path?query` (as sent).
     pub fn asked(&self) -> Vec<String> {
         lock(&self.state.asked).clone()
+    }
+
+    /// Targets observed before any configured hold is released.
+    pub fn arrived(&self) -> Vec<String> {
+        lock(&self.state.arrived).clone()
     }
 
     /// The User-Agent of every request received, in order.

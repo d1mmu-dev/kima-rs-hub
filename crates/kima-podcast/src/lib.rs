@@ -2,5 +2,4 @@
 
 pub mod catalog;
 pub mod feed;
-mod lanes;
 pub mod upstream;

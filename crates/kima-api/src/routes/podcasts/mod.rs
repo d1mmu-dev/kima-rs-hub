@@ -143,6 +143,18 @@ async fn subscribe(
                 }
             }
         }
+        let categories = state
+            .podcast_catalog
+            .resolve_categories(
+                verified.as_deref(),
+                &parsed.show.category_names,
+                kima_podcast::catalog::Priority::Interactive,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "could not assign podcast categories");
+                Vec::new()
+            });
         let input = kima_db::podcasts::NewShow {
             feed_url,
             title: &parsed.show.title,
@@ -150,24 +162,16 @@ async fn subscribe(
             description: parsed.show.description.as_deref(),
             image_url: parsed.show.image_url.as_deref(),
             itunes_id: verified.as_deref(),
-            category_ids: &[],
+            category_ids: &categories,
             language: parsed.show.language.as_deref(),
             explicit: parsed.show.explicit,
             episode_count: parsed.episodes.len() as i32,
             feed_etag: etag.as_deref(),
             feed_last_modified: modified.as_deref(),
         };
-        match kima_db::podcasts::insert_show(&state.pool, uuid::Uuid::now_v7(), &input).await {
+        let mut tx = state.pool.begin().await?;
+        match kima_db::podcasts::insert_show_on(&mut tx, uuid::Uuid::now_v7(), &input).await {
             Ok(show) => {
-                state
-                    .podcast_catalog
-                    .assign_categories(
-                        show.id,
-                        verified.as_deref(),
-                        &parsed.show.category_names,
-                        kima_podcast::catalog::Priority::Interactive,
-                    )
-                    .await;
                 let episodes: Vec<_> = parsed
                     .episodes
                     .into_iter()
@@ -185,13 +189,16 @@ async fn subscribe(
                         mime_type: Some(e.mime_type),
                     })
                     .collect();
-                kima_db::podcasts::insert_episodes(&state.pool, show.id, &episodes).await?;
+                kima_db::podcasts::insert_episodes_on(&mut tx, show.id, &episodes).await?;
+                tx.commit().await?;
                 show
             }
             Err(e)
                 if e.as_database_error()
                     .is_some_and(|d| d.is_unique_violation()) =>
             {
+                // Release the aborted transaction's connection before acquiring from the pool.
+                tx.rollback().await?;
                 kima_db::podcasts::show_by_feed_or_itunes(
                     &state.pool,
                     feed_url,

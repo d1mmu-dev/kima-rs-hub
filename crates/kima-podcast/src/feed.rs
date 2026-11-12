@@ -128,10 +128,16 @@ impl El {
     }
 }
 
-fn start(e: &BytesStart<'_>) -> Result<El, FeedError> {
+fn start(e: &BytesStart<'_>, total_attrs: &mut usize) -> Result<El, FeedError> {
+    const MAX_ATTRIBUTES_PER_ELEMENT: usize = 64;
+    const MAX_ATTRIBUTES: usize = 100_000;
     let mut attrs = Vec::new();
     for attr in e.attributes() {
+        if attrs.len() >= MAX_ATTRIBUTES_PER_ELEMENT || *total_attrs >= MAX_ATTRIBUTES {
+            return Err(not_a_feed("XML attribute limit exceeded"));
+        }
         let attr = attr.map_err(|e| not_a_feed(e.to_string()))?;
+        *total_attrs += 1;
         let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
         let value = attr
             .unescape_value()
@@ -171,17 +177,28 @@ fn tree(xml: &str) -> Result<El, FeedError> {
     let mut reader = Reader::from_str(xml);
     let mut stack: Vec<El> = Vec::new();
     let mut root: Option<El> = None;
+    // Bound both recursive tree operations/drop and per-element allocation.
+    const MAX_DEPTH: usize = 128;
+    const MAX_ELEMENTS: usize = 100_000;
+    let mut elements = 0usize;
+    let mut total_attrs = 0usize;
     loop {
         let event = reader.read_event().map_err(|e| not_a_feed(e.to_string()))?;
+        if matches!(&event, Event::Start(_) | Event::Empty(_)) {
+            elements += 1;
+            if elements > MAX_ELEMENTS || stack.len() >= MAX_DEPTH {
+                return Err(not_a_feed("XML element limit exceeded"));
+            }
+        }
         match event {
             Event::Start(e) => {
                 if stack.is_empty() && root.is_some() {
                     return Err(not_a_feed("more than one root element"));
                 }
-                stack.push(start(&e)?);
+                stack.push(start(&e, &mut total_attrs)?);
             }
             Event::Empty(e) => {
-                let el = start(&e)?;
+                let el = start(&e, &mut total_attrs)?;
                 close(el, &mut stack, &mut root)?;
             }
             Event::End(_) => {
@@ -447,11 +464,14 @@ pub fn parse_duration(s: &str) -> i32 {
     }
     let parts: Option<Vec<i128>> = s.split(':').map(parse_int).collect();
     let secs = match parts.as_deref() {
-        Some([h, m, s]) => h * 3600 + m * 60 + s,
-        Some([m, s]) => m * 60 + s,
-        _ => 0,
+        Some([h, m, s]) => h
+            .checked_mul(3600)
+            .and_then(|h| m.checked_mul(60).and_then(|m| h.checked_add(m)))
+            .and_then(|v| v.checked_add(*s)),
+        Some([m, s]) => m.checked_mul(60).and_then(|m| m.checked_add(*s)),
+        _ => None,
     };
-    i32::try_from(secs).unwrap_or(0)
+    secs.and_then(|n| i32::try_from(n).ok()).unwrap_or(0)
 }
 
 fn month(name: &str) -> Option<Month> {

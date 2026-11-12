@@ -93,6 +93,13 @@ async fn concurrency_multiplier_capped_by_burst() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn cell_available_exactly_at_deadline_is_admitted() {
+    let gate = Gate::new(Duration::from_secs(1), 1, 2);
+    drop(gate.acquire(None).await.unwrap());
+    assert!(gate.acquire(Some(Duration::from_secs(1))).await.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
 async fn lowering_the_cap_waits_for_holders() {
     let gate = Gate::new(Duration::from_millis(1), 10, 3);
     let a = gate.acquire(None).await.unwrap();

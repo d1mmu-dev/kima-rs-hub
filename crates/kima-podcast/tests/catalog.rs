@@ -238,6 +238,304 @@ fn samples_a_show_by_its_oldest_dated_episode_with_audio() {
 // podcastCatalog.inflight.test.ts
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cancelling_all_joined_callers_removes_the_shared_gate_waiter(pool: PgPool) {
+    use kima_net::Source;
+    let replay = Replay::start(recording()).await;
+    let net = Arc::new(Net::new(
+        NetConfig::for_tests(Bases::all(&replay.url())),
+        pool.clone(),
+        IdentifySwitch::new(false, false),
+    ));
+    let catalog = Catalog::new(net.clone(), pool);
+    let held = replay.hold("/lookup");
+    let holder = {
+        let c = catalog.clone();
+        tokio::spawn(async move { c.lookup(&[DND.to_string()], Priority::Interactive).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !replay.arrived().iter().any(|s| s.contains("/lookup")) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("holder did not arrive");
+    let first = {
+        let c = catalog.clone();
+        tokio::spawn(async move { c.chart(Some(1507), Priority::Background).await })
+    };
+    let wait_queue = |expected: Vec<bool>| {
+        let net = net.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while net.queued_priorities(Source::Apple).unwrap() != expected {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("gate queue not observed");
+        }
+    };
+    wait_queue(vec![false]).await;
+    let second = {
+        let c = catalog.clone();
+        tokio::spawn(async move { c.chart(Some(1507), Priority::Interactive).await })
+    };
+    wait_queue(vec![true]).await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    wait_queue(vec![true]).await;
+    second.abort();
+    assert!(second.await.unwrap_err().is_cancelled());
+    wait_queue(vec![]).await;
+    held.release();
+    holder.await.unwrap().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        catalog.chart(Some(1507), Priority::Background),
+    )
+    .await
+    .expect("fresh request blocked")
+    .unwrap();
+    assert_eq!(asks(&replay, "genre=1507"), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn queued_shared_flight_is_promoted_and_cancellation_removes_waiters(pool: PgPool) {
+    use kima_net::Source;
+    let replay = Replay::start(recording()).await;
+    let net = Arc::new(Net::new(
+        NetConfig::for_tests(Bases::all(&replay.url())),
+        pool.clone(),
+        IdentifySwitch::new(false, false),
+    ));
+    let catalog = Catalog::new(net.clone(), pool);
+    let held = replay.hold("/lookup");
+    let page = {
+        let c = catalog.clone();
+        tokio::spawn(async move { c.lookup(&[DND.to_string()], Priority::Interactive).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !replay.arrived().iter().any(|s| s.contains("/lookup")) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("holder did not arrive");
+    let spawn_chart = |genre, priority| {
+        let c = catalog.clone();
+        tokio::spawn(async move { c.chart(Some(genre), priority).await })
+    };
+    let wait_queue = |expected: Vec<bool>| {
+        let net = net.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while net.queued_priorities(Source::Apple).unwrap() != expected {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("expected gate queue not observed");
+        }
+    };
+    let other = spawn_chart(1502, Priority::Background);
+    wait_queue(vec![false]).await;
+    let row = spawn_chart(1507, Priority::Background);
+    wait_queue(vec![false, false]).await;
+    let opened = spawn_chart(1507, Priority::Interactive);
+    wait_queue(vec![false, true]).await;
+    row.abort();
+    assert!(row.await.unwrap_err().is_cancelled());
+    wait_queue(vec![false, true]).await;
+    let cancelled = spawn_chart(1495, Priority::Background);
+    wait_queue(vec![false, true, false]).await;
+    cancelled.abort();
+    assert!(cancelled.await.unwrap_err().is_cancelled());
+    wait_queue(vec![false, true]).await;
+    held.release();
+    page.await.unwrap().unwrap();
+    let result = opened.await.unwrap().unwrap();
+    other.await.unwrap().unwrap();
+    assert!(!result.is_empty());
+    assert_eq!(asks(&replay, "genre=1507"), 1);
+    assert_eq!(asks(&replay, "genre=1495"), 0);
+    let order: Vec<_> = replay
+        .asked()
+        .into_iter()
+        .filter(|a| a.contains("/rss/"))
+        .collect();
+    assert_eq!(order.len(), 2);
+    assert!(order[0].contains("genre=1507"), "{order:?}");
+    assert!(order[1].contains("genre=1502"), "{order:?}");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cached_background_chart_is_not_blocked_by_interactive_load(pool: PgPool) {
+    let replay = Replay::start(recording()).await;
+    let catalog = catalog_at(&replay, &pool);
+    let cached = catalog
+        .chart(Some(1507), Priority::Background)
+        .await
+        .unwrap();
+    let held = replay.hold("genre=1495");
+    let active = {
+        let catalog = catalog.clone();
+        tokio::spawn(async move { catalog.chart(Some(1495), Priority::Interactive).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !replay.arrived().iter().any(|a| a.contains("genre=1495")) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("interactive request never arrived");
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        catalog.chart(Some(1507), Priority::Background),
+    )
+    .await;
+    held.release();
+    active.await.unwrap().unwrap();
+    assert_eq!(
+        result
+            .expect("cache hit was queued behind network work")
+            .unwrap(),
+        cached
+    );
+    assert_eq!(asks(&replay, "genre=1507"), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cancelling_interactive_while_queued_unblocks_background(pool: PgPool) {
+    let replay = Replay::start(recording()).await;
+    let catalog = catalog_at(&replay, &pool);
+    let held = replay.hold("genre=1495");
+    let active = {
+        let catalog = catalog.clone();
+        tokio::spawn(async move { catalog.chart(Some(1495), Priority::Background).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !replay.arrived().iter().any(|a| a.contains("genre=1495")) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background holder did not reach Apple");
+    {
+        let queued = catalog.chart(Some(1507), Priority::Interactive);
+        tokio::pin!(queued);
+        assert!(futures::poll!(&mut queued).is_pending());
+    }
+    held.release();
+    active.await.unwrap().unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        catalog.chart(Some(1502), Priority::Background),
+    )
+    .await;
+    assert!(
+        !result
+            .expect("cancelled interactive flight blocked background")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cancelling_queued_chart_allows_a_fresh_request(pool: PgPool) {
+    let replay = Replay::start(recording()).await;
+    let catalog = catalog_at(&replay, &pool);
+    let held = replay.hold("genre=1495");
+    let active = {
+        let catalog = catalog.clone();
+        tokio::spawn(async move { catalog.chart(Some(1495), Priority::Interactive).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !replay.arrived().iter().any(|a| a.contains("genre=1495")) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("interactive request did not reach Apple");
+    {
+        let queued = catalog.chart(Some(1507), Priority::Background);
+        tokio::pin!(queued);
+        assert!(futures::poll!(&mut queued).is_pending());
+    }
+    assert!(!replay.arrived().iter().any(|a| a.contains("genre=1507")));
+    held.release();
+    active.await.unwrap().unwrap();
+    let fresh = tokio::time::timeout(
+        Duration::from_secs(5),
+        catalog.chart(Some(1507), Priority::Background),
+    )
+    .await;
+    assert!(
+        !fresh
+            .expect("cancelled queued flight blocked fresh request")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(asks(&replay, "genre=1507"), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cancel_one_shared_caller_keeps_the_other_alive(pool: PgPool) {
+    let replay = Replay::start(recording()).await;
+    let catalog = catalog_at(&replay, &pool);
+    let held = replay.hold("genre=1495");
+    let first = {
+        let catalog = catalog.clone();
+        tokio::spawn(async move { catalog.chart(Some(1495), Priority::Interactive).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !replay.arrived().iter().any(|a| a.contains("genre=1495")) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first request did not reach Apple");
+    let joined = catalog.chart(Some(1495), Priority::Interactive);
+    tokio::pin!(joined);
+    assert!(futures::poll!(&mut joined).is_pending());
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    held.release();
+    assert_eq!(joined.await.unwrap().len(), 200);
+    assert_eq!(asks(&replay, "genre=1495"), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cancellation_releases_interactive_flight(pool: PgPool) {
+    let replay = Replay::start(recording()).await;
+    let catalog = catalog_at(&replay, &pool);
+    let held = replay.hold("genre=1495");
+    let first = {
+        let c = catalog.clone();
+        tokio::spawn(async move { c.chart(Some(1495), Priority::Interactive).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !replay.arrived().iter().any(|a| a.contains("genre=1495")) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first request did not reach Apple");
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        catalog.chart(Some(1507), Priority::Background),
+    )
+    .await;
+    held.release();
+    assert!(
+        result
+            .expect("cancelled request blocked background")
+            .is_ok()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn asks_apple_once_when_three_ask_for_the_same_chart_while_it_is_on_its_way(pool: PgPool) {
     let replay = Replay::start(recording()).await;
     let catalog = catalog_at(&replay, &pool);

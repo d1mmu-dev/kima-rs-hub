@@ -477,13 +477,15 @@ async fn hold_plays(pool: &PgPool) -> sqlx::Transaction<'static, sqlx::Postgres>
     tx
 }
 
-/// Wait until `n` sessions sit on that lock with their `DELETE`.
+/// Wait until `n` sessions sit on that lock with their `DELETE`, or on an
+/// advisory lock (the per-user audit lock, or the gate of `gate_deletes`).
 async fn parked(pool: &PgPool, n: i64) {
     for _ in 0..500 {
         let waiting: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
-             AND wait_event_type = 'Lock' AND wait_event = 'relation' \
-             AND query LIKE 'DELETE FROM plays%'",
+             AND wait_event_type = 'Lock' \
+             AND ((wait_event = 'relation' AND query LIKE 'DELETE FROM plays%') \
+                  OR wait_event = 'advisory')",
         )
         .fetch_one(pool)
         .await
@@ -493,7 +495,7 @@ async fn parked(pool: &PgPool, n: i64) {
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    panic!("{n} DELETE statements never waited on the plays lock");
+    panic!("{n} sessions never waited on the plays lock or an advisory lock");
 }
 
 async fn all_plays(pool: &PgPool) -> Vec<Uuid> {
@@ -631,4 +633,65 @@ async fn sub_millisecond_remove_keeps_a_row_inside_a_listen(pool: PgPool) {
     let mut expected = vec![a, b, c];
     expected.sort();
     assert_eq!(all_plays(&pool).await, expected);
+}
+
+/// Park every `DELETE FROM plays` on a gate (advisory lock 4242) held by the
+/// returned connection until `pg_advisory_unlock(4242)`; inserts are not blocked.
+async fn gate_deletes(pool: &PgPool) -> sqlx::pool::PoolConnection<sqlx::Postgres> {
+    sqlx::query(
+        "CREATE FUNCTION test_delete_gate() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN PERFORM pg_advisory_xact_lock_shared(4242); RETURN NULL; END $$",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_delete_gate BEFORE DELETE ON plays \
+         FOR EACH STATEMENT EXECUTE FUNCTION test_delete_gate()",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let mut gate = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(4242)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    gate
+}
+
+/// D-179 under two concurrent collapses: rows [f, hA heard, hB heard]; the first
+/// collapse reads them and would delete hA (hB, a heard endpoint, keeps the
+/// verdict). A non-heard row n is then recorded; a second collapse reading
+/// [f, hA, hB, n] would keep hA and delete hB, so both heard rows go. The
+/// per-user audit lock makes the second one read after the first commits.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn concurrent_collapses_keep_a_heard_row(pool: PgPool) {
+    use kima_db::stats::audit;
+    let (user, tracks) = audit_fixture(&pool, 1).await;
+    let f = audit_play(&pool, user, tracks[0], 0, false).await;
+    let _ha = audit_play(&pool, user, tracks[0], 10, true).await;
+    let hb = audit_play(&pool, user, tracks[0], 20, true).await;
+    let mut gate = gate_deletes(&pool).await;
+    let spawn = || {
+        let pool = pool.clone();
+        tokio::spawn(async move { audit::collapse(&pool, user).await.unwrap() })
+    };
+    let first = spawn();
+    parked(&pool, 1).await;
+    let n = audit_play(&pool, user, tracks[0], 30, false).await;
+    let second = spawn();
+    parked(&pool, 2).await;
+    sqlx::query("SELECT pg_advisory_unlock(4242)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let mut removed = vec![first.await.unwrap(), second.await.unwrap()];
+    removed.sort();
+    assert_eq!(removed, vec![0, 1]);
+    let mut expected = vec![f, hb, n];
+    expected.sort();
+    assert_eq!(all_plays(&pool).await, expected);
+    let rows = audit::audit_rows(&pool, user).await.unwrap();
+    assert_eq!(audit::listens_of(&rows)[0].verdict, audit::Verdict::Heard);
 }

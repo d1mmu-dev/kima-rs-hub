@@ -241,6 +241,21 @@ async fn delete_plays(
     Ok(done.rows_affected())
 }
 
+/// Serialises this user's `collapse` and `remove` until commit (namespace 7002
+/// plus the user hash), so a second one reads only after the first has deleted:
+/// two collapses judging the same listen from different reads could otherwise
+/// each delete a different heard row (D-179).
+async fn lock_user_audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user: Uuid,
+) -> sqlx::Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(7002, hashtext($1))")
+        .bind(user.to_string())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// Delete every row of the listens judged `skipped` now, on the named tracks
 /// that are not ignored; read, judgement and delete share one transaction.
 pub async fn remove(
@@ -249,6 +264,7 @@ pub async fn remove(
     tracks: &[Uuid],
 ) -> sqlx::Result<(u64, usize)> {
     let mut tx = pool.begin().await?;
+    lock_user_audit(&mut tx, user).await?;
     let rows = audit_rows(&mut *tx, user).await?;
     let ignored: HashSet<_> = ignored(&mut *tx, user)
         .await?
@@ -302,6 +318,7 @@ pub async fn restore(pool: &sqlx::PgPool, user: Uuid, tracks: &[Uuid]) -> sqlx::
 /// Collapse only rows selected from this user's current history.
 pub async fn collapse(pool: &sqlx::PgPool, user: Uuid) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
+    lock_user_audit(&mut tx, user).await?;
     let rows = audit_rows(&mut *tx, user).await?;
     let ids = collapse_candidates(&listens_of(&rows));
     let removed = delete_plays(&mut tx, user, &ids).await?;

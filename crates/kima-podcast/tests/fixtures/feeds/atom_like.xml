@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <title>Atom Show</title>
+  <link rel="self" href="https://atom.example/feed"/>
+  <link rel="alternate" href="https://podcasts.apple.com/podcast/id987654"/>
+  <itunes:author>Atom Author</itunes:author>
+  <entry>
+    <title>An entry</title>
+    <id>urn:entry:1</id>
+    <link rel="enclosure" type="audio/mpeg" href="https://atom.example/1.mp3"/>
+    <published>2025-01-01T00:00:00Z</published>
+  </entry>
+</feed>

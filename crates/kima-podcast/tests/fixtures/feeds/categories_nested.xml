@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Categorised</title>
+    <itunes:category text="Comedy">
+      <itunes:category text="Improv"/>
+      <itunes:category text=" Comedy Interviews "/>
+    </itunes:category>
+    <itunes:category text="Leisure">
+      <itunes:category text="Games"/>
+    </itunes:category>
+    <itunes:category text="Comedy"/>
+    <itunes:category text=""/>
+    <itunes:category>No attribute</itunes:category>
+  </channel>
+</rss>

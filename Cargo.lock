@@ -2919,6 +2919,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kima-podcast"
+version = "0.1.0"
+dependencies = [
+ "quick-xml",
+ "thiserror 2.0.21",
+ "time",
+]
+
+[[package]]
 name = "kima-server"
 version = "0.1.0"
 dependencies = [

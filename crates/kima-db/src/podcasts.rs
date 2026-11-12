@@ -484,3 +484,21 @@ pub async fn clear_progress(pool: &PgPool, user: Uuid, episode: Uuid) -> sqlx::R
         .await?;
     Ok(done.rows_affected())
 }
+
+/// Where an episode's audio lives and what to tell the browser it is (`podcasts.ts:916-1084`:
+/// `Content-Type: mimeType || audio/mpeg`, independent of what the host's own response says).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpisodeAudio {
+    pub audio_url: String,
+    pub mime_type: Option<String>,
+}
+
+pub async fn episode_audio(pool: &PgPool, episode: Uuid) -> sqlx::Result<Option<EpisodeAudio>> {
+    sqlx::query_as!(
+        EpisodeAudio,
+        "SELECT audio_url, mime_type FROM podcast_episodes WHERE id = $1",
+        episode
+    )
+    .fetch_optional(pool)
+    .await
+}

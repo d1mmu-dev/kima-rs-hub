@@ -405,6 +405,11 @@ async fn walk_agrees_with_audit_grouping(pool: PgPool) {
 
 /// A user and `n` 180 s tracks.
 async fn audit_fixture(pool: &PgPool, n: usize) -> (Uuid, Vec<Uuid>) {
+    audit_fixture_with(pool, &vec![180; n]).await
+}
+
+/// A user and one track per entry of `durations` (seconds).
+async fn audit_fixture_with(pool: &PgPool, durations: &[i32]) -> (Uuid, Vec<Uuid>) {
     let user = Uuid::now_v7();
     let artist = Uuid::now_v7();
     let album = Uuid::now_v7();
@@ -425,12 +430,13 @@ async fn audit_fixture(pool: &PgPool, n: usize) -> (Uuid, Vec<Uuid>) {
         .await
         .unwrap();
     let mut tracks = Vec::new();
-    for i in 0..n {
+    for (i, duration) in durations.iter().enumerate() {
         let id = Uuid::now_v7();
-        sqlx::query("INSERT INTO tracks (id,album_id,artist_name,title,duration_secs,codec,path,size,mtime,fingerprint) VALUES ($1,$2,'artist',$3,180,'flac',$3,0,now(),decode('','hex'))")
+        sqlx::query("INSERT INTO tracks (id,album_id,artist_name,title,duration_secs,codec,path,size,mtime,fingerprint) VALUES ($1,$2,'artist',$3,$4,'flac',$3,0,now(),decode('','hex'))")
             .bind(id)
             .bind(album)
             .bind(format!("t{i}"))
+            .bind(duration)
             .execute(pool)
             .await
             .unwrap();
@@ -563,4 +569,66 @@ async fn concurrent_collapses_delete_each_row_once(pool: PgPool) {
     removed.sort();
     assert_eq!(removed, vec![0, 2]);
     assert_eq!(all_plays(&pool).await, vec![ids[0], ids[3]]);
+}
+
+/// A play at an exact `timestamptz` literal (sub-second precision).
+async fn audit_play_at(pool: &PgPool, user: Uuid, track: Uuid, at: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,$4::timestamptz)",
+    )
+    .bind(id)
+    .bind(user)
+    .bind(track)
+    .bind(at)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+/// Review scenario (D-178): rows 99.9995 s apart on a 100 s track. Measured in
+/// microseconds they are one listen; truncated to milliseconds each, 100.000 s,
+/// i.e. two. The SQL walk and the audit must give the same answer.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn sub_millisecond_walk_and_audit_grouping_agree(pool: PgPool) {
+    use kima_db::stats::{
+        audit,
+        listens::{Period, listen_rows},
+    };
+    let (user, tracks) = audit_fixture_with(&pool, &[100]).await;
+    audit_play_at(&pool, user, tracks[0], "2026-03-01T12:00:00.000600Z").await;
+    audit_play_at(&pool, user, tracks[0], "2026-03-01T12:01:40.000100Z").await;
+    let sql = format!(
+        "{} SELECT count(*)::bigint FROM p",
+        listen_rows(Period::All, false)
+    );
+    let walk: i64 = sqlx::query_scalar(&sql)
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let rows = audit::audit_rows(&pool, user).await.unwrap();
+    let listens = audit::listens_of(&rows);
+    assert_eq!(walk, 1);
+    assert_eq!(listens.len() as i64, walk);
+    assert_eq!(listens[0].play_ids.len(), 2);
+}
+
+/// Same scenario: B is the second row of a heard listen, so `remove` must not
+/// treat it as a skipped listen of its own.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn sub_millisecond_remove_keeps_a_row_inside_a_listen(pool: PgPool) {
+    use kima_db::stats::audit;
+    let (user, tracks) = audit_fixture_with(&pool, &[100, 180]).await;
+    let a = audit_play_at(&pool, user, tracks[0], "2026-03-01T12:00:00.000600Z").await;
+    let b = audit_play_at(&pool, user, tracks[0], "2026-03-01T12:01:40.000100Z").await;
+    let c = audit_play_at(&pool, user, tracks[1], "2026-03-01T12:01:50Z").await;
+    assert_eq!(
+        audit::remove(&pool, user, &[tracks[0]]).await.unwrap(),
+        (0, 0)
+    );
+    let mut expected = vec![a, b, c];
+    expected.sort();
+    assert_eq!(all_plays(&pool).await, expected);
 }

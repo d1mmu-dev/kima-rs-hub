@@ -44,12 +44,12 @@ pub struct IgnoredRow {
     pub artist: String,
     pub ignored_at: OffsetDateTime,
 }
+/// Microseconds, as stored (`timestamptz`) and as the SQL walk measures them
+/// (`EXTRACT(EPOCH ...)` in `listens::listen_rows`): grouping and verdicts must
+/// agree with the listen counts (D-178). Upstream stores milliseconds, so its
+/// JavaScript `Date` arithmetic loses nothing there.
 fn seconds(a: OffsetDateTime, b: OffsetDateTime) -> f64 {
-    // Prisma materializes each timestamp as a JavaScript Date before subtraction.
-    // Truncate each instant separately, including instants before the Unix epoch;
-    // truncating the duration would change comparisons across millisecond boundaries.
-    let millis = |t: OffsetDateTime| t.unix_timestamp_nanos().div_euclid(1_000_000);
-    (millis(a) - millis(b)) as f64 / 1_000.0
+    (a - b).whole_microseconds() as f64 / 1_000_000.0
 }
 pub fn listens_of(rows: &[AuditRow]) -> Vec<Listen> {
     let mut out: Vec<Listen> = Vec::new();
@@ -323,20 +323,25 @@ mod tests {
             duration,
         }
     }
+    // Seconds are measured in microseconds, like the SQL walk's `EXTRACT(EPOCH ...)`
+    // on `timestamptz` (D-178): a sub-millisecond difference decides a threshold here
+    // exactly as it does there.
     #[test]
-    fn javascript_milliseconds_at_verdict_threshold() {
+    fn sub_millisecond_gap_below_verdict_threshold_is_skipped() {
         let mut first = row(1, 0, 100, false);
         first.played_at += time::Duration::microseconds(500);
         let listens = listens_of(&[first, row(2, 50, 100, false)]);
-        assert_eq!(listens[0].verdict, Verdict::Unclear);
+        assert_eq!(listens[0].gap_after, Some(49.9995));
+        assert_eq!(listens[0].verdict, Verdict::Skipped);
     }
 
     #[test]
-    fn javascript_milliseconds_at_group_boundary() {
+    fn sub_millisecond_gap_below_window_stays_in_one_listen() {
         let mut first = row(1, 0, 100, false);
         first.played_at += time::Duration::microseconds(500);
         let listens = listens_of(&[first, row(1, 100, 100, false)]);
-        assert_eq!(listens.len(), 2);
+        assert_eq!(listens.len(), 1);
+        assert_eq!(listens[0].play_ids.len(), 2);
     }
 
     #[test]

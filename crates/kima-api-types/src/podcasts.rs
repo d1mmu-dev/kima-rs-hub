@@ -39,3 +39,18 @@ pub struct FollowedShow {
     pub latest_episode_at: Option<String>,
     pub episodes: Vec<EpisodeSummary>,
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EpisodeRow {
+    pub id: Uuid,
+    pub title: String,
+    pub description: Option<String>,
+    pub duration: i32,
+    pub published_at: String,
+    pub episode_number: Option<i32>,
+    pub season: Option<i32>,
+    pub image_url: Option<String>,
+    pub is_downloaded: bool,
+    pub progress: Option<Progress>,
+}

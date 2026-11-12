@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
@@ -13,6 +13,10 @@ pub fn routes() -> Router<AppState> {
         .route("/podcasts", get(list))
         .route("/podcasts/subscribe", post(subscribe))
         .route("/podcasts/{id}/unsubscribe", delete(unsubscribe))
+        .route("/podcasts/listening", get(listening))
+        .route("/podcasts/{id}", get(detail))
+        .route("/podcasts/{id}/episodes", get(episodes))
+        .route("/podcasts/{podcast}/episodes/{episode}/next", get(next))
 }
 
 async fn subscribe(
@@ -212,7 +216,7 @@ async fn list(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Vec<kima_api_types::podcasts::FollowedShow>>, ApiError> {
-    use kima_api_types::podcasts::{EpisodeSummary, FollowedShow, Progress};
+    use kima_api_types::podcasts::{EpisodeSummary, FollowedShow};
     use kima_api_types::stats::js_iso;
     let mut out = Vec::new();
     for show in kima_db::podcasts::followed_shows(&state.pool, user.id).await? {
@@ -220,29 +224,12 @@ async fn list(
         let episodes: Vec<_> = rows
             .into_iter()
             .map(|e| {
-                let progress = match (
+                let progress = progress_of(
                     e.current_time,
                     e.progress_duration,
                     e.is_finished,
                     e.last_played_at,
-                ) {
-                    (
-                        Some(current_time),
-                        Some(duration),
-                        Some(is_finished),
-                        Some(last_played_at),
-                    ) => Some(Progress {
-                        current_time,
-                        progress: if duration > 0.0 {
-                            ((current_time / duration) * 100.0).min(100.0)
-                        } else {
-                            0.0
-                        },
-                        is_finished,
-                        last_played_at: js_iso(last_played_at),
-                    }),
-                    _ => None,
-                };
+                );
                 EpisodeSummary {
                     id: e.id,
                     title: e.title,
@@ -282,4 +269,200 @@ async fn unsubscribe(
     Ok(Json(
         json!({"success": true, "message": "Unsubscribed successfully"}),
     ))
+}
+
+struct Page {
+    limit: i64,
+    offset: i64,
+    oldest: bool,
+}
+fn page(raw: Option<String>) -> Page {
+    let args = super::stats::args::Args(
+        form_urlencoded::parse(raw.as_deref().unwrap_or("").as_bytes())
+            .into_owned()
+            .collect(),
+    );
+    let l = args.get("limit").number();
+    let o = args.get("offset").number();
+    Page {
+        limit: if l.is_finite() && l > 0.0 {
+            l.floor().min(200.0) as i64
+        } else {
+            50
+        },
+        offset: if o.is_finite() && o > 0.0 {
+            o.floor() as i64
+        } else {
+            0
+        },
+        oldest: args.get("order").string() == Some("oldest"),
+    }
+}
+
+async fn checked_page(
+    state: &AppState,
+    user: uuid::Uuid,
+    id: &str,
+    raw: Option<String>,
+) -> Result<
+    (
+        uuid::Uuid,
+        Page,
+        Vec<kima_api_types::podcasts::EpisodeRow>,
+        i64,
+    ),
+    ApiError,
+> {
+    use kima_api_types::podcasts::EpisodeRow;
+    use kima_api_types::stats::js_iso;
+    let missing = || ApiError::NotFound("Podcast not found or not subscribed");
+    let id = uuid::Uuid::parse_str(id).map_err(|_| missing())?;
+    if !kima_db::podcasts::is_subscribed(&state.pool, user, id).await? {
+        return Err(missing());
+    }
+    let page = page(raw);
+    let (rows, total) = kima_db::podcasts::episode_page(
+        &state.pool,
+        user,
+        id,
+        page.limit,
+        page.offset,
+        page.oldest,
+    )
+    .await?;
+    let rows = rows
+        .into_iter()
+        .map(|e| {
+            let progress = progress_of(
+                e.current_time,
+                e.progress_duration,
+                e.is_finished,
+                e.last_played_at,
+            );
+            EpisodeRow {
+                id: e.id,
+                title: e.title,
+                description: e.description,
+                duration: e.duration,
+                published_at: js_iso(e.published_at),
+                episode_number: e.episode_number,
+                season: e.season,
+                image_url: e.image_url,
+                is_downloaded: e.is_downloaded,
+                progress,
+            }
+        })
+        .collect();
+    Ok((id, page, rows, total))
+}
+
+async fn episodes(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<Value>, ApiError> {
+    let (_, page, episodes, total) = checked_page(&state, user.id, &id, raw).await?;
+    Ok(Json(
+        json!({"episodes": episodes, "total": total, "offset": page.offset, "limit": page.limit}),
+    ))
+}
+
+async fn detail(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<Value>, ApiError> {
+    let (id, page, episodes, total) = checked_page(&state, user.id, &id, raw).await?;
+    let show = kima_db::podcasts::show_by_id(&state.pool, id)
+        .await?
+        .ok_or(ApiError::NotFound("Podcast not found"))?;
+    let mut categories = Vec::new();
+    if !show.category_ids.is_empty() {
+        if let Ok(names) = state.podcast_catalog.categories().await {
+            for id in &show.category_ids {
+                if let Some(c) = names.iter().find(|c| c.id == *id) {
+                    categories.push(json!({"id": c.id, "name": c.name}));
+                }
+            }
+        }
+    }
+    let genres: Vec<_> = categories.iter().map(|c| c["name"].clone()).collect();
+    Ok(Json(
+        json!({"id": show.id, "title": show.title, "author": show.author, "description": show.description,
+        "coverUrl": show.image_url, "feedUrl": show.feed_url, "genres": genres, "categories": categories,
+        "itunesId": show.itunes_id, "autoDownloadEpisodes": false, "episodes": episodes,
+        "episodeTotal": total, "episodeOffset": page.offset, "episodeLimit": page.limit, "isSubscribed": true}),
+    ))
+}
+
+async fn next(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((show, episode)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    use kima_api_types::stats::js_iso;
+    let missing = || ApiError::NotFound("Episode not found");
+    let show = uuid::Uuid::parse_str(&show).map_err(|_| missing())?;
+    let episode = uuid::Uuid::parse_str(&episode).map_err(|_| missing())?;
+    let next = kima_db::podcasts::next_episode(&state.pool, user.id, show, episode)
+        .await?
+        .ok_or_else(missing)?;
+    let Some(e) = next else {
+        return Ok(Json(json!({"episode": null})));
+    };
+    let show = kima_db::podcasts::show_by_id(&state.pool, show)
+        .await?
+        .ok_or_else(missing)?;
+    let progress = progress_of(
+        e.current_time,
+        e.progress_duration,
+        e.is_finished,
+        e.last_played_at,
+    );
+    Ok(Json(
+        json!({"podcast": {"id": show.id, "title": show.title, "coverUrl": show.image_url},
+        "episode": {"id": e.id, "title": e.title, "duration": e.duration, "publishedAt": js_iso(e.published_at), "coverUrl": e.image_url, "progress": progress}}),
+    ))
+}
+
+async fn listening(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
+    use kima_api_types::stats::js_iso;
+    let (in_progress, new_episodes) = kima_db::podcasts::listening(&state.pool, user.id).await?;
+    let convert = |e: kima_db::podcasts::ListeningRow| {
+        let progress = progress_of(
+            e.current_time,
+            e.progress_duration,
+            e.is_finished,
+            e.last_played_at,
+        );
+        json!({"podcast": {"id": e.podcast_id, "title": e.podcast_title, "coverUrl": e.podcast_image},
+            "episode": {"id": e.id, "title": e.title, "description": e.description, "duration": e.duration,
+            "publishedAt": js_iso(e.published_at), "coverUrl": e.image_url, "progress": progress}})
+    };
+    Ok(Json(
+        json!({"inProgress": in_progress.into_iter().map(convert).collect::<Vec<_>>(),
+        "newEpisodes": new_episodes.into_iter().map(convert).collect::<Vec<_>>()}),
+    ))
+}
+
+fn progress_of(
+    current: Option<f64>,
+    duration: Option<f64>,
+    finished: Option<bool>,
+    last: Option<time::OffsetDateTime>,
+) -> Option<kima_api_types::podcasts::Progress> {
+    let (current_time, duration, is_finished, last_played_at) =
+        (current?, duration?, finished?, last?);
+    Some(kima_api_types::podcasts::Progress {
+        current_time,
+        progress: if duration > 0.0 {
+            ((current_time / duration) * 100.0).min(100.0)
+        } else {
+            0.0
+        },
+        is_finished,
+        last_played_at: kima_api_types::stats::js_iso(last_played_at),
+    })
 }

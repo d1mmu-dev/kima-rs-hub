@@ -321,3 +321,102 @@ pub async fn recent_episodes(
     sqlx::query_as("SELECT e.id, e.title, e.description, e.duration, e.published_at, e.image_url,         p.\"current_time\", p.duration AS progress_duration, p.is_finished, p.last_played_at         FROM podcast_episodes e LEFT JOIN podcast_progress p ON p.episode_id = e.id AND p.user_id = $1         WHERE e.podcast_id = $2 ORDER BY e.published_at DESC, e.id DESC LIMIT 5")
         .bind(user).bind(show).fetch_all(pool).await
 }
+
+#[derive(sqlx::FromRow)]
+pub struct EpisodePageRow {
+    pub id: Uuid,
+    pub title: String,
+    pub description: Option<String>,
+    pub duration: i32,
+    pub published_at: OffsetDateTime,
+    pub episode_number: Option<i32>,
+    pub season: Option<i32>,
+    pub image_url: Option<String>,
+    pub is_downloaded: bool,
+    pub current_time: Option<f64>,
+    pub progress_duration: Option<f64>,
+    pub is_finished: Option<bool>,
+    pub last_played_at: Option<OffsetDateTime>,
+}
+
+pub async fn episode_page(
+    pool: &PgPool,
+    user: Uuid,
+    show: Uuid,
+    limit: i64,
+    offset: i64,
+    oldest: bool,
+) -> sqlx::Result<(Vec<EpisodePageRow>, i64)> {
+    let order = if oldest { "ASC" } else { "DESC" };
+    let query = format!(
+        "SELECT e.id, e.title, e.description, e.duration, e.published_at, e.episode_number, e.season, e.image_url,         EXISTS(SELECT 1 FROM podcast_downloads d WHERE d.episode_id=e.id AND d.user_id=$1) AS is_downloaded,         p.\"current_time\", p.duration AS progress_duration, p.is_finished, p.last_played_at         FROM podcast_episodes e LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1         WHERE e.podcast_id=$2 ORDER BY e.published_at {order}, e.id {order} LIMIT $3 OFFSET $4"
+    );
+    let rows = sqlx::query_as(&query)
+        .bind(user)
+        .bind(show)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+    let total = sqlx::query_scalar("SELECT count(*) FROM podcast_episodes WHERE podcast_id=$1")
+        .bind(show)
+        .fetch_one(pool)
+        .await?;
+    Ok((rows, total))
+}
+
+/// Next by release date and id, skipping episodes this listener finished. The outer option
+/// distinguishes an unknown current episode from the end of the show.
+pub async fn next_episode(
+    pool: &PgPool,
+    user: Uuid,
+    show: Uuid,
+    current: Uuid,
+) -> sqlx::Result<Option<Option<SummaryRow>>> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM podcast_episodes WHERE id=$1 AND podcast_id=$2)",
+    )
+    .bind(current)
+    .bind(show)
+    .fetch_one(pool)
+    .await?;
+    if !exists {
+        return Ok(None);
+    }
+    let next = sqlx::query_as("SELECT e.id, e.title, e.description, e.duration, e.published_at, e.image_url,         p.\"current_time\", p.duration AS progress_duration, p.is_finished, p.last_played_at         FROM podcast_episodes e JOIN podcast_episodes cur ON cur.id=$3 AND cur.podcast_id=$2         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1         WHERE e.podcast_id=$2 AND (e.published_at,e.id) > (cur.published_at,cur.id)         AND NOT COALESCE(p.is_finished, false) ORDER BY e.published_at,e.id LIMIT 1")
+        .bind(user).bind(show).bind(current).fetch_optional(pool).await?;
+    Ok(Some(next))
+}
+
+#[derive(sqlx::FromRow)]
+pub struct ListeningRow {
+    pub podcast_id: Uuid,
+    pub podcast_title: String,
+    pub podcast_image: Option<String>,
+    pub id: Uuid,
+    pub title: String,
+    pub description: Option<String>,
+    pub duration: i32,
+    pub published_at: OffsetDateTime,
+    pub image_url: Option<String>,
+    pub current_time: Option<f64>,
+    pub progress_duration: Option<f64>,
+    pub is_finished: Option<bool>,
+    pub last_played_at: Option<OffsetDateTime>,
+}
+
+pub async fn listening(
+    pool: &PgPool,
+    user: Uuid,
+) -> sqlx::Result<(Vec<ListeningRow>, Vec<ListeningRow>)> {
+    let columns = "s.id AS podcast_id,s.title AS podcast_title,s.image_url AS podcast_image,         e.id,e.title,e.description,e.duration,e.published_at,e.image_url,         p.\"current_time\",p.duration AS progress_duration,p.is_finished,p.last_played_at";
+    let query = format!(
+        "SELECT {columns} FROM podcast_progress p         JOIN podcast_episodes e ON e.id=p.episode_id         JOIN podcasts s ON s.id=e.podcast_id JOIN podcast_subscriptions sub ON sub.podcast_id=s.id AND sub.user_id=$1         WHERE p.user_id=$1 AND NOT p.is_finished AND p.\"current_time\">0 ORDER BY p.last_played_at DESC LIMIT 12"
+    );
+    let in_progress = sqlx::query_as(&query).bind(user).fetch_all(pool).await?;
+    let query = format!(
+        "WITH newest AS (SELECT DISTINCT ON (e.podcast_id) e.id FROM podcast_episodes e         JOIN podcast_subscriptions sub ON sub.podcast_id=e.podcast_id AND sub.user_id=$1         ORDER BY e.podcast_id,e.published_at DESC,e.id)         SELECT {columns} FROM newest n JOIN podcast_episodes e ON e.id=n.id JOIN podcasts s ON s.id=e.podcast_id         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1         WHERE p.user_id IS NULL ORDER BY e.published_at DESC LIMIT 20"
+    );
+    let new_episodes = sqlx::query_as(&query).bind(user).fetch_all(pool).await?;
+    Ok((in_progress, new_episodes))
+}

@@ -1,4 +1,5 @@
-//! Read-only play history audit. Input rows must be ordered by (played_at, id).
+//! Play history audit (pure judgement) and its four actions. Input rows must be
+//! ordered by (played_at, id).
 use sqlx::{FromRow, PgExecutor};
 use std::collections::{HashMap, HashSet};
 use time::OffsetDateTime;
@@ -29,6 +30,8 @@ pub struct Listen {
     pub duration: i32,
     pub required: Option<f64>,
     pub play_ids: Vec<Uuid>,
+    /// `heard` of each row, parallel to `play_ids`.
+    pub play_heard: Vec<bool>,
     pub started_at: OffsetDateTime,
     pub span: f64,
     pub gap_after: Option<f64>,
@@ -51,7 +54,6 @@ fn seconds(a: OffsetDateTime, b: OffsetDateTime) -> f64 {
 pub fn listens_of(rows: &[AuditRow]) -> Vec<Listen> {
     let mut out: Vec<Listen> = Vec::new();
     let mut open: HashMap<Uuid, usize> = HashMap::new();
-    let mut recorded = HashSet::new();
     for (i, row) in rows.iter().enumerate() {
         let gap = rows
             .get(i + 1)
@@ -71,6 +73,7 @@ pub fn listens_of(rows: &[AuditRow]) -> Vec<Listen> {
                     duration: row.duration,
                     required: crate::plays::required_listen_seconds(Some(f64::from(row.duration))),
                     play_ids: Vec::new(),
+                    play_heard: Vec::new(),
                     started_at: row.played_at,
                     span: 0.0,
                     gap_after: None,
@@ -82,14 +85,12 @@ pub fn listens_of(rows: &[AuditRow]) -> Vec<Listen> {
         };
         let listen = &mut out[index];
         listen.play_ids.push(row.id);
+        listen.play_heard.push(row.heard);
         listen.span = seconds(row.played_at, listen.started_at);
         listen.gap_after = gap;
-        if row.heard {
-            recorded.insert(index);
-        }
     }
-    for (i, listen) in out.iter_mut().enumerate() {
-        listen.verdict = if recorded.contains(&i) {
+    for listen in &mut out {
+        listen.verdict = if listen.play_heard.contains(&true) {
             Verdict::Heard
         } else {
             match (listen.required, listen.gap_after) {
@@ -103,18 +104,25 @@ pub fn listens_of(rows: &[AuditRow]) -> Vec<Listen> {
     }
     out
 }
+/// Every row between a listen's first and last row (upstream), except that when
+/// neither endpoint is `heard` the first heard middle row stays, so a collapse
+/// never turns a recorded listen into a skip (D-179, owner decision 2026-11-12).
 pub fn collapse_candidates(listens: &[Listen]) -> Vec<Uuid> {
-    listens
-        .iter()
-        .flat_map(|l| {
-            if l.play_ids.len() > 2 {
-                &l.play_ids[1..l.play_ids.len() - 1]
-            } else {
-                &[]
-            }
-        })
-        .copied()
-        .collect()
+    let mut out = Vec::new();
+    for l in listens.iter().filter(|l| l.play_ids.len() > 2) {
+        let last = l.play_ids.len() - 1;
+        let keep = if l.play_heard[0] || l.play_heard[last] {
+            None
+        } else {
+            (1..last).find(|&i| l.play_heard[i])
+        };
+        out.extend(
+            (1..last)
+                .filter(|&i| Some(i) != keep)
+                .map(|i| l.play_ids[i]),
+        );
+    }
+    out
 }
 
 pub async fn audit_rows<'e>(conn: impl PgExecutor<'e>, user: Uuid) -> sqlx::Result<Vec<AuditRow>> {
@@ -215,6 +223,90 @@ pub fn summarize(listens: &[Listen], ignored: &[IgnoredRow]) -> Audit {
     tracks.sort_by_key(|t| std::cmp::Reverse(t.skipped));
     audit.tracks = tracks;
     audit
+}
+
+/// Delete the given rows of this user only; ids never come from a client.
+async fn delete_plays(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user: Uuid,
+    ids: &[Uuid],
+) -> sqlx::Result<u64> {
+    let done = sqlx::query!(
+        "DELETE FROM plays WHERE user_id = $1 AND id = ANY($2)",
+        user,
+        ids
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(done.rows_affected())
+}
+
+/// Delete every row of the listens judged `skipped` now, on the named tracks
+/// that are not ignored; read, judgement and delete share one transaction.
+pub async fn remove(
+    pool: &sqlx::PgPool,
+    user: Uuid,
+    tracks: &[Uuid],
+) -> sqlx::Result<(u64, usize)> {
+    let mut tx = pool.begin().await?;
+    let rows = audit_rows(&mut *tx, user).await?;
+    let ignored: HashSet<_> = ignored(&mut *tx, user)
+        .await?
+        .into_iter()
+        .map(|row| row.track_id)
+        .collect();
+    let wanted: HashSet<_> = tracks.iter().copied().collect();
+    let listens = listens_of(&rows);
+    let doomed: Vec<_> = listens
+        .iter()
+        .filter(|l| {
+            l.verdict == Verdict::Skipped
+                && wanted.contains(&l.track_id)
+                && !ignored.contains(&l.track_id)
+        })
+        .collect();
+    let touched: HashSet<_> = doomed.iter().map(|l| l.track_id).collect();
+    let ids: Vec<_> = doomed
+        .iter()
+        .flat_map(|l| l.play_ids.iter().copied())
+        .collect();
+    let removed = delete_plays(&mut tx, user, &ids).await?;
+    tx.commit().await?;
+    Ok((removed, touched.len()))
+}
+
+/// Ids that are no track are skipped; a track already ignored is not counted.
+pub async fn ignore(pool: &sqlx::PgPool, user: Uuid, tracks: &[Uuid]) -> sqlx::Result<u64> {
+    let done = sqlx::query!(
+        "INSERT INTO play_audit_ignore (user_id, track_id) \
+         SELECT $1, id FROM tracks WHERE id = ANY($2) ON CONFLICT DO NOTHING",
+        user,
+        tracks
+    )
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected())
+}
+
+pub async fn restore(pool: &sqlx::PgPool, user: Uuid, tracks: &[Uuid]) -> sqlx::Result<u64> {
+    let done = sqlx::query!(
+        "DELETE FROM play_audit_ignore WHERE user_id = $1 AND track_id = ANY($2)",
+        user,
+        tracks
+    )
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected())
+}
+
+/// Collapse only rows selected from this user's current history.
+pub async fn collapse(pool: &sqlx::PgPool, user: Uuid) -> sqlx::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let rows = audit_rows(&mut *tx, user).await?;
+    let ids = collapse_candidates(&listens_of(&rows));
+    let removed = delete_plays(&mut tx, user, &ids).await?;
+    tx.commit().await?;
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -352,6 +444,52 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn collapse_preserves_verdict_when_only_middle_row_is_heard() {
+        let rows = vec![
+            row(1, 0, 180, false),
+            row(1, 1, 180, true),
+            row(1, 2, 180, false),
+            row(1, 3, 180, false),
+            row(2, 4, 180, false),
+        ];
+        let before = listens_of(&rows);
+        assert_eq!(before[0].verdict, Verdict::Heard);
+        let doomed = collapse_candidates(&before);
+        let after_rows: Vec<_> = rows
+            .into_iter()
+            .filter(|r| !doomed.contains(&r.id))
+            .collect();
+        let after = listens_of(&after_rows);
+        assert_eq!(after[0].verdict, before[0].verdict);
+    }
+
+    #[test]
+    fn collapse_keeps_one_heard_row_only_when_no_endpoint_is_heard() {
+        // Owner decision 2026-11-12 (D-179): keep the first heard middle row.
+        let rows = vec![
+            row(1, 0, 180, false),
+            row(1, 1, 180, false),
+            row(1, 2, 180, true),
+            row(1, 3, 180, true),
+            row(1, 4, 180, false),
+        ];
+        let l = listens_of(&rows);
+        assert_eq!(collapse_candidates(&l), vec![rows[1].id, rows[3].id]);
+        // A heard endpoint already carries the verdict: upstream's candidates.
+        for heard_at in [0, 4] {
+            let mut rows = rows.clone();
+            for (i, r) in rows.iter_mut().enumerate() {
+                r.heard = i == heard_at || i == 2;
+            }
+            let l = listens_of(&rows);
+            assert_eq!(
+                collapse_candidates(&l),
+                vec![rows[1].id, rows[2].id, rows[3].id]
+            );
+        }
+    }
+
     #[test]
     fn unknown_and_fractional_required_thresholds() {
         let l = listens_of(&[

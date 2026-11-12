@@ -96,6 +96,39 @@ mod tests {
         assert_eq!(serde_json::to_string(&Value(240.0)).unwrap(), "240");
         assert_eq!(serde_json::to_string(&Value(15.5)).unwrap(), "15.5");
     }
+    #[test]
+    fn false_start_action_bodies_match_upstream_keys() {
+        let wire = |v: serde_json::Value| v.to_string();
+        assert_eq!(
+            serde_json::to_string(&TrackIdsBody {
+                track_ids: vec!["a".into()]
+            })
+            .unwrap(),
+            wire(serde_json::json!({"trackIds":["a"]}))
+        );
+        assert_eq!(
+            serde_json::to_string(&Removed { removed: 2 }).unwrap(),
+            wire(serde_json::json!({"removed":2}))
+        );
+        assert_eq!(
+            serde_json::to_string(&RemovedFrom {
+                removed: 3,
+                tracks: 1
+            })
+            .unwrap(),
+            wire(serde_json::json!({"removed":3,"tracks":1}))
+        );
+        assert_eq!(
+            serde_json::to_string(&Ignored { ignored: 1 }).unwrap(),
+            wire(serde_json::json!({"ignored":1}))
+        );
+        assert_eq!(
+            serde_json::to_string(&Restored { restored: 0 }).unwrap(),
+            wire(serde_json::json!({"restored":0}))
+        );
+        let back: RemovedFrom = serde_json::from_str(r#"{"removed":3,"tracks":1}"#).unwrap();
+        assert_eq!((back.removed, back.tracks), (3, 1));
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -416,4 +449,32 @@ pub struct FalseStartAudit {
     pub earliest: Option<String>,
     pub tracks: Vec<FalseStartTrack>,
     pub ignored: Vec<IgnoredTrack>,
+}
+
+/// Body of `POST /stats/false-starts/{remove,ignore,restore}` (the UI also sends it to `collapse`).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackIdsBody {
+    pub track_ids: Vec<String>,
+}
+/// `POST /stats/false-starts/collapse`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Removed {
+    pub removed: u64,
+}
+/// `POST /stats/false-starts/remove`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct RemovedFrom {
+    pub removed: u64,
+    pub tracks: usize,
+}
+/// `POST /stats/false-starts/ignore`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Ignored {
+    pub ignored: u64,
+}
+/// `POST /stats/false-starts/restore`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Restored {
+    pub restored: u64,
 }

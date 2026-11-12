@@ -16,6 +16,10 @@ pub enum Source {
     Images,
     /// Apple's iTunes Search/Lookup API and podcast charts (M6).
     Apple,
+    /// Podcast feeds on any public host (M6).
+    Feeds,
+    /// Episode audio on any public host (M6).
+    Audio,
 }
 
 /// How hard kima may use a source: `burst` requests per `period` (GCRA), `concurrency` in
@@ -55,7 +59,7 @@ const fn limits(
 }
 
 impl Source {
-    pub const ALL: [Source; 10] = [
+    pub const ALL: [Source; 12] = [
         Source::MusicBrainz,
         Source::AcoustId,
         Source::Wikidata,
@@ -66,6 +70,8 @@ impl Source {
         Source::CoverArtArchive,
         Source::Images,
         Source::Apple,
+        Source::Feeds,
+        Source::Audio,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -80,6 +86,8 @@ impl Source {
             Source::CoverArtArchive => "coverartarchive",
             Source::Images => "images",
             Source::Apple => "apple",
+            Source::Feeds => "feeds",
+            Source::Audio => "audio",
         }
     }
 
@@ -105,7 +113,7 @@ impl Source {
             // The shortest Apple answer (a chart, `podcastCatalog.ts:161`); a lookup absence is
             // remembered a week (`:255`). Each request names its own with `Req::ttl`.
             Source::Apple => pair(6 * HOUR, 7 * DAY),
-            Source::Lrclib | Source::Images => None,
+            Source::Lrclib | Source::Images | Source::Feeds | Source::Audio => None,
         }
     }
 
@@ -123,6 +131,10 @@ impl Source {
             Source::Images => limits(1000, 4, 2, 30, 0),
             // `rateLimiter.ts:121-127` (itunes) and the 15 s of `podcastCatalog.ts:58-66`.
             Source::Apple => limits(3000, 1, 1, 15, 2),
+            // Arbitrary hosts, user-facing: no spacing, a cap on what is in flight, upstream's
+            // 30 s (`rss-parser.ts:105`, `podcasts.ts:1041`); a host's 429 is its own answer.
+            Source::Feeds => limits(0, 8, 4, 30, 0),
+            Source::Audio => limits(0, 16, 16, 30, 0),
         }
     }
 }
@@ -348,6 +360,28 @@ mod tests {
             Bases::all("http://127.0.0.1:9").get(Host::Itunes),
             "http://127.0.0.1:9"
         );
+    }
+
+    /// M6 Task 3: feeds and audio name arbitrary hosts; never cached, never spaced.
+    #[test]
+    fn feeds_and_audio_limits() {
+        let row = |src: Source| {
+            let l = src.limits();
+            (
+                l.period,
+                l.burst,
+                l.concurrency,
+                l.timeout,
+                l.rate_limit_retries,
+            )
+        };
+        let s = Duration::from_secs;
+        assert_eq!(row(Source::Feeds), (Duration::ZERO, 8, 4, s(30), 0));
+        assert_eq!(row(Source::Audio), (Duration::ZERO, 16, 16, s(30), 0));
+        assert_eq!(Source::Feeds.ttl(), None);
+        assert_eq!(Source::Audio.ttl(), None);
+        assert_eq!(Source::from_name("feeds"), Some(Source::Feeds));
+        assert_eq!(Source::from_name("audio"), Some(Source::Audio));
     }
 
     #[test]

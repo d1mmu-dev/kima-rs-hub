@@ -2900,7 +2900,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "bytes",
  "form_urlencoded",
+ "futures",
  "kima-core",
  "kima-db",
  "kima-net",

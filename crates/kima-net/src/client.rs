@@ -47,6 +47,18 @@ pub fn user_agent(version: &str, contact: &str) -> String {
     format!("kima-rs/{version} ( {contact} )")
 }
 
+/// The User-Agent podcast feeds are asked with (`rss-parser.ts:91`, D-203): upstream's form with
+/// kima-rs's version and contact.
+pub fn feed_user_agent(version: &str, contact: &str) -> String {
+    format!("Kima/{version} (+{contact}; podcast aggregator)")
+}
+
+/// The User-Agent episode audio is asked with, streaming and caching alike (`config.ts:106`,
+/// D-203): hosts that stitch ads in send each identity its own copy.
+pub fn audio_user_agent(version: &str, contact: &str) -> String {
+    format!("Kima/{version} ({contact})")
+}
+
 /// How long to wait before retrying a rate-limited request (`rateLimiter.ts:250-266`). A
 /// `Retry-After` of a positive whole number of seconds is honoured, capped at 60 s; anything
 /// else (0, a date, garbage) gets `2 s × 2^attempt + jitter`, capped at 60 s.
@@ -86,10 +98,14 @@ pub fn redirect_allowed(from: &str, to: &str) -> bool {
 pub struct NetConfig {
     /// Sent on every request.
     pub user_agent: String,
+    /// Sent when fetching a podcast feed ([`feed_user_agent`]).
+    pub feed_user_agent: String,
+    /// Sent when fetching episode audio ([`audio_user_agent`]).
+    pub audio_user_agent: String,
     pub bases: Bases,
     /// Panic on any host but this machine (the network guard).
     pub deny_real: bool,
-    /// Lets image downloads reach private addresses (tests).
+    /// Lets image, feed and audio fetches reach private addresses (tests).
     pub allow_private_images: bool,
     /// Scales the limiter spacing and the rate-limit backoff, never the timeouts or the
     /// persisted pause lengths. 1.0 in production; tests shrink it so a retry ladder takes
@@ -101,7 +117,7 @@ pub struct NetConfig {
     /// Host names answered without DNS (tests). Their addresses go through the same checks as
     /// resolved ones.
     pub static_hosts: HashMap<String, Vec<IpAddr>>,
-    /// Socket addresses an image download may reach although they are not public (tests: the
+    /// Socket addresses an image, feed or audio fetch may reach although they are not public (tests: the
     /// replay server, so a redirect away from it can be checked). Empty in production.
     pub private_image_allow: Vec<SocketAddr>,
 }
@@ -111,6 +127,8 @@ impl NetConfig {
     pub fn production(version: &str, contact: &str, musicbrainz_base: &str) -> NetConfig {
         NetConfig {
             user_agent: user_agent(version, contact),
+            feed_user_agent: feed_user_agent(version, contact),
+            audio_user_agent: audio_user_agent(version, contact),
             bases: Bases::production(musicbrainz_base),
             deny_real: std::env::var("KIMA_NET_DENY_REAL").is_ok_and(|v| v.trim() == "1"),
             allow_private_images: false,
@@ -125,6 +143,14 @@ impl NetConfig {
     pub fn for_tests(bases: Bases) -> NetConfig {
         NetConfig {
             user_agent: user_agent(
+                env!("CARGO_PKG_VERSION"),
+                kima_core::config::DEFAULT_CONTACT,
+            ),
+            feed_user_agent: feed_user_agent(
+                env!("CARGO_PKG_VERSION"),
+                kima_core::config::DEFAULT_CONTACT,
+            ),
+            audio_user_agent: audio_user_agent(
                 env!("CARGO_PKG_VERSION"),
                 kima_core::config::DEFAULT_CONTACT,
             ),

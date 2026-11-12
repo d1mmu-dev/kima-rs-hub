@@ -40,3 +40,44 @@ expected plan diffs were aspirational, not observed on this fixture and source.
 AcoustID examples under `crates/kima-ident/tests/fixtures/acoustid/` are
 hand-written synthetic shapes, **not** these live API captures; see their README.
 Task 18 step 4's double full-workspace test gate is explicitly outside this slice.
+
+## M-STATS stats fixtures (plan `2026-11-11-m-stats.md`, Task 11)
+
+After the M-SYNC captures the script records the stats history and captures the ten
+`/api/stats` responses with `jq -eS`, staged then copied like the others:
+
+1. `POST /api/plays` for `First` (900 s, `secondsListened: 900`, recorded `heard = true`)
+   and for `Second` (6 s, `secondsListened: 6`; the listen rule records **no** play for it,
+   observed).
+2. Two `heard = false` rows by SQL (`gen_random_uuid()` ids; no kima-rs writer produces
+   `heard = false`, and only such rows can be a provable skip): `First` one day ago and
+   `Third` (6 s) 60 s later, so `First`'s listen is `skipped` and `Third`'s is too short.
+3. `POST /stats/false-starts/ignore` for `Second`, then the audit, `collapse`, `remove`
+   for `First` and `restore` for `Second`.
+
+| Fixture | HTTP route | Capture condition |
+| --- | --- | --- |
+| stats_response_s1_response | GET /api/stats?period=all&tz=UTC | admin; 3 rows; no analysis (`shape: []`, `key: null`, D-174); spoken zeros (D-175); no `system` (D-176) |
+| stats_hour_response | GET /api/stats/hour?dow=&hour=&tz=UTC | weekday/hour of `listening.lastPlay` |
+| stats_tracks_response | GET /api/stats/tracks?of=top | `First`, `Third` |
+| stats_track_plays_response | GET /api/stats/track/{First}/plays | 2 listens |
+| stats_region_response | GET /api/stats/region?x=12&y=12 | empty S1 answer (D-174) |
+| stats_ignore_response | POST /api/stats/false-starts/ignore | `Second` |
+| stats_false_starts_response | GET /api/stats/false-starts | one skipped `First` listen, `Second` ignored |
+| stats_collapse_response | POST /api/stats/false-starts/collapse | body `{"trackIds":[]}` as the UI sends; nothing to collapse |
+| stats_remove_response | POST /api/stats/false-starts/remove | `First`: one row of one track |
+| stats_restore_response | POST /api/stats/false-starts/restore | `Second` |
+
+`crates/kima-api-types/tests/stats.rs` round-trips them through `kima_api_types::stats`,
+compares each fixture's key paths and JSON types with `stats_upstream_keys.json`
+(hand-written from the v1.12.3 TypeScript interfaces; sub-keys under an empty array or
+`null` are not observable and not required) and rejects integral floats such as `120.0`.
+
+Captured against `feature/m-stats` source HEAD `d72195db44e5943b45a76853d9c3f97933e71d6d`
+(before this task's commit). The capturing delegate could not create Docker containers, so
+the script was run from a scratch copy whose only change is the database: a run-owned
+database `mstats_capture_1794466228_340749` created in the parent-provided isolated cluster
+`mstats-pg-58795` (`127.0.0.1:58795`, identity `kima_verify` checked first) and dropped on
+exit. Only the ten stats fixtures were committed; the nine M-SYNC fixtures from the same run
+differed from the committed ones only in dynamic ids and timestamps and were left as they
+were.

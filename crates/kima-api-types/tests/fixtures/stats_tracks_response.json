@@ -1,0 +1,32 @@
+{
+  "tracks": [
+    {
+      "album": {
+        "coverArt": "01a1ce86-77a7-765b-a0ed-4192eb99d25d",
+        "id": "01a1ce86-77a7-765b-a0ed-4192eb99d25d",
+        "title": "Plain Album"
+      },
+      "artist": {
+        "id": "01a1ce86-77a7-765b-a0ed-4191dc5e4b34",
+        "name": "Untagged Artist"
+      },
+      "duration": 900,
+      "id": "01a1ce86-77a9-7417-a90d-948be534416d",
+      "title": "First"
+    },
+    {
+      "album": {
+        "coverArt": "01a1ce86-77a7-765b-a0ed-4192eb99d25d",
+        "id": "01a1ce86-77a7-765b-a0ed-4192eb99d25d",
+        "title": "Plain Album"
+      },
+      "artist": {
+        "id": "01a1ce86-77a7-765b-a0ed-4191dc5e4b34",
+        "name": "Untagged Artist"
+      },
+      "duration": 6,
+      "id": "01a1ce86-77c5-72a8-af00-f96dff5c4273",
+      "title": "Third"
+    }
+  ]
+}

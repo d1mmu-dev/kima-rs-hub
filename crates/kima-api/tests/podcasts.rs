@@ -275,6 +275,10 @@ fn day(n: u8) -> OffsetDateTime {
     datetime!(2026-10-01 06:00 UTC).replace_day(n).unwrap()
 }
 
+async fn save_progress(env: &Env, path: &str, body: Value) -> axum_test::TestResponse {
+    env.post(path, body).await
+}
+
 async fn add_episodes(pool: &PgPool, show: Uuid, eps: &[(&str, OffsetDateTime)]) {
     let eps: Vec<NewEpisode> = eps.iter().map(|(g, t)| episode(g, *t)).collect();
     podcasts::insert_episodes(pool, show, &eps).await.unwrap();
@@ -335,6 +339,14 @@ impl Env {
             .await
     }
 
+    async fn post(&self, path: &str, body: Value) -> axum_test::TestResponse {
+        self.server
+            .post(path)
+            .authorization_bearer(&self.token)
+            .json(&body)
+            .await
+    }
+
     async fn stored_show(&self) -> Uuid {
         store(
             self.pool(),
@@ -352,7 +364,7 @@ impl Env {
 async fn follows_a_stored_show_found_by_its_apple_id_though_its_feed_address_has_changed(
     pool: PgPool,
 ) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let stored = env.stored_show().await;
     let res = env
         .subscribe(
@@ -384,7 +396,7 @@ async fn follows_a_stored_show_found_by_its_apple_id_though_its_feed_address_has
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn follows_once_however_often_it_is_asked(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let stored = env.stored_show().await;
     let first = env.subscribe(json!({"itunesId": STORED_ITUNES})).await;
     let again = env.subscribe(json!({"itunesId": STORED_ITUNES})).await;
@@ -513,7 +525,7 @@ async fn concurrent_follow_conflict_releases_single_connection(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn survives_two_follows_of_a_new_show_at_once_one_show_stored_both_answered(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let feed_url = env.host.url("/race.xml");
     let (a, b) = tokio::join!(
         env.subscribe(json!({"feedUrl": feed_url})),
@@ -550,7 +562,7 @@ async fn survives_two_follows_of_a_new_show_at_once_one_show_stored_both_answere
 async fn stores_an_apple_id_only_when_apple_says_it_names_the_feed_so_no_one_can_claim_a_real_shows_id(
     pool: PgPool,
 ) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     // A member pairs their own feed with show 555's Apple id.
     let impostor = env
         .subscribe(json!({"feedUrl": env.host.url("/impostor.xml"), "itunesId": "555"}))
@@ -592,7 +604,7 @@ async fn stores_an_apple_id_only_when_apple_says_it_names_the_feed_so_no_one_can
 async fn answers_a_feed_that_is_not_there_404_a_host_that_is_down_502_and_a_page_that_is_not_a_feed_422(
     pool: PgPool,
 ) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let mut got = Vec::new();
     for path in ["/gone.xml", "/down.xml", "/page.xml"] {
         let res = env.subscribe(json!({"feedUrl": env.host.url(path)})).await;
@@ -620,7 +632,7 @@ async fn answers_a_feed_that_is_not_there_404_a_host_that_is_down_502_and_a_page
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn subscribe_requires_feed_or_itunes_id(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     for body in [
         json!({}),
         json!({"feedUrl": "", "itunesId": ""}),
@@ -637,7 +649,7 @@ async fn subscribe_requires_feed_or_itunes_id(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn subscribe_by_unknown_apple_id_is_404(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     // The local Apple knows only 555: a lookup for 777 names no feed.
     let res = env.subscribe(json!({"itunesId": "777"})).await;
     res.assert_status(StatusCode::NOT_FOUND);
@@ -673,7 +685,7 @@ async fn subscribe_refuses_private_feed_address(pool: PgPool) {
 async fn gives_each_followed_show_the_date_of_its_newest_episode_none_for_a_show_without_episodes(
     pool: PgPool,
 ) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let pool = env.pool();
     let old = store(pool, "https://f.invalid/old", "Old", None).await;
     let new = store(pool, "https://f.invalid/new", "New", None).await;
@@ -715,7 +727,7 @@ async fn gives_each_followed_show_the_date_of_its_newest_episode_none_for_a_show
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn followed_list_is_newest_follow_first_with_five_newest_episodes_and_progress(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let pool = env.pool();
     let first = store(pool, "https://f.invalid/first", "First", None).await;
     let second = store(pool, "https://f.invalid/second", "Second", None).await;
@@ -783,7 +795,7 @@ async fn followed_list_is_newest_follow_first_with_five_newest_episodes_and_prog
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn progress_percent_capped_at_100(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let pool = env.pool();
     let show = store(pool, "https://f.invalid/p", "P", None).await;
     add_episodes(
@@ -819,10 +831,210 @@ async fn progress_percent_capped_at_100(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn saves_a_position_past_the_stored_length(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let show = store(&pool, "https://f.invalid/p", "P", None).await;
+    add_episodes(&pool, show, &[("past", day(1))]).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let episode = episode_id(&pool, "past").await;
+    let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
+    let res = env
+        .post(&path, json!({"currentTime": 650, "duration": 700}))
+        .await;
+    res.assert_status_ok();
+    let body: Value = res.json::<Value>();
+    assert_eq!(body["progress"]["currentTime"], json!(650));
+    assert_eq!(body["progress"]["isFinished"], json!(false));
+    let stored: f64 = sqlx::query_scalar(
+        "SELECT \"current_time\" FROM podcast_progress WHERE user_id = $1 AND episode_id = $2",
+    )
+    .bind(env.user)
+    .bind(episode)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, 650.0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn accepts_numbers_sent_as_strings_and_a_missing_duration_keeps_the_stored_one(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let show = store(&pool, "https://f.invalid/p", "P", None).await;
+    add_episodes(&pool, show, &[("s", day(1))]).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let episode = episode_id(&pool, "s").await;
+    let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
+    env.post(&path, json!({"currentTime": 30, "duration": 700}))
+        .await
+        .assert_status_ok();
+    let res = env.post(&path, json!({"currentTime": "120"})).await;
+    res.assert_status_ok();
+    let stored: (f64, f64) = podcasts::progress(&pool, env.user, episode)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.0, 120.0);
+    assert_eq!(stored.1, 700.0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn answers_404_for_an_episode_that_does_not_exist(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let show = store(&pool, "https://f.invalid/p", "P", None).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let nope = Uuid::now_v7();
+    let path = format!("/api/podcasts/{show}/episodes/{nope}/progress");
+    let res = env
+        .post(&path, json!({"currentTime": 10, "duration": 20}))
+        .await;
+    res.assert_status_not_found();
+    assert_eq!(res.json::<Value>()["error"], json!("Episode not found"));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn answers_400_without_a_position(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let show = store(&pool, "https://f.invalid/p", "P", None).await;
+    add_episodes(&pool, show, &[("s", day(1))]).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let episode = episode_id(&pool, "s").await;
+    let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
+    let res = env.post(&path, json!({"duration": 20})).await;
+    res.assert_status_bad_request();
+    assert_eq!(
+        res.json::<Value>()["error"],
+        json!("currentTime (seconds) is required")
+    );
+}
+
+async fn is_finished(pool: &PgPool, user: Uuid, episode: Uuid) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT is_finished FROM podcast_progress WHERE user_id = $1 AND episode_id = $2",
+    )
+    .bind(user)
+    .bind(episode)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn counts_an_episode_finished_from_95_percent_of_its_length_on_whatever_the_client_says_and_unfinished_again_when_replayed_from_early_on(
+    pool: PgPool,
+) {
+    let env = env(pool.clone()).await;
+    let show = store(&pool, "https://f.invalid/p", "P", None).await;
+    add_episodes(&pool, show, &[("f", day(1))]).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let episode = episode_id(&pool, "f").await;
+    let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
+    save_progress(&env, &path, json!({"currentTime": 560, "duration": 600}))
+        .await
+        .assert_status_ok();
+    assert_eq!(is_finished(&pool, env.user, episode).await, json!(false));
+    save_progress(&env, &path, json!({"currentTime": 570, "duration": 600}))
+        .await
+        .assert_status_ok();
+    assert_eq!(is_finished(&pool, env.user, episode).await, json!(true));
+    save_progress(&env, &path, json!({"currentTime": 30, "duration": 600}))
+        .await
+        .assert_status_ok();
+    assert_eq!(is_finished(&pool, env.user, episode).await, json!(false));
+    save_progress(&env, &path, json!({"currentTime": 590}))
+        .await
+        .assert_status_ok();
+    assert_eq!(is_finished(&pool, env.user, episode).await, json!(false));
+    save_progress(&env, &path, json!({"currentTime": 600, "isFinished": true}))
+        .await
+        .assert_status_ok();
+    assert_eq!(is_finished(&pool, env.user, episode).await, json!(true));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn coercion_like_zod(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let show = store(&pool, "https://f.invalid/p", "P", None).await;
+    add_episodes(&pool, show, &[("c", day(1))]).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let episode = episode_id(&pool, "c").await;
+    let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
+    let res = save_progress(&env, &path, json!({"currentTime": "12"})).await;
+    res.assert_status_ok();
+    assert_eq!(res.json::<Value>()["progress"]["currentTime"], json!(12));
+    let res = save_progress(&env, &path, json!({"currentTime": null})).await;
+    res.assert_status_ok();
+    assert_eq!(res.json::<Value>()["progress"]["currentTime"], json!(0));
+    let res = save_progress(&env, &path, json!({"currentTime": []})).await;
+    res.assert_status_ok();
+    assert_eq!(res.json::<Value>()["progress"]["currentTime"], json!(0));
+    let res = save_progress(&env, &path, json!({})).await;
+    res.assert_status_bad_request();
+    assert_eq!(
+        res.json::<Value>()["error"],
+        json!("currentTime (seconds) is required")
+    );
+    let res = save_progress(&env, &path, json!({"currentTime": -1})).await;
+    res.assert_status_bad_request();
+    let res = save_progress(&env, &path, json!({"currentTime": "Infinity"})).await;
+    res.assert_status_bad_request();
+    let res = save_progress(
+        &env,
+        &path,
+        json!({"currentTime": 10, "isFinished": "true"}),
+    )
+    .await;
+    res.assert_status_bad_request();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn delete_is_idempotent(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let show = store(&pool, "https://f.invalid/p", "P", None).await;
+    add_episodes(&pool, show, &[("d", day(1))]).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let episode = episode_id(&pool, "d").await;
+    let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
+    env.post(&path, json!({"currentTime": 100, "duration": 200}))
+        .await
+        .assert_status_ok();
+    env.delete(&path).await.assert_status_ok();
+    env.delete(&path).await.assert_status_ok();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM podcast_progress WHERE user_id = $1 AND episode_id = $2"
+        )
+        .bind(env.user)
+        .bind(episode)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        env.delete(&path).await.json::<Value>(),
+        json!({"success": true, "message": "Progress removed"})
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn episode_of_any_show_id_in_path(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let show = store(&pool, "https://f.invalid/p", "P", None).await;
+    let other = store(&pool, "https://f.invalid/other", "Other", None).await;
+    add_episodes(&pool, show, &[("e", day(1))]).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let episode = episode_id(&pool, "e").await;
+    // The podcast id in the path is ignored (upstream follows the same convention).
+    let path = format!("/api/podcasts/{other}/episodes/{episode}/progress");
+    env.post(&path, json!({"currentTime": 10, "duration": 100}))
+        .await
+        .assert_status_ok();
+}
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn unfollowing_a_show_forgets_that_it_was_playing_so_no_device_restores_it_other_playback_stays(
     pool: PgPool,
 ) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let pool = env.pool();
     let show = store(pool, "https://f.invalid/next", "Next Show", None).await;
     let other = store(pool, "https://f.invalid/other", "Other", None).await;
@@ -883,7 +1095,7 @@ async fn unfollowing_a_show_forgets_that_it_was_playing_so_no_device_restores_it
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn unsubscribe_unknown_is_404(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let show = store(env.pool(), "https://f.invalid/x", "X", None).await;
     for id in [
         show.to_string(),
@@ -901,7 +1113,7 @@ async fn unsubscribe_unknown_is_404(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn requires_auth(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     env.server
         .get("/api/podcasts")
         .await
@@ -919,7 +1131,7 @@ async fn requires_auth(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn apple_unavailable_when_subscribing_is_a_502_not_a_404(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let res = env.subscribe(json!({"itunesId": "888"})).await;
     res.assert_status(StatusCode::BAD_GATEWAY);
     assert_eq!(
@@ -930,7 +1142,7 @@ async fn apple_unavailable_when_subscribing_is_a_502_not_a_404(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn malformed_apple_reply_uses_the_apple_failure_message(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let res = env.subscribe(json!({"itunesId": "889"})).await;
     res.assert_status(StatusCode::BAD_GATEWAY);
     assert_eq!(
@@ -941,7 +1153,7 @@ async fn malformed_apple_reply_uses_the_apple_failure_message(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn unique_apple_id_race_falls_back_to_the_stored_show(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let stored = store(
         env.pool(),
         &env.host.url("/real.xml"),
@@ -960,7 +1172,7 @@ async fn unique_apple_id_race_falls_back_to_the_stored_show(pool: PgPool) {
 // Task 7: show detail and bounded episode pages.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn episode_pages_are_bounded_report_the_true_total_and_order_on_the_server(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let show = store(env.pool(), "https://f.invalid/pages", "Paged", None).await;
     let episodes: Vec<NewEpisode> = (0..120)
         .map(|n| episode(&format!("page-{n:03}"), day(1) + time::Duration::seconds(n)))
@@ -1016,7 +1228,7 @@ async fn episode_pages_are_bounded_report_the_true_total_and_order_on_the_server
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn next_episode_skips_finished_resumes_progress_and_works_without_subscription(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let show = store(env.pool(), "https://f.invalid/next2", "Next", None).await;
     add_episodes(
         env.pool(),
@@ -1058,7 +1270,7 @@ async fn next_episode_skips_finished_resumes_progress_and_works_without_subscrip
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn listening_lists_progress_and_newest_unplayed_only_for_followed_shows(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let a = store(env.pool(), "https://f.invalid/listen-a", "A", None).await;
     let b = store(env.pool(), "https://f.invalid/listen-b", "B", None).await;
     let c = store(env.pool(), "https://f.invalid/listen-c", "C", None).await;
@@ -1112,7 +1324,7 @@ async fn listening_lists_progress_and_newest_unplayed_only_for_followed_shows(po
 async fn detail_requires_follow_and_survives_apple_down_with_user_progress_and_downloads(
     pool: PgPool,
 ) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let show = store(
         env.pool(),
         "https://f.invalid/detail",
@@ -1157,7 +1369,7 @@ async fn detail_requires_follow_and_survives_apple_down_with_user_progress_and_d
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn next_and_episode_pages_break_equal_date_ties_by_id(pool: PgPool) {
-    let env = env(pool).await;
+    let env = env(pool.clone()).await;
     let show = store(env.pool(), "https://f.invalid/ties", "Ties", None).await;
     add_episodes(
         env.pool(),

@@ -1,3 +1,4 @@
+use crate::routes::podcasts::progress::{clear, progress};
 use axum::extract::{Path, RawQuery, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -8,6 +9,8 @@ use crate::error::ApiError;
 use crate::extract::ApiJson;
 use crate::state::AppState;
 
+mod progress;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/podcasts", get(list))
@@ -17,6 +20,10 @@ pub fn routes() -> Router<AppState> {
         .route("/podcasts/{id}", get(detail))
         .route("/podcasts/{id}/episodes", get(episodes))
         .route("/podcasts/{podcast}/episodes/{episode}/next", get(next))
+        .route(
+            "/podcasts/{podcast}/episodes/{episode}/progress",
+            post(progress).delete(clear),
+        )
 }
 
 async fn subscribe(

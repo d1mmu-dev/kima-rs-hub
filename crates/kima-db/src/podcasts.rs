@@ -427,7 +427,7 @@ pub async fn listening(
     pool: &PgPool,
     user: Uuid,
 ) -> sqlx::Result<(Vec<ListeningRow>, Vec<ListeningRow>)> {
-    let columns = "s.id AS podcast_id,s.title AS podcast_title,s.image_url AS podcast_image,         e.id,e.title,e.description,e.duration,e.published_at,e.image_url,         p.\"current_time\",p.duration AS progress_duration,p.is_finished,p.last_played_at";
+    let columns = "s.id AS podcast_id,s.title AS podcast_title,s.image_url AS podcast_image,         e.id,e.title,e.description,e.duration,e.published_at,e.image_url,         p.\"current_time\",p.duration AS progress_duration,p.is_finished,p.last_played_at".to_string();
     let query = format!(
         "SELECT {columns} FROM podcast_progress p         JOIN podcast_episodes e ON e.id=p.episode_id         JOIN podcasts s ON s.id=e.podcast_id JOIN podcast_subscriptions sub ON sub.podcast_id=s.id AND sub.user_id=$1         WHERE p.user_id=$1 AND NOT p.is_finished AND p.\"current_time\">0 ORDER BY p.last_played_at DESC LIMIT 12"
     );
@@ -437,4 +437,50 @@ pub async fn listening(
     );
     let new_episodes = sqlx::query_as(&query).bind(user).fetch_all(pool).await?;
     Ok((in_progress, new_episodes))
+}
+
+/// Current playback position and duration for one episode of one show.
+/// `None` when the user has no stored progress for this episode yet.
+pub async fn progress(
+    pool: &PgPool,
+    user: Uuid,
+    episode: Uuid,
+) -> sqlx::Result<Option<(f64, f64)>> {
+    sqlx::query_as("SELECT \"current_time\", duration FROM podcast_progress WHERE user_id = $1 AND episode_id = $2")
+        .bind(user)
+        .bind(episode)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Store or update playback progress for one episode of one show.
+pub async fn save_progress(
+    pool: &PgPool,
+    user: Uuid,
+    episode: Uuid,
+    current_time: f64,
+    duration: f64,
+    is_finished: bool,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration, is_finished, last_played_at) VALUES ($1, $2, $3, $4, $5, now()) ON CONFLICT (user_id, episode_id) DO UPDATE SET \"current_time\" = $3, duration = $4, is_finished = $5, last_played_at = now()",
+    )
+    .bind(user)
+    .bind(episode)
+    .bind(current_time)
+    .bind(duration)
+    .bind(is_finished)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Remove playback progress for one episode of one show.
+pub async fn clear_progress(pool: &PgPool, user: Uuid, episode: Uuid) -> sqlx::Result<u64> {
+    let done = sqlx::query("DELETE FROM podcast_progress WHERE user_id = $1 AND episode_id = $2")
+        .bind(user)
+        .bind(episode)
+        .execute(pool)
+        .await?;
+    Ok(done.rows_affected())
 }

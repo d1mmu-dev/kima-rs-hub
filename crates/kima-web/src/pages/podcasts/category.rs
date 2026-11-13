@@ -38,6 +38,7 @@ pub fn render(ctx: &Ctx, id: u32) -> DomNode {
     let fetch = bind!(ctx, items, more, busy, error, || {
         let offset = vertigo::transaction(|c| items.get(c).len()) as u32;
         busy.set(true);
+        error.set(None);
         get_driver().spawn(bind!(ctx, items, more, busy, error, async move {
             match api::chart(&ctx.client, Some(id), offset, PAGE, false).await {
                 Ok(page) => {
@@ -50,7 +51,9 @@ pub fn render(ctx: &Ctx, id: u32) -> DomNode {
         }));
     });
     if get_driver().is_browser() {
-        fetch();
+        // Deferred: values must not be written while the page renders.
+        let first = fetch.clone();
+        get_driver().spawn(async move { first() });
     }
 
     let grid = items.render_value(bind!(ctx, busy, |all: Vec<DiscoveryItem>| {

@@ -169,6 +169,8 @@ struct Inner {
     last_saved: Cell<f64>,
     /// The last position an episode's progress was saved at on the server.
     last_progress: Cell<f64>,
+    /// The current episode's end was reported (it is not reported twice).
+    finished_sent: Cell<bool>,
     /// Output volume, 0-100.
     volume: Value<f64>,
     volume_before_mute: Cell<f64>,
@@ -203,6 +205,7 @@ impl Player {
             pending_seek: Cell::new(None),
             last_saved: Cell::new(NOT_SAVED),
             last_progress: Cell::new(0.0),
+            finished_sent: Cell::new(false),
             volume: Value::new(50.0),
             volume_before_mute: Cell::new(50.0),
             shuffle: Value::new(false),
@@ -245,6 +248,7 @@ impl Player {
     /// Plays one podcast episode from `resume` seconds (its saved progress) or the start.
     pub fn play_episode(&self, item: QueueItem, resume: Option<f64>) {
         self.play_queue(vec![item], 0);
+        self.0.finished_sent.set(false);
         self.0.last_progress.set(resume.unwrap_or(0.0));
         if let Some(secs) = resume.filter(|s| *s > 0.0) {
             self.0.pending_seek.set(Some(secs));
@@ -492,7 +496,15 @@ impl Player {
         self.save_position(position);
         self.save_progress(position, duration, paused || ended, ended);
         let index = Self::read(&self.0.index);
-        if ended && Self::read(&self.0.repeat) == Repeat::One {
+        let episode = self
+            .0
+            .audio_track
+            .borrow()
+            .as_deref()
+            .is_some_and(|id| episode_ids(id).is_some());
+        if ended && episode {
+            // An episode stops at its end: repeat applies to library tracks (D-215).
+        } else if ended && Self::read(&self.0.repeat) == Repeat::One {
             // Loop this track: back to the start, play again.
             self.seek(0.0);
             js! { #audio.play() };
@@ -508,6 +520,10 @@ impl Player {
         let Some(id) = self.0.audio_track.borrow().clone() else {
             return;
         };
+        // Episodes keep their place on the server; the local key belongs to library tracks.
+        if episode_ids(&id).is_some() {
+            return;
+        }
         if position::should_write(self.0.last_saved.get(), position) {
             self.0.last_saved.set(position);
             self.0
@@ -525,15 +541,27 @@ impl Player {
         let Some((show, episode)) = episode_ids(&id) else {
             return;
         };
+        // Before the resume seek lands the element reports 0: saving that would wipe the
+        // stored progress (upstream skips a save at 0 that is not the end).
+        if self.0.pending_seek.get().is_some() || (position <= 0.0 && !ended) {
+            return;
+        }
+        if ended && self.0.finished_sent.get() {
+            return;
+        }
         if !(progress_due(self.0.last_progress.get(), position, stopped) || ended) {
             return;
         }
-        if ended && self.0.last_progress.get() == position {
-            return;
-        }
+        self.0.finished_sent.set(ended);
         self.0.last_progress.set(position);
         let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
-        let mut body = serde_json::json!({ "currentTime": position, "isFinished": ended });
+        // At the end upstream reports the whole length as the position.
+        let at = if ended && duration > 0.0 {
+            duration
+        } else {
+            position
+        };
+        let mut body = serde_json::json!({ "currentTime": at, "isFinished": ended });
         if duration > 0.0 {
             body["duration"] = serde_json::json!(duration);
         }

@@ -103,6 +103,32 @@ pub fn resume_point(progress: Option<&Progress>) -> Option<f64> {
         .map(|p| p.current_time)
 }
 
+/// Feed descriptions are often HTML; the page shows them as text, so tags are dropped and the
+/// common entities decoded (everything is still escaped by `dom!`).
+pub fn plain_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    let out = out
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// A page heading in the style of the other kima-web pages.
 pub fn heading(eyebrow_text: &str, title: String, sub: String) -> DomNode {
     let eyebrow = crate::components::eyebrow(eyebrow_text);
@@ -185,6 +211,16 @@ mod tests {
         assert_eq!(resume_point(Some(&progress(300.0, true))), None);
         assert_eq!(resume_point(Some(&progress(0.0, false))), None);
         assert_eq!(resume_point(None), None);
+    }
+
+    #[test]
+    fn descriptions_lose_their_markup() {
+        assert_eq!(
+            plain_text("<p>News &amp; <b>views</b></p>\n<p>daily&nbsp;at 6</p>"),
+            "News & views daily at 6"
+        );
+        assert_eq!(plain_text("a < b"), "a");
+        assert_eq!(plain_text("plain"), "plain");
     }
 
     #[test]

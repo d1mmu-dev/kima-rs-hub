@@ -282,13 +282,17 @@ pub fn render(ctx: &Ctx) -> DomNode {
         async move { api::categories(&ctx.client).await }
     ));
 
-    let discover = resource_view(
-        for_you,
-        bind!(ctx, top, categories, |rows: Rc<Vec<ForYouRow>>| {
-            let shown: Vec<i32> = rows.iter().map(|r| r.category.id).collect();
+    // Three independent requests: a failing one (e.g. Apple down for for-you) hides only its own
+    // section. Category links leave out the categories a for-you row already shows.
+    let shown = for_you.map(|state| match state {
+        vertigo::Resource::Ready(rows) => rows.iter().map(|r| r.category.id).collect(),
+        _ => Vec::<i32>::new(),
+    });
+    let for_you_view = for_you.render_value(bind!(ctx, |state| match state {
+        vertigo::Resource::Ready(rows) => {
             let shelves: Vec<(String, String, Vec<DiscoveryItem>)> = rows
                 .iter()
-                .map(|r| {
+                .map(|r: &ForYouRow| {
                     (
                         r.category.name.clone(),
                         format!("because you listen to {}", r.because.join(", ")),
@@ -296,28 +300,29 @@ pub fn render(ctx: &Ctx) -> DomNode {
                     )
                 })
                 .collect();
-            let top_view = resource_view(
-                top.clone(),
-                bind!(ctx, |items: Rc<Vec<DiscoveryItem>>| catalogue_rows(
-                    &ctx,
-                    &[(
-                        "top shows".into(),
-                        "what Apple Podcasts listeners follow".into(),
-                        items.to_vec()
-                    )]
-                )),
-            );
-            let categories_view = resource_view(
-                categories.clone(),
-                bind!(shown, |c: Rc<Vec<Category>>| categories_view(
-                    c,
-                    shown.clone()
-                )),
-            );
-            let for_you_view = catalogue_rows(&ctx, &shelves);
-            dom! { <div class="section-stack">{for_you_view}{top_view}{categories_view}</div> }
+            catalogue_rows(&ctx, &shelves)
+        }
+        _ => dom! { <span class="hidden" /> },
+    }));
+    let top_view = resource_view(
+        top,
+        bind!(ctx, |items: Rc<Vec<DiscoveryItem>>| catalogue_rows(
+            &ctx,
+            &[(
+                "top shows".into(),
+                "what Apple Podcasts listeners follow".into(),
+                items.to_vec()
+            )]
+        )),
+    );
+    let categories_view = resource_view(
+        categories,
+        bind!(shown, |c: Rc<Vec<Category>>| {
+            shown.render_value(move |ids: Vec<i32>| categories_view(c.clone(), ids))
         }),
     );
+    let discover =
+        dom! { <div class="section-stack">{for_you_view}{top_view}{categories_view}</div> };
 
     let head = heading(
         "Podcasts",

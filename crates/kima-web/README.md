@@ -159,8 +159,19 @@ Settings page and changes it back, so it can be repeated.
 
 `/podcasts` (home), `/podcasts/show?id=` (followed show), `/podcasts/show?itunesId=` (Apple preview) and
 `/podcasts/category?id=` (a category's chart); episodes play in the shared player and save their progress. Differences
-from upstream (category links instead of per-category shelves, search results inline, no sort selects yet, no AI badges until
-the AI filter, episodes not restored after a reload) are listed in `docs/DIVERGENCES.md` D-215. Not yet visually compared.
+from upstream (category links instead of per-category shelves, search results inline, no sort selects yet, episodes not
+restored after a reload) are listed in `docs/DIVERGENCES.md` D-215. Not yet visually compared.
+
+**AI-content labels (kima-only, M6 Task 8, D-200/D-207).** The show and preview heroes and every episode row carry a badge:
+"AI", "Human" (tooltip: declared by the publisher for the show / for this episode, or confirmed by an admin) or "Unlabelled"
+(no disclosure; never treated as human). Lists hide AI-labelled shows and episodes; each section says how many it hides, and
+a pill (`name="ai-pill"`, on the home, category and show pages) shows or hides them for that view. The pill starts from the
+persistent switch in Settings ("Show AI-generated podcasts", `podcastAiContent`). Admins get "mark as AI / confirm human /
+clear label" buttons for the show and for each episode. Compromises: the pages fetch lists with `?ai=show` and filter
+themselves, because vertigo 0.13's fetch API exposes no response headers (the server's `X-Kima-Ai-Hidden` count cannot be
+read), so a filtered episode page can show fewer than 20 rows; media cards have no badge slot, so cards name a known label in
+their subtitle ("Host · AI") and say nothing for unknown; there is no separate explicit ("E") badge because upstream's
+wire shapes carry no `explicit` key.
 
 ## Visual parity: compromises and assets
 

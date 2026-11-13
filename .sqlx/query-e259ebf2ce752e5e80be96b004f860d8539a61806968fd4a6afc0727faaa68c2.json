@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO podcasts (id, feed_url, title, author, description, image_url, itunes_id,\n                               category_ids, language, explicit, episode_count, feed_etag,\n                               feed_last_modified)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)\n         RETURNING id, feed_url, title, author, description, image_url, itunes_id, category_ids,\n                   language, explicit, episode_count, last_refreshed, feed_etag,\n                   feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,\n                   created_at, updated_at",
+  "query": "INSERT INTO podcasts (id, feed_url, title, author, description, image_url, itunes_id,\n                               category_ids, language, explicit, episode_count, feed_etag,\n                               feed_last_modified)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)\n         RETURNING id, feed_url, title, author, description, image_url, itunes_id, category_ids,\n                   language, explicit, episode_count, last_refreshed, feed_etag,\n                   feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,\n                   created_at, updated_at, ai_feed, ai_override",
   "describe": {
     "columns": [
       {
@@ -97,6 +97,16 @@
         "ordinal": 18,
         "name": "updated_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 19,
+        "name": "ai_feed",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 20,
+        "name": "ai_override",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -135,8 +145,10 @@
       true,
       false,
       false,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "fbff5959b740a4c6aca7b55c6e8078ff8e3eafda2821b59a9a60c91a2e7392a3"
+  "hash": "e259ebf2ce752e5e80be96b004f860d8539a61806968fd4a6afc0727faaa68c2"
 }

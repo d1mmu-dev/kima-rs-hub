@@ -111,6 +111,8 @@ async fn preview_show(
 
     let mut preview_episodes: Vec<Value> = Vec::new();
     let mut snippet_json = Value::Null;
+    // The channel's `ai-content` tag as this read found it (`Some(None)`: read, no tag).
+    let mut channel_tag = None;
     if let Some(feed_url) = &show.feed_url {
         // A feed that does not answer in time (or at all) is tolerated: Apple's own data still
         // answers (`podcasts.ts:343-347`).
@@ -129,11 +131,34 @@ async fn preview_show(
             let snippet = oldest.map(Snippet::from_episode);
             let _ = preview::remember_snippet(&state.pool, &itunes_id, snippet.as_ref()).await;
             snippet_json = oldest.map_or(Value::Null, episode_json);
+            channel_tag = Some(parsed.show.ai_feed);
+            // Remembered so discovery items can carry it (spec S3); a failure only costs a label.
+            let _ = kima_db::podcasts::remember_feed_label(
+                &state.pool,
+                &itunes_id,
+                parsed.show.ai_feed,
+            )
+            .await;
         }
     }
 
+    // A stored show's own label (with its admin override) first, then this read's channel tag,
+    // then one remembered from an earlier read; else unknown. A preview is a direct read: it
+    // is labelled, never hidden.
+    use kima_api_types::podcasts::{AiLabel, show_label};
+    let label = if let Some(s) = &stored {
+        show_label(s.ai_override.as_deref(), s.ai_feed)
+    } else if let Some(tag) = channel_tag {
+        show_label(None, tag)
+    } else {
+        kima_db::podcasts::labels_for_itunes(&state.pool, std::slice::from_ref(&itunes_id))
+            .await?
+            .remove(&itunes_id)
+            .map(|l| super::ai::from_db(&l.ai_label, l.ai_label_source.as_deref()))
+            .unwrap_or((AiLabel::Unknown, None))
+    };
     let (categories, genres) = categories_and_genres(&state, &show.category_ids).await;
-    Ok(Json(json!({
+    let mut body = json!({
         "itunesId": show.itunes_id,
         "title": show.title,
         "author": show.author,
@@ -147,7 +172,9 @@ async fn preview_show(
         "snippet": snippet_json,
         "isSubscribed": is_subscribed,
         "subscribedPodcastId": subscribed_podcast_id,
-    })))
+    });
+    super::ai::put_label(&mut body, label);
+    Ok(Json(body))
 }
 
 /// `GET /preview/:itunesId/snippet`: the remembered sample, or a fresh feed read when the show

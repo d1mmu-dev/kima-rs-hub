@@ -3,10 +3,14 @@
 use super::client::{ApiClient, ApiError};
 use crate::pages::search::encode_query;
 use kima_api_types::podcasts::{
-    Category, DiscoveryItem, EpisodePage, EpisodeSearch, FollowedShow, ForYouRow, Listening,
-    Preview, RefreshAll, ShowDetail, ShowSearch, Subscribed,
+    AiLabel, AiLabelSource, Category, DiscoveryItem, EpisodePage, EpisodeSearch, FollowedShow,
+    ForYouRow, Listening, Preview, RefreshAll, ShowDetail, ShowSearch, Subscribed,
 };
+use serde::Deserialize;
 use serde_json::json;
+
+// Lists ask for AI-labelled items too (`ai=show`) and the pages filter them, so a page can count
+// what it hides and switch without a refetch (`pages::podcasts::ai`, D-207).
 
 /// Episode list order on a show page; the server's default is newest first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -21,7 +25,7 @@ pub fn episodes_path(show: &str, offset: u32, limit: u32, order: Order) -> Strin
         Order::Newest => "",
         Order::Oldest => "&order=oldest",
     };
-    format!("/api/podcasts/{show}/episodes?offset={offset}&limit={limit}{order}")
+    format!("/api/podcasts/{show}/episodes?offset={offset}&limit={limit}{order}&ai=show")
 }
 
 /// One page of a category's chart. Shelves on the home page load in the background lane so an
@@ -32,19 +36,22 @@ pub fn chart_path(category: Option<u32>, offset: u32, limit: u32, background: bo
         .map(|c| format!("category={c}&"))
         .unwrap_or_default();
     let lane = if background { "&background=true" } else { "" };
-    format!("/api/podcasts/charts?{category}offset={offset}&limit={limit}{lane}")
+    format!("/api/podcasts/charts?{category}offset={offset}&limit={limit}{lane}&ai=show")
 }
 
 /// Shows from Apple's catalogue and episodes of followed shows, as upstream `PodcastSearch`.
 pub fn show_search_path(q: &str) -> String {
     format!(
-        "/api/search/discover?q={}&type=podcasts&limit=8",
+        "/api/search/discover?q={}&type=podcasts&limit=8&ai=show",
         encode_query(q)
     )
 }
 
 pub fn episode_search_path(q: &str) -> String {
-    format!("/api/search?q={}&type=episodes&limit=6", encode_query(q))
+    format!(
+        "/api/search?q={}&type=episodes&limit=6&ai=show",
+        encode_query(q)
+    )
 }
 
 pub async fn search_shows(api: &ApiClient, q: &str) -> Result<ShowSearch, ApiError> {
@@ -60,11 +67,11 @@ pub fn preview_path(itunes_id: &str) -> String {
 }
 
 pub async fn followed(api: &ApiClient) -> Result<Vec<FollowedShow>, ApiError> {
-    api.get("/api/podcasts").await
+    api.get("/api/podcasts?ai=show").await
 }
 
 pub async fn listening(api: &ApiClient) -> Result<Listening, ApiError> {
-    api.get("/api/podcasts/listening").await
+    api.get("/api/podcasts/listening?ai=show").await
 }
 
 pub async fn categories(api: &ApiClient) -> Result<Vec<Category>, ApiError> {
@@ -72,7 +79,7 @@ pub async fn categories(api: &ApiClient) -> Result<Vec<Category>, ApiError> {
 }
 
 pub async fn for_you(api: &ApiClient) -> Result<Vec<ForYouRow>, ApiError> {
-    api.get("/api/podcasts/for-you").await
+    api.get("/api/podcasts/for-you?ai=show").await
 }
 
 pub async fn chart(
@@ -87,7 +94,7 @@ pub async fn chart(
 }
 
 pub async fn show(api: &ApiClient, id: &str) -> Result<ShowDetail, ApiError> {
-    api.get(&format!("/api/podcasts/{id}")).await
+    api.get(&format!("/api/podcasts/{id}?ai=show")).await
 }
 
 pub async fn episodes(
@@ -101,7 +108,8 @@ pub async fn episodes(
 }
 
 pub async fn similar(api: &ApiClient, show: &str) -> Result<Vec<DiscoveryItem>, ApiError> {
-    api.get(&format!("/api/podcasts/{show}/similar")).await
+    api.get(&format!("/api/podcasts/{show}/similar?ai=show"))
+        .await
 }
 
 pub async fn preview(api: &ApiClient, itunes_id: &str) -> Result<Preview, ApiError> {
@@ -123,6 +131,46 @@ pub async fn unfollow(api: &ApiClient, show: &str) -> Result<serde_json::Value, 
         .await
 }
 
+/// An admin's label for a show or one of its episodes, as the server resolved it.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelAnswer {
+    pub ai_label: AiLabel,
+    pub ai_label_source: Option<AiLabelSource>,
+}
+
+pub fn ai_label_path(show: &str, episode: Option<&str>) -> String {
+    match episode {
+        Some(e) => format!("/api/podcasts/{show}/episodes/{e}/ai-label"),
+        None => format!("/api/podcasts/{show}/ai-label"),
+    }
+}
+
+/// Admin only: `label` `Some("ai" | "human")` sets, `None` clears.
+pub async fn set_ai_label(
+    api: &ApiClient,
+    show: &str,
+    episode: Option<&str>,
+    label: Option<&str>,
+) -> Result<LabelAnswer, ApiError> {
+    api.put(&ai_label_path(show, episode), &json!({ "label": label }))
+        .await
+}
+
+/// Whether the user's persisted setting shows AI-labelled podcasts.
+pub async fn ai_setting(api: &ApiClient) -> Result<bool, ApiError> {
+    let settings: kima_api_types::settings::UserSettings = api.get("/api/settings").await?;
+    Ok(settings.podcast_ai_content == "show")
+}
+
+pub async fn save_ai_setting(api: &ApiClient, show: bool) -> Result<bool, ApiError> {
+    let value = if show { "show" } else { "hide" };
+    let settings: kima_api_types::settings::UserSettings = api
+        .post("/api/settings", &json!({ "podcastAiContent": value }))
+        .await?;
+    Ok(settings.podcast_ai_content == "show")
+}
+
 pub async fn refresh_all(api: &ApiClient) -> Result<RefreshAll, ApiError> {
     api.post_empty("/api/podcasts/refresh-all").await
 }
@@ -137,11 +185,11 @@ mod tests {
     fn episode_pages_ask_for_order_only_when_oldest() {
         assert_eq!(
             episodes_path(SHOW, 0, 20, Order::Newest),
-            format!("/api/podcasts/{SHOW}/episodes?offset=0&limit=20")
+            format!("/api/podcasts/{SHOW}/episodes?offset=0&limit=20&ai=show")
         );
         assert_eq!(
             episodes_path(SHOW, 40, 20, Order::Oldest),
-            format!("/api/podcasts/{SHOW}/episodes?offset=40&limit=20&order=oldest")
+            format!("/api/podcasts/{SHOW}/episodes?offset=40&limit=20&order=oldest&ai=show")
         );
     }
 
@@ -149,15 +197,15 @@ mod tests {
     fn shelves_use_the_background_lane_and_pages_do_not() {
         assert_eq!(
             chart_path(Some(1303), 0, 12, true),
-            "/api/podcasts/charts?category=1303&offset=0&limit=12&background=true"
+            "/api/podcasts/charts?category=1303&offset=0&limit=12&background=true&ai=show"
         );
         assert_eq!(
             chart_path(Some(1303), 24, 24, false),
-            "/api/podcasts/charts?category=1303&offset=24&limit=24"
+            "/api/podcasts/charts?category=1303&offset=24&limit=24&ai=show"
         );
         assert_eq!(
             chart_path(None, 0, 24, true),
-            "/api/podcasts/charts?offset=0&limit=24&background=true"
+            "/api/podcasts/charts?offset=0&limit=24&background=true&ai=show"
         );
     }
 
@@ -165,11 +213,23 @@ mod tests {
     fn search_paths_encode_the_query() {
         assert_eq!(
             show_search_path("true crime & co"),
-            "/api/search/discover?q=true%20crime%20%26%20co&type=podcasts&limit=8"
+            "/api/search/discover?q=true%20crime%20%26%20co&type=podcasts&limit=8&ai=show"
         );
         assert_eq!(
             episode_search_path("nvidia"),
-            "/api/search?q=nvidia&type=episodes&limit=6"
+            "/api/search?q=nvidia&type=episodes&limit=6&ai=show"
+        );
+    }
+
+    #[test]
+    fn admin_label_paths() {
+        assert_eq!(
+            ai_label_path(SHOW, None),
+            format!("/api/podcasts/{SHOW}/ai-label")
+        );
+        assert_eq!(
+            ai_label_path(SHOW, Some("e1")),
+            format!("/api/podcasts/{SHOW}/episodes/e1/ai-label")
         );
     }
 

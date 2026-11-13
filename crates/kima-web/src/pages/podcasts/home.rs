@@ -10,6 +10,7 @@ use kima_api_types::podcasts::{
 };
 use vertigo::{DomNode, Value, bind, dom, get_driver};
 
+use super::ai::{hidden_note, pill, show_ai_state, visible, with_label};
 use super::{
     ShowInfo, category_rows, discovery_card, episode_item, heading, image_url, resume_point,
 };
@@ -42,12 +43,14 @@ fn show_href(id: impl ToString) -> String {
     Route::PodcastShow { id: id.to_string() }.to_string()
 }
 
-fn listening_view(ctx: &Ctx, data: Rc<Listening>) -> DomNode {
+fn listening_view(ctx: &Ctx, data: Rc<Listening>, show_ai: bool) -> DomNode {
     let token = ctx.session.current_token();
     let mut sections = Vec::new();
-    if !data.in_progress.is_empty() {
-        let cards = data
-            .in_progress
+    let (in_progress, hidden_progress) =
+        visible(&data.in_progress, show_ai, |r| r.episode.ai_label);
+    let (new_episodes, hidden_new) = visible(&data.new_episodes, show_ai, |r| r.episode.ai_label);
+    if !in_progress.is_empty() || hidden_progress > 0 {
+        let cards = in_progress
             .iter()
             .enumerate()
             .map(|(index, row)| {
@@ -77,7 +80,7 @@ fn listening_view(ctx: &Ctx, data: Rc<Listening>) -> DomNode {
                         .into_iter()
                         .collect(),
                     title: row.episode.title.clone(),
-                    subtitle: progress_line(row),
+                    subtitle: with_label(&progress_line(row), row.episode.ai_label),
                     kind: Kind::Podcast,
                     on_play: Some(play),
                     index,
@@ -87,13 +90,13 @@ fn listening_view(ctx: &Ctx, data: Rc<Listening>) -> DomNode {
         let header = section_header(
             Kind::Podcast,
             "continue listening",
-            data.in_progress.len() as i64,
+            in_progress.len() as i64,
         );
-        sections.push(dom! { <section>{header}{media_grid(cards)}</section> });
+        let note = hidden_note(hidden_progress);
+        sections.push(dom! { <section>{header}{note}{media_grid(cards)}</section> });
     }
-    if !data.new_episodes.is_empty() {
-        let rows: Vec<DomNode> = data
-            .new_episodes
+    if !new_episodes.is_empty() || hidden_new > 0 {
+        let rows: Vec<DomNode> = new_episodes
             .iter()
             .take(10)
             .map(|row| {
@@ -112,13 +115,22 @@ fn listening_view(ctx: &Ctx, data: Rc<Listening>) -> DomNode {
             })
             .collect();
         let header = section_header(Kind::Podcast, "new from your shows", rows.len() as i64);
-        sections.push(dom! { <section>{header}<div class="space-y-1">{..rows}</div></section> });
+        let note = hidden_note(hidden_new);
+        sections
+            .push(dom! { <section>{header}{note}<div class="space-y-1">{..rows}</div></section> });
     }
     dom! { <div class="section-stack">{..sections}</div> }
 }
 
-fn followed_view(ctx: &Ctx, shows: Rc<Vec<FollowedShow>>, refresh_all: DomNode) -> DomNode {
-    if shows.is_empty() {
+fn followed_view(
+    ctx: &Ctx,
+    all: Rc<Vec<FollowedShow>>,
+    refresh_all: DomNode,
+    show_ai: bool,
+) -> DomNode {
+    let (shows, hidden) = visible(&all, show_ai, |s| s.ai_label);
+    let shows: Vec<FollowedShow> = shows.into_iter().cloned().collect();
+    if shows.is_empty() && hidden == 0 {
         return empty_state(
             "mic-vocal",
             "No shows yet",
@@ -136,7 +148,7 @@ fn followed_view(ctx: &Ctx, shows: Rc<Vec<FollowedShow>>, refresh_all: DomNode) 
                     .into_iter()
                     .collect(),
                 title: show.title.clone(),
-                subtitle: show.author.clone().unwrap_or_default(),
+                subtitle: with_label(show.author.as_deref().unwrap_or_default(), show.ai_label),
                 kind: Kind::Podcast,
                 on_play: None,
                 index,
@@ -144,20 +156,27 @@ fn followed_view(ctx: &Ctx, shows: Rc<Vec<FollowedShow>>, refresh_all: DomNode) 
         })
         .collect();
     let header = section_header(Kind::Podcast, "your shows", shows.len() as i64);
+    let note = hidden_note(hidden);
     dom! {
         <section>
             {header}
+            {note}
             <div class="flex justify-end mb-4">{refresh_all}</div>
             {media_grid(cards)}
         </section>
     }
 }
 
-fn catalogue_rows(ctx: &Ctx, rows: &[(String, String, Vec<DiscoveryItem>)]) -> DomNode {
+fn catalogue_rows(
+    ctx: &Ctx,
+    rows: &[(String, String, Vec<DiscoveryItem>)],
+    show_ai: bool,
+) -> DomNode {
     let sections: Vec<DomNode> = rows
         .iter()
         .filter(|(_, _, items)| !items.is_empty())
         .map(|(title, because, items)| {
+            let (items, hidden) = visible(items, show_ai, |i| i.ai_label);
             let cards = items
                 .iter()
                 .enumerate()
@@ -165,7 +184,8 @@ fn catalogue_rows(ctx: &Ctx, rows: &[(String, String, Vec<DiscoveryItem>)]) -> D
                 .collect();
             let header = section_header(Kind::Podcast, title, items.len() as i64);
             let because = because.clone();
-            dom! { <section>{header}<p class="t-meta -mt-4 mb-4">{because}</p>{media_grid(cards)}</section> }
+            let note = hidden_note(hidden);
+            dom! { <section>{header}<p class="t-meta -mt-4 mb-4">{because}</p>{note}{media_grid(cards)}</section> }
         })
         .collect();
     dom! { <div class="section-stack">{..sections}</div> }
@@ -191,6 +211,8 @@ fn categories_view(categories: Rc<Vec<Category>>, shown: Vec<i32>) -> DomNode {
 pub fn render(ctx: &Ctx) -> DomNode {
     // Bumped after following a feed or checking every show, so the lists refetch.
     let rev = Value::new(0u32);
+    // Whether this view shows AI-labelled shows and episodes (the pill; D-207).
+    let show_ai = show_ai_state(ctx);
 
     let feed = Value::new(String::new());
     let feed_error: Value<Option<String>> = Value::new(None);
@@ -217,9 +239,11 @@ pub fn render(ctx: &Ctx) -> DomNode {
         Some(message) => dom! { <p class="w-full text-xs text-danger-light mt-1">{message}</p> },
         None => dom! { <span class="hidden" /> },
     });
-    let search = super::search::render(ctx);
+    let search = super::search::render(ctx, show_ai.clone());
+    let ai_pill = pill(&show_ai);
     let add_feed = dom! {
         <div class="page-shell mb-8 flex flex-col gap-3">
+            <div class="flex flex-wrap items-center gap-2">{ai_pill}</div>
             {search}
             <form class="flex flex-wrap items-center gap-2 max-w-xl" on_submit={follow_feed}>
                 <input class={INPUT} type="url" name="feed" aria-label="rss feed address"
@@ -255,21 +279,28 @@ pub fn render(ctx: &Ctx) -> DomNode {
         .to_owned()
     });
 
-    let mine = rev.render_value(bind!(ctx, check_all, check_label, checking, |_rev: u32| {
+    let mine = rev.render_value(bind!(ctx, check_all, check_label, checking, show_ai, |_rev: u32| {
         let listening = load(bind!(ctx, async move { api::listening(&ctx.client).await }));
         let followed = load(bind!(ctx, async move { api::followed(&ctx.client).await }));
-        let listening = resource_view(listening, bind!(ctx, |data| listening_view(&ctx, data)));
+        let listening = resource_view(
+            listening,
+            bind!(ctx, show_ai, |data: Rc<Listening>| {
+                show_ai.render_value(bind!(ctx, data, |on| listening_view(&ctx, data.clone(), on)))
+            }),
+        );
         let followed = resource_view(
             followed,
-            bind!(ctx, check_all, check_label, checking, |shows| {
-                let button = dom! {
-                    <button class={BUTTON} name="refresh-all" on_click={check_all.clone()}
-                        disabled={flag(checking.to_computed())}>
-                        {icon("refresh-cw", "w-3.5 h-3.5")}
-                        {check_label.clone()}
-                    </button>
-                };
-                followed_view(&ctx, shows, button)
+            bind!(ctx, check_all, check_label, checking, show_ai, |shows: Rc<Vec<FollowedShow>>| {
+                show_ai.render_value(bind!(ctx, check_all, check_label, checking, shows, |on| {
+                    let button = dom! {
+                        <button class={BUTTON} name="refresh-all" on_click={check_all.clone()}
+                            disabled={flag(checking.to_computed())}>
+                            {icon("refresh-cw", "w-3.5 h-3.5")}
+                            {check_label.clone()}
+                        </button>
+                    };
+                    followed_view(&ctx, shows.clone(), button, on)
+                }))
             }),
         );
         dom! { <div class="section-stack">{listening}{followed}</div> }
@@ -290,7 +321,7 @@ pub fn render(ctx: &Ctx) -> DomNode {
         vertigo::Resource::Ready(rows) => rows.iter().map(|r| r.category.id).collect(),
         _ => Vec::<i32>::new(),
     });
-    let for_you_view = for_you.render_value(bind!(ctx, |state| match state {
+    let for_you_view = for_you.render_value(bind!(ctx, show_ai, |state| match state {
         vertigo::Resource::Ready(rows) => {
             let shelves: Vec<(String, String, Vec<DiscoveryItem>)> = rows
                 .iter()
@@ -302,20 +333,23 @@ pub fn render(ctx: &Ctx) -> DomNode {
                     )
                 })
                 .collect();
-            catalogue_rows(&ctx, &shelves)
+            show_ai.render_value(bind!(ctx, shelves, |on| catalogue_rows(&ctx, &shelves, on)))
         }
         _ => dom! { <span class="hidden" /> },
     }));
     let top_view = resource_view(
         top,
-        bind!(ctx, |items: Rc<Vec<DiscoveryItem>>| catalogue_rows(
-            &ctx,
-            &[(
-                "top shows".into(),
-                "what Apple Podcasts listeners follow".into(),
-                items.to_vec()
-            )]
-        )),
+        bind!(ctx, show_ai, |items: Rc<Vec<DiscoveryItem>>| {
+            show_ai.render_value(bind!(ctx, items, |on| catalogue_rows(
+                &ctx,
+                &[(
+                    "top shows".into(),
+                    "what Apple Podcasts listeners follow".into(),
+                    items.to_vec()
+                )],
+                on
+            )))
+        }),
     );
     let categories_view = resource_view(
         categories,

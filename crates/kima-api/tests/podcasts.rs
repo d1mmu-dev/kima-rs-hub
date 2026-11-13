@@ -302,6 +302,14 @@ const FEED: &str = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Ra
 <item><title>Ep 1</title><guid>race-1</guid><pubDate>Mon, 13 Oct 2026 10:00:00 GMT</pubDate>
 <enclosure url="https://cdn.example.invalid/1.mp3" length="1000" type="audio/mpeg"/></item></channel></rss>"#;
 
+/// A feed disclosing AI content for the show, with one episode declared human (D-200).
+const AI_FEED: &str = r#"<?xml version="1.0"?><rss version="2.0" xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><title>Synthetic Show</title>
+<podcast:txt purpose="ai-content">true</podcast:txt>
+<item><title>Made by people</title><guid>ai-human</guid><pubDate>Mon, 13 Oct 2026 10:00:00 GMT</pubDate><podcast:txt purpose="ai-content">false</podcast:txt>
+<enclosure url="https://cdn.example.invalid/h.mp3" length="1000" type="audio/mpeg"/></item>
+<item><title>Generated</title><guid>ai-gen</guid><pubDate>Sun, 12 Oct 2026 10:00:00 GMT</pubDate>
+<enclosure url="https://cdn.example.invalid/g.mp3" length="1000" type="audio/mpeg"/></item></channel></rss>"#;
+
 /// A loopback host serving feeds and Apple's lookup: show 555 is the feed at `/real.xml`.
 /// `/race.xml` answers only once two requests for it are waiting, so two follows of a new show
 /// really overlap.
@@ -392,6 +400,7 @@ async fn answer(base: &str, race: &tokio::sync::Barrier, uri: &Uri) -> Response 
             ),
         )
             .into_response(),
+        "/ai.xml" => ([(header::CONTENT_TYPE, "application/rss+xml")], AI_FEED).into_response(),
         "/down.xml" => (StatusCode::SERVICE_UNAVAILABLE, "maintenance").into_response(),
         "/gone.xml" => (StatusCode::NOT_FOUND, "not here").into_response(),
         "/forbidden.xml" => (StatusCode::FORBIDDEN, "forbidden").into_response(),
@@ -974,7 +983,12 @@ async fn followed_list_is_newest_follow_first_with_five_newest_episodes_and_prog
         list.iter().map(|p| p["title"].clone()).collect::<Vec<_>>(),
         [json!("Second"), json!("First")]
     );
-    let first_json = &list[1];
+    // The AI labels (Task 8) are checked on their own; upstream's keys are compared here.
+    assert_eq!(list[1]["aiLabel"], "unknown");
+    assert_eq!(list[1]["episodes"][0]["aiLabel"], "unknown");
+    let mut first_json = list[1].clone();
+    strip_ai(&mut first_json);
+    let first_json = &first_json;
     let e7 = episode_id(pool, "e7").await;
     let last_played = first_json["episodes"][0]["progress"]["lastPlayedAt"].clone();
     assert!(last_played.as_str().unwrap().ends_with('Z'));
@@ -1752,5 +1766,578 @@ mod cover {
                 env.token
             )
         );
+    }
+}
+
+// ---- Task 8: AI-content labels, filter, switch (spec S1-S5, D-200/D-207) ----
+
+const HIDDEN: &str = "x-kima-ai-hidden";
+
+/// Removes the kima-only `aiLabel`/`aiLabelSource` keys everywhere in `v`.
+fn strip_ai(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            map.remove("aiLabel");
+            map.remove("aiLabelSource");
+            map.values_mut().for_each(strip_ai);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_ai),
+        _ => {}
+    }
+}
+
+fn hidden(res: &axum_test::TestResponse) -> Option<String> {
+    res.headers()
+        .get(HIDDEN)
+        .map(|v| v.to_str().unwrap().to_string())
+}
+
+async fn set_tag(pool: &PgPool, table: &str, id: Uuid, tag: Option<bool>) {
+    sqlx::query(&format!("UPDATE {table} SET ai_feed = $2 WHERE id = $1"))
+        .bind(id)
+        .bind(tag)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Two followed shows: `ai` (channel tag true, episodes a1 a2) and `plain` (no tag, episodes
+/// p1 untagged and p2 with an item tag true).
+async fn two_shows(env: &Env) -> (Uuid, Uuid) {
+    let ai = store(
+        env.pool(),
+        "https://ai.example.invalid/feed",
+        "AI Show",
+        None,
+    )
+    .await;
+    let plain = store(
+        env.pool(),
+        "https://plain.example.invalid/feed",
+        "Plain Show",
+        None,
+    )
+    .await;
+    add_episodes(env.pool(), ai, &[("a1", day(1)), ("a2", day(2))]).await;
+    add_episodes(env.pool(), plain, &[("p1", day(3)), ("p2", day(4))]).await;
+    set_tag(env.pool(), "podcasts", ai, Some(true)).await;
+    let p2 = episode_id(env.pool(), "p2").await;
+    set_tag(env.pool(), "podcast_episodes", p2, Some(true)).await;
+    for show in [ai, plain] {
+        podcasts::subscribe(env.pool(), env.user, show)
+            .await
+            .unwrap();
+    }
+    (ai, plain)
+}
+
+async fn member(env: &Env) -> String {
+    common::user_with_token(&env.state, "member").await.1
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn subscribe_stores_the_feed_ai_tags(pool: PgPool) {
+    let env = env(pool).await;
+    env.subscribe(json!({"feedUrl": env.host.url("/ai.xml")}))
+        .await
+        .assert_status_ok();
+    let res = env.get("/api/podcasts?ai=show").await;
+    res.assert_status_ok();
+    assert_eq!(hidden(&res), None, "no header with ai=show");
+    let v = res.json::<Value>();
+    assert_eq!(v[0]["aiLabel"], "ai");
+    assert_eq!(v[0]["aiLabelSource"], "feed-show");
+    let eps = &v[0]["episodes"];
+    assert_eq!(eps[0]["title"], "Made by people");
+    assert_eq!(eps[0]["aiLabel"], "human");
+    assert_eq!(eps[0]["aiLabelSource"], "feed-episode");
+    assert_eq!(eps[1]["aiLabel"], "ai");
+    assert_eq!(eps[1]["aiLabelSource"], "feed-show");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn no_tag_is_unknown_not_human_and_stays_visible(pool: PgPool) {
+    let env = env(pool).await;
+    let show = store(env.pool(), "https://u.example.invalid/feed", "U", None).await;
+    add_episodes(env.pool(), show, &[("u1", day(1))]).await;
+    podcasts::subscribe(env.pool(), env.user, show)
+        .await
+        .unwrap();
+    let res = env.get("/api/podcasts").await;
+    assert_eq!(hidden(&res).as_deref(), Some("0"));
+    let v = res.json::<Value>();
+    assert_eq!(v[0]["aiLabel"], "unknown");
+    assert!(v[0]["aiLabelSource"].is_null());
+    assert_eq!(v[0]["episodes"][0]["aiLabel"], "unknown");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn lists_hide_ai_by_default_with_header(pool: PgPool) {
+    let env = env(pool).await;
+    two_shows(&env).await;
+    let res = env.get("/api/podcasts").await;
+    res.assert_status_ok();
+    // The AI show and the plain show's AI episode.
+    assert_eq!(hidden(&res).as_deref(), Some("2"));
+    let v = res.json::<Value>();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["title"], "Plain Show");
+    let titles: Vec<_> = v[0]["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["title"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(titles, vec!["p1"]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn ai_show_param_shows_all_without_header(pool: PgPool) {
+    let env = env(pool).await;
+    two_shows(&env).await;
+    let res = env.get("/api/podcasts?ai=show").await;
+    assert_eq!(hidden(&res), None);
+    let v = res.json::<Value>();
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    let res = env.get("/api/podcasts?ai=hide").await;
+    assert_eq!(hidden(&res).as_deref(), Some("2"));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn ai_param_rejects_other_values(pool: PgPool) {
+    let env = env(pool).await;
+    let (ai, _) = two_shows(&env).await;
+    for path in [
+        "/api/podcasts?ai=all".to_string(),
+        format!("/api/podcasts/{ai}?ai=yes"),
+        format!("/api/podcasts/{ai}/episodes?ai="),
+        "/api/podcasts/listening?ai=1".to_string(),
+        "/api/search?q=show&ai=maybe".to_string(),
+    ] {
+        let res = env.get(&path).await;
+        assert_eq!(res.status_code(), StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(
+            res.json::<Value>(),
+            json!({"error": "ai must be hide or show"}),
+            "{path}"
+        );
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn x_kima_ai_hidden_counts_before_paging(pool: PgPool) {
+    let env = env(pool).await;
+    let show = store(
+        env.pool(),
+        "https://page.example.invalid/feed",
+        "Paged",
+        None,
+    )
+    .await;
+    let eps: Vec<(String, OffsetDateTime)> =
+        (1..=10).map(|n| (format!("e{n}"), day(n as u8))).collect();
+    let refs: Vec<(&str, OffsetDateTime)> = eps.iter().map(|(g, d)| (g.as_str(), *d)).collect();
+    add_episodes(env.pool(), show, &refs).await;
+    for g in ["e10", "e8", "e2"] {
+        let id = episode_id(env.pool(), g).await;
+        set_tag(env.pool(), "podcast_episodes", id, Some(true)).await;
+    }
+    podcasts::subscribe(env.pool(), env.user, show)
+        .await
+        .unwrap();
+
+    let res = env
+        .get(&format!("/api/podcasts/{show}/episodes?limit=5"))
+        .await;
+    res.assert_status_ok();
+    assert_eq!(hidden(&res).as_deref(), Some("3"));
+    let v = res.json::<Value>();
+    assert_eq!(v["total"], 7);
+    let titles: Vec<_> = v["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["title"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(titles, vec!["e9", "e7", "e6", "e5", "e4"]);
+
+    let res = env.get(&format!("/api/podcasts/{show}?limit=5")).await;
+    assert_eq!(hidden(&res).as_deref(), Some("3"));
+    let v = res.json::<Value>();
+    assert_eq!(v["episodeTotal"], 7);
+    assert_eq!(v["episodes"].as_array().unwrap().len(), 5);
+
+    let res = env
+        .get(&format!("/api/podcasts/{show}/episodes?limit=5&ai=show"))
+        .await;
+    assert_eq!(hidden(&res), None);
+    let v = res.json::<Value>();
+    assert_eq!(v["total"], 10);
+    assert_eq!(v["episodes"][0]["title"], "e10");
+    assert_eq!(v["episodes"][0]["aiLabel"], "ai");
+    assert_eq!(v["episodes"][0]["aiLabelSource"], "feed-episode");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn direct_read_of_ai_show_still_answers(pool: PgPool) {
+    let env = env(pool).await;
+    let (ai, _) = two_shows(&env).await;
+    let res = env.get(&format!("/api/podcasts/{ai}")).await;
+    res.assert_status_ok();
+    let v = res.json::<Value>();
+    assert_eq!(v["title"], "AI Show");
+    assert_eq!(v["aiLabel"], "ai");
+    assert_eq!(v["aiLabelSource"], "feed-show");
+    // Its episodes inherit the show's label, so the hidden page is empty and says so.
+    assert_eq!(v["episodes"], json!([]));
+    assert_eq!(v["episodeTotal"], 0);
+    assert_eq!(hidden(&res).as_deref(), Some("2"));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn settings_round_trip_podcast_ai_content(pool: PgPool) {
+    let env = env(pool).await;
+    let res = env.get("/api/settings").await;
+    assert_eq!(res.json::<Value>()["podcastAiContent"], "hide");
+    let res = env
+        .post("/api/settings", json!({"podcastAiContent": "show"}))
+        .await;
+    res.assert_status_ok();
+    assert_eq!(res.json::<Value>()["podcastAiContent"], "show");
+    assert_eq!(
+        env.get("/api/settings").await.json::<Value>()["podcastAiContent"],
+        "show"
+    );
+    let res = env
+        .post("/api/settings", json!({"podcastAiContent": "all"}))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+    let body = res.json::<Value>();
+    assert_eq!(body["details"][0]["path"], json!(["podcastAiContent"]));
+    assert_eq!(
+        body["details"][0]["message"],
+        "podcastAiContent must be hide or show"
+    );
+    assert_eq!(
+        env.get("/api/settings").await.json::<Value>()["podcastAiContent"],
+        "show",
+        "a refused change keeps the stored value"
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn setting_show_persists_per_user(pool: PgPool) {
+    let env = env(pool).await;
+    let (ai, plain) = two_shows(&env).await;
+    let other = member(&env).await;
+    let other_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = 'member'")
+        .fetch_one(env.pool())
+        .await
+        .unwrap();
+    for show in [ai, plain] {
+        podcasts::subscribe(env.pool(), other_id, show)
+            .await
+            .unwrap();
+    }
+    env.post("/api/settings", json!({"podcastAiContent": "show"}))
+        .await
+        .assert_status_ok();
+    let res = env.get("/api/podcasts").await;
+    assert_eq!(hidden(&res), None);
+    assert_eq!(res.json::<Value>().as_array().unwrap().len(), 2);
+    // `?ai=hide` still hides for this request only.
+    let res = env.get("/api/podcasts?ai=hide").await;
+    assert_eq!(res.json::<Value>().as_array().unwrap().len(), 1);
+    // Another user keeps the default.
+    let res = env
+        .server
+        .get("/api/podcasts")
+        .authorization_bearer(&other)
+        .await;
+    assert_eq!(hidden(&res).as_deref(), Some("2"));
+    assert_eq!(res.json::<Value>().as_array().unwrap().len(), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn admin_override_requires_admin(pool: PgPool) {
+    let env = env(pool).await;
+    let (ai, plain) = two_shows(&env).await;
+    let other = member(&env).await;
+    let path = format!("/api/podcasts/{plain}/ai-label");
+    let res = env
+        .server
+        .put(&path)
+        .authorization_bearer(&other)
+        .json(&json!({"label": "ai"}))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::FORBIDDEN);
+    let res = env.server.put(&path).json(&json!({"label": "ai"})).await;
+    assert_eq!(res.status_code(), StatusCode::UNAUTHORIZED);
+
+    let put = |path: String, body: Value| {
+        env.server
+            .put(&path)
+            .authorization_bearer(&env.token)
+            .json(&body)
+    };
+    let res = put(path.clone(), json!({"label": "ai"})).await;
+    res.assert_status_ok();
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"aiLabel": "ai", "aiLabelSource": "admin"})
+    );
+    let res = put(path.clone(), json!({"label": "maybe"})).await;
+    assert_eq!(res.status_code(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"error": "label must be ai, human or null"})
+    );
+    let res = put(
+        format!("/api/podcasts/{}/ai-label", Uuid::now_v7()),
+        json!({"label": "human"}),
+    )
+    .await;
+    assert_eq!(res.status_code(), StatusCode::NOT_FOUND);
+    // Both shows are AI now: everything hidden.
+    let res = env.get("/api/podcasts").await;
+    assert_eq!(res.json::<Value>(), json!([]));
+    // The admin confirms the channel-tagged show human: the override beats the channel tag.
+    let res = put(
+        format!("/api/podcasts/{ai}/ai-label"),
+        json!({"label": "human"}),
+    )
+    .await;
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"aiLabel": "human", "aiLabelSource": "admin"})
+    );
+    // Clearing goes back to the feed's label.
+    let res = put(path.clone(), json!({"label": null})).await;
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"aiLabel": "unknown", "aiLabelSource": null})
+    );
+    let stored: (Option<String>, Option<Uuid>) =
+        sqlx::query_as("SELECT ai_override, ai_override_by FROM podcasts WHERE id = $1")
+            .bind(plain)
+            .fetch_one(env.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, (None, None));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn admin_episode_override_wins_and_is_admin_only(pool: PgPool) {
+    let env = env(pool).await;
+    let (ai, plain) = two_shows(&env).await;
+    let other = member(&env).await;
+    let a1 = episode_id(env.pool(), "a1").await;
+    let p1 = episode_id(env.pool(), "p1").await;
+    let path = format!("/api/podcasts/{ai}/episodes/{a1}/ai-label");
+    let res = env
+        .server
+        .put(&path)
+        .authorization_bearer(&other)
+        .json(&json!({"label": "human"}))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::FORBIDDEN);
+    let res = env
+        .server
+        .put(&path)
+        .authorization_bearer(&env.token)
+        .json(&json!({"label": "human"}))
+        .await;
+    res.assert_status_ok();
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"aiLabel": "human", "aiLabelSource": "admin"})
+    );
+    // An episode of another show is not found under this one.
+    let res = env
+        .server
+        .put(&format!("/api/podcasts/{ai}/episodes/{p1}/ai-label"))
+        .authorization_bearer(&env.token)
+        .json(&json!({"label": "ai"}))
+        .await;
+    assert_eq!(res.status_code(), StatusCode::NOT_FOUND);
+    // The episode label beats its AI show's label: visible on the show's page.
+    let res = env.get(&format!("/api/podcasts/{ai}/episodes")).await;
+    let v = res.json::<Value>();
+    assert_eq!(v["total"], 1);
+    assert_eq!(v["episodes"][0]["title"], "a1");
+    assert_eq!(hidden(&res).as_deref(), Some("1"));
+    let _ = plain;
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn item_true_beats_admin_human(pool: PgPool) {
+    let env = env(pool).await;
+    let (_, plain) = two_shows(&env).await;
+    env.server
+        .put(&format!("/api/podcasts/{plain}/ai-label"))
+        .authorization_bearer(&env.token)
+        .json(&json!({"label": "human"}))
+        .await
+        .assert_status_ok();
+    let v = env
+        .get(&format!("/api/podcasts/{plain}/episodes?ai=show"))
+        .await
+        .json::<Value>();
+    let by_title = |t: &str| {
+        v["episodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["title"] == t)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_title("p2")["aiLabel"], "ai");
+    assert_eq!(by_title("p2")["aiLabelSource"], "feed-episode");
+    assert_eq!(by_title("p1")["aiLabel"], "human");
+    assert_eq!(by_title("p1")["aiLabelSource"], "admin");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn listening_next_and_recently_listened_skip_ai(pool: PgPool) {
+    let env = env(pool).await;
+    let (ai, plain) = two_shows(&env).await;
+    progress(env.pool(), env.user, "a1", 30.0, 60.0, false).await;
+    progress(env.pool(), env.user, "p1", 30.0, 60.0, false).await;
+    let res = env.get("/api/podcasts/listening").await;
+    // Hidden: a1 in progress (AI show), and both shows' newest episodes without progress, a2
+    // (AI show) and p2 (AI item tag).
+    assert_eq!(hidden(&res).as_deref(), Some("3"));
+    let v = res.json::<Value>();
+    assert_eq!(v["newEpisodes"], json!([]));
+    let in_progress: Vec<_> = v["inProgress"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["episode"]["title"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(in_progress, vec!["p1"]);
+    assert!(v["inProgress"][0]["episode"]["aiLabel"] == "unknown");
+    assert!(v["inProgress"][0]["podcast"]["aiLabel"] == "unknown");
+    let all = env.get("/api/podcasts/listening?ai=show").await;
+    assert_eq!(hidden(&all), None);
+    assert_eq!(
+        all.json::<Value>()["inProgress"].as_array().unwrap().len(),
+        2
+    );
+
+    // `next` after p1 skips the AI-tagged p2: the end of the show.
+    let p1 = episode_id(env.pool(), "p1").await;
+    let v = env
+        .get(&format!("/api/podcasts/{plain}/episodes/{p1}/next"))
+        .await
+        .json::<Value>();
+    assert_eq!(v, json!({"episode": null}));
+    let v = env
+        .get(&format!("/api/podcasts/{plain}/episodes/{p1}/next?ai=show"))
+        .await
+        .json::<Value>();
+    assert_eq!(v["episode"]["title"], "p2");
+    assert_eq!(v["episode"]["aiLabel"], "ai");
+
+    let res = env.get("/api/library/recently-listened").await;
+    assert_eq!(hidden(&res).as_deref(), Some("1"));
+    let items = res.json::<Value>()["items"].clone();
+    let podcasts_in: Vec<_> = items
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["type"] == "podcast")
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(podcasts_in, vec![plain.to_string()]);
+    let _ = ai;
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn sql_and_rust_resolution_agree(pool: PgPool) {
+    use kima_api_types::podcasts::{AiLabelSource, episode_label, show_label};
+    let overrides = [None, Some("ai"), Some("human")];
+    let tags = [None, Some(true), Some(false)];
+    let mut checked = 0;
+    for (si, show_override) in overrides.iter().enumerate() {
+        for (ci, channel) in tags.iter().enumerate() {
+            let show = store(
+                &pool,
+                &format!("https://c{si}{ci}.example.invalid/feed"),
+                "S",
+                None,
+            )
+            .await;
+            sqlx::query("UPDATE podcasts SET ai_override = $2, ai_feed = $3 WHERE id = $1")
+                .bind(show)
+                .bind(show_override)
+                .bind(channel)
+                .execute(&pool)
+                .await
+                .unwrap();
+            for (ei, ep_override) in overrides.iter().enumerate() {
+                for (ii, item) in tags.iter().enumerate() {
+                    let guid = format!("c{si}{ci}-{ei}{ii}");
+                    add_episodes(&pool, show, &[(&guid, day(1))]).await;
+                    let id = episode_id(&pool, &guid).await;
+                    sqlx::query(
+                        "UPDATE podcast_episodes SET ai_override = $2, ai_feed = $3 WHERE id = $1",
+                    )
+                    .bind(id)
+                    .bind(ep_override)
+                    .bind(item)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                    let sql = format!(
+                        "SELECT {}, {}, {}, {} FROM podcast_episodes e
+                         JOIN podcasts p ON p.id = e.podcast_id WHERE e.id = $1",
+                        podcasts::show_label_sql("p"),
+                        podcasts::show_source_sql("p"),
+                        podcasts::episode_label_sql("e", "p"),
+                        podcasts::episode_source_sql("e", "p"),
+                    );
+                    let (sl, ss, el, es): (String, Option<String>, String, Option<String>) =
+                        sqlx::query_as(&sql)
+                            .bind(id)
+                            .fetch_one(&pool)
+                            .await
+                            .unwrap();
+                    let show_rust = show_label(*show_override, *channel);
+                    let ep_rust = episode_label(*ep_override, *item, show_rust);
+                    let src = |s: Option<AiLabelSource>| s.map(|s| s.as_str().to_string());
+                    assert_eq!(
+                        (sl.as_str(), ss.clone()),
+                        (show_rust.0.as_str(), src(show_rust.1))
+                    );
+                    assert_eq!(
+                        (el.as_str(), es.clone()),
+                        (ep_rust.0.as_str(), src(ep_rust.1))
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 81);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn ai_label_and_explicit_are_independent_in_storage(pool: PgPool) {
+    for (n, (explicit, ai)) in [(true, true), (true, false), (false, true), (false, false)]
+        .into_iter()
+        .enumerate()
+    {
+        let url = format!("https://x{n}.example.invalid/feed");
+        let mut s = show(&url, "X", None);
+        s.explicit = explicit;
+        let id = podcasts::insert_show(&pool, Uuid::now_v7(), &s)
+            .await
+            .unwrap()
+            .id;
+        set_tag(&pool, "podcasts", id, Some(ai)).await;
+        let got = podcasts::show_by_id(&pool, id).await.unwrap().unwrap();
+        assert_eq!((got.explicit, got.ai_feed), (explicit, Some(ai)));
     }
 }

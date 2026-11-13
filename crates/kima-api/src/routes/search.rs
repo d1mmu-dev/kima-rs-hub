@@ -1,7 +1,8 @@
 //! `GET /api/search?q=&type=&limit=`: library search, shaped as upstream `routes/search.ts`
 //! (library part only). Artists, albums and tracks reuse the browse serializers.
 
-use axum::extract::{Query, State};
+use axum::extract::{Query, RawQuery, State};
+use axum::http::HeaderMap;
 use axum::routing::get;
 use axum::{Json, Router};
 use kima_db::search;
@@ -10,6 +11,7 @@ use serde_json::{Value, json};
 
 use super::library::artists::artist_json;
 use super::library::{album_json, parse_int, track_json};
+use super::podcasts::ai::{AiFilter, from_db, put_label, retain_visible};
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -33,7 +35,9 @@ async fn search(
     State(state): State<AppState>,
     user: AuthUser,
     Query(params): Query<Params>,
-) -> Result<Json<Value>, ApiError> {
+    RawQuery(raw): RawQuery,
+) -> Result<(HeaderMap, Json<Value>), ApiError> {
+    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
     let q = params.q.as_deref().unwrap_or("").trim();
     let q: String = q.chars().take(MAX_QUERY_CHARS).collect();
     let limit = params
@@ -64,33 +68,38 @@ async fn search(
             episodes = search::episodes(&state.pool, user.id, &tsq, limit, 0).await?;
         }
     }
-    Ok(Json(json!({
-        "artists": artists.iter().map(artist_json).collect::<Vec<_>>(),
-        "albums": albums.iter().map(album_json).collect::<Vec<_>>(),
-        "tracks": tracks.iter().map(track_json).collect::<Vec<_>>(),
-        "audiobooks": [],
-        "podcasts": podcasts.iter().map(podcast_json).collect::<Vec<_>>(),
-        "episodes": episodes.iter().map(episode_json).collect::<Vec<_>>(),
-    })))
+    // Followed shows and their episodes are filtered like every podcast list (D-207).
+    let hidden = retain_visible(filter, &mut podcasts, |p| from_db(&p.ai_label, None).0)
+        + retain_visible(filter, &mut episodes, |e| from_db(&e.ai_label, None).0);
+    Ok((
+        filter.headers(hidden),
+        Json(json!({
+            "artists": artists.iter().map(artist_json).collect::<Vec<_>>(),
+            "albums": albums.iter().map(album_json).collect::<Vec<_>>(),
+            "tracks": tracks.iter().map(track_json).collect::<Vec<_>>(),
+            "audiobooks": [],
+            "podcasts": podcasts.iter().map(podcast_json).collect::<Vec<_>>(),
+            "episodes": episodes.iter().map(episode_json).collect::<Vec<_>>(),
+        })),
+    ))
 }
 
-/// A followed show found by search; AI labelling is `"unknown"`/`null` until Task 0/Task 8
-/// land the `ai_feed` schema (same boundary as Task 13/14's deferred AI cases).
+/// A followed show found by search, with its AI label (D-207).
 fn podcast_json(p: &search::PodcastSearchRow) -> Value {
-    json!({
+    let mut v = json!({
         "id": p.id,
         "title": p.title,
         "author": p.author,
         "description": p.description,
         "imageUrl": p.image_url,
         "episodeCount": p.episode_count,
-        "aiLabel": "unknown",
-        "aiLabelSource": null,
-    })
+    });
+    put_label(&mut v, from_db(&p.ai_label, p.ai_label_source.as_deref()));
+    v
 }
 
 fn episode_json(e: &search::EpisodeSearchRow) -> Value {
-    json!({
+    let mut v = json!({
         "id": e.id,
         "title": e.title,
         "description": e.description,
@@ -99,7 +108,7 @@ fn episode_json(e: &search::EpisodeSearchRow) -> Value {
         "publishedAt": kima_api_types::stats::js_iso(e.published_at),
         "duration": e.duration,
         "audioUrl": e.audio_url,
-        "aiLabel": "unknown",
-        "aiLabelSource": null,
-    })
+    });
+    put_label(&mut v, from_db(&e.ai_label, e.ai_label_source.as_deref()));
+    v
 }

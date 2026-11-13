@@ -6,9 +6,13 @@
 
 use std::rc::Rc;
 
-use kima_api_types::podcasts::{DiscoveryItem, EpisodePage, EpisodeRow, Preview, ShowDetail};
-use vertigo::{DomNode, Value, bind, dom, get_driver};
+use kima_api_types::auth::MeResponse;
+use kima_api_types::podcasts::{
+    AiLabel, AiLabelSource, DiscoveryItem, EpisodePage, EpisodeRow, Preview, ShowDetail,
+};
+use vertigo::{Computed, DomNode, Value, bind, dom, get_driver};
 
+use super::ai::{admin_buttons, badge, hidden_note, pill, show_ai_state, visible};
 use super::{ShowInfo, discovery_card, episode_item, image_url, resume_point};
 use crate::api::client::load;
 use crate::api::podcasts::{self as api, Order};
@@ -37,11 +41,27 @@ pub fn episode_meta(e: &EpisodeRow) -> String {
     parts.join(" · ")
 }
 
+type Label = (AiLabel, Option<AiLabelSource>);
+
+/// Whether the signed-in user may set AI labels (admins only; the server checks too).
+fn is_admin(ctx: &Ctx) -> Computed<bool> {
+    let me = load(bind!(ctx, async move {
+        ctx.client.get::<MeResponse>("/api/auth/me").await
+    }));
+    me.map(|state| matches!(state, vertigo::Resource::Ready(me) if me.role == "admin"))
+}
+
+/// A label badge that follows `label` (an admin's change shows at once).
+fn live_badge(label: &Value<Label>) -> DomNode {
+    label.render_value(|(l, s)| badge(l, s))
+}
+
 fn hero(
     cover: Option<String>,
     title: String,
     author: String,
     genres: String,
+    label: DomNode,
     actions: DomNode,
 ) -> DomNode {
     let art = match cover {
@@ -54,7 +74,10 @@ fn hero(
                 {art}
             </div>
             <div class="flex flex-col justify-end min-w-0">
-                <p class="t-eyebrow mb-2">"podcast"</p>
+                <div class="flex items-center gap-2 mb-2">
+                    <p class="t-eyebrow">"podcast"</p>
+                    {label}
+                </div>
                 <h1 class="text-3xl md:text-5xl font-bold tracking-tight text-white">{title}</h1>
                 <p class="t-body mt-2">{author}</p>
                 <p class="t-meta mt-1">{genres}</p>
@@ -76,10 +99,25 @@ fn description(text: Option<String>) -> DomNode {
     }
 }
 
-fn episode_rows(ctx: &Ctx, show: &Rc<ShowInfo>, rows: &[EpisodeRow]) -> DomNode {
+fn episode_rows(
+    ctx: &Ctx,
+    show: &Rc<ShowInfo>,
+    rows: &[&EpisodeRow],
+    admin: &Computed<bool>,
+) -> DomNode {
     let rows: Vec<DomNode> = rows
         .iter()
         .map(|e| {
+            let label = Value::new((e.ai_label, e.ai_label_source));
+            let label_badge = live_badge(&label);
+            let (show_id, episode_id) = (show.id.clone(), e.id.to_string());
+            let controls = admin.render_value(bind!(ctx, show_id, episode_id, label, |on| {
+                if on {
+                    admin_buttons(&ctx, show_id.clone(), Some(episode_id.clone()), label.clone())
+                } else {
+                    dom! { <span class="hidden" /> }
+                }
+            }));
             let (title, meta) = (e.title.clone(), episode_meta(e));
             let item = episode_item(show, &e.id.to_string(), &e.title, e.duration, e.image_url.as_deref());
             let resume = resume_point(e.progress.as_ref());
@@ -95,6 +133,8 @@ fn episode_rows(ctx: &Ctx, show: &Rc<ShowInfo>, rows: &[EpisodeRow]) -> DomNode 
                         <p class="text-sm font-medium text-white truncate">{title}</p>
                         <p class="t-meta">{meta}</p>
                     </div>
+                    {label_badge}
+                    {controls}
                 </div>
             }
         })
@@ -102,7 +142,12 @@ fn episode_rows(ctx: &Ctx, show: &Rc<ShowInfo>, rows: &[EpisodeRow]) -> DomNode 
     dom! { <div>{..rows}</div> }
 }
 
-fn episodes(ctx: &Ctx, detail: &ShowDetail) -> DomNode {
+fn episodes(
+    ctx: &Ctx,
+    detail: &ShowDetail,
+    show_ai: &Value<bool>,
+    admin: &Computed<bool>,
+) -> DomNode {
     let id = detail.id.to_string();
     let show = Rc::new(ShowInfo {
         id: id.clone(),
@@ -111,19 +156,23 @@ fn episodes(ctx: &Ctx, detail: &ShowDetail) -> DomNode {
     });
     // The order and the page's offset; every change fetches that page.
     let view = Value::new((Order::Newest, 0u32));
-    let pages = view.render_value(bind!(ctx, id, view, show, |(order, offset): (Order, u32)| {
+    let pages = view.render_value(bind!(ctx, id, view, show, show_ai, admin, |(order, offset): (Order, u32)| {
         let page = load(bind!(ctx, id, async move {
             api::episodes(&ctx.client, &id, offset, PAGE, order).await
         }));
-        resource_view(page, bind!(ctx, view, show, |page: Rc<EpisodePage>| {
+        resource_view(page, bind!(ctx, view, show, show_ai, admin, |page: Rc<EpisodePage>| {
+            show_ai.render_value(bind!(ctx, view, show, admin, page, |on| {
             let label = page_label(page.offset, page.episodes.len(), page.total);
             let has_prev = page.offset > 0;
             let has_next = page.offset + (page.episodes.len() as i64) < page.total;
             let prev = bind!(view, |_| view.change(|(_, o)| *o = o.saturating_sub(PAGE)));
             let next = bind!(view, |_| view.change(|(_, o)| *o += PAGE));
-            let rows = episode_rows(&ctx, &show, &page.episodes);
+            let (shown, hidden) = visible(&page.episodes, on, |e| e.ai_label);
+            let rows = episode_rows(&ctx, &show, &shown, &admin);
+            let note = hidden_note(hidden);
             dom! {
                 <div>
+                    {note}
                     {rows}
                     <div class="flex items-center justify-between mt-4">
                         <span class="t-meta">{label}</span>
@@ -134,6 +183,7 @@ fn episodes(ctx: &Ctx, detail: &ShowDetail) -> DomNode {
                     </div>
                 </div>
             }
+            }))
         }))
     }));
     let toggle = bind!(view, |_| {
@@ -161,24 +211,28 @@ fn episodes(ctx: &Ctx, detail: &ShowDetail) -> DomNode {
     }
 }
 
-fn similar(ctx: &Ctx, id: String) -> DomNode {
+fn similar(ctx: &Ctx, id: String, show_ai: &Value<bool>) -> DomNode {
     let found = load(bind!(
         ctx,
         async move { api::similar(&ctx.client, &id).await }
     ));
     resource_view(
         found,
-        bind!(ctx, |items: Rc<Vec<DiscoveryItem>>| {
-            if items.is_empty() {
-                return dom! { <span class="hidden" /> };
-            }
-            let cards = items
-                .iter()
-                .enumerate()
-                .map(|(i, item)| discovery_card(&ctx, item, i))
-                .collect();
-            let header = section_header(Kind::Podcast, "similar shows", items.len() as i64);
-            dom! { <section class="page-shell page-end">{header}{media_grid(cards)}</section> }
+        bind!(ctx, show_ai, |all: Rc<Vec<DiscoveryItem>>| {
+            show_ai.render_value(bind!(ctx, all, |on| {
+                let (items, hidden) = visible(&all, on, |i| i.ai_label);
+                if items.is_empty() && hidden == 0 {
+                    return dom! { <span class="hidden" /> };
+                }
+                let cards = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| discovery_card(&ctx, item, i))
+                    .collect();
+                let header = section_header(Kind::Podcast, "similar shows", items.len() as i64);
+                let note = hidden_note(hidden);
+                dom! { <section class="page-shell page-end">{header}{note}{media_grid(cards)}</section> }
+            }))
         }),
     )
 }
@@ -245,15 +299,34 @@ fn show_page(ctx: &Ctx, detail: Rc<ShowDetail>) -> DomNode {
         </div>
     };
     let genres = detail.genres.join(" · ");
+    let show_ai = show_ai_state(ctx);
+    let admin = is_admin(ctx);
+    let label = Value::new((detail.ai_label, detail.ai_label_source));
+    let show_controls = admin.render_value(bind!(ctx, id, label, |on| {
+        if on {
+            admin_buttons(&ctx, id.clone(), None, label.clone())
+        } else {
+            dom! { <span class="hidden" /> }
+        }
+    }));
+    let ai_pill = pill(&show_ai);
+    let actions = dom! {
+        <div class="flex flex-wrap items-center gap-2">
+            {actions}
+            {ai_pill}
+            {show_controls}
+        </div>
+    };
     let hero = hero(
         image_url(detail.cover_url.as_deref(), 600, token.as_deref()),
         detail.title.clone(),
         detail.author.clone().unwrap_or_default(),
         genres,
+        live_badge(&label),
         actions,
     );
-    let episodes = episodes(ctx, &detail);
-    let similar = similar(ctx, detail.id.to_string());
+    let episodes = episodes(ctx, &detail, &show_ai, &admin);
+    let similar = similar(ctx, detail.id.to_string(), &show_ai);
     dom! {
         <div class="min-h-screen animate-rise">
             {hero}
@@ -306,6 +379,7 @@ fn preview_page(ctx: &Ctx, p: Rc<Preview>) -> DomNode {
         p.title.clone(),
         p.author.clone().unwrap_or_default(),
         p.genres.join(" · "),
+        badge(p.ai_label, p.ai_label_source),
         actions,
     );
     let rows: Vec<DomNode> = p

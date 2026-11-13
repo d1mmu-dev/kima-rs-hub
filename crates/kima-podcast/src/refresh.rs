@@ -257,6 +257,13 @@ async fn refresh_inner(
         } => {
             let parsed = crate::feed::parse(&text, time::OffsetDateTime::now_utc())
                 .map_err(|error| RefreshError::Processing(error.into()))?;
+            // The `ai-content` tags are re-read for every listed episode, stored ones included
+            // (D-206: a disclosure added later must apply).
+            let labels: Vec<(String, Option<bool>)> = parsed
+                .episodes
+                .iter()
+                .map(|e| (e.guid.clone(), e.ai_feed))
+                .collect();
             let episodes: Vec<_> = parsed
                 .episodes
                 .into_iter()
@@ -297,6 +304,7 @@ async fn refresh_inner(
                 FenceState::Missing => return Ok(RefreshOutcome::Missing),
             }
             let stored = podcasts::insert_episodes_on(&mut tx, id, &episodes).await?;
+            podcasts::set_feed_labels_on(&mut tx, id, parsed.show.ai_feed, &labels).await?;
             sqlx::query("UPDATE podcasts SET title = $2, author = $3, description = $4, image_url = $5, language = $6, explicit = $7, episode_count = $8, feed_etag = $9, feed_last_modified = $10, last_refreshed = now(), updated_at = now(), refresh_error = NULL, refresh_failed_at = NULL, refresh_failures = 0 WHERE id = $1")
                 .bind(id).bind(input.title).bind(input.author).bind(input.description)
                 .bind(input.image_url).bind(input.language).bind(input.explicit)

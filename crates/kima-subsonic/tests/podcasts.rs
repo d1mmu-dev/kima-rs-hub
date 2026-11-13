@@ -416,6 +416,49 @@ async fn refresh_podcasts_refreshes_each_followed_show(pool: PgPool) {
     migrator = "kima_db::MIGRATOR",
     fixtures(path = "fixtures", scripts("subsonic"))
 )]
+async fn refresh_mixed_failure_and_success_are_all_settled(pool: PgPool) {
+    let mut failure = feed_entry("/bad.xml", "failure");
+    failure.status = 500;
+    let replay = Replay::start(Recording(vec![
+        failure,
+        feed_entry("/good.xml", &feed_xml("Updated", "New", "new")),
+    ]))
+    .await;
+    let net = Arc::new(Net::new(
+        NetConfig::for_tests(Bases::all(&replay.url())),
+        pool.clone(),
+        IdentifySwitch::new(false, false),
+    ));
+    let env = env_with_net(pool.clone(), net);
+    let bad = seeded_show(&pool, &format!("{}/bad.xml", replay.url()), "Bad", 0, true).await;
+    let good = seeded_show(
+        &pool,
+        &format!("{}/good.xml", replay.url()),
+        "Good",
+        0,
+        true,
+    )
+    .await;
+    let body = env.json("refreshPodcasts", &[]).await;
+    assert_eq!(body["status"], "ok");
+    assert_eq!(replay.asked().len(), 2);
+    let bad_show = podcasts::show_by_id(&pool, bad).await.unwrap().unwrap();
+    assert_eq!(bad_show.refresh_failures, 1);
+    assert!(bad_show.refresh_error.is_some());
+    let good_show = podcasts::show_by_id(&pool, good).await.unwrap().unwrap();
+    assert_eq!(good_show.title, "Updated");
+    assert_eq!(good_show.refresh_failures, 0);
+    let episodes = podcasts::episodes_for_channel(&pool, good, 10)
+        .await
+        .unwrap();
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0].title, "New");
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
 async fn decision_podcast_direct_only(pool: PgPool) {
     let env = env(pool.clone());
     let show = seeded_show(&pool, "https://feed.example/a.xml", "Show A", 1, true).await;

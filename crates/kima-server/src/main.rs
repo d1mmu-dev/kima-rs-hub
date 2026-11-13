@@ -205,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
         data_dir: config.data_dir.clone(),
     };
     registry.register_podcast_cache(podcast_ctx.clone());
+    registry.register_podcast_refresh(podcast_ctx.clone());
     // Before any worker starts: recover library jobs a dead process left running, then queue
     // the safety-net reconcile (spec §4.4).
     kima_server::jobs::prepare_library_queue(&pool)

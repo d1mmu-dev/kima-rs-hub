@@ -113,7 +113,8 @@ fn cors(origins: &[String]) -> CorsLayer {
 /// The scheduler's entries (spec §5): `library-sync` when `KIMA_LIBRARY_SYNC_CRON` is not `off`
 /// (`sync`, parsed at startup), and always `http-cache-prune` (03:17 UTC daily: expired cache
 /// rows, then unused genres) and `enrich-kick` (every ten minutes: a backstop for a lost
-/// self-reschedule; a paused or halted pipeline stays so).
+/// self-reschedule; a paused or halted pipeline stays so), plus `podcast-refresh-sweep`
+/// every 15 minutes independently of identification.
 pub fn schedule_entries(
     _config: &Config,
     sync: Option<Cron>,
@@ -131,6 +132,18 @@ pub fn schedule_entries(
         "enrich-kick",
         Cron::parse("*/10 * * * *").expect("a valid cron expression"),
         enrich_kick_job(),
+    ));
+    entries.push((
+        "podcast-refresh-sweep",
+        Cron::parse("*/15 * * * *").expect("a valid cron expression"),
+        std::sync::Arc::new(|pool| {
+            Box::pin(async move {
+                kima_podcast::refresh::sweep(&pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+        }),
     ));
     entries
 }

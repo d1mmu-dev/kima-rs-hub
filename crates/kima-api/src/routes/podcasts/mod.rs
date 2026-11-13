@@ -19,6 +19,8 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/podcasts", get(list))
         .route("/podcasts/subscribe", post(subscribe))
+        .route("/podcasts/refresh-all", post(refresh_all))
+        .route("/podcasts/{id}/refresh", get(refresh_one))
         .route("/podcasts/{id}/unsubscribe", delete(unsubscribe))
         .route("/podcasts/listening", get(listening))
         .route("/podcasts/{id}", get(detail))
@@ -32,6 +34,73 @@ pub fn routes() -> Router<AppState> {
         .merge(discovery::routes())
         .merge(preview::routes())
         .merge(cover::routes())
+}
+
+async fn refresh_one(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    use kima_podcast::refresh::{FeedFailure, RefreshError, RefreshOutcome};
+    let id = uuid::Uuid::parse_str(&id).map_err(|_| ApiError::NotFound("Podcast not found"))?;
+    match kima_podcast::refresh::refresh(&state.podcast_catalog, id).await {
+        Ok(RefreshOutcome::Missing) => Err(ApiError::NotFound("Podcast not found")),
+        Ok(RefreshOutcome::Superseded) => Err(ApiError::Conflict("Podcast refresh was superseded")),
+        Ok(RefreshOutcome::Applied(result)) => Ok(Json(json!({
+            "success": true,
+            "newEpisodesCount": result.new_episodes,
+            "totalEpisodes": result.total_episodes,
+            "message": format!("Found {} new episodes", result.new_episodes),
+        }))),
+        Err(RefreshError::Feed(FeedFailure::Gone(_))) => {
+            Err(ApiError::NotFound("The show's feed is gone"))
+        }
+        // Upstream wraps every feed read failure in `FeedReadError`, answered as "down" (502),
+        // including a page that is not a feed and a permanent fetch failure.
+        Err(
+            RefreshError::Feed(
+                FeedFailure::Down(_) | FeedFailure::RateLimited { .. } | FeedFailure::Permanent(_),
+            )
+            | RefreshError::Processing(_),
+        ) => Err(ApiError::BadGateway(
+            "The show's feed did not answer; try again shortly",
+        )),
+        Err(error) => Err(ApiError::Internal(error.into())),
+    }
+}
+
+async fn refresh_all(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    let shows = kima_db::podcasts::followed_shows(&state.pool, user.id).await?;
+    if shows.is_empty() {
+        return Ok(Json(
+            json!({"queued": 0, "message": "No subscribed podcasts"}),
+        ));
+    }
+    let total = shows.len();
+    let mut queued = 0;
+    for show in shows {
+        let key = format!("podcast-{}", show.id);
+        match kima_jobs::queue::enqueue(
+            &state.pool,
+            "podcasts",
+            json!({"podcast_id": show.id, "key": key}),
+            3,
+        )
+        .await
+        {
+            Ok(_) => queued += 1,
+            Err(error) => {
+                tracing::warn!(%error, podcast_id = %show.id, "could not queue podcast refresh")
+            }
+        }
+    }
+    let plural = if queued == 1 { "" } else { "s" };
+    Ok(Json(
+        json!({"queued": queued, "total": total, "message": format!("Queued {queued} podcast{plural} for refresh")}),
+    ))
 }
 
 async fn subscribe(

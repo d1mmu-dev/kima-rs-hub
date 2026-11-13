@@ -347,6 +347,16 @@ impl Catalog {
         }))
     }
 
+    /// The database the catalogue writes categories to.
+    pub fn pool(&self) -> &PgPool {
+        &self.0.pool
+    }
+
+    /// The process's one outbound client.
+    pub fn net(&self) -> &Net {
+        &self.0.net
+    }
+
     /// One Apple JSON request through the cache, shared with anyone already waiting for the same
     /// `key` (`cached`, `podcastCatalog.ts:84-120`).
     async fn load(&self, key: String, req: Req, priority: Priority) -> Result<Value, Upstream> {

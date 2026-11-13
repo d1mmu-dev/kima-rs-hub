@@ -2972,6 +2972,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-test",
+ "base64 0.22.1",
  "form_urlencoded",
  "futures",
  "kima-api",

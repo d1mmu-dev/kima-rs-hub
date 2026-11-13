@@ -73,6 +73,229 @@ async fn cancelling_category_lookup_never_commits_an_uncategorized_import(pool: 
     assert_eq!(show.category_ids, vec![1310]);
 }
 
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refresh_all_without_subscriptions_returns_empty_message_green(pool: PgPool) {
+    let env = env(pool).await;
+    let response = env.post("/api/podcasts/refresh-all", json!({})).await;
+    assert_eq!(response.status_code(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>(),
+        json!({"queued": 0, "message": "No subscribed podcasts"})
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn manual_refresh_unknown_podcast_is_not_found_green(pool: PgPool) {
+    let env = env(pool).await;
+    let response = env
+        .get(&format!("/api/podcasts/{}/refresh", Uuid::now_v7()))
+        .await;
+    assert_eq!(response.status_code(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.json::<Value>(),
+        json!({"error": "Podcast not found"})
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refresh_routes_require_authentication(pool: PgPool) {
+    let env = env(pool).await;
+    let response = env.server.post("/api/podcasts/refresh-all").await;
+    assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+    let response = env
+        .server
+        .get(&format!("/api/podcasts/{}/refresh", Uuid::now_v7()))
+        .await;
+    assert_eq!(response.status_code(), StatusCode::UNAUTHORIZED);
+}
+
+// ---- Task 9: manual refresh of a followed show, refresh-all, the refresh fence ----
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn manual_refresh_succeeds_green(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let feed = env.host.url("/feed.xml");
+    let show = store(&pool, &feed, "Old Title", None).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
+    res.assert_status_ok();
+    let body = res.json::<Value>();
+    assert_eq!(body["success"], json!(true));
+    assert_eq!(body["newEpisodesCount"], json!(1));
+    assert_eq!(body["totalEpisodes"], json!(1));
+    assert_eq!(body["message"], json!("Found 1 new episodes"));
+    // The feed consumed: metadata follows the feed, episode stored, no failure recorded.
+    let show = podcasts::show_by_id(&pool, show).await.unwrap().unwrap();
+    assert_eq!(show.title, "Race Show");
+    assert_eq!(show.episode_count, 1);
+    assert_eq!(show.refresh_error, None);
+    assert_eq!(show.refresh_failed_at, None);
+    assert_eq!(show.refresh_failures, 0);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM podcast_episodes WHERE guid = 'race-1'"
+        )
+        .await,
+        1
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn manual_refresh_feed_gone_is_404_green(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let show = store(&pool, &env.host.url("/gone.xml"), "Gone", None).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
+    res.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(
+        res.json::<Value>()["error"],
+        json!("The show's feed is gone")
+    );
+    // A typed feed failure must not wipe the show's metadata; a gone feed is recorded as a
+    // failure so the admin sees it in the enrichment failures list (review finding).
+    let show = podcasts::show_by_id(&pool, show).await.unwrap().unwrap();
+    assert_eq!(show.title, "Gone");
+    assert_eq!(
+        show.refresh_error.as_deref(),
+        Some("The show's feed is gone")
+    );
+    assert_eq!(show.refresh_failures, 1);
+}
+
+/// Upstream wraps every feed read failure (a page that is not RSS, a host that is down) in
+/// `FeedReadError`, which `answerUpstreamFailure` answers as 502 "down".
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn manual_refresh_unreadable_or_down_feed_is_502_green(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    for path in ["/page.xml", "/down.xml"] {
+        let show = store(&pool, &env.host.url(path), "Show", None).await;
+        podcasts::subscribe(&pool, env.user, show).await.unwrap();
+        let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
+        res.assert_status(StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            res.json::<Value>()["error"],
+            json!("The show's feed did not answer; try again shortly"),
+            "{path}"
+        );
+        let show = podcasts::show_by_id(&pool, show).await.unwrap().unwrap();
+        assert_eq!(show.refresh_failures, 1, "{path}");
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn manual_refresh_feed_missing_is_500_green(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    // 4xx other than 429 that a feed answers is Absence without refusal (per
+    // `status_failure`), i.e. a permanent fetch failure and the route's 500 arm.
+    let show = store(&pool, &env.host.url("/forbidden.xml"), "Forbidden", None).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
+    res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(res.json::<Value>()["error"], json!("Internal error"));
+    let show = podcasts::show_by_id(&pool, show).await.unwrap().unwrap();
+    assert_eq!(show.refresh_failures, 1);
+    assert!(show.refresh_error.is_some());
+    assert!(show.refresh_failed_at.is_some());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn manual_refresh_feed_blocked_ssrf_returns_500_green(pool: PgPool) {
+    // The feed host answers loopback only; the show's url points at a private
+    // address outside the allowed bases, so the hop is refused here.
+    let env = env_with(pool.clone(), |cfg| cfg.allow_private_images = false).await;
+    let feed = "http://10.9.9.9:8080/feed.xml";
+    let show = store(&pool, feed, "Blocked", None).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
+    res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(res.json::<Value>()["error"], json!("Internal error"));
+    let show = podcasts::show_by_id(env.pool(), show)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(show.refresh_failures, 1);
+    assert!(show.refresh_error.is_some());
+    assert!(show.refresh_failed_at.is_some());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refresh_all_with_mixed_followed_shows_green(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    // One followed show with a good feed; one with a down feed. refresh-all must
+    // best-effort enqueue both and answer from the followed set only.
+    let good = store(&pool, &env.host.url("/race.xml"), "Good", None).await;
+    let bad = store(&pool, &env.host.url("/down.xml"), "Bad", None).await;
+    podcasts::subscribe(&pool, env.user, good).await.unwrap();
+    podcasts::subscribe(&pool, env.user, bad).await.unwrap();
+    let res = env.post("/api/podcasts/refresh-all", json!({})).await;
+    res.assert_status_ok();
+    let body = res.json::<Value>();
+    assert_eq!(body["queued"], json!(2));
+    assert_eq!(body["total"], json!(2));
+    assert_eq!(body["message"], json!("Queued 2 podcasts for refresh"));
+    let followed: i64 = count(
+        env.pool(),
+        &format!(
+            "SELECT count(*) FROM podcast_subscriptions WHERE user_id = '{}'",
+            env.user
+        ),
+    )
+    .await;
+    assert_eq!(followed, 2);
+    let queued: i64 = count(
+        env.pool(),
+        "SELECT count(*) FROM jobs WHERE queue = 'podcasts' AND state = 'queued'",
+    )
+    .await;
+    assert_eq!(queued, 2);
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT (payload ->> 'key')::text FROM jobs WHERE queue = 'podcasts' AND state = 'queued'",
+    )
+    .fetch_all(env.pool())
+    .await
+    .unwrap();
+    assert!(
+        keys.contains(&format!("podcast-{good}")),
+        "queued key {keys:?}"
+    );
+    assert!(
+        keys.contains(&format!("podcast-{bad}")),
+        "queued key {keys:?}"
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refresh_one_superseded_by_concurrent_refresh_returns_409_green(pool: PgPool) {
+    // The refresh fence is a one-writer barrier: `refresh_one` claims a fresh
+    // `refresh_token` with an unconditional UPDATE before it ever touches the
+    // feed, so two concurrent refreshes of the same followed show race at that
+    // claim; whichever claims last invalidates the other's token. `/race.xml`
+    // answers only once two fetches are waiting on it, so both requests are
+    // still in flight (claim already done, feed not yet parsed) when the other
+    // claims — the loser's later fence recheck finds it has been superseded.
+    let env = env(pool.clone()).await;
+    let show = store(&pool, &env.host.url("/race.xml"), "Race Show", None).await;
+    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    let path = format!("/api/podcasts/{show}/refresh");
+    let (a, b) = tokio::join!(env.get(&path), env.get(&path));
+    let mut codes = [a.status_code(), b.status_code()];
+    codes.sort_unstable();
+    assert_eq!(codes, [StatusCode::OK, StatusCode::CONFLICT]);
+    // The fence did its job: exactly one refresh committed; the other was
+    // fenced (409) and stored nothing new.
+    let episodes = count(
+        &pool,
+        &format!("SELECT count(*) FROM podcast_episodes WHERE podcast_id = '{show}'"),
+    )
+    .await;
+    assert_eq!(episodes, 1);
+    let show = podcasts::show_by_id(&pool, show).await.unwrap().unwrap();
+    assert_eq!(show.title, "Race Show");
+    assert_eq!(show.refresh_error, None);
+    assert_eq!(show.refresh_failures, 0);
+}
+
 const STORED_ITUNES: &str = "1450241676";
 
 const FEED: &str = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Race Show</title><description>d</description>
@@ -171,6 +394,7 @@ async fn answer(base: &str, race: &tokio::sync::Barrier, uri: &Uri) -> Response 
             .into_response(),
         "/down.xml" => (StatusCode::SERVICE_UNAVAILABLE, "maintenance").into_response(),
         "/gone.xml" => (StatusCode::NOT_FOUND, "not here").into_response(),
+        "/forbidden.xml" => (StatusCode::FORBIDDEN, "forbidden").into_response(),
         "/real.xml/" => {
             let body = FEED.replace(
                 "<title>Race Show</title>",

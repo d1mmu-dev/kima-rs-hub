@@ -88,6 +88,12 @@ async fn main() -> anyhow::Result<()> {
         &config.musicbrainz_base_url,
     );
     net_config.bases.itunes = config.itunes_base_url.clone();
+    // Capture runs only (`tools/capture-api-fixtures.sh`): loopback feed/Apple stand-ins.
+    net_config.private_image_allow = kima_net::loopback_allow(
+        net_config.deny_real,
+        std::env::var("KIMA_NET_ALLOW_LOOPBACK").ok().as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
     let net = kima_net::Net::new(net_config, pool.clone(), identify.clone());
     net.load_pauses()
         .await

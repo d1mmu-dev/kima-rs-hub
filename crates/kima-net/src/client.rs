@@ -118,7 +118,9 @@ pub struct NetConfig {
     /// resolved ones.
     pub static_hosts: HashMap<String, Vec<IpAddr>>,
     /// Socket addresses an image, feed or audio fetch may reach although they are not public (tests: the
-    /// replay server, so a redirect away from it can be checked). Empty in production.
+    /// replay server, so a redirect away from it can be checked). Empty in production: outside
+    /// tests it is set only from `KIMA_NET_ALLOW_LOOPBACK`, and only together with
+    /// `KIMA_NET_DENY_REAL=1` (D-216).
     pub private_image_allow: Vec<SocketAddr>,
 }
 

@@ -65,7 +65,10 @@ fn hero(
 }
 
 fn description(text: Option<String>) -> DomNode {
-    match text.filter(|t| !t.trim().is_empty()) {
+    match text
+        .map(|t| super::plain_text(&t))
+        .filter(|t| !t.is_empty())
+    {
         Some(text) => {
             dom! { <div class="page-shell"><p class="t-body max-w-3xl mb-8 line-clamp-2">{text}</p></div> }
         }
@@ -201,6 +204,8 @@ fn show_page(ctx: &Ctx, detail: Rc<ShowDetail>) -> DomNode {
                 }
             };
             match result {
+                // Upstream leaves the page of a show that is no longer followed.
+                Ok(false) => ctx.router.set(Route::Podcasts),
                 Ok(state) => following.set(state),
                 Err(err) => ctx.notify(err.message),
             }
@@ -270,7 +275,10 @@ pub fn render(ctx: &Ctx, id: String) -> DomNode {
 
 fn preview_page(ctx: &Ctx, p: Rc<Preview>) -> DomNode {
     if let Some(id) = p.subscribed_podcast_id {
-        ctx.router.set(Route::PodcastShow { id: id.to_string() });
+        // Already followed: open its page in place of the preview (upstream `router.replace`).
+        // Deferred: a route write is not allowed while this view renders.
+        let url = Route::PodcastShow { id: id.to_string() }.to_string();
+        get_driver().spawn(async move { get_driver().history_replace(&url) });
     }
     let token = ctx.session.current_token();
     let busy = Value::new(false);

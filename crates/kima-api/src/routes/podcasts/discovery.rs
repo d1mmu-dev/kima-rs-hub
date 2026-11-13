@@ -153,13 +153,16 @@ async fn answer_chart(
         .map_err(apple_failure)?;
     let offset = page.offset as usize;
     let limit = page.limit as usize;
-    let page_slice: Vec<_> = shows.into_iter().skip(offset).take(limit).collect();
+    // The whole chart is labelled and filtered before paging, so a page stays full and the
+    // hidden count covers the chart, as for a show's episodes (D-207).
     let items = state
         .podcast_catalog
-        .to_discovery_items(page_slice)
+        .to_discovery_items(shows)
         .await
         .map_err(apple_failure)?;
-    labelled(state, &items, filter).await
+    let (items, hidden) = label_apple_items(state, &items, "itunesId", filter).await?;
+    let page: Vec<Value> = items.into_iter().skip(offset).take(limit).collect();
+    Ok((filter.headers(hidden), Json(page)))
 }
 
 async fn categories(

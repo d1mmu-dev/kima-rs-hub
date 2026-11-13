@@ -10,7 +10,7 @@ use kima_api_types::podcasts::{
 };
 use vertigo::{DomNode, Value, bind, dom, get_driver};
 
-use super::ai::{hidden_note, pill, show_ai_state, visible, with_label};
+use super::ai::{hidden_note, pill, show_ai_state, visible, when_known, with_label};
 use super::{
     ShowInfo, category_rows, discovery_card, episode_item, heading, image_url, resume_point,
 };
@@ -43,13 +43,17 @@ fn show_href(id: impl ToString) -> String {
     Route::PodcastShow { id: id.to_string() }.to_string()
 }
 
-fn listening_view(ctx: &Ctx, data: Rc<Listening>, show_ai: bool) -> DomNode {
+/// Continue listening and new episodes, as the server filtered them for the pill (it picks each
+/// show's newest visible episode, so they are not filtered again here; D-207).
+fn listening_view(ctx: &Ctx, data: Rc<Listening>) -> DomNode {
     let token = ctx.session.current_token();
     let mut sections = Vec::new();
-    let (in_progress, hidden_progress) =
-        visible(&data.in_progress, show_ai, |r| r.episode.ai_label);
-    let (new_episodes, hidden_new) = visible(&data.new_episodes, show_ai, |r| r.episode.ai_label);
-    if !in_progress.is_empty() || hidden_progress > 0 {
+    let hidden = data.ai_hidden.max(0) as usize;
+    if hidden > 0 {
+        sections.push(hidden_note(hidden));
+    }
+    let (in_progress, new_episodes) = (&data.in_progress, &data.new_episodes);
+    if !in_progress.is_empty() {
         let cards = in_progress
             .iter()
             .enumerate()
@@ -92,10 +96,9 @@ fn listening_view(ctx: &Ctx, data: Rc<Listening>, show_ai: bool) -> DomNode {
             "continue listening",
             in_progress.len() as i64,
         );
-        let note = hidden_note(hidden_progress);
-        sections.push(dom! { <section>{header}{note}{media_grid(cards)}</section> });
+        sections.push(dom! { <section>{header}{media_grid(cards)}</section> });
     }
-    if !new_episodes.is_empty() || hidden_new > 0 {
+    if !new_episodes.is_empty() {
         let rows: Vec<DomNode> = new_episodes
             .iter()
             .take(10)
@@ -115,9 +118,7 @@ fn listening_view(ctx: &Ctx, data: Rc<Listening>, show_ai: bool) -> DomNode {
             })
             .collect();
         let header = section_header(Kind::Podcast, "new from your shows", rows.len() as i64);
-        let note = hidden_note(hidden_new);
-        sections
-            .push(dom! { <section>{header}{note}<div class="space-y-1">{..rows}</div></section> });
+        sections.push(dom! { <section>{header}<div class="space-y-1">{..rows}</div></section> });
     }
     dom! { <div class="section-stack">{..sections}</div> }
 }
@@ -280,18 +281,16 @@ pub fn render(ctx: &Ctx) -> DomNode {
     });
 
     let mine = rev.render_value(bind!(ctx, check_all, check_label, checking, show_ai, |_rev: u32| {
-        let listening = load(bind!(ctx, async move { api::listening(&ctx.client).await }));
+        // Asked for with the pill's position and fetched again when it flips.
+        let listening = when_known(&show_ai, bind!(ctx, |on| {
+            let listening = load(bind!(ctx, async move { api::listening(&ctx.client, on).await }));
+            resource_view(listening, bind!(ctx, |data: Rc<Listening>| listening_view(&ctx, data)))
+        }));
         let followed = load(bind!(ctx, async move { api::followed(&ctx.client).await }));
-        let listening = resource_view(
-            listening,
-            bind!(ctx, show_ai, |data: Rc<Listening>| {
-                show_ai.render_value(bind!(ctx, data, |on| listening_view(&ctx, data.clone(), on)))
-            }),
-        );
         let followed = resource_view(
             followed,
             bind!(ctx, check_all, check_label, checking, show_ai, |shows: Rc<Vec<FollowedShow>>| {
-                show_ai.render_value(bind!(ctx, check_all, check_label, checking, shows, |on| {
+                when_known(&show_ai, bind!(ctx, check_all, check_label, checking, shows, |on| {
                     let button = dom! {
                         <button class={BUTTON} name="refresh-all" on_click={check_all.clone()}
                             disabled={flag(checking.to_computed())}>
@@ -308,7 +307,7 @@ pub fn render(ctx: &Ctx) -> DomNode {
 
     let for_you = load(bind!(ctx, async move { api::for_you(&ctx.client).await }));
     let top = load(bind!(ctx, async move {
-        api::chart(&ctx.client, None, 0, 24, true).await
+        api::chart(&ctx.client, None, 0, 24, true, true).await
     }));
     let categories = load(bind!(
         ctx,
@@ -333,22 +332,28 @@ pub fn render(ctx: &Ctx) -> DomNode {
                     )
                 })
                 .collect();
-            show_ai.render_value(bind!(ctx, shelves, |on| catalogue_rows(&ctx, &shelves, on)))
+            when_known(
+                &show_ai,
+                bind!(ctx, shelves, |on| catalogue_rows(&ctx, &shelves, on)),
+            )
         }
         _ => dom! { <span class="hidden" /> },
     }));
     let top_view = resource_view(
         top,
         bind!(ctx, show_ai, |items: Rc<Vec<DiscoveryItem>>| {
-            show_ai.render_value(bind!(ctx, items, |on| catalogue_rows(
-                &ctx,
-                &[(
-                    "top shows".into(),
-                    "what Apple Podcasts listeners follow".into(),
-                    items.to_vec()
-                )],
-                on
-            )))
+            when_known(
+                &show_ai,
+                bind!(ctx, items, |on| catalogue_rows(
+                    &ctx,
+                    &[(
+                        "top shows".into(),
+                        "what Apple Podcasts listeners follow".into(),
+                        items.to_vec()
+                    )],
+                    on
+                )),
+            )
         }),
     );
     let categories_view = resource_view(

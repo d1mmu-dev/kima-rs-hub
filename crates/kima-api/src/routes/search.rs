@@ -37,7 +37,6 @@ async fn search(
     Query(params): Query<Params>,
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
     let q = params.q.as_deref().unwrap_or("").trim();
     let q: String = q.chars().take(MAX_QUERY_CHARS).collect();
     let limit = params
@@ -48,6 +47,13 @@ async fn search(
         .clamp(1, 100);
     let kind = params.kind.as_deref().unwrap_or("all");
     let want = |name: &str| kind == "all" || kind == name;
+    // Only the podcast groups are filtered (D-207): a music-only search neither reads the
+    // setting nor answers `X-Kima-Ai-Hidden`.
+    let filter = if want("podcasts") || want("episodes") {
+        Some(AiFilter::resolve(&state, user.id, raw.as_deref()).await?)
+    } else {
+        None
+    };
 
     let (mut artists, mut albums, mut tracks) = (Vec::new(), Vec::new(), Vec::new());
     let (mut podcasts, mut episodes) = (Vec::new(), Vec::new());
@@ -69,10 +75,16 @@ async fn search(
         }
     }
     // Followed shows and their episodes are filtered like every podcast list (D-207).
-    let hidden = retain_visible(filter, &mut podcasts, |p| from_db(&p.ai_label, None).0)
-        + retain_visible(filter, &mut episodes, |e| from_db(&e.ai_label, None).0);
+    let headers = match filter {
+        Some(filter) => {
+            let hidden = retain_visible(filter, &mut podcasts, |p| from_db(&p.ai_label, None).0)
+                + retain_visible(filter, &mut episodes, |e| from_db(&e.ai_label, None).0);
+            filter.headers(hidden)
+        }
+        None => HeaderMap::new(),
+    };
     Ok((
-        filter.headers(hidden),
+        headers,
         Json(json!({
             "artists": artists.iter().map(artist_json).collect::<Vec<_>>(),
             "albums": albums.iter().map(album_json).collect::<Vec<_>>(),

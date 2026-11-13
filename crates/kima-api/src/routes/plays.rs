@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::library::artists::artist_json;
 use super::library::parse_int;
-use super::podcasts::ai::{AiFilter, from_db, put_label, retain_visible};
+use super::podcasts::ai::{AiFilter, from_db, put_label};
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::extract::ApiJson;
@@ -93,9 +93,9 @@ async fn recently_listened(
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
     let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
     let limit = limit_of(&params, 10, 100);
-    let (artist_rows, mut podcast_rows) = tokio::try_join!(
+    let (artist_rows, (podcast_rows, hidden)) = tokio::try_join!(
         plays::recent_artists(&state.pool, user.id, limit),
-        kima_db::podcasts::recent_in_progress(&state.pool, user.id, limit),
+        kima_db::podcasts::recent_in_progress(&state.pool, user.id, limit, filter.hides()),
     )?;
     let mut items: Vec<(OffsetDateTime, Value)> = artist_rows
         .iter()
@@ -107,8 +107,8 @@ async fn recently_listened(
             (r.last_played_at, v)
         })
         .collect();
-    // Podcast rows are filtered by their in-progress episode's label (D-207).
-    let hidden = retain_visible(filter, &mut podcast_rows, |r| from_db(&r.ai_label, None).0);
+    // Podcast rows are filtered by their in-progress episode's label in the query, before each
+    // show's latest pick (D-207).
     items.extend(podcast_rows.iter().map(|r| {
         let mut v = json!({
                 "id": r.podcast_id,

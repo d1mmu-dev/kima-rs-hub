@@ -198,6 +198,10 @@ pub struct ListeningRow {
 pub struct Listening {
     pub in_progress: Vec<ListeningRow>,
     pub new_episodes: Vec<ListeningRow>,
+    /// Kima-only (D-207): how many AI-labelled rows the server hid; 0 when it hid nothing or
+    /// was asked to show them (`ai=show`, the key is then absent).
+    #[serde(default)]
+    pub ai_hidden: i64,
 }
 
 /// An Apple category (`GET /podcasts/categories`); `parent_id` is `None` for a top category.
@@ -277,6 +281,9 @@ pub struct ShowDetail {
     pub ai_label: AiLabel,
     #[serde(default)]
     pub ai_label_source: Option<AiLabelSource>,
+    /// Kima-only (D-207): AI-labelled episodes the server hid from this show's list.
+    #[serde(default)]
+    pub ai_hidden: i64,
 }
 
 /// `GET /podcasts/{id}/episodes`: one page of a show's episodes.
@@ -286,6 +293,9 @@ pub struct EpisodePage {
     pub total: i64,
     pub offset: i64,
     pub limit: i64,
+    /// Kima-only (D-207): AI-labelled episodes the server hid; `total` counts only the rest.
+    #[serde(default, rename = "aiHidden")]
+    pub ai_hidden: i64,
 }
 
 /// One feed episode a preview shows before the show is followed.

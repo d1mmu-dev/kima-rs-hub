@@ -790,6 +790,11 @@ async fn charts_hide_known_ai_shows(pool: PgPool) {
         all.iter()
             .all(|p| p["aiLabel"] == "unknown" && p["aiLabelSource"].is_null())
     );
+    let all_six: Vec<Value> = env
+        .get("/api/podcasts/charts?category=1495&limit=6&ai=show")
+        .await
+        .json();
+    assert_eq!(all_six.len(), 6);
     let first = all[0]["itunesId"].as_str().unwrap().to_string();
     let second = all[1]["itunesId"].as_str().unwrap().to_string();
     // One remembered by a preview as AI, one stored and confirmed human by an admin.
@@ -826,8 +831,10 @@ async fn charts_hide_known_ai_shows(pool: PgPool) {
     let res = env.get(path).await;
     assert_eq!(res.headers()["x-kima-ai-hidden"], "1");
     let body: Vec<Value> = res.json();
-    assert_eq!(body.len(), 4, "the page is paged first, then filtered");
+    // Filtered before paging: the page stays full, starting after the hidden first show.
+    assert_eq!(body.len(), 5, "the chart is filtered first, then paged");
     assert_eq!(body[0]["itunesId"], second.as_str());
+    assert_eq!(body[4]["itunesId"], all_six[5]["itunesId"]);
     assert_eq!(body[0]["aiLabel"], "human");
     assert_eq!(body[0]["aiLabelSource"], "admin");
 

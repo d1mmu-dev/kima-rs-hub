@@ -4,7 +4,9 @@
 //!
 //! Lists hide AI-labelled shows and episodes unless `?ai=show` or the caller's persisted
 //! `podcastAiContent` setting says `show`. Hiding is never silent: a filtered answer carries
-//! `X-Kima-Ai-Hidden: <n>`; with `show` the header is absent. `unknown` is never hidden.
+//! `X-Kima-Ai-Hidden: <n>`; with `show` the header is absent. The paged lists kima-web reads
+//! (a show's episodes and detail, `/podcasts/listening`) repeat the count in the body as
+//! `aiHidden`. `unknown` is never hidden.
 
 use axum::Json;
 use axum::Router;
@@ -82,6 +84,14 @@ impl AiFilter {
             headers.insert(HIDDEN_HEADER, HeaderValue::from(hidden));
         }
         headers
+    }
+
+    /// The same count in a JSON object's body as `aiHidden` (kima-web cannot read response
+    /// headers), present exactly when the header is.
+    pub fn put_hidden(self, body: &mut Value, hidden: i64) {
+        if let (true, Value::Object(map)) = (self.hides(), body) {
+            map.insert("aiHidden".into(), json!(hidden));
+        }
     }
 }
 

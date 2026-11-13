@@ -2166,7 +2166,48 @@ async fn admin_episode_override_wins_and_is_admin_only(pool: PgPool) {
     assert_eq!(v["total"], 1);
     assert_eq!(v["episodes"][0]["title"], "a1");
     assert_eq!(hidden(&res).as_deref(), Some("1"));
-    let _ = plain;
+
+    // Clearing the override (`null`) falls back to the source label: a1 inherits its show's
+    // channel tag, p2 has its own item tag.
+    let res = env
+        .server
+        .put(&path)
+        .authorization_bearer(&env.token)
+        .json(&json!({"label": null}))
+        .await;
+    res.assert_status_ok();
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"aiLabel": "ai", "aiLabelSource": "feed-show"})
+    );
+    let p2 = episode_id(env.pool(), "p2").await;
+    let p2_path = format!("/api/podcasts/{plain}/episodes/{p2}/ai-label");
+    for (label, expected) in [
+        (
+            json!("human"),
+            json!({"aiLabel": "human", "aiLabelSource": "admin"}),
+        ),
+        (
+            Value::Null,
+            json!({"aiLabel": "ai", "aiLabelSource": "feed-episode"}),
+        ),
+    ] {
+        let res = env
+            .server
+            .put(&p2_path)
+            .authorization_bearer(&env.token)
+            .json(&json!({ "label": label }))
+            .await;
+        res.assert_status_ok();
+        assert_eq!(res.json::<Value>(), expected);
+    }
+    let stored: (Option<String>, Option<Uuid>) =
+        sqlx::query_as("SELECT ai_override, ai_override_by FROM podcast_episodes WHERE id = $1")
+            .bind(p2)
+            .fetch_one(env.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, (None, None));
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -2202,6 +2243,13 @@ async fn item_true_beats_admin_human(pool: PgPool) {
 async fn listening_next_and_recently_listened_skip_ai(pool: PgPool) {
     let env = env(pool).await;
     let (ai, plain) = two_shows(&env).await;
+    // Between p1 and the AI-tagged p2: the plain show's newest visible episode.
+    add_episodes(
+        env.pool(),
+        plain,
+        &[("pn", day(3) + time::Duration::hours(12))],
+    )
+    .await;
     progress(env.pool(), env.user, "a1", 30.0, 60.0, false).await;
     progress(env.pool(), env.user, "p1", 30.0, 60.0, false).await;
     let res = env.get("/api/podcasts/listening").await;
@@ -2209,7 +2257,14 @@ async fn listening_next_and_recently_listened_skip_ai(pool: PgPool) {
     // (AI show) and p2 (AI item tag).
     assert_eq!(hidden(&res).as_deref(), Some("3"));
     let v = res.json::<Value>();
-    assert_eq!(v["newEpisodes"], json!([]));
+    // The filter runs before each show's newest pick: the plain show offers pn, not nothing.
+    let new_titles: Vec<_> = v["newEpisodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["episode"]["title"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(new_titles, vec!["pn"]);
     let in_progress: Vec<_> = v["inProgress"]
         .as_array()
         .unwrap()
@@ -2226,31 +2281,41 @@ async fn listening_next_and_recently_listened_skip_ai(pool: PgPool) {
         2
     );
 
-    // `next` after p1 skips the AI-tagged p2: the end of the show.
-    let p1 = episode_id(env.pool(), "p1").await;
+    // `next` after pn skips the AI-tagged p2: the end of the show.
+    let pn = episode_id(env.pool(), "pn").await;
     let v = env
-        .get(&format!("/api/podcasts/{plain}/episodes/{p1}/next"))
+        .get(&format!("/api/podcasts/{plain}/episodes/{pn}/next"))
         .await
         .json::<Value>();
     assert_eq!(v, json!({"episode": null}));
     let v = env
-        .get(&format!("/api/podcasts/{plain}/episodes/{p1}/next?ai=show"))
+        .get(&format!("/api/podcasts/{plain}/episodes/{pn}/next?ai=show"))
         .await
         .json::<Value>();
     assert_eq!(v["episode"]["title"], "p2");
     assert_eq!(v["episode"]["aiLabel"], "ai");
 
+    // The AI-tagged p2 is the plain show's latest played episode: recently-listened falls back
+    // to its latest visible one, p1, instead of dropping the show.
+    progress(env.pool(), env.user, "p2", 10.0, 60.0, false).await;
     let res = env.get("/api/library/recently-listened").await;
-    assert_eq!(hidden(&res).as_deref(), Some("1"));
+    // Hidden: the AI rows the unfiltered answer has (a1, p2).
+    assert_eq!(hidden(&res).as_deref(), Some("2"));
     let items = res.json::<Value>()["items"].clone();
     let podcasts_in: Vec<_> = items
         .as_array()
         .unwrap()
         .iter()
         .filter(|i| i["type"] == "podcast")
-        .map(|i| i["id"].as_str().unwrap().to_string())
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap().to_string(),
+                i["episodeId"].as_str().unwrap().to_string(),
+            )
+        })
         .collect();
-    assert_eq!(podcasts_in, vec![plain.to_string()]);
+    let p1 = episode_id(env.pool(), "p1").await;
+    assert_eq!(podcasts_in, vec![(plain.to_string(), p1.to_string())]);
     let _ = ai;
 }
 
@@ -2340,4 +2405,27 @@ async fn ai_label_and_explicit_are_independent_in_storage(pool: PgPool) {
         let got = podcasts::show_by_id(&pool, id).await.unwrap().unwrap();
         assert_eq!((got.explicit, got.ai_feed), (explicit, Some(ai)));
     }
+}
+
+/// kima-web cannot read response headers, so the paged lists also carry the hidden count in
+/// the body as `aiHidden` (D-207), present exactly when the header is.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn hidden_count_is_in_the_body_too(pool: PgPool) {
+    let env = env(pool).await;
+    let (_, plain) = two_shows(&env).await;
+    for path in [
+        format!("/api/podcasts/{plain}/episodes"),
+        format!("/api/podcasts/{plain}"),
+        "/api/podcasts/listening".to_string(),
+    ] {
+        let res = env.get(&path).await;
+        res.assert_status_ok();
+        let header: i64 = hidden(&res).unwrap().parse().unwrap();
+        assert_eq!(res.json::<Value>()["aiHidden"], json!(header), "{path}");
+        let sep = if path.contains('?') { '&' } else { '?' };
+        let res = env.get(&format!("{path}{sep}ai=show")).await;
+        assert!(res.json::<Value>().get("aiHidden").is_none(), "{path}");
+    }
+    let res = env.get(&format!("/api/podcasts/{plain}/episodes")).await;
+    assert_eq!(res.json::<Value>()["aiHidden"], 1);
 }

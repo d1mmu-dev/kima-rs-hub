@@ -501,12 +501,9 @@ async fn episodes(
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
     let found = checked_page(&state, user.id, &id, raw).await?;
-    Ok((
-        found.filter.headers(found.hidden),
-        Json(
-            json!({"episodes": found.rows, "total": found.total, "offset": found.page.offset, "limit": found.page.limit}),
-        ),
-    ))
+    let mut body = json!({"episodes": found.rows, "total": found.total, "offset": found.page.offset, "limit": found.page.limit});
+    found.filter.put_hidden(&mut body, found.hidden);
+    Ok((found.filter.headers(found.hidden), Json(body)))
 }
 
 /// A direct read: the show answers whatever its label (labelled); its episode page is
@@ -540,6 +537,7 @@ async fn detail(
         &mut body,
         kima_api_types::podcasts::show_label(show.ai_override.as_deref(), show.ai_feed),
     );
+    found.filter.put_hidden(&mut body, found.hidden);
     Ok((found.filter.headers(found.hidden), Json(body)))
 }
 
@@ -588,11 +586,9 @@ async fn listening(
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
     use kima_api_types::stats::js_iso;
     let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
-    let (mut in_progress, mut new_episodes) =
-        kima_db::podcasts::listening(&state.pool, user.id).await?;
-    // The episode's label already falls back to its show's.
-    let hidden = retain_visible(filter, &mut in_progress, |e| from_db(&e.ai_label, None).0)
-        + retain_visible(filter, &mut new_episodes, |e| from_db(&e.ai_label, None).0);
+    // Filtered in the query, before the limits and each show's newest pick (D-207).
+    let (in_progress, new_episodes, hidden) =
+        kima_db::podcasts::listening(&state.pool, user.id, filter.hides()).await?;
     let convert = |e: kima_db::podcasts::ListeningRow| {
         let progress = progress_of(
             e.current_time,
@@ -614,13 +610,10 @@ async fn listening(
         );
         json!({"podcast": podcast, "episode": episode})
     };
-    Ok((
-        filter.headers(hidden),
-        Json(
-            json!({"inProgress": in_progress.into_iter().map(convert).collect::<Vec<_>>(),
-            "newEpisodes": new_episodes.into_iter().map(convert).collect::<Vec<_>>()}),
-        ),
-    ))
+    let mut body = json!({"inProgress": in_progress.into_iter().map(convert).collect::<Vec<_>>(),
+        "newEpisodes": new_episodes.into_iter().map(convert).collect::<Vec<_>>()});
+    filter.put_hidden(&mut body, hidden);
+    Ok((filter.headers(hidden), Json(body)))
 }
 
 fn progress_of(

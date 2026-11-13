@@ -3005,6 +3005,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "axum-test",
+ "base64 0.22.1",
  "form_urlencoded",
  "hex",
  "hmac 0.13.0",
@@ -3017,6 +3018,7 @@ dependencies = [
  "kima-jobs",
  "kima-library",
  "kima-net",
+ "kima-podcast",
  "kima-test-support",
  "md-5 0.11.0",
  "quick-xml",

@@ -705,3 +705,135 @@ pub async fn expired_downloads(
     .fetch_all(pool)
     .await
 }
+
+// M6 Task 18: Subsonic podcast views (`crates/kima-subsonic/src/routes/podcasts.rs`). These
+// helpers are scoped to what Subsonic needs; Task 9's eventual job-queued refresh/sweep is a
+// separate, larger piece (D-205) and is not implemented here.
+
+/// A followed show as a Subsonic `channel` needs it (`getPodcasts`).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Channel {
+    pub id: Uuid,
+    pub feed_url: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub image_url: Option<String>,
+}
+
+/// The shows `user` follows, as Subsonic channels, oldest follow first (same order as
+/// [`followed`]).
+pub async fn followed_channels(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<Channel>> {
+    sqlx::query_as!(
+        Channel,
+        "SELECT p.id, p.feed_url, p.title, p.description, p.image_url
+         FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id
+         WHERE s.user_id = $1 ORDER BY s.subscribed_at, p.id",
+        user
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// An episode as a Subsonic `podcastEpisode` needs it: its show's title too
+/// (`mapPodcastEpisode`).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SubsonicEpisode {
+    pub id: Uuid,
+    pub podcast_id: Uuid,
+    pub podcast_title: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub audio_url: String,
+    pub duration: i32,
+    pub published_at: OffsetDateTime,
+    pub created_at: OffsetDateTime,
+    pub file_size: Option<i64>,
+    pub mime_type: Option<String>,
+}
+
+const SUBSONIC_EPISODE_COLS: &str = "e.id, e.podcast_id, p.title AS podcast_title, e.title, \
+     e.description, e.audio_url, e.duration, e.published_at, e.created_at, e.file_size, \
+     e.mime_type FROM podcast_episodes e JOIN podcasts p ON p.id = e.podcast_id";
+
+/// Up to `limit` newest episodes of `show` (`getPodcasts`: at most 200).
+pub async fn episodes_for_channel(
+    pool: &PgPool,
+    show: Uuid,
+    limit: i64,
+) -> sqlx::Result<Vec<SubsonicEpisode>> {
+    let query = format!(
+        "SELECT {SUBSONIC_EPISODE_COLS} WHERE e.podcast_id = $1 \
+         ORDER BY e.published_at DESC, e.id DESC LIMIT $2"
+    );
+    sqlx::query_as(&query)
+        .bind(show)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+}
+
+/// `user`'s newest episodes across every followed show (`getNewestPodcasts`).
+pub async fn newest_episodes(
+    pool: &PgPool,
+    user: Uuid,
+    limit: i64,
+) -> sqlx::Result<Vec<SubsonicEpisode>> {
+    let query = format!(
+        "SELECT {SUBSONIC_EPISODE_COLS} \
+         JOIN podcast_subscriptions s ON s.podcast_id = e.podcast_id AND s.user_id = $1 \
+         ORDER BY e.published_at DESC, e.id DESC LIMIT $2"
+    );
+    sqlx::query_as(&query)
+        .bind(user)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+}
+
+/// One episode by id, with its show's title (`getPodcastEpisode`, the Subsonic decision and
+/// stream branches).
+pub async fn subsonic_episode_by_id(
+    pool: &PgPool,
+    id: Uuid,
+) -> sqlx::Result<Option<SubsonicEpisode>> {
+    let query = format!("SELECT {SUBSONIC_EPISODE_COLS} WHERE e.id = $1");
+    sqlx::query_as(&query).bind(id).fetch_optional(pool).await
+}
+
+/// Applies a successful feed refresh to a show: metadata, counts and validators; clears any
+/// stored refresh failure (Subsonic `refreshPodcasts`; D-205's job-queued sweep is a separate,
+/// later piece and may supersede this).
+pub async fn apply_refresh(pool: &PgPool, id: Uuid, s: &NewShow<'_>) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE podcasts SET title = $2, author = $3, description = $4, image_url = $5,
+                language = $6, explicit = $7, episode_count = $8, feed_etag = $9,
+                feed_last_modified = $10, last_refreshed = now(), updated_at = now(),
+                refresh_error = NULL, refresh_failed_at = NULL, refresh_failures = 0
+         WHERE id = $1",
+        id,
+        s.title,
+        s.author,
+        s.description,
+        s.image_url,
+        s.language,
+        s.explicit,
+        s.episode_count,
+        s.feed_etag,
+        s.feed_last_modified
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// A 304 to a conditional refresh: the caller's copy is current, so only the clock moves
+/// (upstream `refreshPodcastFeed`'s `{newEpisodesCount:0}` branch).
+pub async fn bump_last_refreshed(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
+    sqlx::query!(
+        "UPDATE podcasts SET last_refreshed = now(), updated_at = now() WHERE id = $1",
+        id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}

@@ -217,6 +217,50 @@ async fn hls(
         .into_response())
 }
 
+/// `getTranscodeDecision`'s podcast branch (D-101/D-167 amended): episodes are never made into
+/// anything but themselves, so the only question is whether the client's own `format` names
+/// what the episode already is. `suffix` is the content type's subtype (upstream's `contentType
+/// default audio/mpeg`), since episodes carry no file extension.
+async fn podcast_decision(
+    app: &AppState,
+    media_id: &str,
+    format: Option<&str>,
+) -> Result<Answer, SubsonicError> {
+    let not_found = || SubsonicError::not_found("Media not found");
+    let id = ids::parse(media_id, &[]).ok_or_else(not_found)?;
+    let episode = kima_db::podcasts::subsonic_episode_by_id(&app.pool, id)
+        .await?
+        .ok_or_else(not_found)?;
+    let mime = episode.mime_type.as_deref().unwrap_or("audio/mpeg");
+    let suffix = mime
+        .rsplit('/')
+        .next()
+        .unwrap_or("mpeg")
+        .to_ascii_lowercase();
+    let wanted = format
+        .map(|f| f.trim().to_ascii_lowercase())
+        .filter(|f| !f.is_empty());
+    let direct = match wanted.as_deref() {
+        None | Some("raw") => true,
+        Some(w) => w == suffix,
+    };
+    let reason = (!direct).then(|| {
+        let w = wanted.as_deref().unwrap_or_default();
+        format!("Kima transcodes only to mp3; it cannot make {w}")
+    });
+    let mut node = Node::new("transcodeDecision")
+        .attr("canDirectPlay", direct)
+        .attr("canTranscode", false)
+        .attr("errorReason", reason.clone().unwrap_or_default());
+    if direct {
+        node = node.attr("transcodeParams", DIRECT_PARAMS);
+    }
+    Ok(Answer::node(node.scalars(
+        "transcodeReason",
+        reason.into_iter().map(Into::into).collect(),
+    )))
+}
+
 async fn get_transcode_decision(
     user: SubsonicUser,
     params: Params,
@@ -225,6 +269,9 @@ async fn get_transcode_decision(
     let media_id = params.required("mediaId")?;
     let media_type = params.required("mediaType")?;
     let not_found = || SubsonicError::not_found("Media not found");
+    if media_type.eq_ignore_ascii_case("podcast") {
+        return podcast_decision(&app, media_id, params.get("format")).await;
+    }
     if !media_type.eq_ignore_ascii_case("song") {
         return Err(not_found());
     }
@@ -300,7 +347,22 @@ async fn get_transcode_stream(
             let id = track_id(media_id)?;
             stream_track(&app, &user, id, |_| chosen, &headers).await
         }
-        "podcast" => Err(SubsonicError::not_found("Podcast episode not found")),
+        "podcast" => {
+            let not_found = || SubsonicError::not_found("Podcast episode not found");
+            let id = ids::parse(media_id, &[]).ok_or_else(not_found)?;
+            let episode = kima_db::podcasts::subsonic_episode_by_id(&app.pool, id)
+                .await?
+                .ok_or_else(not_found)?;
+            Response::builder()
+                .status(axum::http::StatusCode::FOUND)
+                .header(
+                    axum::http::header::LOCATION,
+                    HeaderValue::from_str(&episode.audio_url)
+                        .unwrap_or_else(|_| HeaderValue::from_static("")),
+                )
+                .body(axum::body::Body::empty())
+                .map_err(|e| SubsonicError::internal(e.to_string()))
+        }
         _ => Err(SubsonicError::generic("Unsupported mediaType")),
     }
 }

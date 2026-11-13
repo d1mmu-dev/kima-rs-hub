@@ -23,6 +23,9 @@ pub struct FeedShow {
     pub itunes_id: Option<String>,
     /// The feed's own `itunes:category` names, top-level and nested, trimmed and unique.
     pub category_names: Vec<String>,
+    /// The channel's `podcast:txt purpose="ai-content"` disclosure (kima-only, D-200): `None`
+    /// is no signal, never "human".
+    pub ai_feed: Option<bool>,
 }
 
 /// An episode with audio (`rss-parser.ts:20-32`).
@@ -39,6 +42,8 @@ pub struct FeedEpisode {
     pub image_url: Option<String>,
     pub file_size: Option<i64>,
     pub mime_type: String,
+    /// The item's own `podcast:txt purpose="ai-content"` disclosure (D-200).
+    pub ai_feed: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -234,6 +239,77 @@ fn tree(xml: &str) -> Result<El, FeedError> {
     root.ok_or_else(|| not_a_feed("Unable to parse XML."))
 }
 
+/// The Podcasting 2.0 namespace, and the GitHub URI early feeds declared before it moved.
+const PODCAST_NAMESPACES: [&str; 2] = [
+    "https://podcastindex.org/namespace/1.0",
+    "https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md",
+];
+
+/// In-scope namespace declarations (`xmlns:prefix` / `xmlns`), innermost last.
+#[derive(Clone, Default)]
+struct Scope<'a> {
+    decls: Vec<(&'a str, &'a str)>,
+}
+
+impl<'a> Scope<'a> {
+    fn with(&self, el: &'a El) -> Scope<'a> {
+        let mut decls = self.decls.clone();
+        for (k, v) in &el.attrs {
+            if k == "xmlns" {
+                decls.push(("", v));
+            } else if let Some(prefix) = k.strip_prefix("xmlns:") {
+                decls.push((prefix, v));
+            }
+        }
+        Scope { decls }
+    }
+
+    fn uri(&self, prefix: &str) -> Option<&'a str> {
+        self.decls
+            .iter()
+            .rev()
+            .find(|(p, _)| *p == prefix)
+            .map(|(_, uri)| *uri)
+    }
+}
+
+/// The `ai-content` disclosure among `parent`'s direct children (spec S2): `<txt>` in the
+/// Podcasting 2.0 namespace, matched by URI whatever its prefix, with `purpose` equal to
+/// `ai-content` (trimmed, ASCII case-insensitive) and a value of `true`/`false` (trimmed, case-
+/// insensitive). Other values are no signal. Several tags: any `true` wins, else any `false`.
+fn ai_content<'a>(parent: &'a El, scope: &Scope<'a>) -> Option<bool> {
+    let mut found = None;
+    for child in &parent.children {
+        let (prefix, local) = child.name.split_once(':').unwrap_or(("", &child.name));
+        if local != "txt" {
+            continue;
+        }
+        let scope = scope.with(child);
+        if !scope
+            .uri(prefix)
+            .is_some_and(|u| PODCAST_NAMESPACES.contains(&u))
+        {
+            continue;
+        }
+        if !child
+            .attr("purpose")
+            .is_some_and(|p| p.trim().eq_ignore_ascii_case("ai-content"))
+        {
+            continue;
+        }
+        let mut text = String::new();
+        child.all_text(&mut text);
+        let value = text.trim();
+        if value.eq_ignore_ascii_case("true") {
+            return Some(true);
+        }
+        if value.eq_ignore_ascii_case("false") {
+            found = Some(false);
+        }
+    }
+    found
+}
+
 /// Reads a feed (`rss-parser.ts:120-190`). `now` dates an episode without a readable date.
 pub fn parse(xml: &str, now: OffsetDateTime) -> Result<Feed, FeedError> {
     let root = tree(xml)?;
@@ -245,19 +321,40 @@ pub fn parse(xml: &str, now: OffsetDateTime) -> Result<Feed, FeedError> {
                 .child("channel")
                 .ok_or_else(|| not_a_feed("no channel"))?;
             let itunes = root.attr("xmlns:itunes").is_some();
-            Ok(rss(channel, channel.children_named("item"), itunes, now))
+            let scope = Scope::default().with(&root);
+            Ok(rss(
+                channel,
+                channel.children_named("item"),
+                itunes,
+                &scope,
+                now,
+            ))
         }
         "rdf:RDF" => {
             let channel = root
                 .child("channel")
                 .ok_or_else(|| not_a_feed("no channel"))?;
-            Ok(rss(channel, root.children_named("item"), false, now))
+            let scope = Scope::default().with(&root);
+            Ok(rss(
+                channel,
+                root.children_named("item"),
+                false,
+                &scope,
+                now,
+            ))
         }
         "rss" if version.is_some_and(|v| v.contains("0.9")) => {
             let channel = root
                 .child("channel")
                 .ok_or_else(|| not_a_feed("no channel"))?;
-            Ok(rss(channel, channel.children_named("item"), false, now))
+            let scope = Scope::default().with(&root);
+            Ok(rss(
+                channel,
+                channel.children_named("item"),
+                false,
+                &scope,
+                now,
+            ))
         }
         _ => Err(not_a_feed("Feed not recognized as RSS 1 or 2.")),
     }
@@ -293,11 +390,13 @@ fn is_audio(mime: Option<&str>) -> bool {
 }
 
 fn rss<'a>(
-    channel: &El,
+    channel: &'a El,
     items: impl Iterator<Item = &'a El>,
     itunes: bool,
+    root_scope: &Scope<'a>,
     now: OffsetDateTime,
 ) -> Feed {
+    let scope = root_scope.with(channel);
     // `channel.image[0].url` exists only for an `<image>` with a `<url>` child.
     let rss_image = channel
         .child("image")
@@ -326,8 +425,11 @@ fn rss<'a>(
         } else {
             Vec::new()
         },
+        ai_feed: ai_content(channel, &scope),
     };
-    let episodes = items.filter_map(|i| episode(i, &show, now)).collect();
+    let episodes = items
+        .filter_map(|i| episode(i, &show, &scope.with(i), now))
+        .collect();
     Feed { show, episodes }
 }
 
@@ -349,7 +451,12 @@ fn category_names(channel: &El) -> Vec<String> {
     out
 }
 
-fn episode(item: &El, show: &FeedShow, now: OffsetDateTime) -> Option<FeedEpisode> {
+fn episode(
+    item: &El,
+    show: &FeedShow,
+    scope: &Scope<'_>,
+    now: OffsetDateTime,
+) -> Option<FeedEpisode> {
     // rss-parser keeps the first enclosure's attributes only.
     let enclosure = item.child("enclosure").filter(|e| !e.attrs.is_empty())?;
     let url = truthy(enclosure.attr("url").map(str::to_string))?;
@@ -390,6 +497,7 @@ fn episode(item: &El, show: &FeedShow, now: OffsetDateTime) -> Option<FeedEpisod
             .and_then(|l| parse_int(&l))
             .and_then(|n| i64::try_from(n).ok()),
         mime_type: mime.unwrap_or("audio/mpeg").to_string(),
+        ai_feed: ai_content(item, scope),
     })
 }
 
@@ -418,6 +526,7 @@ fn atom(feed: &El) -> Feed {
         }),
         itunes_id: truthy(link).as_deref().and_then(apple_id),
         category_names: Vec::new(),
+        ai_feed: ai_content(feed, &Scope::default().with(feed)),
     };
     Feed {
         show,

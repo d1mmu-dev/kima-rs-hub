@@ -5,6 +5,7 @@
 
 use axum::Router;
 use axum::extract::{Path, RawQuery, State};
+use axum::http::HeaderMap;
 use axum::routing::get;
 use axum::{Json, routing};
 use serde_json::{Value, json};
@@ -14,7 +15,21 @@ use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::routes::stats::args::{Arg, Args, js_number};
 use crate::state::AppState;
-use kima_podcast::catalog::{CHART_MAX, Category, DiscoveryItem, ForYouRow, Priority};
+use kima_podcast::catalog::{CHART_MAX, Category, DiscoveryItem, Priority};
+
+use super::ai::{AiFilter, label_apple_items};
+
+/// A labelled, filtered list of Apple shows with its `X-Kima-Ai-Hidden` header.
+type Labelled = (HeaderMap, Json<Vec<Value>>);
+
+async fn labelled(
+    state: &AppState,
+    items: &[DiscoveryItem],
+    filter: AiFilter,
+) -> Result<Labelled, ApiError> {
+    let (items, hidden) = label_apple_items(state, items, "itunesId", filter).await?;
+    Ok((filter.headers(hidden), Json(items)))
+}
 use kima_podcast::upstream::Upstream;
 
 pub fn routes() -> Router<AppState> {
@@ -111,9 +126,12 @@ fn page_params(args: &Args) -> Option<Page> {
 /// without a category), paged, as discovery items.
 async fn answer_chart(
     state: &AppState,
+    user: Uuid,
+    raw: Option<&str>,
     category_raw: Option<String>,
     args: &Args,
-) -> Result<Json<Vec<DiscoveryItem>>, ApiError> {
+) -> Result<Labelled, ApiError> {
+    let filter = AiFilter::resolve(state, user, raw).await?;
     let category = match category_raw {
         None => None,
         Some(raw) => Some(integer_of(&raw).ok_or_else(invalid_page)?),
@@ -135,13 +153,16 @@ async fn answer_chart(
         .map_err(apple_failure)?;
     let offset = page.offset as usize;
     let limit = page.limit as usize;
-    let page_slice: Vec<_> = shows.into_iter().skip(offset).take(limit).collect();
+    // The whole chart is labelled and filtered before paging, so a page stays full and the
+    // hidden count covers the chart, as for a show's episodes (D-207).
     let items = state
         .podcast_catalog
-        .to_discovery_items(page_slice)
+        .to_discovery_items(shows)
         .await
         .map_err(apple_failure)?;
-    Ok(Json(items))
+    let (items, hidden) = label_apple_items(state, &items, "itunesId", filter).await?;
+    let page: Vec<Value> = items.into_iter().skip(offset).take(limit).collect();
+    Ok((filter.headers(hidden), Json(page)))
 }
 
 async fn categories(
@@ -159,41 +180,43 @@ async fn categories(
 
 async fn charts(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     RawQuery(raw): RawQuery,
-) -> Result<Json<Vec<DiscoveryItem>>, ApiError> {
-    let args = parse_args(raw);
+) -> Result<Labelled, ApiError> {
+    let args = parse_args(raw.clone());
     let category_raw = raw_of(args.get("category"));
-    answer_chart(&state, category_raw, &args).await
+    answer_chart(&state, user.id, raw.as_deref(), category_raw, &args).await
 }
 
 async fn discover_top(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     RawQuery(raw): RawQuery,
-) -> Result<Json<Vec<DiscoveryItem>>, ApiError> {
-    let args = parse_args(raw);
-    answer_chart(&state, None, &args).await
+) -> Result<Labelled, ApiError> {
+    let args = parse_args(raw.clone());
+    answer_chart(&state, user.id, raw.as_deref(), None, &args).await
 }
 
 async fn discover_genre(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(genre_id): Path<String>,
     RawQuery(raw): RawQuery,
-) -> Result<Json<Vec<DiscoveryItem>>, ApiError> {
-    let args = parse_args(raw);
-    answer_chart(&state, Some(genre_id), &args).await
+) -> Result<Labelled, ApiError> {
+    let args = parse_args(raw.clone());
+    answer_chart(&state, user.id, raw.as_deref(), Some(genre_id), &args).await
 }
 
 /// `/discover/genres?genres=a,b`: the first ten of each real category's chart, keyed by id;
 /// an id that is not one of Apple's is left out, each real id asked for once.
 async fn discover_genres(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     RawQuery(raw): RawQuery,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<(HeaderMap, Json<Value>), ApiError> {
     const PER_CATEGORY: usize = 10;
+    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    let mut hidden = 0;
     let bad_genres =
         || ApiError::BadRequest("genres parameter required (comma-separated genre IDs)".into());
     let args = parse_args(raw);
@@ -232,51 +255,65 @@ async fn discover_genres(
             .to_discovery_items(top)
             .await
             .map_err(apple_failure)?;
+        let (items, removed) = label_apple_items(&state, &items, "itunesId", filter).await?;
+        hidden += removed;
         out.insert(id.to_string(), json!(items));
     }
-    Ok(Json(Value::Object(out)))
+    Ok((filter.headers(hidden), Json(Value::Object(out))))
 }
 
 async fn for_you(
     State(state): State<AppState>,
     user: AuthUser,
-) -> Result<Json<Vec<ForYouRow>>, ApiError> {
-    Ok(Json(
-        state
-            .podcast_catalog
-            .for_you(user.id)
-            .await
-            .map_err(apple_failure)?,
-    ))
+    RawQuery(raw): RawQuery,
+) -> Result<Labelled, ApiError> {
+    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    let rows = state
+        .podcast_catalog
+        .for_you(user.id)
+        .await
+        .map_err(apple_failure)?;
+    let mut hidden = 0;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let (podcasts, removed) =
+            label_apple_items(&state, &row.podcasts, "itunesId", filter).await?;
+        hidden += removed;
+        out.push(json!({"category": row.category, "because": row.because, "podcasts": podcasts}));
+    }
+    Ok((filter.headers(hidden), Json(out)))
 }
 
 /// `GET /podcasts/{id}/similar`: shows on a stored show's own categories' charts.
 async fn similar(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<Vec<DiscoveryItem>>, ApiError> {
+    RawQuery(raw): RawQuery,
+) -> Result<Labelled, ApiError> {
+    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
     let missing = || ApiError::NotFound("Podcast not found");
     let id = Uuid::parse_str(&id).map_err(|_| missing())?;
     let show = kima_db::podcasts::show_by_id(&state.pool, id)
         .await?
         .ok_or_else(missing)?;
-    Ok(Json(
-        state
-            .podcast_catalog
-            .similar(show.itunes_id.as_deref(), &show.category_ids)
-            .await
-            .map_err(apple_failure)?,
-    ))
+    let items = state
+        .podcast_catalog
+        .similar(show.itunes_id.as_deref(), &show.category_ids)
+        .await
+        .map_err(apple_failure)?;
+    labelled(&state, &items, filter).await
 }
 
 /// `GET /podcasts/preview/{itunesId}/similar`: a show not followed yet, by its Apple id.
 /// Non-digit ids are never asked about (`router.param("itunesId")`): 404 before any request.
 async fn preview_similar(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(itunes_id): Path<String>,
-) -> Result<Json<Vec<DiscoveryItem>>, ApiError> {
+    RawQuery(raw): RawQuery,
+) -> Result<Labelled, ApiError> {
+    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
     let missing = || ApiError::NotFound("Podcast not found");
     if itunes_id.is_empty() || !itunes_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err(missing());
@@ -287,11 +324,10 @@ async fn preview_similar(
         .await
         .map_err(apple_failure)?;
     let show = shows.remove(&itunes_id).ok_or_else(missing)?;
-    Ok(Json(
-        state
-            .podcast_catalog
-            .similar(Some(&itunes_id), &show.category_ids)
-            .await
-            .map_err(apple_failure)?,
-    ))
+    let items = state
+        .podcast_catalog
+        .similar(Some(&itunes_id), &show.category_ids)
+        .await
+        .map_err(apple_failure)?;
+    labelled(&state, &items, filter).await
 }

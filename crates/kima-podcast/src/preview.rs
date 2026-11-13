@@ -115,6 +115,7 @@ mod tests {
             image_url: None,
             file_size: None,
             mime_type: "audio/mpeg".into(),
+            ai_feed: None,
         }
     }
 

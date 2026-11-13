@@ -1,10 +1,112 @@
 //! Podcast response shapes. The four `Serialize` types are what the server builds; every type
 //! here also deserializes, so `kima-web` reads the answers through the same shapes (Task 21).
-//! Shapes follow the captured wire fixtures (Task 19); unknown keys (for example the AI labels of
-//! Task 8) are ignored, so an older client keeps working when the server grows a field.
+//! Shapes follow the captured wire fixtures (Task 19); unknown keys are ignored, so an older
+//! client keeps working when the server grows a field. The AI labels (`aiLabel`,
+//! `aiLabelSource`, D-200/D-207) default to `unknown`/`null` when a server does not send them.
 use crate::stats::js_f64;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Whether a show or an episode is AI-generated content (D-200). `Unknown` means no signal:
+/// it is never read as `Human`.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AiLabel {
+    Ai,
+    Human,
+    #[default]
+    Unknown,
+}
+
+/// Where an `ai`/`human` label comes from: the episode's own feed tag, the show's feed tag, or an
+/// admin's override (of the show or of the episode). `None` goes with `Unknown` only.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiLabelSource {
+    FeedEpisode,
+    FeedShow,
+    Admin,
+}
+
+/// A resolved label and its source.
+pub type Labelled = (AiLabel, Option<AiLabelSource>);
+
+impl AiLabel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AiLabel::Ai => "ai",
+            AiLabel::Human => "human",
+            AiLabel::Unknown => "unknown",
+        }
+    }
+
+    /// `ai`/`human`/`unknown`; anything else is `Unknown`.
+    pub fn parse(s: &str) -> AiLabel {
+        match s {
+            "ai" => AiLabel::Ai,
+            "human" => AiLabel::Human,
+            _ => AiLabel::Unknown,
+        }
+    }
+
+    /// A feed tag's value: `true` is AI, `false` is the publisher declaring no AI content.
+    fn of_tag(tag: bool) -> AiLabel {
+        if tag { AiLabel::Ai } else { AiLabel::Human }
+    }
+}
+
+impl AiLabelSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AiLabelSource::FeedEpisode => "feed-episode",
+            AiLabelSource::FeedShow => "feed-show",
+            AiLabelSource::Admin => "admin",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<AiLabelSource> {
+        match s {
+            "feed-episode" => Some(AiLabelSource::FeedEpisode),
+            "feed-show" => Some(AiLabelSource::FeedShow),
+            "admin" => Some(AiLabelSource::Admin),
+            _ => None,
+        }
+    }
+}
+
+/// An admin override as stored (`'ai'`/`'human'`); anything else is no override.
+fn of_override(ai_override: Option<&str>) -> Option<AiLabel> {
+    match ai_override {
+        Some("ai") => Some(AiLabel::Ai),
+        Some("human") => Some(AiLabel::Human),
+        _ => None,
+    }
+}
+
+/// A show's label (spec S2): the admin's show override, else the channel's `ai-content` tag,
+/// else `Unknown`.
+pub fn show_label(ai_override: Option<&str>, channel: Option<bool>) -> Labelled {
+    if let Some(label) = of_override(ai_override) {
+        return (label, Some(AiLabelSource::Admin));
+    }
+    match channel {
+        Some(tag) => (AiLabel::of_tag(tag), Some(AiLabelSource::FeedShow)),
+        None => (AiLabel::Unknown, None),
+    }
+}
+
+/// An episode's label (spec S2, owner decision D-200): the admin's episode override, else the
+/// item's own `ai-content` tag, else its show's label. The episode label takes precedence over
+/// the show label.
+pub fn episode_label(ai_override: Option<&str>, item: Option<bool>, show: Labelled) -> Labelled {
+    if let Some(label) = of_override(ai_override) {
+        return (label, Some(AiLabelSource::Admin));
+    }
+    match item {
+        Some(tag) => (AiLabel::of_tag(tag), Some(AiLabelSource::FeedEpisode)),
+        None => show,
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +129,10 @@ pub struct EpisodeSummary {
     pub published_at: String,
     pub cover_url: Option<String>,
     pub progress: Option<Progress>,
+    #[serde(default)]
+    pub ai_label: AiLabel,
+    #[serde(default)]
+    pub ai_label_source: Option<AiLabelSource>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -41,6 +147,10 @@ pub struct FollowedShow {
     pub auto_download_episodes: bool,
     pub latest_episode_at: Option<String>,
     pub episodes: Vec<EpisodeSummary>,
+    #[serde(default)]
+    pub ai_label: AiLabel,
+    #[serde(default)]
+    pub ai_label_source: Option<AiLabelSource>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -56,6 +166,10 @@ pub struct EpisodeRow {
     pub image_url: Option<String>,
     pub is_downloaded: bool,
     pub progress: Option<Progress>,
+    #[serde(default)]
+    pub ai_label: AiLabel,
+    #[serde(default)]
+    pub ai_label_source: Option<AiLabelSource>,
 }
 
 /// A show as the listening shelves and `next` name it.
@@ -65,6 +179,10 @@ pub struct ShowRef {
     pub id: Uuid,
     pub title: String,
     pub cover_url: Option<String>,
+    #[serde(default)]
+    pub ai_label: AiLabel,
+    #[serde(default)]
+    pub ai_label_source: Option<AiLabelSource>,
 }
 
 /// One row of `GET /podcasts/listening`.
@@ -80,6 +198,10 @@ pub struct ListeningRow {
 pub struct Listening {
     pub in_progress: Vec<ListeningRow>,
     pub new_episodes: Vec<ListeningRow>,
+    /// Kima-only (D-207): how many AI-labelled rows the server hid; 0 when it hid nothing or
+    /// was asked to show them (`ai=show`, the key is then absent).
+    #[serde(default)]
+    pub ai_hidden: i64,
 }
 
 /// An Apple category (`GET /podcasts/categories`); `parent_id` is `None` for a top category.
@@ -113,6 +235,10 @@ pub struct DiscoveryItem {
     pub chart_rank: Option<i64>,
     #[serde(default)]
     pub is_external: bool,
+    #[serde(default)]
+    pub ai_label: AiLabel,
+    #[serde(default)]
+    pub ai_label_source: Option<AiLabelSource>,
 }
 
 /// One row of `GET /podcasts/for-you`: a category the caller listens to and its top shows.
@@ -151,6 +277,13 @@ pub struct ShowDetail {
     pub episode_total: i64,
     pub episode_offset: i64,
     pub episode_limit: i64,
+    #[serde(default)]
+    pub ai_label: AiLabel,
+    #[serde(default)]
+    pub ai_label_source: Option<AiLabelSource>,
+    /// Kima-only (D-207): AI-labelled episodes the server hid from this show's list.
+    #[serde(default)]
+    pub ai_hidden: i64,
 }
 
 /// `GET /podcasts/{id}/episodes`: one page of a show's episodes.
@@ -160,6 +293,9 @@ pub struct EpisodePage {
     pub total: i64,
     pub offset: i64,
     pub limit: i64,
+    /// Kima-only (D-207): AI-labelled episodes the server hid; `total` counts only the rest.
+    #[serde(default, rename = "aiHidden")]
+    pub ai_hidden: i64,
 }
 
 /// One feed episode a preview shows before the show is followed.
@@ -191,6 +327,10 @@ pub struct Preview {
     pub preview_episodes: Vec<PreviewEpisode>,
     pub is_subscribed: bool,
     pub subscribed_podcast_id: Option<Uuid>,
+    #[serde(default)]
+    pub ai_label: AiLabel,
+    #[serde(default)]
+    pub ai_label_source: Option<AiLabelSource>,
 }
 
 /// The show a `POST /podcasts/subscribe` stored or found.
@@ -216,6 +356,10 @@ pub struct ShowHit {
     pub name: String,
     pub artist: Option<String>,
     pub cover_url: Option<String>,
+    #[serde(default)]
+    pub ai_label: AiLabel,
+    #[serde(default)]
+    pub ai_label_source: Option<AiLabelSource>,
 }
 
 /// `GET /search/discover?type=podcasts`.
@@ -234,6 +378,10 @@ pub struct EpisodeHit {
     pub podcast_title: String,
     pub title: String,
     pub published_at: Option<String>,
+    #[serde(default)]
+    pub ai_label: AiLabel,
+    #[serde(default)]
+    pub ai_label_source: Option<AiLabelSource>,
 }
 
 /// The episode part of `GET /search?type=episodes`.
@@ -320,6 +468,99 @@ mod tests {
         )
         .unwrap();
         assert_eq!(found.episodes[0].podcast_title, "Race Show");
+    }
+
+    #[test]
+    fn no_tag_is_unknown_not_human() {
+        assert_eq!(show_label(None, None), (AiLabel::Unknown, None));
+        assert_eq!(
+            episode_label(None, None, show_label(None, None)),
+            (AiLabel::Unknown, None)
+        );
+    }
+
+    #[test]
+    fn channel_true_labels_show_and_untagged_episodes_ai() {
+        let show = show_label(None, Some(true));
+        assert_eq!(show, (AiLabel::Ai, Some(AiLabelSource::FeedShow)));
+        assert_eq!(episode_label(None, None, show), show);
+    }
+
+    #[test]
+    fn item_false_beats_channel_true() {
+        let show = show_label(None, Some(true));
+        assert_eq!(
+            episode_label(None, Some(false), show),
+            (AiLabel::Human, Some(AiLabelSource::FeedEpisode))
+        );
+    }
+
+    #[test]
+    fn item_true_beats_admin_human() {
+        let show = show_label(Some("human"), Some(false));
+        assert_eq!(show, (AiLabel::Human, Some(AiLabelSource::Admin)));
+        assert_eq!(
+            episode_label(None, Some(true), show),
+            (AiLabel::Ai, Some(AiLabelSource::FeedEpisode))
+        );
+    }
+
+    #[test]
+    fn admin_override_beats_channel() {
+        assert_eq!(
+            show_label(Some("ai"), Some(false)),
+            (AiLabel::Ai, Some(AiLabelSource::Admin))
+        );
+        assert_eq!(
+            show_label(Some("human"), Some(true)),
+            (AiLabel::Human, Some(AiLabelSource::Admin))
+        );
+    }
+
+    #[test]
+    fn episode_override_beats_its_item_tag_and_the_show() {
+        let show = show_label(Some("ai"), Some(true));
+        assert_eq!(
+            episode_label(Some("human"), Some(true), show),
+            (AiLabel::Human, Some(AiLabelSource::Admin))
+        );
+    }
+
+    #[test]
+    fn labels_serialize_as_the_wire_strings() {
+        let row = ShowRef {
+            id: Uuid::nil(),
+            title: "t".into(),
+            cover_url: None,
+            ai_label: AiLabel::Ai,
+            ai_label_source: Some(AiLabelSource::FeedEpisode),
+        };
+        let v = serde_json::json!({"ai": row.ai_label, "src": row.ai_label_source,
+            "none": None::<AiLabelSource>, "unknown": AiLabel::Unknown});
+        assert_eq!(
+            v,
+            serde_json::json!({"ai":"ai","src":"feed-episode","none":null,"unknown":"unknown"})
+        );
+        for l in [AiLabel::Ai, AiLabel::Human, AiLabel::Unknown] {
+            assert_eq!(AiLabel::parse(l.as_str()), l);
+        }
+        for s in [
+            AiLabelSource::FeedEpisode,
+            AiLabelSource::FeedShow,
+            AiLabelSource::Admin,
+        ] {
+            assert_eq!(AiLabelSource::parse(s.as_str()), Some(s));
+        }
+    }
+
+    #[test]
+    fn a_missing_label_decodes_as_unknown() {
+        let got: ShowRef = serde_json::from_str(
+            r#"{"id":"01a1d3a4-6a42-7a3e-b6a8-1b1c9b1e1f01","title":"S","coverUrl":null}"#,
+        )
+        .unwrap();
+        assert_eq!(got.ai_label, AiLabel::Unknown);
+        assert_eq!(got.ai_label_source, None);
     }
 
     #[test]

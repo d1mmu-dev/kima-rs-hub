@@ -5,8 +5,9 @@
 use std::rc::Rc;
 
 use kima_api_types::podcasts::{EpisodeSearch, ShowSearch};
-use vertigo::{DomNode, Value, bind, dom, get_driver};
+use vertigo::{Computed, DomNode, Value, bind, dom, get_driver};
 
+use super::ai::{ShowAi, hidden_text, visible, with_label};
 use super::image_url;
 use crate::api::client::ApiError;
 use crate::api::podcasts as api;
@@ -34,7 +35,7 @@ enum Answer {
 
 const ROW: &str = "flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-white/5";
 
-fn results(ctx: &Ctx, answer: Answer) -> DomNode {
+fn results(ctx: &Ctx, answer: Answer, show_ai: bool) -> DomNode {
     let found = match answer {
         Answer::Idle => return dom! { <span class="hidden" /> },
         Answer::Searching => {
@@ -45,11 +46,16 @@ fn results(ctx: &Ctx, answer: Answer) -> DomNode {
     let token = ctx.session.current_token();
     let (shows, episodes) = &*found;
     let mut rows: Vec<DomNode> = Vec::new();
+    let mut hidden = 0;
     if let Ok(shows) = shows
         && !shows.results.is_empty()
     {
-        rows.push(dom! { <p class="px-3 pt-3 pb-1 text-xs font-semibold text-[var(--text-muted)]">"shows"</p> });
-        for hit in &shows.results {
+        let (hits, removed) = visible(&shows.results, show_ai, |h| h.ai_label);
+        hidden += removed;
+        if !hits.is_empty() {
+            rows.push(dom! { <p class="px-3 pt-3 pb-1 text-xs font-semibold text-[var(--text-muted)]">"shows"</p> });
+        }
+        for hit in hits {
             let href = Route::PodcastPreview {
                 itunes_id: hit.id.to_string(),
             }
@@ -62,7 +68,10 @@ fn results(ctx: &Ctx, answer: Answer) -> DomNode {
                     dom! { <span class="w-10 h-10 rounded bg-white/5 flex items-center justify-center shrink-0">{icon("mic-vocal", "w-4 h-4 text-[var(--text-muted)]")}</span> }
                 }
             };
-            let (name, artist) = (hit.name.clone(), hit.artist.clone().unwrap_or_default());
+            let (name, artist) = (
+                hit.name.clone(),
+                with_label(hit.artist.as_deref().unwrap_or_default(), hit.ai_label),
+            );
             rows.push(dom! {
                 <a class={ROW} href={href} data-search="show">
                     {art}
@@ -77,8 +86,12 @@ fn results(ctx: &Ctx, answer: Answer) -> DomNode {
     if let Ok(found) = episodes
         && !found.episodes.is_empty()
     {
-        rows.push(dom! { <p class="px-3 pt-3 pb-1 text-xs font-semibold text-[var(--text-muted)]">"episodes"</p> });
-        for hit in &found.episodes {
+        let (hits, removed) = visible(&found.episodes, show_ai, |h| h.ai_label);
+        hidden += removed;
+        if !hits.is_empty() {
+            rows.push(dom! { <p class="px-3 pt-3 pb-1 text-xs font-semibold text-[var(--text-muted)]">"episodes"</p> });
+        }
+        for hit in hits {
             let href = Route::PodcastShow {
                 id: hit.podcast_id.to_string(),
             }
@@ -88,7 +101,10 @@ fn results(ctx: &Ctx, answer: Answer) -> DomNode {
                 .as_deref()
                 .and_then(|d| d.get(..10))
                 .unwrap_or_default();
-            let (title, meta) = (hit.title.clone(), format!("{} · {date}", hit.podcast_title));
+            let (title, meta) = (
+                hit.title.clone(),
+                with_label(&format!("{} · {date}", hit.podcast_title), hit.ai_label),
+            );
             rows.push(dom! {
                 <a class={ROW} href={href} data-search="episode">
                     {icon("mic-vocal", "w-4 h-4 text-[var(--text-muted)] shrink-0")}
@@ -99,6 +115,11 @@ fn results(ctx: &Ctx, answer: Answer) -> DomNode {
                 </a>
             });
         }
+    }
+    if let Some(text) = hidden_text(hidden) {
+        rows.push(
+            dom! { <p class="px-3 pt-3 t-meta" data-ai-hidden={hidden.to_string()}>{text}</p> },
+        );
     }
     if rows.is_empty() {
         let text = match (shows, episodes) {
@@ -115,7 +136,7 @@ fn results(ctx: &Ctx, answer: Answer) -> DomNode {
     }
 }
 
-pub fn render(ctx: &Ctx) -> DomNode {
+pub fn render(ctx: &Ctx, show_ai: ShowAi) -> DomNode {
     let typed = Value::new(String::new());
     let answer = Value::new(Answer::Idle);
     // Bumped on every keystroke: a search started for an older value is dropped.
@@ -146,7 +167,11 @@ pub fn render(ctx: &Ctx) -> DomNode {
             }
         }));
     });
-    let list = answer.render_value(bind!(ctx, |a: Answer| results(&ctx, a)));
+    let shown = Computed::from(bind!(answer, show_ai, |c| (answer.get(c), show_ai.get(c))));
+    // Before the setting is known, hide (the default).
+    let list = shown.render_value(bind!(ctx, |(a, on): (Answer, Option<bool>)| {
+        results(&ctx, a, on.unwrap_or(false))
+    }));
     dom! {
         <div class="w-full sm:w-96 max-w-xl">
             <div class="relative">

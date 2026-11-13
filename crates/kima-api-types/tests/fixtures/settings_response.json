@@ -4,6 +4,7 @@
   "maxCacheSizeMb": 10240,
   "offlineEnabled": false,
   "playbackQuality": "original",
+  "podcastAiContent": "hide",
   "shareLiveListening": true,
   "userId": "01a1c0ca-8f7d-7473-900a-82f1ec3f6f55",
   "wifiOnly": false

@@ -4,6 +4,7 @@
 use kima_api_types::podcasts::{Category, DiscoveryItem};
 use vertigo::{DomNode, Value, bind, dom, get_driver};
 
+use super::ai::{pill, show_ai_state, when_known};
 use super::{discovery_card, heading};
 use crate::api::client::load;
 use crate::api::podcasts as api;
@@ -17,20 +18,9 @@ pub fn may_have_more(page_len: usize) -> bool {
     page_len as u32 >= PAGE
 }
 
-pub fn render(ctx: &Ctx, id: u32) -> DomNode {
-    let names = load(bind!(
-        ctx,
-        async move { api::categories(&ctx.client).await }
-    ));
-    let title = names.map(move |state| match state {
-        vertigo::Resource::Ready(all) => all
-            .iter()
-            .find(|c: &&Category| c.id as u32 == id)
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| "category".into()),
-        _ => "\u{a0}".into(),
-    });
-
+/// The chart of category `id` with AI-labelled shows shown (`show_ai`) or hidden, a page at a
+/// time.
+fn chart_list(ctx: &Ctx, id: u32, show_ai: bool) -> DomNode {
     let items: Value<Vec<DiscoveryItem>> = Value::new(Vec::new());
     let more = Value::new(false);
     let busy = Value::new(true);
@@ -40,7 +30,7 @@ pub fn render(ctx: &Ctx, id: u32) -> DomNode {
         busy.set(true);
         error.set(None);
         get_driver().spawn(bind!(ctx, items, more, busy, error, async move {
-            match api::chart(&ctx.client, Some(id), offset, PAGE, false).await {
+            match api::chart(&ctx.client, Some(id), offset, PAGE, false, show_ai).await {
                 Ok(page) => {
                     more.set(may_have_more(page.len()));
                     items.change(|all| all.extend(page));
@@ -55,7 +45,6 @@ pub fn render(ctx: &Ctx, id: u32) -> DomNode {
         let first = fetch.clone();
         get_driver().spawn(async move { first() });
     }
-
     let grid = items.render_value(bind!(ctx, busy, |all: Vec<DiscoveryItem>| {
         if all.is_empty() {
             return if vertigo::transaction(|c| busy.get(c)) {
@@ -91,15 +80,37 @@ pub fn render(ctx: &Ctx, id: u32) -> DomNode {
         Some(message) => dom! { <p class="py-4 text-sm text-danger-light">{message}</p> },
         None => dom! { <span class="hidden" /> },
     });
+    dom! { <div>{grid}{error_view}{more_button}</div> }
+}
+
+pub fn render(ctx: &Ctx, id: u32) -> DomNode {
+    let names = load(bind!(
+        ctx,
+        async move { api::categories(&ctx.client).await }
+    ));
+    let title = names.map(move |state| match state {
+        vertigo::Resource::Ready(all) => all
+            .iter()
+            .find(|c: &&Category| c.id as u32 == id)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "category".into()),
+        _ => "\u{a0}".into(),
+    });
+
+    // Pages are asked for with the pill's position, so the server hides AI-labelled shows before
+    // paging and a page stays full; flipping the pill loads the chart again from the start. The
+    // chart answer is a bare list (upstream shape), so no hidden count is shown here (D-207).
+    let show_ai = show_ai_state(ctx);
+    let ai_pill = pill(&show_ai);
+    let list = when_known(&show_ai, bind!(ctx, |on| chart_list(&ctx, id, on)));
     let head = title
         .render_value(|t: String| heading("Podcasts", t, "top shows on Apple Podcasts".into()));
     dom! {
         <div class="min-h-screen">
             {head}
             <div class="page-shell page-end animate-rise">
-                {grid}
-                {error_view}
-                {more_button}
+                <div class="flex flex-wrap items-center gap-2 mb-4">{ai_pill}</div>
+                {list}
             </div>
         </div>
     }

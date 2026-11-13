@@ -367,10 +367,8 @@ async fn asks_apple_once_per_real_category_and_leaves_out_an_id_that_is_not_one(
 
 // --- Task 14: preview a show and sample its first episode ---
 // (`podcastSnippetTicket.route.test.ts`, the preview/discovery-adjacent cases of
-// `podcastUpstreamFailures.route.test.ts`.) `preview_records_channel_ai_label` is not covered
-// here: it needs the `ai_feed`/`podcast_feed_labels` schema that Task 0/Task 8 own, which this
-// slice does not touch per the owner's explicit boundary (same note as Task 13's
-// `charts_hide_known_ai_shows`).
+// `podcastUpstreamFailures.route.test.ts`.) The AI-label cases of Task 8
+// (`preview_records_channel_ai_label`, `charts_hide_known_ai_shows`) are at the end of the file.
 
 use axum::http::header;
 use axum::response::IntoResponse;
@@ -777,4 +775,114 @@ async fn snippet_400_for_a_blocked_audio_url(pool: PgPool) {
             .starts_with("Invalid episode audio URL:"),
         "{body}"
     );
+}
+
+// --- Task 8: AI-content labels on discovery items and previews (spec S3, D-207) ---
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn charts_hide_known_ai_shows(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let path = "/api/podcasts/charts?category=1495&limit=5";
+    let all = env.get(&format!("{path}&ai=show")).await;
+    assert!(all.headers().get("x-kima-ai-hidden").is_none());
+    let all: Vec<Value> = all.json();
+    assert!(
+        all.iter()
+            .all(|p| p["aiLabel"] == "unknown" && p["aiLabelSource"].is_null())
+    );
+    let all_six: Vec<Value> = env
+        .get("/api/podcasts/charts?category=1495&limit=6&ai=show")
+        .await
+        .json();
+    assert_eq!(all_six.len(), 6);
+    let first = all[0]["itunesId"].as_str().unwrap().to_string();
+    let second = all[1]["itunesId"].as_str().unwrap().to_string();
+    // One remembered by a preview as AI, one stored and confirmed human by an admin.
+    podcasts::remember_feed_label(&pool, &first, Some(true))
+        .await
+        .unwrap();
+    let id = podcasts::insert_show(
+        &pool,
+        Uuid::now_v7(),
+        &NewShow {
+            feed_url: "https://feeds.example.invalid/second",
+            title: "Second",
+            author: None,
+            description: None,
+            image_url: None,
+            itunes_id: Some(&second),
+            category_ids: &[],
+            language: None,
+            explicit: false,
+            episode_count: 0,
+            feed_etag: None,
+            feed_last_modified: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    sqlx::query("UPDATE podcasts SET ai_override = 'human', ai_feed = true WHERE id = $1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let res = env.get(path).await;
+    assert_eq!(res.headers()["x-kima-ai-hidden"], "1");
+    let body: Vec<Value> = res.json();
+    // Filtered before paging: the page stays full, starting after the hidden first show.
+    assert_eq!(body.len(), 5, "the chart is filtered first, then paged");
+    assert_eq!(body[0]["itunesId"], second.as_str());
+    assert_eq!(body[4]["itunesId"], all_six[5]["itunesId"]);
+    assert_eq!(body[0]["aiLabel"], "human");
+    assert_eq!(body[0]["aiLabelSource"], "admin");
+
+    let res = env.get(&format!("{path}&ai=show")).await;
+    let body: Vec<Value> = res.json();
+    assert_eq!(body[0]["aiLabel"], "ai");
+    assert_eq!(body[0]["aiLabelSource"], "feed-show");
+    env.get(&format!("{path}&ai=nope"))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn preview_records_channel_ai_label(pool: PgPool) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new().fallback(|| async {
+        (
+            [(header::CONTENT_TYPE, "application/rss+xml")],
+            r#"<?xml version="1.0"?><rss version="2.0" xmlns:podcast="https://podcastindex.org/namespace/1.0"><channel><title>Preview Show</title><podcast:txt purpose="ai-content">true</podcast:txt></channel></rss>"#,
+        )
+            .into_response()
+    });
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut rec = recording();
+    rec.0.push(lookup_entry(
+        "9001009",
+        &format!("{base}/feed.xml"),
+        &[1495],
+    ));
+    let replay = Replay::start(rec).await;
+    let state: AppState = common::state(pool.clone()).with_net(net_to(&replay, pool.clone()));
+    let token = common::user_with_token(&state, "previewai").await.1;
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    let res = server
+        .get("/api/podcasts/preview/9001009")
+        .authorization_bearer(&token)
+        .await;
+    res.assert_status_ok();
+    let body: Value = res.json();
+    // A direct read: labelled, not hidden.
+    assert_eq!(body["aiLabel"], "ai");
+    assert_eq!(body["aiLabelSource"], "feed-show");
+    let remembered: Option<bool> =
+        sqlx::query_scalar("SELECT ai_feed FROM podcast_feed_labels WHERE itunes_id = '9001009'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(remembered, Some(true));
+    task.abort();
 }

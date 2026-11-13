@@ -28,6 +28,10 @@ pub struct Show {
     pub refresh_failures: i32,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
+    /// The channel's `ai-content` tag (D-200); `None` is no signal.
+    pub ai_feed: Option<bool>,
+    /// An admin's `ai`/`human` decision for the show.
+    pub ai_override: Option<String>,
 }
 
 /// A show to store, as read from its feed (and Apple).
@@ -66,6 +70,213 @@ pub struct NewEpisode {
     pub mime_type: Option<String>,
 }
 
+// M6 Task 8 (D-200): AI-content labels. The resolution mirrors
+// `kima_api_types::podcasts::{show_label, episode_label}` (a test compares them over every input
+// combination) so filtering and counting happen in the query.
+
+/// A show's effective label (`ai`/`human`/`unknown`) over the `podcasts` row aliased `p`: the
+/// admin override, else the channel tag, else `unknown`.
+pub fn show_label_sql(p: &str) -> String {
+    format!(
+        "(CASE WHEN {p}.ai_override IS NOT NULL THEN {p}.ai_override \
+         WHEN {p}.ai_feed THEN 'ai' WHEN NOT {p}.ai_feed THEN 'human' ELSE 'unknown' END)"
+    )
+}
+
+/// The source of [`show_label_sql`]: `admin`, `feed-show`, or NULL.
+pub fn show_source_sql(p: &str) -> String {
+    format!(
+        "(CASE WHEN {p}.ai_override IS NOT NULL THEN 'admin' \
+         WHEN {p}.ai_feed IS NOT NULL THEN 'feed-show' END)"
+    )
+}
+
+/// An episode's effective label over `podcast_episodes` aliased `e` and its show aliased `p`:
+/// the episode's admin override, else its item tag, else the show's label.
+pub fn episode_label_sql(e: &str, p: &str) -> String {
+    format!(
+        "(CASE WHEN {e}.ai_override IS NOT NULL THEN {e}.ai_override \
+         WHEN {e}.ai_feed THEN 'ai' WHEN NOT {e}.ai_feed THEN 'human' ELSE {} END)",
+        show_label_sql(p)
+    )
+}
+
+/// The source of [`episode_label_sql`]: `admin`, `feed-episode`, the show's source, or NULL.
+pub fn episode_source_sql(e: &str, p: &str) -> String {
+    format!(
+        "(CASE WHEN {e}.ai_override IS NOT NULL THEN 'admin' \
+         WHEN {e}.ai_feed IS NOT NULL THEN 'feed-episode' ELSE {} END)",
+        show_source_sql(p)
+    )
+}
+
+/// `<label> AS ai_label, <source> AS ai_label_source` for a show.
+fn show_label_cols(p: &str) -> String {
+    format!(
+        "{} AS ai_label, {} AS ai_label_source",
+        show_label_sql(p),
+        show_source_sql(p)
+    )
+}
+
+/// `<label> AS ai_label, <source> AS ai_label_source` for an episode.
+fn episode_label_cols(e: &str, p: &str) -> String {
+    format!(
+        "{} AS ai_label, {} AS ai_label_source",
+        episode_label_sql(e, p),
+        episode_source_sql(e, p)
+    )
+}
+
+/// Stores the `ai-content` tags a feed read carries (subscribe and every non-304 refresh,
+/// D-206): the channel tag on the show, and each listed episode's item tag by guid (including
+/// `None` when the tag is gone). An episode no longer in the feed keeps its last tag. The first
+/// item of a duplicated guid wins, as in [`insert_episodes_on`].
+pub async fn set_feed_labels_on(
+    connection: &mut sqlx::PgConnection,
+    podcast: Uuid,
+    channel: Option<bool>,
+    items: &[(String, Option<bool>)],
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE podcasts SET ai_feed = $2 WHERE id = $1 AND ai_feed IS DISTINCT FROM $2")
+        .bind(podcast)
+        .bind(channel)
+        .execute(&mut *connection)
+        .await?;
+    let mut seen = std::collections::HashSet::new();
+    let (mut guids, mut tags) = (Vec::new(), Vec::new());
+    for (guid, tag) in items {
+        if seen.insert(guid.as_str()) {
+            guids.push(guid.clone());
+            tags.push(*tag);
+        }
+    }
+    sqlx::query(
+        "UPDATE podcast_episodes e SET ai_feed = v.ai
+         FROM unnest($2::text[], $3::bool[]) AS v(guid, ai)
+         WHERE e.podcast_id = $1 AND e.guid = v.guid AND e.ai_feed IS DISTINCT FROM v.ai",
+    )
+    .bind(podcast)
+    .bind(&guids)
+    .bind(&tags)
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+/// A resolved label as the queries answer it: `(label, source)`.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct LabelRow {
+    pub ai_label: String,
+    pub ai_label_source: Option<String>,
+}
+
+/// Sets or clears (`None`) an admin's label for a show; `None` when there is no such show.
+pub async fn set_show_override(
+    pool: &PgPool,
+    podcast: Uuid,
+    label: Option<&str>,
+    by: Uuid,
+) -> sqlx::Result<Option<LabelRow>> {
+    let query = format!(
+        "UPDATE podcasts p SET ai_override = $2,
+                ai_override_by = CASE WHEN $2::text IS NULL THEN NULL ELSE $3 END,
+                ai_override_at = CASE WHEN $2::text IS NULL THEN NULL ELSE now() END
+         WHERE p.id = $1 RETURNING {}",
+        show_label_cols("p")
+    );
+    sqlx::query_as(&query)
+        .bind(podcast)
+        .bind(label)
+        .bind(by)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Sets or clears an admin's label for one episode of `podcast`; `None` when the episode is
+/// not one of that show's.
+pub async fn set_episode_override(
+    pool: &PgPool,
+    podcast: Uuid,
+    episode: Uuid,
+    label: Option<&str>,
+    by: Uuid,
+) -> sqlx::Result<Option<LabelRow>> {
+    let query = format!(
+        "UPDATE podcast_episodes e SET ai_override = $3,
+                ai_override_by = CASE WHEN $3::text IS NULL THEN NULL ELSE $4 END,
+                ai_override_at = CASE WHEN $3::text IS NULL THEN NULL ELSE now() END
+         FROM podcasts p
+         WHERE e.id = $2 AND e.podcast_id = $1 AND p.id = e.podcast_id
+         RETURNING {}",
+        episode_label_cols("e", "p")
+    );
+    sqlx::query_as(&query)
+        .bind(podcast)
+        .bind(episode)
+        .bind(label)
+        .bind(by)
+        .fetch_optional(pool)
+        .await
+}
+
+/// Remembers the channel tag a preview read for an Apple show (spec S3).
+pub async fn remember_feed_label(
+    pool: &PgPool,
+    itunes_id: &str,
+    ai_feed: Option<bool>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "INSERT INTO podcast_feed_labels (itunes_id, ai_feed) VALUES ($1, $2)
+         ON CONFLICT (itunes_id) DO UPDATE SET ai_feed = $2, read_at = now()",
+    )
+    .bind(itunes_id)
+    .bind(ai_feed)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Labels for Apple shows by id (spec S3): a stored show's label, else the channel tag a
+/// preview remembered, else nothing (the caller answers `unknown`).
+pub async fn labels_for_itunes(
+    pool: &PgPool,
+    itunes_ids: &[String],
+) -> sqlx::Result<std::collections::HashMap<String, LabelRow>> {
+    if itunes_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let stored = show_label_sql("p");
+    let query = format!(
+        "SELECT ids.id AS itunes_id,
+                COALESCE(CASE WHEN p.id IS NOT NULL THEN {stored} END,
+                         CASE WHEN f.ai_feed THEN 'ai' WHEN NOT f.ai_feed THEN 'human' END,
+                         'unknown') AS ai_label,
+                CASE WHEN p.id IS NOT NULL THEN {ss}
+                     WHEN f.ai_feed IS NOT NULL THEN 'feed-show' END AS ai_label_source
+         FROM unnest($1::text[]) AS ids(id)
+         LEFT JOIN podcasts p ON p.itunes_id = ids.id
+         LEFT JOIN podcast_feed_labels f ON f.itunes_id = ids.id",
+        ss = show_source_sql("p"),
+    );
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(&query)
+        .bind(itunes_ids)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, ai_label, ai_label_source)| {
+            (
+                id,
+                LabelRow {
+                    ai_label,
+                    ai_label_source,
+                },
+            )
+        })
+        .collect())
+}
+
 /// Stores a new show. A second show with the same feed URL or Apple id is a unique violation
 /// (23505); callers that race resolve it with [`show_by_feed_or_itunes`].
 pub async fn insert_show(pool: &PgPool, id: Uuid, s: &NewShow<'_>) -> sqlx::Result<Show> {
@@ -87,7 +298,7 @@ pub async fn insert_show_on(
          RETURNING id, feed_url, title, author, description, image_url, itunes_id, category_ids,
                    language, explicit, episode_count, last_refreshed, feed_etag,
                    feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,
-                   created_at, updated_at",
+                   created_at, updated_at, ai_feed, ai_override",
         id,
         s.feed_url,
         s.title,
@@ -112,7 +323,7 @@ pub async fn show_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Show>> {
         "SELECT id, feed_url, title, author, description, image_url, itunes_id, category_ids,
                 language, explicit, episode_count, last_refreshed, feed_etag,
                 feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,
-                created_at, updated_at
+                created_at, updated_at, ai_feed, ai_override
          FROM podcasts WHERE id = $1",
         id
     )
@@ -133,7 +344,7 @@ pub async fn show_by_feed_or_itunes(
         "SELECT id, feed_url, title, author, description, image_url, itunes_id, category_ids,
                 language, explicit, episode_count, last_refreshed, feed_etag,
                 feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,
-                created_at, updated_at
+                created_at, updated_at, ai_feed, ai_override
          FROM podcasts WHERE feed_url = $1 OR ($2::text IS NOT NULL AND itunes_id = $2)
          ORDER BY (feed_url = $1) DESC LIMIT 1",
         feed_url,
@@ -313,26 +524,37 @@ pub struct InProgressPodcast {
     /// Rounded percent (0 when the stored duration is not yet known).
     pub progress: i32,
     pub last_played_at: OffsetDateTime,
+    /// The in-progress episode's label (D-200).
+    pub ai_label: String,
+    pub ai_label_source: Option<String>,
 }
 
 /// `user`'s in-progress episodes, newest `lastPlayedAt` first, deduplicated to the most recent
 /// episode of each show (upstream takes `overall_limit * 2` progress rows, dedupes keeping the
 /// first/most recent per show, then slices to `ceil(overall_limit / 3)`; `tracks.ts:90-125`).
+///
+/// With `hide_ai` the AI-labelled episodes are left out before the row limit and the per-show
+/// deduplication, so a show whose latest played episode is AI shows its latest visible one
+/// (D-207). The second value is how many AI-labelled rows the unfiltered answer has (0 when not
+/// hiding).
 pub async fn recent_in_progress(
     pool: &PgPool,
     user: Uuid,
     overall_limit: i64,
-) -> sqlx::Result<Vec<InProgressPodcast>> {
+    hide_ai: bool,
+) -> sqlx::Result<(Vec<InProgressPodcast>, i64)> {
     let take_rows = overall_limit.saturating_mul(2).max(1);
     let take_shows = overall_limit.saturating_add(2) / 3;
     if take_shows <= 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
-    sqlx::query_as(
+    let query = format!(
         "WITH recent AS (
              SELECT p.episode_id, e.podcast_id, p.last_played_at, p.\"current_time\", p.duration
              FROM podcast_progress p JOIN podcast_episodes e ON e.id = p.episode_id
+             JOIN podcasts s ON s.id = e.podcast_id
              WHERE p.user_id = $1 AND NOT p.is_finished AND p.\"current_time\" > 0
+               AND (NOT $4 OR {label} <> 'ai')
              ORDER BY p.last_played_at DESC LIMIT $2
          ),
          deduped AS (
@@ -343,15 +565,30 @@ pub async fn recent_in_progress(
          SELECT d.podcast_id, d.episode_id, s.title AS name, s.image_url AS cover_art, s.author,
                 (CASE WHEN d.duration > 0 THEN round(d.\"current_time\" / d.duration * 100)
                       ELSE 0 END)::int AS progress,
-                d.last_played_at
+                d.last_played_at, {cols}
          FROM deduped d JOIN podcasts s ON s.id = d.podcast_id
+         JOIN podcast_episodes e ON e.id = d.episode_id
          ORDER BY d.last_played_at DESC LIMIT $3",
-    )
-    .bind(user)
-    .bind(take_rows)
-    .bind(take_shows)
-    .fetch_all(pool)
-    .await
+        label = episode_label_sql("e", "s"),
+        cols = episode_label_cols("e", "s")
+    );
+    let run = |hide: bool| {
+        sqlx::query_as::<_, InProgressPodcast>(&query)
+            .bind(user)
+            .bind(take_rows)
+            .bind(take_shows)
+            .bind(hide)
+            .fetch_all(pool)
+    };
+    if !hide_ai {
+        return Ok((run(false).await?, 0));
+    }
+    let hidden = run(false)
+        .await?
+        .iter()
+        .filter(|r| r.ai_label == "ai")
+        .count() as i64;
+    Ok((run(true).await?, hidden))
 }
 
 /// A subscribed show in newest-subscription-first order.
@@ -363,6 +600,8 @@ pub struct FollowedShowRow {
     pub description: Option<String>,
     pub image_url: Option<String>,
     pub episode_count: i32,
+    pub ai_label: String,
+    pub ai_label_source: Option<String>,
 }
 
 /// The caller's most recent episodes of one show with only their own progress.
@@ -378,11 +617,18 @@ pub struct SummaryRow {
     pub progress_duration: Option<f64>,
     pub is_finished: Option<bool>,
     pub last_played_at: Option<OffsetDateTime>,
+    pub ai_label: String,
+    pub ai_label_source: Option<String>,
 }
 
 pub async fn followed_shows(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<FollowedShowRow>> {
-    sqlx::query_as("SELECT p.id, p.title, p.author, p.description, p.image_url, p.episode_count         FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id         WHERE s.user_id = $1 ORDER BY s.subscribed_at DESC, p.id DESC")
-        .bind(user).fetch_all(pool).await
+    let query = format!(
+        "SELECT p.id, p.title, p.author, p.description, p.image_url, p.episode_count, {}
+         FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id
+         WHERE s.user_id = $1 ORDER BY s.subscribed_at DESC, p.id DESC",
+        show_label_cols("p")
+    );
+    sqlx::query_as(&query).bind(user).fetch_all(pool).await
 }
 
 pub async fn recent_episodes(
@@ -390,8 +636,20 @@ pub async fn recent_episodes(
     user: Uuid,
     show: Uuid,
 ) -> sqlx::Result<Vec<SummaryRow>> {
-    sqlx::query_as("SELECT e.id, e.title, e.description, e.duration, e.published_at, e.image_url,         p.\"current_time\", p.duration AS progress_duration, p.is_finished, p.last_played_at         FROM podcast_episodes e LEFT JOIN podcast_progress p ON p.episode_id = e.id AND p.user_id = $1         WHERE e.podcast_id = $2 ORDER BY e.published_at DESC, e.id DESC LIMIT 5")
-        .bind(user).bind(show).fetch_all(pool).await
+    let query = format!(
+        "SELECT e.id, e.title, e.description, e.duration, e.published_at, e.image_url,
+                p.\"current_time\", p.duration AS progress_duration, p.is_finished,
+                p.last_played_at, {}
+         FROM podcast_episodes e JOIN podcasts s ON s.id = e.podcast_id
+         LEFT JOIN podcast_progress p ON p.episode_id = e.id AND p.user_id = $1
+         WHERE e.podcast_id = $2 ORDER BY e.published_at DESC, e.id DESC LIMIT 5",
+        episode_label_cols("e", "s")
+    );
+    sqlx::query_as(&query)
+        .bind(user)
+        .bind(show)
+        .fetch_all(pool)
+        .await
 }
 
 #[derive(sqlx::FromRow)]
@@ -409,6 +667,17 @@ pub struct EpisodePageRow {
     pub progress_duration: Option<f64>,
     pub is_finished: Option<bool>,
     pub last_played_at: Option<OffsetDateTime>,
+    pub ai_label: String,
+    pub ai_label_source: Option<String>,
+}
+
+/// One page of a show's episodes (Task 7, filtered by Task 8).
+pub struct EpisodePage {
+    pub rows: Vec<EpisodePageRow>,
+    /// Episodes the page draws from: the visible ones when `hide_ai`.
+    pub total: i64,
+    /// AI-labelled episodes `hide_ai` removed before paging (0 when not hiding).
+    pub hidden: i64,
 }
 
 pub async fn episode_page(
@@ -418,23 +687,49 @@ pub async fn episode_page(
     limit: i64,
     offset: i64,
     oldest: bool,
-) -> sqlx::Result<(Vec<EpisodePageRow>, i64)> {
+    hide_ai: bool,
+) -> sqlx::Result<EpisodePage> {
     let order = if oldest { "ASC" } else { "DESC" };
+    let label = episode_label_sql("e", "s");
     let query = format!(
-        "SELECT e.id, e.title, e.description, e.duration, e.published_at, e.episode_number, e.season, e.image_url,         EXISTS(SELECT 1 FROM podcast_downloads d WHERE d.episode_id=e.id AND d.user_id=$1) AS is_downloaded,         p.\"current_time\", p.duration AS progress_duration, p.is_finished, p.last_played_at         FROM podcast_episodes e LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1         WHERE e.podcast_id=$2 ORDER BY e.published_at {order}, e.id {order} LIMIT $3 OFFSET $4"
+        "SELECT e.id, e.title, e.description, e.duration, e.published_at, e.episode_number,
+                e.season, e.image_url,
+                EXISTS(SELECT 1 FROM podcast_downloads d WHERE d.episode_id=e.id AND d.user_id=$1)
+                    AS is_downloaded,
+                p.\"current_time\", p.duration AS progress_duration, p.is_finished,
+                p.last_played_at, {cols}
+         FROM podcast_episodes e JOIN podcasts s ON s.id = e.podcast_id
+         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1
+         WHERE e.podcast_id=$2 AND (NOT $5 OR {label} <> 'ai')
+         ORDER BY e.published_at {order}, e.id {order} LIMIT $3 OFFSET $4",
+        cols = episode_label_cols("e", "s"),
     );
     let rows = sqlx::query_as(&query)
         .bind(user)
         .bind(show)
         .bind(limit)
         .bind(offset)
+        .bind(hide_ai)
         .fetch_all(pool)
         .await?;
-    let total = sqlx::query_scalar("SELECT count(*) FROM podcast_episodes WHERE podcast_id=$1")
-        .bind(show)
-        .fetch_one(pool)
-        .await?;
-    Ok((rows, total))
+    let counts = format!(
+        "SELECT count(*), count(*) FILTER (WHERE {label} = 'ai')
+         FROM podcast_episodes e JOIN podcasts s ON s.id = e.podcast_id WHERE e.podcast_id=$1"
+    );
+    let (all, ai): (i64, i64) = sqlx::query_as(&counts).bind(show).fetch_one(pool).await?;
+    Ok(if hide_ai {
+        EpisodePage {
+            rows,
+            total: all - ai,
+            hidden: ai,
+        }
+    } else {
+        EpisodePage {
+            rows,
+            total: all,
+            hidden: 0,
+        }
+    })
 }
 
 /// Next by release date and id, skipping episodes this listener finished. The outer option
@@ -444,6 +739,7 @@ pub async fn next_episode(
     user: Uuid,
     show: Uuid,
     current: Uuid,
+    hide_ai: bool,
 ) -> sqlx::Result<Option<Option<SummaryRow>>> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM podcast_episodes WHERE id=$1 AND podcast_id=$2)",
@@ -455,8 +751,27 @@ pub async fn next_episode(
     if !exists {
         return Ok(None);
     }
-    let next = sqlx::query_as("SELECT e.id, e.title, e.description, e.duration, e.published_at, e.image_url,         p.\"current_time\", p.duration AS progress_duration, p.is_finished, p.last_played_at         FROM podcast_episodes e JOIN podcast_episodes cur ON cur.id=$3 AND cur.podcast_id=$2         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1         WHERE e.podcast_id=$2 AND (e.published_at,e.id) > (cur.published_at,cur.id)         AND NOT COALESCE(p.is_finished, false) ORDER BY e.published_at,e.id LIMIT 1")
-        .bind(user).bind(show).bind(current).fetch_optional(pool).await?;
+    // With `hide_ai`, AI-labelled episodes are skipped like finished ones (spec S4).
+    let query = format!(
+        "SELECT e.id, e.title, e.description, e.duration, e.published_at, e.image_url,
+                p.\"current_time\", p.duration AS progress_duration, p.is_finished,
+                p.last_played_at, {cols}
+         FROM podcast_episodes e JOIN podcasts s ON s.id = e.podcast_id
+         JOIN podcast_episodes cur ON cur.id=$3 AND cur.podcast_id=$2
+         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1
+         WHERE e.podcast_id=$2 AND (e.published_at,e.id) > (cur.published_at,cur.id)
+         AND NOT COALESCE(p.is_finished, false) AND (NOT $4 OR {label} <> 'ai')
+         ORDER BY e.published_at,e.id LIMIT 1",
+        cols = episode_label_cols("e", "s"),
+        label = episode_label_sql("e", "s"),
+    );
+    let next = sqlx::query_as(&query)
+        .bind(user)
+        .bind(show)
+        .bind(current)
+        .bind(hide_ai)
+        .fetch_optional(pool)
+        .await?;
     Ok(Some(next))
 }
 
@@ -465,6 +780,8 @@ pub struct ListeningRow {
     pub podcast_id: Uuid,
     pub podcast_title: String,
     pub podcast_image: Option<String>,
+    pub podcast_ai_label: String,
+    pub podcast_ai_label_source: Option<String>,
     pub id: Uuid,
     pub title: String,
     pub description: Option<String>,
@@ -475,22 +792,78 @@ pub struct ListeningRow {
     pub progress_duration: Option<f64>,
     pub is_finished: Option<bool>,
     pub last_played_at: Option<OffsetDateTime>,
+    pub ai_label: String,
+    pub ai_label_source: Option<String>,
 }
 
+/// `/podcasts/listening`: the followed shows' in-progress episodes (12 most recently played)
+/// and each followed show's newest episode the caller has not started (20 newest).
+///
+/// With `hide_ai` the AI-labelled episodes are left out before the limits and before picking a
+/// show's newest episode, so a show whose newest episode is AI offers its newest visible one
+/// (D-207). The third value is how many AI-labelled rows the unfiltered lists have (0 when not
+/// hiding).
 pub async fn listening(
     pool: &PgPool,
     user: Uuid,
-) -> sqlx::Result<(Vec<ListeningRow>, Vec<ListeningRow>)> {
-    let columns = "s.id AS podcast_id,s.title AS podcast_title,s.image_url AS podcast_image,         e.id,e.title,e.description,e.duration,e.published_at,e.image_url,         p.\"current_time\",p.duration AS progress_duration,p.is_finished,p.last_played_at".to_string();
-    let query = format!(
-        "SELECT {columns} FROM podcast_progress p         JOIN podcast_episodes e ON e.id=p.episode_id         JOIN podcasts s ON s.id=e.podcast_id JOIN podcast_subscriptions sub ON sub.podcast_id=s.id AND sub.user_id=$1         WHERE p.user_id=$1 AND NOT p.is_finished AND p.\"current_time\">0 ORDER BY p.last_played_at DESC LIMIT 12"
+    hide_ai: bool,
+) -> sqlx::Result<(Vec<ListeningRow>, Vec<ListeningRow>, i64)> {
+    let columns = format!(
+        "s.id AS podcast_id, s.title AS podcast_title, s.image_url AS podcast_image,
+         {} AS podcast_ai_label, {} AS podcast_ai_label_source,
+         e.id, e.title, e.description, e.duration, e.published_at, e.image_url,
+         p.\"current_time\", p.duration AS progress_duration, p.is_finished, p.last_played_at,
+         {}",
+        show_label_sql("s"),
+        show_source_sql("s"),
+        episode_label_cols("e", "s")
     );
-    let in_progress = sqlx::query_as(&query).bind(user).fetch_all(pool).await?;
-    let query = format!(
-        "WITH newest AS (SELECT DISTINCT ON (e.podcast_id) e.id FROM podcast_episodes e         JOIN podcast_subscriptions sub ON sub.podcast_id=e.podcast_id AND sub.user_id=$1         ORDER BY e.podcast_id,e.published_at DESC,e.id)         SELECT {columns} FROM newest n JOIN podcast_episodes e ON e.id=n.id JOIN podcasts s ON s.id=e.podcast_id         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1         WHERE p.user_id IS NULL ORDER BY e.published_at DESC LIMIT 20"
+    let label = episode_label_sql("e", "s");
+    let in_progress = format!(
+        "SELECT {columns} FROM podcast_progress p \
+         JOIN podcast_episodes e ON e.id=p.episode_id \
+         JOIN podcasts s ON s.id=e.podcast_id \
+         JOIN podcast_subscriptions sub ON sub.podcast_id=s.id AND sub.user_id=$1 \
+         WHERE p.user_id=$1 AND NOT p.is_finished AND p.\"current_time\">0 \
+           AND (NOT $2 OR {label} <> 'ai') \
+         ORDER BY p.last_played_at DESC LIMIT 12"
     );
-    let new_episodes = sqlx::query_as(&query).bind(user).fetch_all(pool).await?;
-    Ok((in_progress, new_episodes))
+    let new_episodes = format!(
+        "WITH newest AS (SELECT DISTINCT ON (e.podcast_id) e.id FROM podcast_episodes e \
+         JOIN podcasts s ON s.id=e.podcast_id \
+         JOIN podcast_subscriptions sub ON sub.podcast_id=e.podcast_id AND sub.user_id=$1 \
+         WHERE NOT $2 OR {label} <> 'ai' \
+         ORDER BY e.podcast_id,e.published_at DESC,e.id) \
+         SELECT {columns} FROM newest n JOIN podcast_episodes e ON e.id=n.id \
+         JOIN podcasts s ON s.id=e.podcast_id \
+         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1 \
+         WHERE p.user_id IS NULL ORDER BY e.published_at DESC LIMIT 20"
+    );
+    async fn run(
+        pool: &PgPool,
+        query: &str,
+        user: Uuid,
+        hide: bool,
+    ) -> sqlx::Result<Vec<ListeningRow>> {
+        sqlx::query_as(query)
+            .bind(user)
+            .bind(hide)
+            .fetch_all(pool)
+            .await
+    }
+    let hidden = if hide_ai {
+        let ai =
+            |rows: Vec<ListeningRow>| rows.iter().filter(|r| r.ai_label == "ai").count() as i64;
+        ai(run(pool, &in_progress, user, false).await?)
+            + ai(run(pool, &new_episodes, user, false).await?)
+    } else {
+        0
+    };
+    Ok((
+        run(pool, &in_progress, user, hide_ai).await?,
+        run(pool, &new_episodes, user, hide_ai).await?,
+        hidden,
+    ))
 }
 
 /// Current playback position and duration for one episode of one show.
@@ -718,20 +1091,28 @@ pub struct Channel {
     pub title: String,
     pub description: Option<String>,
     pub image_url: Option<String>,
+    pub ai_label: String,
 }
 
 /// The shows `user` follows, as Subsonic channels, oldest follow first (same order as
-/// [`followed`]).
-pub async fn followed_channels(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<Channel>> {
-    sqlx::query_as!(
-        Channel,
-        "SELECT p.id, p.feed_url, p.title, p.description, p.image_url
+/// [`followed`]); AI-labelled shows left out when `hide_ai`.
+pub async fn followed_channels(
+    pool: &PgPool,
+    user: Uuid,
+    hide_ai: bool,
+) -> sqlx::Result<Vec<Channel>> {
+    let label = show_label_sql("p");
+    let query = format!(
+        "SELECT p.id, p.feed_url, p.title, p.description, p.image_url, {label} AS ai_label
          FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id
-         WHERE s.user_id = $1 ORDER BY s.subscribed_at, p.id",
-        user
-    )
-    .fetch_all(pool)
-    .await
+         WHERE s.user_id = $1 AND (NOT $2 OR {label} <> 'ai')
+         ORDER BY s.subscribed_at, p.id"
+    );
+    sqlx::query_as(&query)
+        .bind(user)
+        .bind(hide_ai)
+        .fetch_all(pool)
+        .await
 }
 
 /// An episode as a Subsonic `podcastEpisode` needs it: its show's title too
@@ -749,43 +1130,60 @@ pub struct SubsonicEpisode {
     pub created_at: OffsetDateTime,
     pub file_size: Option<i64>,
     pub mime_type: Option<String>,
+    pub ai_label: String,
 }
 
-const SUBSONIC_EPISODE_COLS: &str = "e.id, e.podcast_id, p.title AS podcast_title, e.title, \
-     e.description, e.audio_url, e.duration, e.published_at, e.created_at, e.file_size, \
-     e.mime_type FROM podcast_episodes e JOIN podcasts p ON p.id = e.podcast_id";
+fn subsonic_episode_cols() -> String {
+    format!(
+        "e.id, e.podcast_id, p.title AS podcast_title, e.title, e.description, e.audio_url, \
+         e.duration, e.published_at, e.created_at, e.file_size, e.mime_type, {} AS ai_label \
+         FROM podcast_episodes e JOIN podcasts p ON p.id = e.podcast_id",
+        episode_label_sql("e", "p")
+    )
+}
 
-/// Up to `limit` newest episodes of `show` (`getPodcasts`: at most 200).
+/// Up to `limit` newest episodes of `show` (`getPodcasts`: at most 200). With `hide_ai` the
+/// AI-labelled ones are left out before the limit, so the answer stays full (D-208).
 pub async fn episodes_for_channel(
     pool: &PgPool,
     show: Uuid,
     limit: i64,
+    hide_ai: bool,
 ) -> sqlx::Result<Vec<SubsonicEpisode>> {
     let query = format!(
-        "SELECT {SUBSONIC_EPISODE_COLS} WHERE e.podcast_id = $1 \
-         ORDER BY e.published_at DESC, e.id DESC LIMIT $2"
+        "SELECT {} WHERE e.podcast_id = $1 AND (NOT $3 OR {} <> 'ai') \
+         ORDER BY e.published_at DESC, e.id DESC LIMIT $2",
+        subsonic_episode_cols(),
+        episode_label_sql("e", "p")
     );
     sqlx::query_as(&query)
         .bind(show)
         .bind(limit)
+        .bind(hide_ai)
         .fetch_all(pool)
         .await
 }
 
-/// `user`'s newest episodes across every followed show (`getNewestPodcasts`).
+/// `user`'s newest episodes across every followed show (`getNewestPodcasts`), AI-labelled ones
+/// left out before the limit when `hide_ai` (D-208).
 pub async fn newest_episodes(
     pool: &PgPool,
     user: Uuid,
     limit: i64,
+    hide_ai: bool,
 ) -> sqlx::Result<Vec<SubsonicEpisode>> {
     let query = format!(
-        "SELECT {SUBSONIC_EPISODE_COLS} \
+        "SELECT {} \
          JOIN podcast_subscriptions s ON s.podcast_id = e.podcast_id AND s.user_id = $1 \
-         ORDER BY e.published_at DESC, e.id DESC LIMIT $2"
+         WHERE NOT $3 OR {} <> 'ai' \
+         ORDER BY e.published_at DESC, e.id DESC LIMIT $2",
+        subsonic_episode_cols(),
+        episode_label_sql("e", "p")
     );
     sqlx::query_as(&query)
         .bind(user)
         .bind(limit)
+        .bind(hide_ai)
         .fetch_all(pool)
         .await
 }
@@ -796,6 +1194,6 @@ pub async fn subsonic_episode_by_id(
     pool: &PgPool,
     id: Uuid,
 ) -> sqlx::Result<Option<SubsonicEpisode>> {
-    let query = format!("SELECT {SUBSONIC_EPISODE_COLS} WHERE e.id = $1");
+    let query = format!("SELECT {} WHERE e.id = $1", subsonic_episode_cols());
     sqlx::query_as(&query).bind(id).fetch_optional(pool).await
 }

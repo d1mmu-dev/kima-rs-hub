@@ -183,24 +183,30 @@ async fn manual_refresh_unreadable_or_down_feed_is_502_green(pool: PgPool) {
     }
 }
 
+/// A 4xx other than 404/429 from the feed's host (`Absent`): upstream's `upstreamStatusFailure`
+/// calls it "missing", so `answerUpstreamFailure` answers 404 with the route's one missing text
+/// (D-205). The failure is still recorded on the show, as for `Gone`.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn manual_refresh_feed_missing_is_500_green(pool: PgPool) {
+async fn manual_refresh_feed_refused_is_404_green(pool: PgPool) {
     let env = env(pool.clone()).await;
-    // 4xx other than 429 that a feed answers is Absence without refusal (per
-    // `status_failure`), i.e. a permanent fetch failure and the route's 500 arm.
     let show = store(&pool, &env.host.url("/forbidden.xml"), "Forbidden", None).await;
     podcasts::subscribe(&pool, env.user, show).await.unwrap();
     let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
-    res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(res.json::<Value>()["error"], json!("Internal error"));
+    res.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"error": "The show's feed is gone"})
+    );
     let show = podcasts::show_by_id(&pool, show).await.unwrap().unwrap();
     assert_eq!(show.refresh_failures, 1);
     assert!(show.refresh_error.is_some());
     assert!(show.refresh_failed_at.is_some());
 }
 
+/// An address the SSRF guard refuses (`Blocked`): upstream's `isBlockedFetch` makes it "missing",
+/// answered 404 with the same body as a gone feed (D-205).
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn manual_refresh_feed_blocked_ssrf_returns_500_green(pool: PgPool) {
+async fn manual_refresh_feed_blocked_ssrf_is_404_green(pool: PgPool) {
     // The feed host answers loopback only; the show's url points at a private
     // address outside the allowed bases, so the hop is refused here.
     let env = env_with(pool.clone(), |cfg| cfg.allow_private_images = false).await;
@@ -208,8 +214,11 @@ async fn manual_refresh_feed_blocked_ssrf_returns_500_green(pool: PgPool) {
     let show = store(&pool, feed, "Blocked", None).await;
     podcasts::subscribe(&pool, env.user, show).await.unwrap();
     let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
-    res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(res.json::<Value>()["error"], json!("Internal error"));
+    res.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"error": "The show's feed is gone"})
+    );
     let show = podcasts::show_by_id(env.pool(), show)
         .await
         .unwrap()

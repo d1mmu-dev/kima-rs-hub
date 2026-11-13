@@ -1,0 +1,710 @@
+{
+  "_about": "Key paths of upstream kima-hub v1.12.3 (c7527577) podcast responses, read from the BACKEND handlers that build them (each entry's `sources`, path:first-last line at c7527577; frontend/features/podcast/types.ts is a looser client view and is not the reference). Grammar as stats_upstream_keys.json: '.key' object member, '[]' array element, '{}' value of a string-keyed record, 'a|b' allowed JSON types, trailing '?' = upstream may omit the key. Paths below an empty array, a null value or an absent optional key are not observable and not required. `upstream` lists only what upstream sends; `kimaOnly` lists every key kima-rs adds, each with the docs/DIVERGENCES.md row that records it: aiLabel/aiLabelSource/aiHidden (D-207, AI-content labels, owner decision D-200) and the artist rows' trackCount on /library/recently-listened (D-059). `sameShapeAs` reuses another entry (the same route captured in a second case). `stats_spoken` uses stats_upstream_keys.json's stats_response_s1. tools/check-podcast-upstream-keys.py re-checks every upstream key name against the cited source lines of a c7527577 checkout.",
+  "list": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:110-160",
+      "backend/src/routes/podcasts.ts:46-53"
+    ],
+    "upstream": {
+      "": "array",
+      "[]": "object",
+      "[].id": "string",
+      "[].title": "string",
+      "[].author": "string|null",
+      "[].description": "string|null",
+      "[].coverUrl": "string|null",
+      "[].episodeCount": "number",
+      "[].autoDownloadEpisodes": "boolean",
+      "[].latestEpisodeAt": "string|null",
+      "[].episodes": "array",
+      "[].episodes[]": "object",
+      "[].episodes[].id": "string",
+      "[].episodes[].title": "string",
+      "[].episodes[].description": "string|null",
+      "[].episodes[].duration": "number",
+      "[].episodes[].publishedAt": "string",
+      "[].episodes[].coverUrl": "string|null",
+      "[].episodes[].progress": "object|null",
+      "[].episodes[].progress.currentTime": "number",
+      "[].episodes[].progress.progress": "number",
+      "[].episodes[].progress.isFinished": "boolean",
+      "[].episodes[].progress.lastPlayedAt": "string"
+    },
+    "kimaOnly": {
+      "[].aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      "[].aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      },
+      "[].episodes[].aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      "[].episodes[].aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "list_ai_show": {
+    "sameShapeAs": "list"
+  },
+  "detail": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:228-246",
+      "backend/src/routes/podcasts.ts:529-611",
+      "backend/src/routes/podcasts.ts:46-53"
+    ],
+    "upstream": {
+      "": "object",
+      ".id": "string",
+      ".title": "string",
+      ".author": "string|null",
+      ".description": "string|null",
+      ".coverUrl": "string|null",
+      ".feedUrl": "string",
+      ".genres": "array",
+      ".genres[]": "string",
+      ".categories": "array",
+      ".categories[]": "object",
+      ".categories[].id": "number",
+      ".categories[].name": "string",
+      ".itunesId": "string|null",
+      ".autoDownloadEpisodes": "boolean",
+      ".episodeTotal": "number",
+      ".episodeOffset": "number",
+      ".episodeLimit": "number",
+      ".isSubscribed": "boolean",
+      ".episodes": "array",
+      ".episodes[]": "object",
+      ".episodes[].id": "string",
+      ".episodes[].title": "string",
+      ".episodes[].description": "string|null",
+      ".episodes[].duration": "number",
+      ".episodes[].publishedAt": "string",
+      ".episodes[].episodeNumber": "number|null",
+      ".episodes[].season": "number|null",
+      ".episodes[].imageUrl": "string|null",
+      ".episodes[].isDownloaded": "boolean",
+      ".episodes[].progress": "object|null",
+      ".episodes[].progress.currentTime": "number",
+      ".episodes[].progress.progress": "number",
+      ".episodes[].progress.isFinished": "boolean",
+      ".episodes[].progress.lastPlayedAt": "string"
+    },
+    "kimaOnly": {
+      ".aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      },
+      ".aiHidden": {
+        "type": "number?",
+        "divergence": "D-207"
+      },
+      ".episodes[].aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".episodes[].aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "episodes": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:529-560",
+      "backend/src/routes/podcasts.ts:613-631",
+      "backend/src/routes/podcasts.ts:46-53"
+    ],
+    "upstream": {
+      "": "object",
+      ".episodes": "array",
+      ".total": "number",
+      ".offset": "number",
+      ".limit": "number",
+      ".episodes[]": "object",
+      ".episodes[].id": "string",
+      ".episodes[].title": "string",
+      ".episodes[].description": "string|null",
+      ".episodes[].duration": "number",
+      ".episodes[].publishedAt": "string",
+      ".episodes[].episodeNumber": "number|null",
+      ".episodes[].season": "number|null",
+      ".episodes[].imageUrl": "string|null",
+      ".episodes[].isDownloaded": "boolean",
+      ".episodes[].progress": "object|null",
+      ".episodes[].progress.currentTime": "number",
+      ".episodes[].progress.progress": "number",
+      ".episodes[].progress.isFinished": "boolean",
+      ".episodes[].progress.lastPlayedAt": "string"
+    },
+    "kimaOnly": {
+      ".aiHidden": {
+        "type": "number?",
+        "divergence": "D-207"
+      },
+      ".episodes[].aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".episodes[].aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "next": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:637-675",
+      "backend/src/routes/podcasts.ts:46-53"
+    ],
+    "upstream": {
+      "": "object",
+      ".podcast": "object?",
+      ".podcast.id": "string",
+      ".podcast.title": "string",
+      ".podcast.coverUrl": "string|null",
+      ".episode": "object|null",
+      ".episode.id": "string",
+      ".episode.title": "string",
+      ".episode.duration": "number",
+      ".episode.publishedAt": "string",
+      ".episode.coverUrl": "string|null",
+      ".episode.progress": "object|null",
+      ".episode.progress.currentTime": "number",
+      ".episode.progress.progress": "number",
+      ".episode.progress.isFinished": "boolean",
+      ".episode.progress.lastPlayedAt": "string"
+    },
+    "kimaOnly": {
+      ".podcast.aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".podcast.aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      },
+      ".episode.aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".episode.aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "next_end": {
+    "sameShapeAs": "next"
+  },
+  "listening": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:248-293",
+      "backend/src/routes/podcasts.ts:46-53"
+    ],
+    "upstream": {
+      "": "object",
+      ".inProgress": "array",
+      ".inProgress[]": "object",
+      ".inProgress[].podcast": "object",
+      ".inProgress[].podcast.id": "string",
+      ".inProgress[].podcast.title": "string",
+      ".inProgress[].podcast.coverUrl": "string|null",
+      ".inProgress[].episode": "object",
+      ".inProgress[].episode.id": "string",
+      ".inProgress[].episode.title": "string",
+      ".inProgress[].episode.description": "string|null",
+      ".inProgress[].episode.duration": "number",
+      ".inProgress[].episode.publishedAt": "string",
+      ".inProgress[].episode.coverUrl": "string|null",
+      ".inProgress[].episode.progress": "object|null",
+      ".inProgress[].episode.progress.currentTime": "number",
+      ".inProgress[].episode.progress.progress": "number",
+      ".inProgress[].episode.progress.isFinished": "boolean",
+      ".inProgress[].episode.progress.lastPlayedAt": "string",
+      ".newEpisodes": "array",
+      ".newEpisodes[]": "object",
+      ".newEpisodes[].podcast": "object",
+      ".newEpisodes[].podcast.id": "string",
+      ".newEpisodes[].podcast.title": "string",
+      ".newEpisodes[].podcast.coverUrl": "string|null",
+      ".newEpisodes[].episode": "object",
+      ".newEpisodes[].episode.id": "string",
+      ".newEpisodes[].episode.title": "string",
+      ".newEpisodes[].episode.description": "string|null",
+      ".newEpisodes[].episode.duration": "number",
+      ".newEpisodes[].episode.publishedAt": "string",
+      ".newEpisodes[].episode.coverUrl": "string|null",
+      ".newEpisodes[].episode.progress": "object|null",
+      ".newEpisodes[].episode.progress.currentTime": "number",
+      ".newEpisodes[].episode.progress.progress": "number",
+      ".newEpisodes[].episode.progress.isFinished": "boolean",
+      ".newEpisodes[].episode.progress.lastPlayedAt": "string"
+    },
+    "kimaOnly": {
+      ".aiHidden": {
+        "type": "number?",
+        "divergence": "D-207"
+      },
+      ".inProgress[].podcast.aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".inProgress[].podcast.aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      },
+      ".inProgress[].episode.aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".inProgress[].episode.aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      },
+      ".newEpisodes[].podcast.aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".newEpisodes[].podcast.aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      },
+      ".newEpisodes[].episode.aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".newEpisodes[].episode.aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "listening_ai_show": {
+    "sameShapeAs": "listening"
+  },
+  "subscribe": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:678-690"
+    ],
+    "upstream": {
+      "": "object",
+      ".success": "boolean",
+      ".podcast": "object",
+      ".podcast.id": "string",
+      ".podcast.title": "string",
+      ".message": "string"
+    },
+    "kimaOnly": {}
+  },
+  "unsubscribe": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:832-890"
+    ],
+    "upstream": {
+      "": "object",
+      ".success": "boolean",
+      ".message": "string"
+    },
+    "kimaOnly": {}
+  },
+  "refresh": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:893-910"
+    ],
+    "upstream": {
+      "": "object",
+      ".success": "boolean",
+      ".newEpisodesCount": "number",
+      ".totalEpisodes": "number",
+      ".message": "string"
+    },
+    "kimaOnly": {}
+  },
+  "refresh_all": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:453-490"
+    ],
+    "upstream": {
+      "": "object",
+      ".queued": "number",
+      ".total": "number?",
+      ".message": "string"
+    },
+    "kimaOnly": {}
+  },
+  "progress": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:1101-1150",
+      "backend/src/routes/podcasts.ts:46-53"
+    ],
+    "upstream": {
+      "": "object",
+      ".success": "boolean",
+      ".progress": "object|null",
+      ".progress.currentTime": "number",
+      ".progress.progress": "number",
+      ".progress.isFinished": "boolean",
+      ".progress.lastPlayedAt": "string"
+    },
+    "kimaOnly": {}
+  },
+  "progress_clear": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:1153-1173"
+    ],
+    "upstream": {
+      "": "object",
+      ".success": "boolean",
+      ".message": "string"
+    },
+    "kimaOnly": {}
+  },
+  "categories": {
+    "sources": [
+      "backend/src/services/podcastCatalog.ts:20-24",
+      "backend/src/routes/podcasts.ts:189-195"
+    ],
+    "upstream": {
+      "": "array",
+      "[]": "object",
+      "[].id": "number",
+      "[].name": "string",
+      "[].parentId": "number|null"
+    },
+    "kimaOnly": {}
+  },
+  "charts": {
+    "sources": [
+      "backend/src/services/podcastCatalog.ts:316-347"
+    ],
+    "upstream": {
+      "": "array",
+      "[]": "object",
+      "[].id": "string",
+      "[].itunesId": "string",
+      "[].title": "string",
+      "[].author": "string",
+      "[].description": "string",
+      "[].coverUrl": "string|null",
+      "[].feedUrl": "null",
+      "[].genres": "array",
+      "[].genres[]": "string",
+      "[].categoryIds": "array",
+      "[].categoryIds[]": "number",
+      "[].episodeCount": "number",
+      "[].chartRank": "number|null",
+      "[].isExternal": "boolean"
+    },
+    "kimaOnly": {
+      "[].aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      "[].aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "discover_top": {
+    "sameShapeAs": "charts"
+  },
+  "discover_genre": {
+    "sameShapeAs": "charts"
+  },
+  "similar": {
+    "sameShapeAs": "charts"
+  },
+  "preview_similar": {
+    "sameShapeAs": "charts"
+  },
+  "discover_genres": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:302-318",
+      "backend/src/services/podcastCatalog.ts:316-347"
+    ],
+    "upstream": {
+      "": "object",
+      "{}": "array",
+      "{}[]": "object",
+      "{}[].id": "string",
+      "{}[].itunesId": "string",
+      "{}[].title": "string",
+      "{}[].author": "string",
+      "{}[].description": "string",
+      "{}[].coverUrl": "string|null",
+      "{}[].feedUrl": "null",
+      "{}[].genres": "array",
+      "{}[].genres[]": "string",
+      "{}[].categoryIds": "array",
+      "{}[].categoryIds[]": "number",
+      "{}[].episodeCount": "number",
+      "{}[].chartRank": "number|null",
+      "{}[].isExternal": "boolean"
+    },
+    "kimaOnly": {
+      "{}[].aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      "{}[].aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "for_you": {
+    "sources": [
+      "backend/src/services/podcastCatalog.ts:20-24",
+      "backend/src/services/podcastCatalog.ts:316-354"
+    ],
+    "upstream": {
+      "": "array",
+      "[]": "object",
+      "[].category": "object",
+      "[].category.id": "number",
+      "[].category.name": "string",
+      "[].category.parentId": "number|null",
+      "[].because": "array",
+      "[].because[]": "string",
+      "[].podcasts": "array",
+      "[].podcasts[]": "object",
+      "[].podcasts[].id": "string",
+      "[].podcasts[].itunesId": "string",
+      "[].podcasts[].title": "string",
+      "[].podcasts[].author": "string",
+      "[].podcasts[].description": "string",
+      "[].podcasts[].coverUrl": "string|null",
+      "[].podcasts[].feedUrl": "null",
+      "[].podcasts[].genres": "array",
+      "[].podcasts[].genres[]": "string",
+      "[].podcasts[].categoryIds": "array",
+      "[].podcasts[].categoryIds[]": "number",
+      "[].podcasts[].episodeCount": "number",
+      "[].podcasts[].chartRank": "number|null",
+      "[].podcasts[].isExternal": "boolean"
+    },
+    "kimaOnly": {
+      "[].podcasts[].aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      "[].podcasts[].aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "preview": {
+    "sources": [
+      "backend/src/routes/podcasts.ts:335-410",
+      "backend/src/services/podcastCatalog.ts:39-56"
+    ],
+    "upstream": {
+      "": "object",
+      ".itunesId": "string",
+      ".title": "string",
+      ".author": "string",
+      ".description": "string",
+      ".coverUrl": "string|null",
+      ".feedUrl": "string|null",
+      ".genres": "array",
+      ".genres[]": "string",
+      ".categories": "array",
+      ".categories[]": "object",
+      ".categories[].id": "number",
+      ".categories[].name": "string",
+      ".episodeCount": "number",
+      ".previewEpisodes": "array",
+      ".previewEpisodes[]": "object",
+      ".previewEpisodes[].title": "string",
+      ".previewEpisodes[].publishedAt": "string",
+      ".previewEpisodes[].duration": "number",
+      ".previewEpisodes[].description": "string",
+      ".snippet": "object|null",
+      ".snippet.title": "string",
+      ".snippet.publishedAt": "string",
+      ".snippet.duration": "number",
+      ".snippet.description": "string",
+      ".isSubscribed": "boolean",
+      ".subscribedPodcastId": "string|null"
+    },
+    "kimaOnly": {
+      ".aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "preview_followed": {
+    "sameShapeAs": "preview"
+  },
+  "search": {
+    "sources": [
+      "backend/src/routes/search.ts:19-58",
+      "backend/src/services/search.ts:90-110"
+    ],
+    "upstream": {
+      "": "object",
+      ".artists": "array",
+      ".albums": "array",
+      ".tracks": "array",
+      ".audiobooks": "array",
+      ".podcasts": "array",
+      ".podcasts[]": "object",
+      ".podcasts[].id": "string",
+      ".podcasts[].title": "string",
+      ".podcasts[].author": "string|null",
+      ".podcasts[].description": "string|null",
+      ".podcasts[].imageUrl": "string|null",
+      ".podcasts[].episodeCount": "number",
+      ".podcasts[].rank": "number?",
+      ".episodes": "array",
+      ".episodes[]": "object",
+      ".episodes[].id": "string",
+      ".episodes[].title": "string",
+      ".episodes[].description": "string|null",
+      ".episodes[].podcastId": "string",
+      ".episodes[].podcastTitle": "string",
+      ".episodes[].publishedAt": "string",
+      ".episodes[].duration": "number",
+      ".episodes[].audioUrl": "string",
+      ".episodes[].rank": "number?"
+    },
+    "kimaOnly": {
+      ".podcasts[].aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".podcasts[].aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      },
+      ".episodes[].aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".episodes[].aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "search_discover": {
+    "sources": [
+      "backend/src/routes/search.ts:216-230",
+      "backend/src/routes/search.ts:266-266"
+    ],
+    "upstream": {
+      "": "object",
+      ".results": "array",
+      ".results[]": "object",
+      ".results[].type": "string",
+      ".results[].id": "number",
+      ".results[].name": "string",
+      ".results[].artist": "string",
+      ".results[].description": "string|null?",
+      ".results[].coverUrl": "string|null",
+      ".results[].feedUrl": "string|null?",
+      ".results[].genres": "array",
+      ".results[].genres[]": "string",
+      ".results[].categoryIds": "array",
+      ".results[].categoryIds[]": "number",
+      ".results[].trackCount": "number|null?",
+      ".aliasInfo": "object|null"
+    },
+    "kimaOnly": {
+      ".results[].aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".results[].aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "recently_listened": {
+    "sources": [
+      "backend/src/routes/library/tracks.ts:40-84",
+      "backend/src/routes/library/tracks.ts:140-207"
+    ],
+    "upstream": {
+      "": "object",
+      ".items": "array",
+      ".items[]": "object",
+      ".items[].id": "string",
+      ".items[].type": "string",
+      ".items[].name": "string",
+      ".items[].coverArt": "string|null",
+      ".items[].lastPlayedAt": "string",
+      ".items[].episodeId": "string?",
+      ".items[].author": "string|null?",
+      ".items[].progress": "number?",
+      ".items[].mbid": "string|null?",
+      ".items[].heroUrl": "string|null?",
+      ".items[].userHeroUrl": "string|null?",
+      ".items[].albumCount": "number?"
+    },
+    "kimaOnly": {
+      ".items[].aiLabel": {
+        "type": "string?",
+        "divergence": "D-207"
+      },
+      ".items[].aiLabelSource": {
+        "type": "string|null?",
+        "divergence": "D-207"
+      },
+      ".items[].trackCount": {
+        "type": "number?",
+        "divergence": "D-059"
+      }
+    }
+  },
+  "ai_label_show": {
+    "sources": [],
+    "upstream": {
+      "": "object"
+    },
+    "kimaOnly": {
+      ".aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  },
+  "ai_label_episode": {
+    "sources": [],
+    "upstream": {
+      "": "object"
+    },
+    "kimaOnly": {
+      ".aiLabel": {
+        "type": "string",
+        "divergence": "D-207"
+      },
+      ".aiLabelSource": {
+        "type": "string|null",
+        "divergence": "D-207"
+      }
+    }
+  }
+}

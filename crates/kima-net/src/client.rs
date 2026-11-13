@@ -165,6 +165,31 @@ impl NetConfig {
     }
 }
 
+/// Loopback socket addresses a feed, audio or image fetch may reach although they are not
+/// public, from `KIMA_NET_ALLOW_LOOPBACK` (`127.0.0.1:<port>[,...]`). Only for a capture run of
+/// the real server against loopback feed/Apple stand-ins (`tools/capture-api-fixtures.sh`):
+/// it is refused unless `deny_real` is on (so no real host can be reached at the same time),
+/// and every entry must be a loopback address with a nonzero port. Unset or empty: none.
+pub fn loopback_allow(deny_real: bool, raw: Option<&str>) -> Result<Vec<SocketAddr>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    if !deny_real {
+        return Err("KIMA_NET_ALLOW_LOOPBACK needs KIMA_NET_DENY_REAL=1".into());
+    }
+    raw.split(',')
+        .map(|item| {
+            let item = item.trim();
+            match item.parse::<SocketAddr>() {
+                Ok(addr) if addr.ip().is_loopback() && addr.port() != 0 => Ok(addr),
+                _ => Err(format!(
+                    "KIMA_NET_ALLOW_LOOPBACK: {item:?} is not a loopback address with a port"
+                )),
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Pause {
     until: OffsetDateTime,
@@ -894,6 +919,29 @@ mod tests {
         assert_eq!(cfg.user_agent, "kima-rs/1.2.3 ( me@example.org )");
         assert_eq!(cfg.bases.musicbrainz, "https://musicbrainz.org/ws/2");
         assert!(!cfg.allow_private_images);
+    }
+
+    #[test]
+    fn loopback_allow_needs_the_guard_and_loopback_ports() {
+        assert_eq!(loopback_allow(false, None), Ok(Vec::new()));
+        assert_eq!(loopback_allow(false, Some(" ")), Ok(Vec::new()));
+        assert_eq!(
+            loopback_allow(true, Some("127.0.0.1:4000, [::1]:4001")),
+            Ok(vec![
+                "127.0.0.1:4000".parse().unwrap(),
+                "[::1]:4001".parse().unwrap()
+            ])
+        );
+        assert!(loopback_allow(false, Some("127.0.0.1:4000")).is_err());
+        for bad in [
+            "10.0.0.1:80",
+            "127.0.0.1:0",
+            "127.0.0.1",
+            "localhost:80",
+            "8.8.8.8:53",
+        ] {
+            assert!(loopback_allow(true, Some(bad)).is_err(), "{bad} accepted");
+        }
     }
 
     /// `rateLimiterBackoff.test.ts`, with zero jitter.

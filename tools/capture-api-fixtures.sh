@@ -1,26 +1,65 @@
 #!/usr/bin/env bash
-# Capture M-SYNC and M-STATS wire fixtures from THIS checkout's server and a fresh run-owned pgvector cluster.
-# No caller database is accepted. Requires docker, ffmpeg, jq, curl, psql and cargo.
+# Capture M-SYNC, M-STATS and M6 podcast wire fixtures from THIS checkout's server and a fresh
+# run-owned pgvector cluster. No caller database is accepted. Requires docker, ffmpeg, jq, curl,
+# psql, python3, git and cargo.
+# KIMA_CAPTURE_SET (required) names the fixture sets copied into the tree: a comma list of
+# msync, mstats, m6. Every capture runs (later ones depend on earlier state), but only the named
+# sets are copied, so a run for one milestone never rewrites another's fixtures with new ids.
 set -euo pipefail
 if [[ -n "${DATABASE_URL:-}" || -n "${PGDATABASE:-}" ]]; then
   echo 'No external DATABASE_URL or PGDATABASE allowed; this script owns a fresh database.' >&2; exit 2
 fi
 if [[ "${1:-}" == --help ]]; then
-  echo 'No external DATABASE_URL or PGDATABASE allowed. Run from a checkout with Docker and ffmpeg.'; exit 0
+  echo 'KIMA_CAPTURE_SET=msync,mstats,m6 (any subset). No external DATABASE_URL or PGDATABASE allowed.'; exit 0
 fi
 [[ $# == 0 ]] || { echo 'No arguments accepted' >&2; exit 2; }
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-for cmd in docker ffmpeg jq curl psql cargo; do command -v "$cmd" >/dev/null || { echo "Missing $cmd" >&2; exit 1; }; done
+for cmd in docker ffmpeg jq curl psql python3 git cargo; do command -v "$cmd" >/dev/null || { echo "Missing $cmd" >&2; exit 1; }; done
+msync_names=(me settings public_config library_removals playlist_create playlist_update playlists_list playlist_detail enrichment_rerun)
+mstats_names=(stats_response_s1 stats_hour stats_tracks stats_track_plays stats_region stats_false_starts stats_collapse stats_remove stats_ignore stats_restore)
+m6_names=(categories subscribe list list_ai_show detail episodes progress next next_end listening listening_ai_show
+  charts discover_top discover_genre discover_genres for_you similar preview preview_followed preview_similar
+  search search_discover recently_listened stats_spoken refresh refresh_all progress_clear ai_label_show
+  ai_label_episode unsubscribe)
+copy=()
+IFS=',' read -r -a sets <<< "${KIMA_CAPTURE_SET:-}"
+for set in "${sets[@]}"; do
+  case "$set" in
+    msync) for n in "${msync_names[@]}"; do copy+=("${n}_response.json"); done ;;
+    mstats) for n in "${mstats_names[@]}"; do copy+=("${n}_response.json"); done ;;
+    m6) for n in "${m6_names[@]}"; do copy+=("podcasts_${n}_response.json"); done
+        copy+=(podcasts_capture_manifest.json) ;;
+    *) echo "KIMA_CAPTURE_SET: unknown set '$set' (msync, mstats, m6)" >&2; exit 2 ;;
+  esac
+done
+[[ ${#copy[@]} -gt 0 ]] || { echo 'Set KIMA_CAPTURE_SET (msync, mstats, m6; comma-separated)' >&2; exit 2; }
+# Refuse before anything expensive when a fixture this run would overwrite has uncommitted
+# changes: they would be lost. A file HEAD does not have yet is not flagged.
+dirty=()
+for f in "${copy[@]}"; do
+  f="crates/kima-api-types/tests/fixtures/$f"
+  if [[ -e "$f" ]] && ! git diff --quiet HEAD -- "$f" 2>/dev/null; then dirty+=("$f"); fi
+done
+if [[ ${#dirty[@]} -gt 0 ]]; then
+  printf 'Uncommitted changes in fixtures this run would overwrite:\n' >&2
+  printf '  %s\n' "${dirty[@]}" >&2
+  exit 1
+fi
 run="$(date +%s)-$$"
 container_name="msync18-capture-${run}"
 tmp="$(mktemp -d "${TMPDIR:-$HOME/.hermes/cache/scratch}/msync18-capture.XXXXXXXX")"
 server_pid=''
+mock_pid=''
 cleanup() {
   # The server must release all database connections before its DB disappears.
   if [[ -n "$server_pid" ]]; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$mock_pid" ]]; then
+    kill "$mock_pid" 2>/dev/null || true
+    wait "$mock_pid" 2>/dev/null || true
   fi
   docker rm -f -v "$container_name" >/dev/null 2>&1 || true
   rm -rf "$tmp"
@@ -44,6 +83,19 @@ echo "capture provenance: HEAD=$(git rev-parse HEAD), container=$container_name,
 export MUSIC_PATH="$tmp/music" KIMA_DATA_DIR="$tmp/data" KIMA_IDENTIFY=off KIMA_BIND_HOST=127.0.0.1
 export KIMA_DISABLE_CLAP=1
 mkdir -p "$KIMA_DATA_DIR"
+# M6: loopback Apple/feed/audio stand-in (synthetic data). The server may reach exactly this
+# socket despite its SSRF guard (KIMA_NET_ALLOW_LOOPBACK, accepted only with KIMA_NET_DENY_REAL=1).
+python3 "$root/tools/podcast-capture-mock.py" > "$tmp/mock.port" 2> "$tmp/mock.log" & mock_pid=$!
+mock_port=''
+for _ in {1..50}; do
+  mock_port="$(head -n1 "$tmp/mock.port" 2>/dev/null || true)"
+  [[ "$mock_port" =~ ^[0-9]+$ ]] && break
+  kill -0 "$mock_pid" 2>/dev/null || { cat "$tmp/mock.log" >&2; exit 1; }
+  sleep 0.2
+done
+[[ "$mock_port" =~ ^[0-9]+$ ]] || { echo 'Podcast mock did not start' >&2; exit 1; }
+mock="http://127.0.0.1:$mock_port"
+export KIMA_ITUNES_BASE_URL="$mock" KIMA_NET_ALLOW_LOOPBACK="127.0.0.1:$mock_port"
 # Build from the checked-out sources; never run a stale target/debug/kima.
 cargo build -p kima-server > "$tmp/build.log" 2>&1 || { cat "$tmp/build.log" >&2; exit 1; }
 # Choose an OS-assigned free port; only the run-owned server may answer health.
@@ -113,8 +165,10 @@ capture stats_false_starts GET /stats/false-starts
 capture stats_collapse POST /stats/false-starts/collapse '{"trackIds":[]}'
 capture stats_remove POST /stats/false-starts/remove "$(jq -nc --arg id "$first" '{trackIds:[$id]}')"
 capture stats_restore POST /stats/false-starts/restore "$(jq -nc --arg id "$second" '{trackIds:[$id]}')"
-for name in me settings public_config library_removals playlist_create playlist_update playlists_list playlist_detail enrichment_rerun \
-    stats_response_s1 stats_hour stats_tracks stats_track_plays stats_region stats_false_starts stats_collapse stats_remove stats_ignore stats_restore; do
-  cp "$stage/${name}_response.json" "crates/kima-api-types/tests/fixtures/${name}_response.json"
+# M6 podcasts (Task 19): real subscribe/refresh/preview flow against the loopback mock.
+# shellcheck source=tools/capture-podcast-fixtures.inc.sh
+source "$root/tools/capture-podcast-fixtures.inc.sh"
+for f in "${copy[@]}"; do
+  cp "$stage/$f" "crates/kima-api-types/tests/fixtures/$f"
 done
-echo 'Capture complete (raw dynamic UUIDs/timestamps retained); DB and server removed on exit.' >&2
+echo "Copied ${#copy[@]} fixtures (sets: ${KIMA_CAPTURE_SET}); raw dynamic UUIDs/timestamps retained; DB, mock and server removed on exit." >&2

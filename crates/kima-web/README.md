@@ -162,6 +162,23 @@ Settings page and changes it back, so it can be repeated.
 from upstream (category links instead of per-category shelves, search results inline, no sort selects yet, episodes not
 restored after a reload) are listed in `docs/DIVERGENCES.md` D-215. Not yet visually compared.
 
+**Compromises on the podcast pages (M6a close-out, 2026-11-14)**, each also in D-215 or D-207:
+
+- Not measured with `tools/compare-kima-web-visual.mjs`: the podcast pages have no diff/ink/SSIM numbers yet, so their
+  look is unverified against v1.12.3 (the legacy reference itself was only smoke-tested against this backend: home,
+  category, preview, follow, show page, play with a ranged seek, next episode, unfollow, no failing `/api/podcasts*`).
+- Home: top categories are links to their chart page, not one shelf each (each shelf would be one Apple request through
+  the 1-per-3-s limiter); search results render inline under the box, not in a floating dropdown.
+- Category page: 24 shows per page with a "more shows" button instead of loading on scroll; no hidden-AI count (the
+  chart answer is a bare list).
+- Show page: no sort or page-size selects (newest/oldest button, 20 per page); feed descriptions as plain text; a manual
+  refresh does not reload the episode list.
+- Player: an episode stops at its end — no automatic or "next episode" step to the show's following episode (upstream
+  `podcast-next.spec.ts`; the server's `/next` route exists and is tested); an episode is not written to
+  `/api/playback-state`, so a reload does not restore it (its progress is kept); switching away or signing out can
+  lose up to 15 s of progress.
+- Badges: cards name a known AI/human label in their subtitle (no badge slot); no separate explicit ("E") badge.
+
 **AI-content labels (kima-only, M6 Task 8, D-200/D-207).** The show and preview heroes and every episode row carry a badge:
 "AI", "Human" (tooltip: declared by the publisher for the show / for this episode, or confirmed by an admin) or "Unlabelled"
 (no disclosure; never treated as human). Lists hide AI-labelled shows and episodes; each section says how many it hides, and

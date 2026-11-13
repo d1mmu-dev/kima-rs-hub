@@ -369,3 +369,129 @@ async fn recently_listened_leaves_out_various_artists_and_unknown_artist(pool: P
         .collect();
     assert_eq!(names, ["Real"]);
 }
+
+// ---- M6 Task 17: podcasts mixed into /library/recently-listened ----
+
+/// Stores a show with one episode and the caller's progress on it, `mins` minutes ago.
+async fn seed_podcast_progress(
+    pool: &PgPool,
+    user: Uuid,
+    title: &str,
+    mins: i32,
+    finished: bool,
+) -> (Uuid, Uuid) {
+    let show = kima_db::podcasts::insert_show(
+        pool,
+        Uuid::now_v7(),
+        &kima_db::podcasts::NewShow {
+            feed_url: &format!("https://feeds.example.invalid/{title}"),
+            title,
+            author: Some("Some Author"),
+            description: None,
+            image_url: Some("https://img.example.invalid/cover.png"),
+            itunes_id: None,
+            category_ids: &[],
+            language: None,
+            explicit: false,
+            episode_count: 1,
+            feed_etag: None,
+            feed_last_modified: None,
+        },
+    )
+    .await
+    .unwrap();
+    kima_db::podcasts::insert_episodes(
+        pool,
+        show.id,
+        &[kima_db::podcasts::NewEpisode {
+            guid: "ep1".into(),
+            title: "Episode 1".into(),
+            description: None,
+            audio_url: "https://audio.example.invalid/ep1.mp3".into(),
+            duration: 1000,
+            published_at: time::OffsetDateTime::now_utc(),
+            episode_number: None,
+            season: None,
+            image_url: None,
+            file_size: None,
+            mime_type: None,
+        }],
+    )
+    .await
+    .unwrap();
+    let episode: Uuid = sqlx::query_scalar("SELECT id FROM podcast_episodes WHERE podcast_id = $1")
+        .bind(show.id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration, is_finished, last_played_at)
+         VALUES ($1, $2, 100, 1000, $3, now() - make_interval(mins => $4))",
+    )
+    .bind(user)
+    .bind(episode)
+    .bind(finished)
+    .bind(mins)
+    .execute(pool)
+    .await
+    .unwrap();
+    (show.id, episode)
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn recently_listened_mixes_podcasts_by_last_played(pool: PgPool) {
+    let a = seed(&pool, Seed::new("Alpha", "A1", None, "a1")).await;
+    let e = env(pool.clone()).await;
+    // Artist play 40 minutes ago; three shows in progress at 35/25/5 minutes ago.
+    sqlx::query(
+        "INSERT INTO plays (id, user_id, track_id, played_at, heard)
+         VALUES ($1, $2, $3, now() - make_interval(mins => 40), true)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(e.ana_id)
+    .bind(a.track)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (_show1, _) = seed_podcast_progress(&pool, e.ana_id, "Show One", 35, false).await;
+    let (show2, _) = seed_podcast_progress(&pool, e.ana_id, "Show Two", 25, false).await;
+    let (show3, ep3) = seed_podcast_progress(&pool, e.ana_id, "Show Three", 5, false).await;
+
+    let v = get(&e, &e.ana, "/api/library/recently-listened?limit=6").await;
+    let items = v["items"].as_array().unwrap();
+    let podcasts: Vec<&Value> = items.iter().filter(|i| i["type"] == "podcast").collect();
+    // ceil(6/3) = 2 podcast rows: only the two most recently progressed shows, one row each.
+    assert_eq!(podcasts.len(), 2, "{items:#?}");
+    assert_eq!(podcasts[0]["id"], json!(show3));
+    assert_eq!(podcasts[0]["episodeId"], json!(ep3));
+    assert_eq!(podcasts[0]["name"], json!("Show Three"));
+    assert_eq!(podcasts[0]["author"], json!("Some Author"));
+    assert_eq!(podcasts[0]["type"], json!("podcast"));
+    assert_eq!(
+        podcasts[0]["coverArt"],
+        json!("https://img.example.invalid/cover.png")
+    );
+    assert_eq!(podcasts[0]["progress"], json!(10));
+    assert_eq!(podcasts[1]["id"], json!(show2));
+    // Overall order is newest `lastPlayedAt` first across artists and podcasts; the oldest
+    // show (Show One) is squeezed out by the ceil(limit/3) cap on podcast rows.
+    let names: Vec<_> = items
+        .iter()
+        .map(|i| i["name"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(names, ["Show Three", "Show Two", "Alpha"]);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn recently_listened_podcasts_skip_finished_and_other_users(pool: PgPool) {
+    let e = env(pool.clone()).await;
+    seed_podcast_progress(&pool, e.ana_id, "Finished Show", 5, true).await;
+    let ben_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE username = 'ben'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    seed_podcast_progress(&pool, ben_id, "Bens Show", 1, false).await;
+
+    let v = get(&e, &e.ana, "/api/library/recently-listened?limit=6").await;
+    assert_eq!(v["items"].as_array().unwrap().len(), 0);
+}

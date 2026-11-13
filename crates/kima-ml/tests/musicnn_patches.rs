@@ -9,9 +9,9 @@ fn patches_preserve_frame_and_band_order_at_the_specified_stride() {
     assert_eq!(patches.len(), 3);
     for (patch, start) in patches.iter().zip([0, 93, 186]) {
         assert_eq!(patch.len(), 187);
-        for frame in 0..187 {
-            for band in 0..96 {
-                assert_eq!(patch[frame][band], ((start + frame) * 100 + band) as f32);
+        for (frame, row) in patch.iter().enumerate() {
+            for (band, value) in row.iter().enumerate() {
+                assert_eq!(*value, ((start + frame) * 100 + band) as f32);
             }
         }
     }

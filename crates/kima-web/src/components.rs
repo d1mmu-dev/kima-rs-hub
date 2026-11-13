@@ -205,6 +205,7 @@ pub enum Kind {
     Artist,
     Album,
     Playlist,
+    Podcast,
 }
 
 impl Kind {
@@ -218,6 +219,9 @@ impl Kind {
             }
             Kind::Playlist => {
                 "h-0.5 mt-1 scale-x-0 group-hover:scale-x-100 transition-transform duration-150 bg-type-track"
+            }
+            Kind::Podcast => {
+                "h-0.5 mt-1 scale-x-0 group-hover:scale-x-100 transition-transform duration-150 bg-type-podcast"
             }
         }
     }
@@ -245,8 +249,12 @@ pub fn media_card(card: Card) -> DomNode {
         on_play,
         index,
     } = card;
+    let placeholder = match kind {
+        Kind::Podcast => "mic-vocal",
+        _ => "music",
+    };
     let art = match covers.len() {
-        0 => icon("music", "w-10 h-10 text-[var(--text-muted)]"),
+        0 => icon(placeholder, "w-10 h-10 text-[var(--text-muted)]"),
         1 => {
             let src = covers[0].clone();
             let alt = title.clone();
@@ -347,6 +355,7 @@ pub fn section_header(kind: Kind, title: &str, count: i64) -> DomNode {
         Kind::Artist => "bg-type-artist",
         Kind::Album => "bg-type-album",
         Kind::Playlist => "bg-type-track",
+        Kind::Podcast => "bg-type-podcast",
     };
     let class = format!("w-1 rounded-full shrink-0 h-8 {bar}");
     let (title, count) = (title.to_owned(), count.to_string());

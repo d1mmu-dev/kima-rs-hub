@@ -234,6 +234,71 @@ async fn status_with_a_bad_token_falls_back_to_the_basic_answer(pool: PgPool) {
     );
 }
 
+/// The `podcasts` flag (M6 Task 20) is on only because every route of upstream's
+/// `routes/podcasts.ts` (v1.12.3, 24 registrations) is served: an authenticated request reaches
+/// a handler, never the API's "Not found" fallback or a 405 for a missing method. Unknown ids
+/// and the disabled test network answer the handlers' own errors, which is all this checks.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn every_upstream_podcast_route_is_served(pool: PgPool) {
+    let server = common::server(pool);
+    let body: Value = register(&server, "ana", "secret1").await.json();
+    let token = body["token"].as_str().unwrap();
+    let id = "00000000-0000-7000-8000-000000000001";
+    let ep = "00000000-0000-7000-8000-000000000002";
+    let routes: Vec<(&str, String)> = vec![
+        ("GET", "/api/podcasts".into()),
+        ("GET", "/api/podcasts/categories".into()),
+        ("GET", "/api/podcasts/charts".into()),
+        ("GET", "/api/podcasts/for-you".into()),
+        ("GET", "/api/podcasts/listening".into()),
+        ("GET", "/api/podcasts/discover/top".into()),
+        ("GET", "/api/podcasts/discover/genres?genres=1495".into()),
+        ("GET", "/api/podcasts/discover/genre/1495".into()),
+        ("GET", "/api/podcasts/preview/555".into()),
+        ("GET", "/api/podcasts/preview/555/snippet".into()),
+        ("GET", "/api/podcasts/preview/555/similar".into()),
+        ("POST", "/api/podcasts/refresh-all".into()),
+        ("GET", format!("/api/podcasts/{id}")),
+        ("GET", format!("/api/podcasts/{id}/episodes")),
+        ("GET", format!("/api/podcasts/{id}/episodes/{ep}/next")),
+        ("POST", "/api/podcasts/subscribe".into()),
+        ("DELETE", format!("/api/podcasts/{id}/unsubscribe")),
+        ("GET", format!("/api/podcasts/{id}/refresh")),
+        ("GET", format!("/api/podcasts/{id}/episodes/{ep}/stream")),
+        ("POST", format!("/api/podcasts/{id}/episodes/{ep}/progress")),
+        (
+            "DELETE",
+            format!("/api/podcasts/{id}/episodes/{ep}/progress"),
+        ),
+        ("GET", format!("/api/podcasts/{id}/similar")),
+        ("GET", format!("/api/podcasts/{id}/cover")),
+        ("GET", format!("/api/podcasts/episodes/{ep}/cover")),
+    ];
+    assert_eq!(routes.len(), 24, "upstream podcasts.ts registers 24 routes");
+    for (method, path) in &routes {
+        let req = match *method {
+            "GET" => server.get(path),
+            "POST" => server.post(path).json(&json!({})),
+            "DELETE" => server.delete(path),
+            other => unreachable!("{other}"),
+        };
+        let res = req.authorization_bearer(token).await;
+        let status = res.status_code();
+        assert_ne!(status, StatusCode::METHOD_NOT_ALLOWED, "{method} {path}");
+        let text = res.text();
+        let fallback =
+            serde_json::from_str::<Value>(&text).is_ok_and(|v| v == json!({"error": "Not found"}));
+        assert!(!fallback, "{method} {path} reached the fallback ({status})");
+    }
+    // The detector itself: a path no route serves does reach the fallback.
+    let res = server
+        .get(&format!("/api/podcasts/{id}/no-such-route"))
+        .authorization_bearer(token)
+        .await;
+    res.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(res.json::<Value>(), json!({"error": "Not found"}));
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn features_m1_flags(pool: PgPool) {
     let server = common::server(pool);
@@ -241,7 +306,7 @@ async fn features_m1_flags(pool: PgPool) {
     let token = body["token"].as_str().unwrap();
     server.get("/api/system/features").authorization_bearer(token).await.assert_json(&json!({
         "musicCNN": false, "vibeEmbeddings": false, "audiobookshelfEnabled": false, "fpcalc": false,
-        "library": true, "podcasts": false, "audiobooks": false, "discover": false,
+        "library": true, "podcasts": true, "audiobooks": false, "discover": false,
         "mixes": false, "downloads": false, "imports": false,
         // M-STATS S1: every `/stats/*` route the v1.12.3 page calls is served. `changelog`
         // and `accountDeletion` stay unsent (= off in the frontend, D-170).

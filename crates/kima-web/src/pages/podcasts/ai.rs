@@ -1,10 +1,13 @@
 //! AI-content labels in kima-web (D-200/D-207): the "AI" / "Human" / "Unlabelled" badges, the pill
 //! that shows or hides AI-labelled shows and episodes on a page, and the admin label buttons.
 //!
-//! Podcast lists are fetched with `?ai=show` and filtered here, so a page can say how many items
-//! it hides and switch without a refetch: vertigo 0.13's fetch API does not expose response
-//! headers, so the server's `X-Kima-Ai-Hidden` count cannot be read. The pill starts from the
-//! user's persisted `podcastAiContent` setting (default hide); `unknown` is never hidden.
+//! Paged lists (a show's episodes, a category's chart, `/podcasts/listening`) are fetched with
+//! the pill's `ai=hide|show` and refetched when it flips, so the server filters before paging;
+//! their hidden count is the body's `aiHidden` (vertigo 0.13's fetch API does not expose response
+//! headers, so `X-Kima-Ai-Hidden` cannot be read). Short unpaged lists are fetched with
+//! `ai=show` and filtered here ([`visible`]). The pill starts from the user's persisted
+//! `podcastAiContent` setting (default hide), and lists render only once it is known, so a
+//! `show` setting never flashes the hidden view first; `unknown` is never hidden.
 
 use kima_api_types::podcasts::{AiLabel, AiLabelSource};
 use vertigo::{DomNode, Value, bind, dom, get_driver};
@@ -121,37 +124,58 @@ pub fn hidden_note(hidden: usize) -> DomNode {
     }
 }
 
-/// A page's show/hide state, starting hidden and then following the user's persisted setting.
-pub fn show_ai_state(ctx: &Ctx) -> Value<bool> {
-    let show_ai = Value::new(false);
+/// A page's show/hide state: `None` until the user's persisted setting is known, then the
+/// pill's position. Create it once per page (outside any re-rendered view) so a re-render keeps
+/// what the pill was switched to.
+pub type ShowAi = Value<Option<bool>>;
+
+/// [`ShowAi`] for a page, filled from the user's setting (hide when it cannot be read).
+pub fn show_ai_state(ctx: &Ctx) -> ShowAi {
+    let show_ai = Value::new(None);
     if get_driver().is_browser() {
         get_driver().spawn(bind!(ctx, show_ai, async move {
-            if let Ok(show) = api::ai_setting(&ctx.client).await {
-                show_ai.set(show);
-            }
+            let show = api::ai_setting(&ctx.client).await.unwrap_or(false);
+            show_ai.set(Some(show));
         }));
     }
     show_ai
 }
 
-/// The switch for one page view (the persistent one is in Settings).
-pub fn pill(show_ai: &Value<bool>) -> DomNode {
-    let toggle = bind!(show_ai, |_| show_ai.change(|on| *on = !*on));
-    let text = show_ai.map(|on| pill_text(on).to_owned());
-    let class = show_ai.map(|on| {
-        format!(
-            "inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold border transition-all {}",
-            if on {
-                AI_COLOURS
-            } else {
-                "bg-white/5 text-white border-white/10 hover:bg-white/10"
+/// Renders `view` with the pill's position once it is known; nothing before.
+pub fn when_known(show_ai: &ShowAi, view: impl Fn(bool) -> DomNode + 'static) -> DomNode {
+    show_ai.render_value(move |state| match state {
+        Some(on) => view(on),
+        None => dom! { <span class="hidden" /> },
+    })
+}
+
+/// Whether a row with `label` stays on the page in pill state `show_ai`.
+pub fn row_visible(show_ai: Option<bool>, label: AiLabel) -> bool {
+    show_ai != Some(false) || label != AiLabel::Ai
+}
+
+/// The switch for one page view (the persistent one is in Settings); absent until the setting
+/// it starts from is known.
+pub fn pill(show_ai: &ShowAi) -> DomNode {
+    when_known(
+        show_ai,
+        bind!(show_ai, |on| {
+            let toggle = bind!(show_ai, |_| show_ai
+                .change(|state| *state = state.map(|on| !on)));
+            let class = format!(
+                "inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold border transition-all {}",
+                if on {
+                    AI_COLOURS
+                } else {
+                    "bg-white/5 text-white border-white/10 hover:bg-white/10"
+                }
+            );
+            let (text, pressed) = (pill_text(on), on.to_string());
+            dom! {
+                <button type="button" name="ai-pill" class={class} aria-pressed={pressed} on_click={toggle}>{text}</button>
             }
-        )
-    });
-    let pressed = show_ai.map(|on| on.to_string());
-    dom! {
-        <button type="button" name="ai-pill" class={class} aria-pressed={pressed} on_click={toggle}>{text}</button>
-    }
+        }),
+    )
 }
 
 /// What an admin's label button sends: `Some("ai")`, `Some("human")` or `None` (clear).
@@ -162,24 +186,29 @@ pub const ADMIN_CHOICES: [(&str, Option<&str>); 3] = [
 ];
 
 /// Admin buttons for a show (`episode: None`) or one of its episodes. `current` is updated with
-/// the server's resolved label.
+/// the server's resolved label at once; `reload` is then bumped so the lists that depend on it
+/// (a show's episodes inherit its label) fetch the labels the server now resolves.
 pub fn admin_buttons(
     ctx: &Ctx,
     show: String,
     episode: Option<String>,
     current: Value<(AiLabel, Option<AiLabelSource>)>,
+    reload: Value<u32>,
 ) -> DomNode {
     let buttons: Vec<DomNode> = ADMIN_CHOICES
         .iter()
         .map(|(text, label)| {
             let text = (*text).to_owned();
             let label = label.map(str::to_owned);
-            let click = bind!(ctx, show, episode, current, label, |_| {
-                get_driver().spawn(bind!(ctx, show, episode, current, label, async move {
+            let click = bind!(ctx, show, episode, current, label, reload, |_| {
+                get_driver().spawn(bind!(ctx, show, episode, current, label, reload, async move {
                     match api::set_ai_label(&ctx.client, &show, episode.as_deref(), label.as_deref())
                         .await
                     {
-                        Ok(got) => current.set((got.ai_label, got.ai_label_source)),
+                        Ok(got) => {
+                            current.set((got.ai_label, got.ai_label_source));
+                            reload.change(|n| *n += 1);
+                        }
                         Err(err) => ctx.notify(err.message),
                     }
                 }));
@@ -229,6 +258,16 @@ mod tests {
         assert_eq!(with_label("Host", AiLabel::Ai), "Host · AI");
         assert_eq!(with_label("", AiLabel::Human), "human");
         assert_eq!(with_label("Host", AiLabel::Unknown), "Host");
+    }
+
+    #[test]
+    fn a_row_is_hidden_only_when_ai_and_hiding() {
+        assert!(!row_visible(Some(false), AiLabel::Ai));
+        assert!(row_visible(Some(true), AiLabel::Ai));
+        assert!(row_visible(Some(false), AiLabel::Human));
+        assert!(row_visible(Some(false), AiLabel::Unknown));
+        // Unknown state: nothing is rendered yet, so nothing is hidden either.
+        assert!(row_visible(None, AiLabel::Ai));
     }
 
     #[test]

@@ -167,11 +167,17 @@ restored after a reload) are listed in `docs/DIVERGENCES.md` D-215. Not yet visu
 (no disclosure; never treated as human). Lists hide AI-labelled shows and episodes; each section says how many it hides, and
 a pill (`name="ai-pill"`, on the home, category and show pages) shows or hides them for that view. The pill starts from the
 persistent switch in Settings ("Show AI-generated podcasts", `podcastAiContent`). Admins get "mark as AI / confirm human /
-clear label" buttons for the show and for each episode. Compromises: the pages fetch lists with `?ai=show` and filter
-themselves, because vertigo 0.13's fetch API exposes no response headers (the server's `X-Kima-Ai-Hidden` count cannot be
-read), so a filtered episode page can show fewer than 20 rows; media cards have no badge slot, so cards name a known label in
-their subtitle ("Host · AI") and say nothing for unknown; there is no separate explicit ("E") badge because upstream's
-wire shapes carry no `explicit` key.
+clear label" buttons for the show and for each episode; a change shows at once (an episode marked AI leaves the list while
+hiding) and the episode page is fetched again, so episodes inheriting a changed show label update too. Paged lists (a show's
+episodes, a category's chart, continue listening / new episodes) are fetched with the pill's `?ai=hide|show` and fetched again
+when it flips, so the server filters before paging (full pages, a true "x–y of N"); their hidden count is the body's
+`aiHidden`, because vertigo 0.13's fetch API exposes no response headers (`X-Kima-Ai-Hidden` cannot be read). Short unpaged
+lists (your shows, for-you, similar, search, the home page's top shows) are fetched with `?ai=show` and filtered on the page.
+Lists and the pill render only once the Settings value is known (no flash of the hidden view), and the pill keeps its
+position when the page re-renders. Compromises: the category chart's answer is a bare list (upstream shape), so that page
+shows no hidden count; media cards have no badge slot, so cards name a known label in their subtitle ("Host · AI") and say
+nothing for unknown; there is no separate explicit ("E") badge because upstream's wire shapes carry no `explicit` key
+(plan S4 lists one; recorded in D-207).
 
 ## Visual parity: compromises and assets
 

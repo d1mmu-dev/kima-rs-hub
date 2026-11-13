@@ -9,6 +9,12 @@ ALTER TABLE podcasts
     ADD COLUMN ai_override_by uuid REFERENCES users (id) ON DELETE SET NULL,
     ADD COLUMN ai_override_at timestamptz;
 
+-- Feeds stored before this migration were never read for the tags, and a host that honours the
+-- stored validators would answer every later refresh with 304, so drop them: the next refresh of
+-- every existing show is one full read that stores its labels (D-206).
+UPDATE podcasts SET feed_etag = NULL, feed_last_modified = NULL
+ WHERE feed_etag IS NOT NULL OR feed_last_modified IS NOT NULL;
+
 ALTER TABLE podcast_episodes
     ADD COLUMN ai_feed boolean,
     ADD COLUMN ai_override text CHECK (ai_override IN ('ai', 'human')),

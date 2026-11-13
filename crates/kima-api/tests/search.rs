@@ -450,3 +450,50 @@ async fn search_hides_ai_shows_and_episodes_by_default(pool: PgPool) {
     assert_eq!(robots["aiLabel"], "ai");
     assert_eq!(robots["aiLabelSource"], "feed-show");
 }
+
+/// The AI filter belongs to the podcast groups only (D-207): a music-only search neither reads
+/// the setting nor says anything about hidden items, and ignores `ai=`.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn music_only_search_has_no_ai_filter(pool: PgPool) {
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "musicuser").await;
+    let ai = followed_show(&pool, user.id, "Jazz Robots", "about jazz").await;
+    sqlx::query("UPDATE podcasts SET ai_feed = true WHERE id = $1")
+        .bind(ai)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let e = Env {
+        server: TestServer::new(kima_api::router(state)).unwrap(),
+        token,
+    };
+    for kind in ["artists", "albums", "tracks"] {
+        let res = e
+            .server
+            .get(&format!("/api/search?q=jazz&type={kind}"))
+            .authorization_bearer(&e.token)
+            .await;
+        res.assert_status_ok();
+        assert!(
+            res.headers().get("x-kima-ai-hidden").is_none(),
+            "{kind}: no hidden header"
+        );
+        let res = e
+            .server
+            .get(&format!("/api/search?q=jazz&type={kind}&ai=bogus"))
+            .authorization_bearer(&e.token)
+            .await;
+        res.assert_status_ok();
+    }
+    for kind in ["podcasts", "episodes", "all"] {
+        let res = e
+            .server
+            .get(&format!("/api/search?q=jazz&type={kind}"))
+            .authorization_bearer(&e.token)
+            .await;
+        assert!(
+            res.headers().get("x-kima-ai-hidden").is_some(),
+            "{kind}: filtered"
+        );
+    }
+}

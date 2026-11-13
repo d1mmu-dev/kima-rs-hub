@@ -9,8 +9,16 @@ use kima_api_types::podcasts::{
 use serde::Deserialize;
 use serde_json::json;
 
-// Lists ask for AI-labelled items too (`ai=show`) and the pages filter them, so a page can count
-// what it hides and switch without a refetch (`pages::podcasts::ai`, D-207).
+// Paged and per-show lists (a show's episodes, a category's chart, `/podcasts/listening`) ask
+// for what the page's pill shows (`ai=hide|show`) and refetch when it flips: the server filters
+// before paging, so pages stay full, and says how many it hid in `aiHidden`. Short unpaged lists
+// (followed shows, for-you, similar, search, the home page's top shows) ask for everything
+// (`ai=show`) and the page filters and counts them (`pages::podcasts::ai`, D-207).
+
+/// The `ai=` value for a pill state.
+pub fn ai_param(show_ai: bool) -> &'static str {
+    if show_ai { "show" } else { "hide" }
+}
 
 /// Episode list order on a show page; the server's default is newest first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -20,23 +28,35 @@ pub enum Order {
     Oldest,
 }
 
-pub fn episodes_path(show: &str, offset: u32, limit: u32, order: Order) -> String {
+pub fn episodes_path(show: &str, offset: u32, limit: u32, order: Order, show_ai: bool) -> String {
     let order = match order {
         Order::Newest => "",
         Order::Oldest => "&order=oldest",
     };
-    format!("/api/podcasts/{show}/episodes?offset={offset}&limit={limit}{order}&ai=show")
+    let ai = ai_param(show_ai);
+    format!("/api/podcasts/{show}/episodes?offset={offset}&limit={limit}{order}&ai={ai}")
 }
 
 /// One page of a category's chart. Shelves on the home page load in the background lane so an
 /// interactive request (a search, a show page) is not queued behind them.
 /// `category: None` is Apple's overall chart.
-pub fn chart_path(category: Option<u32>, offset: u32, limit: u32, background: bool) -> String {
+pub fn chart_path(
+    category: Option<u32>,
+    offset: u32,
+    limit: u32,
+    background: bool,
+    show_ai: bool,
+) -> String {
     let category = category
         .map(|c| format!("category={c}&"))
         .unwrap_or_default();
     let lane = if background { "&background=true" } else { "" };
-    format!("/api/podcasts/charts?{category}offset={offset}&limit={limit}{lane}&ai=show")
+    let ai = ai_param(show_ai);
+    format!("/api/podcasts/charts?{category}offset={offset}&limit={limit}{lane}&ai={ai}")
+}
+
+pub fn listening_path(show_ai: bool) -> String {
+    format!("/api/podcasts/listening?ai={}", ai_param(show_ai))
 }
 
 /// Shows from Apple's catalogue and episodes of followed shows, as upstream `PodcastSearch`.
@@ -70,8 +90,8 @@ pub async fn followed(api: &ApiClient) -> Result<Vec<FollowedShow>, ApiError> {
     api.get("/api/podcasts?ai=show").await
 }
 
-pub async fn listening(api: &ApiClient) -> Result<Listening, ApiError> {
-    api.get("/api/podcasts/listening?ai=show").await
+pub async fn listening(api: &ApiClient, show_ai: bool) -> Result<Listening, ApiError> {
+    api.get(&listening_path(show_ai)).await
 }
 
 pub async fn categories(api: &ApiClient) -> Result<Vec<Category>, ApiError> {
@@ -88,8 +108,9 @@ pub async fn chart(
     offset: u32,
     limit: u32,
     background: bool,
+    show_ai: bool,
 ) -> Result<Vec<DiscoveryItem>, ApiError> {
-    api.get(&chart_path(category, offset, limit, background))
+    api.get(&chart_path(category, offset, limit, background, show_ai))
         .await
 }
 
@@ -103,8 +124,10 @@ pub async fn episodes(
     offset: u32,
     limit: u32,
     order: Order,
+    show_ai: bool,
 ) -> Result<EpisodePage, ApiError> {
-    api.get(&episodes_path(show, offset, limit, order)).await
+    api.get(&episodes_path(show, offset, limit, order, show_ai))
+        .await
 }
 
 pub async fn similar(api: &ApiClient, show: &str) -> Result<Vec<DiscoveryItem>, ApiError> {
@@ -182,13 +205,13 @@ mod tests {
     const SHOW: &str = "01a1d3a4-6a42-7a3e-b6a8-1b1c9b1e1f01";
 
     #[test]
-    fn episode_pages_ask_for_order_only_when_oldest() {
+    fn episode_pages_ask_for_order_only_when_oldest_and_follow_the_pill() {
         assert_eq!(
-            episodes_path(SHOW, 0, 20, Order::Newest),
-            format!("/api/podcasts/{SHOW}/episodes?offset=0&limit=20&ai=show")
+            episodes_path(SHOW, 0, 20, Order::Newest, false),
+            format!("/api/podcasts/{SHOW}/episodes?offset=0&limit=20&ai=hide")
         );
         assert_eq!(
-            episodes_path(SHOW, 40, 20, Order::Oldest),
+            episodes_path(SHOW, 40, 20, Order::Oldest, true),
             format!("/api/podcasts/{SHOW}/episodes?offset=40&limit=20&order=oldest&ai=show")
         );
     }
@@ -196,17 +219,23 @@ mod tests {
     #[test]
     fn shelves_use_the_background_lane_and_pages_do_not() {
         assert_eq!(
-            chart_path(Some(1303), 0, 12, true),
+            chart_path(Some(1303), 0, 12, true, true),
             "/api/podcasts/charts?category=1303&offset=0&limit=12&background=true&ai=show"
         );
         assert_eq!(
-            chart_path(Some(1303), 24, 24, false),
-            "/api/podcasts/charts?category=1303&offset=24&limit=24&ai=show"
+            chart_path(Some(1303), 24, 24, false, false),
+            "/api/podcasts/charts?category=1303&offset=24&limit=24&ai=hide"
         );
         assert_eq!(
-            chart_path(None, 0, 24, true),
+            chart_path(None, 0, 24, true, true),
             "/api/podcasts/charts?offset=0&limit=24&background=true&ai=show"
         );
+    }
+
+    #[test]
+    fn listening_follows_the_pill() {
+        assert_eq!(listening_path(false), "/api/podcasts/listening?ai=hide");
+        assert_eq!(listening_path(true), "/api/podcasts/listening?ai=show");
     }
 
     #[test]

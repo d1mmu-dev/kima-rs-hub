@@ -7,7 +7,7 @@ use std::rc::Rc;
 use kima_api_types::podcasts::{EpisodeSearch, ShowSearch};
 use vertigo::{Computed, DomNode, Value, bind, dom, get_driver};
 
-use super::ai::{hidden_text, visible, with_label};
+use super::ai::{ShowAi, hidden_text, visible, with_label};
 use super::image_url;
 use crate::api::client::ApiError;
 use crate::api::podcasts as api;
@@ -136,7 +136,7 @@ fn results(ctx: &Ctx, answer: Answer, show_ai: bool) -> DomNode {
     }
 }
 
-pub fn render(ctx: &Ctx, show_ai: Value<bool>) -> DomNode {
+pub fn render(ctx: &Ctx, show_ai: ShowAi) -> DomNode {
     let typed = Value::new(String::new());
     let answer = Value::new(Answer::Idle);
     // Bumped on every keystroke: a search started for an older value is dropped.
@@ -168,7 +168,10 @@ pub fn render(ctx: &Ctx, show_ai: Value<bool>) -> DomNode {
         }));
     });
     let shown = Computed::from(bind!(answer, show_ai, |c| (answer.get(c), show_ai.get(c))));
-    let list = shown.render_value(bind!(ctx, |(a, on): (Answer, bool)| results(&ctx, a, on)));
+    // Before the setting is known, hide (the default).
+    let list = shown.render_value(bind!(ctx, |(a, on): (Answer, Option<bool>)| {
+        results(&ctx, a, on.unwrap_or(false))
+    }));
     dom! {
         <div class="w-full sm:w-96 max-w-xl">
             <div class="relative">

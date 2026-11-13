@@ -872,3 +872,72 @@ async fn counts_shape(pool: PgPool) {
         json!({"artist":1,"track":2,"audio":0,"vibe":0,"scan":1,"podcast":0,"total":4})
     );
 }
+
+/// A podcast refresh failure must be counted and listed by the same control-plane routes a
+/// music enrichment failure uses, not only by the podcast worker/sweep.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn podcast_refresh_failure_is_counted_and_listed(pool: PgPool) {
+    let podcast = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO podcasts (id, feed_url, title, refresh_error, refresh_failed_at, refresh_failures)\n         VALUES ($1, $2, 'A Show', 'feed is down', now(), 2)",
+    )
+    .bind(podcast)
+    .bind(format!("https://example.invalid/{podcast}"))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let c = enrichment::failure_counts(&pool).await.unwrap();
+    assert_eq!(c.podcast, 1, "a failed podcast must be counted");
+    assert_eq!(
+        c.total, 1,
+        "the podcast count must be folded into the total"
+    );
+
+    let (rows, total) = enrichment::failures(
+        &pool,
+        &FailureFilter {
+            entity_type: None,
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].entity_type, "podcast");
+    assert_eq!(rows[0].entity_id, podcast);
+    assert_eq!(rows[0].entity_name.as_deref(), Some("A Show"));
+    assert_eq!(rows[0].error_message.as_deref(), Some("feed is down"));
+    assert_eq!(rows[0].retry_count, 2);
+
+    let (rows, total) = enrichment::failures(
+        &pool,
+        &FailureFilter {
+            entity_type: Some("podcast".to_owned()),
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows.len(), 1);
+
+    let (rows, total) = enrichment::failures(
+        &pool,
+        &FailureFilter {
+            entity_type: Some("track".to_owned()),
+            limit: 50,
+            offset: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        total, 0,
+        "a track-only filter must not list a podcast failure"
+    );
+    assert!(rows.is_empty());
+}

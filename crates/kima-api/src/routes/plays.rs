@@ -88,16 +88,38 @@ async fn recently_listened(
     user: AuthUser,
     Query(params): Query<LimitParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let rows = plays::recent_artists(&state.pool, user.id, limit_of(&params, 10, 100)).await?;
-    let items: Vec<Value> = rows
+    let limit = limit_of(&params, 10, 100);
+    let (artist_rows, podcast_rows) = tokio::try_join!(
+        plays::recent_artists(&state.pool, user.id, limit),
+        kima_db::podcasts::recent_in_progress(&state.pool, user.id, limit),
+    )?;
+    let mut items: Vec<(OffsetDateTime, Value)> = artist_rows
         .iter()
         .map(|r| {
             let mut v = artist_json(&r.artist);
             v["userHeroUrl"] = Value::Null;
             v["type"] = json!("artist");
             v["lastPlayedAt"] = json!(iso(r.last_played_at));
-            v
+            (r.last_played_at, v)
         })
         .collect();
+    items.extend(podcast_rows.iter().map(|r| {
+        (
+            r.last_played_at,
+            json!({
+                "id": r.podcast_id,
+                "episodeId": r.episode_id,
+                "name": r.name,
+                "coverArt": r.cover_art,
+                "type": "podcast",
+                "author": r.author,
+                "progress": r.progress,
+                "lastPlayedAt": iso(r.last_played_at),
+            }),
+        )
+    }));
+    items.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    items.truncate(limit as usize);
+    let items: Vec<Value> = items.into_iter().map(|(_, v)| v).collect();
     Ok(Json(json!({ "items": items })))
 }

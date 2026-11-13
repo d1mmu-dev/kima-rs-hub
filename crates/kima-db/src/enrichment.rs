@@ -1027,11 +1027,11 @@ struct Parts {
     scan: bool,
     artist: bool,
     audio: bool,
+    podcast: bool,
 }
 
 impl Parts {
-    /// Whitelisted entity types; `vibe`, `podcast` and anything unknown select
-    /// nothing.
+    /// Whitelisted entity types; `vibe` and anything unknown select nothing.
     fn of(entity_type: Option<&str>) -> Parts {
         let (track, scan, artist) = match entity_type {
             None => (true, true, true),
@@ -1045,6 +1045,7 @@ impl Parts {
             scan,
             artist,
             audio: entity_type.is_none() || entity_type == Some("audio"),
+            podcast: entity_type.is_none() || entity_type == Some("podcast"),
         }
     }
 }
@@ -1084,7 +1085,14 @@ pub async fn failures(pool: &PgPool, f: &FailureFilter) -> sqlx::Result<(Vec<Fai
                     jsonb_build_object('status', a.enrichment_status)
              FROM artists a
              WHERE $3 AND a.enrichment_status IN ('failed', 'unresolvable')
-               AND a.enrichment_failures > 0),
+               AND a.enrichment_failures > 0
+             UNION ALL
+             SELECT p.id::text, 'podcast', p.id, p.title, left(p.refresh_error, $6),
+                    NULL::text, p.refresh_failures,
+                    p.refresh_failed_at, p.refresh_failed_at,
+                    jsonb_build_object('feedUrl', p.feed_url)
+             FROM podcasts p
+             WHERE $8 AND p.refresh_error IS NOT NULL),
            page AS (
              SELECT * FROM f
              ORDER BY last_failed_at DESC NULLS LAST, id
@@ -1102,6 +1110,7 @@ pub async fn failures(pool: &PgPool, f: &FailureFilter) -> sqlx::Result<(Vec<Fai
         offset,
         max_chars,
         parts.audio,
+        parts.podcast,
     )
     .fetch_all(pool)
     .await?;
@@ -1157,7 +1166,8 @@ pub async fn failure_counts(pool: &PgPool) -> sqlx::Result<FailureCounts> {
                 AND error_class IS DISTINCT FROM 'FILE_MISSING') AS "scan!",
              (SELECT count(*) FROM track_stages
               WHERE stage = 'embedding' AND status = 'failed'
-                AND error_class IS DISTINCT FROM 'FILE_MISSING') AS "audio!""#
+                AND error_class IS DISTINCT FROM 'FILE_MISSING') AS "audio!",
+             (SELECT count(*) FROM podcasts WHERE refresh_error IS NOT NULL) AS "podcast!""#
     )
     .fetch_one(pool)
     .await?;
@@ -1167,7 +1177,7 @@ pub async fn failure_counts(pool: &PgPool) -> sqlx::Result<FailureCounts> {
         audio: r.audio,
         vibe: 0,
         scan: r.scan,
-        podcast: 0,
-        total: r.artist + r.track + r.scan + r.audio,
+        podcast: r.podcast,
+        total: r.artist + r.track + r.scan + r.audio + r.podcast,
     })
 }

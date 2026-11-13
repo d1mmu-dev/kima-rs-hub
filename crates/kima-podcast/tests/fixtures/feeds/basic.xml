@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Basic Show</title>
+    <link>https://basic.example/</link>
+    <description>A show about &amp; around things.</description>
+    <language>en-us</language>
+    <author>Plain Author</author>
+    <item>
+      <title>Episode Two</title>
+      <guid isPermaLink="false">basic-2</guid>
+      <pubDate>Tue, 10 Jun 2025 04:00:00 GMT</pubDate>
+      <description><![CDATA[<p>Second <b>episode</b></p>]]></description>
+      <enclosure url="https://cdn.basic.example/2.mp3" length="2048" type="audio/mpeg"/>
+      <itunes:duration>1:02:03</itunes:duration>
+    </item>
+    <item>
+      <title>Episode One</title>
+      <guid>basic-1</guid>
+      <pubDate>Mon, 02 Jun 2025 09:30:00 +0200</pubDate>
+      <description>First episode</description>
+      <enclosure url="https://cdn.basic.example/1.m4a" type="audio/x-m4a"/>
+      <itunes:duration>600</itunes:duration>
+    </item>
+  </channel>
+</rss>

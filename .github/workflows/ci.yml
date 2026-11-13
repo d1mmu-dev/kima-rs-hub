@@ -78,12 +78,22 @@ jobs:
           cargo test --locked -p kima-ml --test clap_cold_start --test clap_prepare
           cargo test --locked -p kima-ml --features pg-publish --test clap_cold_start --test clap_prepare
           python3 - <<'PY'
-          import os, pathlib, subprocess
-          for target in ('clap_cold_start', 'clap_prepare'):
-              binaries = [p for p in pathlib.Path('target/debug/deps').glob(target + '-*') if p.is_file() and os.access(p, os.X_OK)]
-              assert binaries, target
-              for binary in binaries:
-                  subprocess.run(['sh', 'scripts/check-soxr-linkage.sh', str(binary), os.environ['RUNNER_TEMP'] + '/kima-soxr'], check=True)
+          import json, os, subprocess
+          # Ask Cargo where the test binaries are: since Cargo's build-dir layout (stable 2026-11) they
+          # are no longer under target/debug/deps.
+          for features in ([], ['--features', 'pg-publish']):
+              out = subprocess.run(
+                  ['cargo', 'test', '--locked', '-p', 'kima-ml', *features, '--test', 'clap_cold_start',
+                   '--test', 'clap_prepare', '--no-run', '--message-format=json'],
+                  check=True, capture_output=True, text=True).stdout
+              found = {}
+              for line in out.splitlines():
+                  msg = json.loads(line)
+                  if msg.get('reason') == 'compiler-artifact' and msg.get('executable') and msg['target']['name'] in ('clap_cold_start', 'clap_prepare'):
+                      found[msg['target']['name']] = msg['executable']
+              assert set(found) == {'clap_cold_start', 'clap_prepare'}, found
+              for binary in found.values():
+                  subprocess.run(['sh', 'scripts/check-soxr-linkage.sh', binary, os.environ['RUNNER_TEMP'] + '/kima-soxr'], check=True)
           PY
       # Failing test lines also go out as annotations, readable without log access.
       - run: |

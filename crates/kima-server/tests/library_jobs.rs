@@ -399,15 +399,20 @@ fn schedule_has_prune_and_kick_always() {
             .map(|(name, _, _)| name)
             .collect::<Vec<_>>()
     };
-    // Sync off still gives the two always-on entries.
+    // Sync off still gives the three always-on entries.
     assert_eq!(
         names(None, config(Some("off"))),
-        vec!["http-cache-prune", "enrich-kick"]
+        vec!["http-cache-prune", "enrich-kick", "podcast-refresh-sweep"]
     );
     let cron = kima_jobs::schedule::Cron::parse("0 4 * * *").unwrap();
     assert_eq!(
         names(Some(cron), config(None)),
-        vec!["library-sync", "http-cache-prune", "enrich-kick"]
+        vec![
+            "library-sync",
+            "http-cache-prune",
+            "enrich-kick",
+            "podcast-refresh-sweep"
+        ]
     );
     // The fire times: 03:17 daily, every ten minutes.
     let entries = kima_server::schedule_entries(&config(Some("off")), None);

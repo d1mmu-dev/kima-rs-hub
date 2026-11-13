@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE podcast_downloads SET last_accessed_at = now() WHERE episode_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9e2e340279bfa8b4843c8655d899af52de3628fae3420b62709473280e597a0e"
+}

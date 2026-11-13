@@ -31,7 +31,7 @@ struct Params {
 
 async fn search(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     Query(params): Query<Params>,
 ) -> Result<Json<Value>, ApiError> {
     let q = params.q.as_deref().unwrap_or("").trim();
@@ -46,6 +46,7 @@ async fn search(
     let want = |name: &str| kind == "all" || kind == name;
 
     let (mut artists, mut albums, mut tracks) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut podcasts, mut episodes) = (Vec::new(), Vec::new());
     if let Some(tsq) = search::prefix_query(&state.pool, &q).await? {
         if want("artists") {
             artists = search::artists(&state.pool, &tsq, limit, 0).await?;
@@ -56,13 +57,49 @@ async fn search(
         if want("tracks") {
             tracks = search::tracks(&state.pool, &tsq, limit, 0).await?;
         }
+        if want("podcasts") {
+            podcasts = search::podcasts(&state.pool, user.id, &tsq, limit, 0).await?;
+        }
+        if want("episodes") {
+            episodes = search::episodes(&state.pool, user.id, &tsq, limit, 0).await?;
+        }
     }
     Ok(Json(json!({
         "artists": artists.iter().map(artist_json).collect::<Vec<_>>(),
         "albums": albums.iter().map(album_json).collect::<Vec<_>>(),
         "tracks": tracks.iter().map(track_json).collect::<Vec<_>>(),
         "audiobooks": [],
-        "podcasts": [],
-        "episodes": [],
+        "podcasts": podcasts.iter().map(podcast_json).collect::<Vec<_>>(),
+        "episodes": episodes.iter().map(episode_json).collect::<Vec<_>>(),
     })))
+}
+
+/// A followed show found by search; AI labelling is `"unknown"`/`null` until Task 0/Task 8
+/// land the `ai_feed` schema (same boundary as Task 13/14's deferred AI cases).
+fn podcast_json(p: &search::PodcastSearchRow) -> Value {
+    json!({
+        "id": p.id,
+        "title": p.title,
+        "author": p.author,
+        "description": p.description,
+        "imageUrl": p.image_url,
+        "episodeCount": p.episode_count,
+        "aiLabel": "unknown",
+        "aiLabelSource": null,
+    })
+}
+
+fn episode_json(e: &search::EpisodeSearchRow) -> Value {
+    json!({
+        "id": e.id,
+        "title": e.title,
+        "description": e.description,
+        "podcastId": e.podcast_id,
+        "podcastTitle": e.podcast_title,
+        "publishedAt": kima_api_types::stats::js_iso(e.published_at),
+        "duration": e.duration,
+        "audioUrl": e.audio_url,
+        "aiLabel": "unknown",
+        "aiLabelSource": null,
+    })
 }

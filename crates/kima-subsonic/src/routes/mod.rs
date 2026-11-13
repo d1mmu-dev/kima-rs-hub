@@ -12,6 +12,7 @@ mod browse;
 mod info;
 mod media;
 mod playlists;
+mod podcasts;
 mod queue;
 mod scrobble;
 mod search;
@@ -127,6 +128,7 @@ pub fn router() -> Router<SubsonicCtx> {
     let router = scrobble::add_routes(router);
     let router = queue::add_routes(router);
     let router = playlists::add_routes(router);
+    let router = podcasts::add_routes(router);
     let router = stars::add_routes(router);
     let router = bookmarks::add_routes(router);
     let router = users::add_routes(router);

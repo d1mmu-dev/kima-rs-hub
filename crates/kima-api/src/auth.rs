@@ -31,15 +31,24 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|token| !token.is_empty())
 }
 
-/// The `?token=` value, only on media paths (`.../stream`, `/api/library/cover-art...`), where
-/// `<audio>`/`<img>` cannot send headers.
+/// Whether `path` is a media path where `<audio>`/`<img>` cannot send headers: a stream, a
+/// podcast preview sample, the cover-art proxy, or a legacy podcast cover redirect link
+/// (Task 15) that itself carries a `?token=` on to the proxy.
+fn is_media_path(path: &str) -> bool {
+    path.ends_with("/stream")
+        || path.ends_with("/snippet")
+        || path.ends_with("/cover")
+        || path.starts_with("/api/library/cover-art")
+}
+
+/// The `?token=` value, only on media paths ([`is_media_path`]).
 fn query_token(parts: &Parts) -> Option<String> {
     // Inside `nest("/api", ..)` the request URI has the prefix stripped; the original keeps it.
     let path = parts
         .extensions
         .get::<axum::extract::OriginalUri>()
         .map_or_else(|| parts.uri.path(), |original| original.0.path());
-    if !(path.ends_with("/stream") || path.starts_with("/api/library/cover-art")) {
+    if !is_media_path(path) {
         return None;
     }
     let Query(mut params) = Query::<HashMap<String, String>>::try_from_uri(&parts.uri).ok()?;
@@ -64,7 +73,7 @@ pub async fn authenticate(
     };
     match claims.kind() {
         TokenKind::Refresh => return Ok(None),
-        TokenKind::Stream if !path.ends_with("/stream") => return Ok(None),
+        TokenKind::Stream if !is_media_path(path) => return Ok(None),
         TokenKind::Access | TokenKind::Stream => {}
     }
     let Some(user) = users::find_by_id(&state.pool, claims.user_id).await? else {

@@ -420,6 +420,9 @@ const LIST_NAMES: &[&str] = &[
     "subsonic-response/artistInfo2/similarArtist",
     "subsonic-response/lyricsList/structuredLyrics",
     "subsonic-response/lyricsList/structuredLyrics/line",
+    "subsonic-response/podcasts/channel",
+    "subsonic-response/podcasts/channel/episode",
+    "subsonic-response/newestPodcasts/episode",
 ];
 
 /// Elements the writers emit as [`Child::Text`]: text in XML, a plain string in JSON. The

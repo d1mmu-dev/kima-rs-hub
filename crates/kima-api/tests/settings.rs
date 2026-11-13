@@ -223,6 +223,45 @@ mod system {
         assert_eq!(body["autoEnrichMetadataLocked"], false);
         assert_eq!(body["enrichmentConcurrency"], 1);
         assert_eq!(body["autotagAutoApply"], "off");
+        assert_eq!(body["podcastChartCountry"], "us");
+    }
+
+    // ---- M6 Task 17: podcastChartCountry (upstream `systemSettings.ts:113`) ----
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn chart_country_validation(pool: PgPool) {
+        let (server, _, admin, _) = setup(pool, |s| s).await;
+        // zod's `.trim().toLowerCase()` runs before the regex: normalized and stored.
+        server
+            .post("/api/system-settings")
+            .authorization_bearer(&admin)
+            .json(&json!({ "podcastChartCountry": " DE " }))
+            .await
+            .assert_status_ok();
+        assert_eq!(get(&server, &admin).await["podcastChartCountry"], "de");
+
+        for bad in ["deu", "1a", "", "d"] {
+            let res = server
+                .post("/api/system-settings")
+                .authorization_bearer(&admin)
+                .json(&json!({ "podcastChartCountry": bad }))
+                .await;
+            res.assert_status_bad_request();
+            res.assert_json(&json!({
+                "error": "Invalid settings",
+                "details": "podcastChartCountry must be a two-letter country code",
+            }));
+        }
+        for bad in [json!(12), json!(null), json!(["de"])] {
+            let res = server
+                .post("/api/system-settings")
+                .authorization_bearer(&admin)
+                .json(&json!({ "podcastChartCountry": bad }))
+                .await;
+            res.assert_status_bad_request();
+        }
+        // Rejected posts never changed the stored value.
+        assert_eq!(get(&server, &admin).await["podcastChartCountry"], "de");
     }
 
     #[sqlx::test(migrator = "kima_db::MIGRATOR")]

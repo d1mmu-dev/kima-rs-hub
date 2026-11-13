@@ -12,9 +12,11 @@ testing = ["dep:axum"]
 [dependencies]
 axum = { workspace = true, optional = true }
 base64.workspace = true
+bytes.workspace = true
 kima-core.workspace = true
 kima-db.workspace = true
 form_urlencoded.workspace = true
+futures.workspace = true
 percent-encoding.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = ["rustls-tls", "json", "gzip"] }

@@ -230,9 +230,10 @@ async fn stats(
         let zone = safe_zone(&state.pool, tz.string()).await?;
         let period_arg = args.get("period");
         let period = Period::parse(period_arg.string());
-        let (l, o) = tokio::try_join!(
+        let (l, o, podcasts) = tokio::try_join!(
             listening_stats(&state.pool, user.id, &zone, period),
-            overview(&state.pool, user.id, period)
+            overview(&state.pool, user.id, period),
+            kima_db::stats::spoken::podcast_spoken(&state.pool, user.id),
         )?;
         let listening = dto::ListeningStats {
             plays: l.plays,
@@ -356,11 +357,11 @@ async fn stats(
                     current: None,
                 },
                 podcasts: dto::PodcastStats {
-                    seconds: 0,
-                    finished: 0,
-                    in_progress: 0,
-                    subscriptions: 0,
-                    backlog: 0,
+                    seconds: podcasts.seconds,
+                    finished: podcasts.finished,
+                    in_progress: podcasts.in_progress,
+                    subscriptions: podcasts.subscriptions,
+                    backlog: podcasts.backlog,
                 },
             },
             signature: dto::Signature {

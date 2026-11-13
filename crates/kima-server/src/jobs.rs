@@ -76,6 +76,103 @@ impl Registry {
     pub fn register_autotag(&mut self, ctx: IdentCtx) {
         self.register(search::QUEUE, 1, search::handler(ctx));
     }
+
+    /// Registers feed refresh independently of the identification switch.
+    pub fn register_podcast_refresh(&mut self, ctx: kima_podcast::ctx::PodcastCtx) {
+        self.register("podcasts", 2, podcast_refresh_handler(ctx));
+    }
+
+    /// Registers the `podcast-cache` queue: one episode download per job (Task 12, D-204).
+    /// Concurrency 2, 3 attempts with the default 5 s/10 s/... backoff.
+    pub fn register_podcast_cache(&mut self, ctx: kima_podcast::ctx::PodcastCtx) {
+        self.register(kima_podcast::cache::QUEUE, 2, podcast_cache_handler(ctx));
+    }
+}
+
+fn podcast_refresh_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
+    let catalog = kima_podcast::catalog::Catalog::new(ctx.net.clone(), ctx.pool.clone());
+    kima_jobs::worker::handler_ctx(move |job, job_ctx| {
+        let ctx = ctx.clone();
+        let catalog = catalog.clone();
+        async move {
+            use kima_jobs::worker::JobError;
+            let id = job
+                .payload
+                .get("podcast_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .ok_or_else(|| {
+                    JobError::Permanent("podcast job missing or invalid podcast_id".into())
+                })?;
+            let run = async {
+                let followed: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM podcast_subscriptions WHERE podcast_id = $1)",
+                )
+                .bind(id)
+                .fetch_one(&ctx.pool)
+                .await
+                .map_err(|e| JobError::Retry(e.to_string()))?;
+                if followed {
+                    match kima_podcast::refresh::refresh_job(&catalog, id, job.id).await {
+                        Ok(_) => {}
+                        Err(kima_podcast::refresh::RefreshError::Feed(
+                            kima_podcast::refresh::FeedFailure::Gone(_),
+                        )) => {
+                            // Feed says it is gone: permanent, never retry.
+                            return Err(JobError::Permanent("podcast feed is gone".into()));
+                        }
+                        Err(error) => return Err(JobError::Retry(error.to_string())),
+                    }
+                }
+                Ok(())
+            };
+            tokio::select! {
+                result = run => result,
+                _ = job_ctx.cancel.cancelled() => Err(JobError::Retry("podcast refresh cancelled".into())),
+            }
+        }
+    })
+}
+
+fn podcast_cache_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
+    kima_jobs::worker::handler(move |job: kima_jobs::queue::Job| {
+        let ctx = ctx.clone();
+        async move {
+            let uuid_field = |name: &str| {
+                job.payload
+                    .get(name)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    .ok_or_else(|| format!("podcast-cache job missing or invalid {name:?}"))
+            };
+            let episode = uuid_field("episode")?;
+            let user = uuid_field("user")?;
+            kima_podcast::cache::download(&ctx, episode, user)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    })
+}
+
+/// Startup for the podcast episode cache (Task 12): measures episodes cached before lengths
+/// were measured (once, via a marker file), then runs the 30-day cleanup immediately so a
+/// restart does not wait for the next 04:00 UTC fire.
+pub async fn prepare_podcast_cache(ctx: &kima_podcast::ctx::PodcastCtx) {
+    let measured = kima_podcast::cache::measure_cached_once(ctx).await;
+    if measured > 0 {
+        tracing::info!(measured, "measured the length of cached podcast episodes");
+    }
+    match kima_podcast::cache::cleanup(ctx).await {
+        Ok((deleted, freed_mb)) if deleted > 0 => {
+            tracing::info!(
+                deleted,
+                freed_mb,
+                "cleaned up expired podcast episode cache"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => warn!(%error, "podcast episode cache cleanup failed"),
+    }
 }
 
 /// Startup step for the `autotag` queue; call before [`spawn_all`]. Requeues searches left
@@ -164,5 +261,28 @@ mod tests {
     fn empty_registry_spawns_nothing() {
         let registry = Registry::new();
         assert!(registry.is_empty());
+    }
+
+    #[tokio::test]
+    async fn register_podcast_cache_adds_its_queue() {
+        let mut registry = Registry::new();
+        registry.register_podcast_cache(kima_podcast::ctx::PodcastCtx {
+            pool: unreachable_pool(),
+            net: std::sync::Arc::new(kima_net::Net::disabled()),
+            data_dir: std::path::PathBuf::new(),
+        });
+        assert_eq!(registry.queues(), vec![kima_podcast::cache::QUEUE]);
+        assert_eq!(
+            registry
+                .config(kima_podcast::cache::QUEUE)
+                .unwrap()
+                .concurrency,
+            2
+        );
+    }
+
+    /// A pool that is never actually used by this test (no query runs against it).
+    fn unreachable_pool() -> PgPool {
+        PgPool::connect_lazy("postgres://127.0.0.1:1/nope").expect("lazy pool never connects")
     }
 }

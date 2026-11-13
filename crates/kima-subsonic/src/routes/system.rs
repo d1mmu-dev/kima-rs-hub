@@ -73,7 +73,8 @@ async fn get_music_folders(_: SubsonicUser) -> Answer {
 }
 
 /// No auth: OpenSubsonic requires clients to be able to ask before signing in (D-075).
-/// `songLyrics` v1 since `getLyricsBySongId` is real (spec §18 row 4, D-116).
+/// `songLyrics` v1 since `getLyricsBySongId` is real (spec §18 row 4, D-116); `getPodcastEpisode`
+/// v1 since M6 Task 18.
 async fn extensions() -> Answer {
     let extension = |name: &'static str| {
         Node::new("openSubsonicExtensions")
@@ -87,6 +88,7 @@ async fn extensions() -> Answer {
             extension("formPost"),
             extension("indexBasedQueue"),
             extension("songLyrics"),
+            extension("getPodcastEpisode"),
         ],
     ))
 }

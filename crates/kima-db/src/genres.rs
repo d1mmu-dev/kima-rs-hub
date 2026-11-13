@@ -294,15 +294,21 @@ macro_rules! genre_reader {
 
 genre_reader!(
     /// Effective genres (MusicBrainz, else file) per track, by rank. Tracks with none are absent.
-    effective_for_tracks, "track_genres_effective", "track_id"
+    effective_for_tracks,
+    "track_genres_effective",
+    "track_id"
 );
 genre_reader!(
     /// Effective genres per album, by rank.
-    effective_for_albums, "album_genres_effective", "album_id"
+    effective_for_albums,
+    "album_genres_effective",
+    "album_id"
 );
 genre_reader!(
     /// Effective genres per artist, by rank.
-    effective_for_artists, "artist_genres_effective", "artist_id"
+    effective_for_artists,
+    "artist_genres_effective",
+    "artist_id"
 );
 
 macro_rules! musicbrainz_reader {
@@ -333,11 +339,15 @@ macro_rules! musicbrainz_reader {
 
 musicbrainz_reader!(
     /// MusicBrainz genres per album (the `tags` alias upstream sends), by rank.
-    musicbrainz_for_albums, "album_genres", "album_id"
+    musicbrainz_for_albums,
+    "album_genres",
+    "album_id"
 );
 musicbrainz_reader!(
     /// MusicBrainz genres per artist (the `tags` alias), by rank.
-    musicbrainz_for_artists, "artist_genres", "artist_id"
+    musicbrainz_for_artists,
+    "artist_genres",
+    "artist_id"
 );
 
 /// The genres an entity shows (upstream `getMergedGenres`, D-166): a person's own list **is**

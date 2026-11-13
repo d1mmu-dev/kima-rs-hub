@@ -324,7 +324,10 @@ async fn keep_claim(
             Ok(false) => {
                 warn!(job = %job.id, queue = %job.queue, "job claim lost; cancelling the job");
                 cancel.cancel();
-                return std::future::pending().await;
+                // Park until the caller drops this future (newer rustc lints awaiting an
+                // uninhabited `pending::<Infallible>()` as unreachable).
+                std::future::pending::<()>().await;
+                unreachable!("a pending future never completes");
             }
             Err(error) => warn!(%error, job = %job.id, "renewing the job lease failed"),
         }

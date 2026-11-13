@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT file_size_mb FROM podcast_downloads WHERE episode_id = $1\n         ORDER BY downloaded_at LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "file_size_mb",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "754f81b548747d6b5b0412df8818c79d38bea38c7352b74682a09c9dafcebf58"
+}

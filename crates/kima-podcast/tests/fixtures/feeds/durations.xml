@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+  <channel>
+    <title>Durations</title>
+    <item><guid>d1</guid><enclosure url="https://c.example/1.mp3" type="audio/mpeg"/><itunes:duration>3600</itunes:duration></item>
+    <item><guid>d2</guid><enclosure url="https://c.example/2.mp3" type="audio/mpeg"/><itunes:duration>02:03</itunes:duration></item>
+    <item><guid>d3</guid><enclosure url="https://c.example/3.mp3" type="audio/mpeg"/><itunes:duration>12.5</itunes:duration></item>
+    <item><guid>d4</guid><enclosure url="https://c.example/4.mp3" type="audio/mpeg"/></item>
+  </channel>
+</rss>

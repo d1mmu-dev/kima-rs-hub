@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE podcasts SET category_ids = $2, updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b3e7cc9783b1771f6cc1145bafa57c18d78765cb56c03f040b1e5635b3298d59"
+}

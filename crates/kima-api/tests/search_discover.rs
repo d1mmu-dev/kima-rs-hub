@@ -127,3 +127,44 @@ async fn discover_podcasts_empty_and_uncached_when_apple_fails(pool: PgPool) {
         .unwrap();
     assert!(cached.is_none(), "a failed section must not be cached");
 }
+
+/// M6 Task 8 (spec S3, D-207): Apple results carry the label kima already knows for that Apple
+/// id (a stored show, else a preview's remembered channel tag), are hidden by default when it is
+/// AI, and a label learnt after an answer was cached still applies to the cached answer.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn discover_labels_known_shows_and_hides_ai(pool: PgPool) {
+    let env = env(pool.clone()).await;
+    let path = "/api/search/discover?q=dungeons&type=podcasts&limit=5";
+    let res = env.get(path).await;
+    assert_eq!(res.headers()["x-kima-ai-hidden"], "0");
+    assert_eq!(res.json::<Value>()["results"].as_array().unwrap().len(), 5);
+
+    kima_db::podcasts::remember_feed_label(&pool, "1450241676", Some(true))
+        .await
+        .unwrap();
+    let res = env.get(path).await;
+    assert_eq!(res.headers()["x-kima-ai-hidden"], "1");
+    let body: Value = res.json();
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 4);
+    assert!(results.iter().all(|r| r["id"] != 1450241676));
+    assert!(results.iter().all(|r| r["aiLabel"] == "unknown"));
+
+    let res = env.get(&format!("{path}&ai=show")).await;
+    assert!(res.headers().get("x-kima-ai-hidden").is_none());
+    let body: Value = res.json();
+    let dnd = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == 1450241676)
+        .unwrap()
+        .clone();
+    assert_eq!(dnd["aiLabel"], "ai");
+    assert_eq!(dnd["aiLabelSource"], "feed-show");
+    assert_eq!(
+        env.replay.asked().len(),
+        1,
+        "later answers came from the cache"
+    );
+}

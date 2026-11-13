@@ -2,7 +2,8 @@
 //! `GET /api/library/recently-listened` (`routes/library/tracks.ts`, artists only: M1 has no
 //! audiobooks or podcasts).
 
-use axum::extract::{Query, State};
+use axum::extract::{Query, RawQuery, State};
+use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kima_db::plays::{self, Listen, PlayOutcome, Source};
@@ -14,6 +15,7 @@ use uuid::Uuid;
 
 use super::library::artists::artist_json;
 use super::library::parse_int;
+use super::podcasts::ai::{AiFilter, from_db, put_label, retain_visible};
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::extract::ApiJson;
@@ -87,9 +89,11 @@ async fn recently_listened(
     State(state): State<AppState>,
     user: AuthUser,
     Query(params): Query<LimitParams>,
-) -> Result<Json<Value>, ApiError> {
+    RawQuery(raw): RawQuery,
+) -> Result<(HeaderMap, Json<Value>), ApiError> {
+    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
     let limit = limit_of(&params, 10, 100);
-    let (artist_rows, podcast_rows) = tokio::try_join!(
+    let (artist_rows, mut podcast_rows) = tokio::try_join!(
         plays::recent_artists(&state.pool, user.id, limit),
         kima_db::podcasts::recent_in_progress(&state.pool, user.id, limit),
     )?;
@@ -103,10 +107,10 @@ async fn recently_listened(
             (r.last_played_at, v)
         })
         .collect();
+    // Podcast rows are filtered by their in-progress episode's label (D-207).
+    let hidden = retain_visible(filter, &mut podcast_rows, |r| from_db(&r.ai_label, None).0);
     items.extend(podcast_rows.iter().map(|r| {
-        (
-            r.last_played_at,
-            json!({
+        let mut v = json!({
                 "id": r.podcast_id,
                 "episodeId": r.episode_id,
                 "name": r.name,
@@ -115,11 +119,12 @@ async fn recently_listened(
                 "author": r.author,
                 "progress": r.progress,
                 "lastPlayedAt": iso(r.last_played_at),
-            }),
-        )
+        });
+        put_label(&mut v, from_db(&r.ai_label, r.ai_label_source.as_deref()));
+        (r.last_played_at, v)
     }));
     items.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     items.truncate(limit as usize);
     let items: Vec<Value> = items.into_iter().map(|(_, v)| v).collect();
-    Ok(Json(json!({ "items": items })))
+    Ok((filter.headers(hidden), Json(json!({ "items": items }))))
 }

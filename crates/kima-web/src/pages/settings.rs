@@ -70,6 +70,7 @@ pub fn render(ctx: &Ctx) -> DomNode {
             </div>
         }
     }));
+    let ai_row = podcast_ai_row(ctx);
     dom! {
         <div class="min-h-screen bg-[var(--bg-primary)]">
             <header class="page-shell pt-8 pb-6">
@@ -99,6 +100,7 @@ pub fn render(ctx: &Ctx) -> DomNode {
                             <div class="space-y-1">
                                 {signed_in}
                                 {password_row}
+                                {ai_row}
                             </div>
                             <div class="border-t border-white/5 mt-8 mb-8"></div>
                         </section>
@@ -107,6 +109,59 @@ pub fn render(ctx: &Ctx) -> DomNode {
             </div>
         </div>
     }
+}
+
+/// The persisted podcast AI switch (kima-only, D-207): AI-labelled shows and episodes are hidden
+/// unless this is on. The pill on the podcast pages starts from it.
+fn podcast_ai_row(ctx: &Ctx) -> DomNode {
+    let on = Value::new(false);
+    let busy = Value::new(false);
+    if get_driver().is_browser() {
+        get_driver().spawn(bind!(ctx, on, async move {
+            if let Ok(show) = crate::api::podcasts::ai_setting(&ctx.client).await {
+                on.set(show);
+            }
+        }));
+    }
+    let toggle = bind!(ctx, on, busy, |_| {
+        let want = !vertigo::transaction(|c| on.get(c));
+        busy.set(true);
+        get_driver().spawn(bind!(ctx, on, busy, async move {
+            match crate::api::podcasts::save_ai_setting(&ctx.client, want).await {
+                Ok(show) => on.set(show),
+                Err(err) => ctx.notify(err.message),
+            }
+            busy.set(false);
+        }));
+    });
+    let checked = on.map(|v| v.to_string());
+    let class = on.map(|v| {
+        format!(
+            "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 {}",
+            if v { "bg-brand" } else { "bg-white/15" }
+        )
+    });
+    let knob = on.map(|v| {
+        format!(
+            "inline-block h-5 w-5 rounded-full bg-white transition-transform {}",
+            if v {
+                "translate-x-5"
+            } else {
+                "translate-x-0.5"
+            }
+        )
+    });
+    row(
+        "Show AI-generated podcasts",
+        dom! { <p class="text-xs tabular-nums text-[var(--text-muted)] mt-0.5">"Shows and episodes labelled AI are hidden unless this is on; unlabelled ones always show"</p> },
+        dom! {
+            <button type="button" role="switch" name="podcast-ai" aria-label="Show AI-generated podcasts"
+                aria-checked={checked} class={class} on_click={toggle}
+                disabled={flag(busy.to_computed())}>
+                <span class={knob}></span>
+            </button>
+        },
+    )
 }
 
 /// `SettingsRow`: label and description on the left, the control on the right (stacked on phones).

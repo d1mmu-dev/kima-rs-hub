@@ -430,3 +430,121 @@ fn rejects_excessive_xml_elements() {
     );
     assert!(kima_podcast::feed::parse(&wide, time::OffsetDateTime::now_utc()).is_err());
 }
+
+// M6 Task 8 (D-200, spec S2/S5): the `podcast:txt purpose="ai-content"` disclosure.
+
+const P20: &str = "https://podcastindex.org/namespace/1.0";
+
+/// An RSS 2.0 feed declaring the Podcasting 2.0 namespace as `podcast:` on the root.
+fn p20(channel: &str, items: &str) -> Feed {
+    let xml = format!(
+        "<?xml version=\"1.0\"?><rss version=\"2.0\" xmlns:podcast=\"{P20}\"><channel>\
+         <title>T</title>{channel}{items}</channel></rss>"
+    );
+    parse(&xml, now()).unwrap()
+}
+
+fn tag(value: &str) -> String {
+    format!("<podcast:txt purpose=\"ai-content\">{value}</podcast:txt>")
+}
+
+#[test]
+fn no_tag_is_no_signal() {
+    let feed = p20("", &item("<guid>a</guid>"));
+    assert_eq!(feed.show.ai_feed, None);
+    assert_eq!(feed.episodes[0].ai_feed, None);
+}
+
+#[test]
+fn channel_and_item_tags_are_read_separately() {
+    let feed = p20(
+        &tag("true"),
+        &format!(
+            "{}{}{}",
+            item(&format!("<guid>a</guid>{}", tag("false"))),
+            item("<guid>b</guid>"),
+            item(&format!("<guid>c</guid>{}", tag("true")))
+        ),
+    );
+    assert_eq!(feed.show.ai_feed, Some(true));
+    let got: Vec<_> = feed.episodes.iter().map(|e| e.ai_feed).collect();
+    assert_eq!(got, vec![Some(false), None, Some(true)]);
+}
+
+#[test]
+fn contradictory_tags_resolve_to_ai() {
+    let feed = p20(&format!("{}{}", tag("false"), tag("true")), "");
+    assert_eq!(feed.show.ai_feed, Some(true));
+    let feed = p20(&format!("{}{}", tag("false"), tag("maybe")), "");
+    assert_eq!(feed.show.ai_feed, Some(false));
+}
+
+#[test]
+fn bad_values_are_no_signal() {
+    for bad in ["yes", "", "1", "maybe", "no"] {
+        assert_eq!(p20(&tag(bad), "").show.ai_feed, None, "{bad:?}");
+    }
+    assert_eq!(p20(&tag(" TRUE "), "").show.ai_feed, Some(true));
+    assert_eq!(p20(&tag("\nFalse\n"), "").show.ai_feed, Some(false));
+    let purpose = "<podcast:txt purpose=\" AI-Content \">true</podcast:txt>";
+    assert_eq!(p20(purpose, "").show.ai_feed, Some(true));
+    let other = "<podcast:txt purpose=\"verify\">true</podcast:txt>";
+    assert_eq!(p20(other, "").show.ai_feed, None);
+    let no_purpose = "<podcast:txt>true</podcast:txt>";
+    assert_eq!(p20(no_purpose, "").show.ai_feed, None);
+}
+
+#[test]
+fn prefix_does_not_matter_namespace_does() {
+    let own = format!("<p20:txt xmlns:p20=\"{P20}\" purpose=\"AI-Content\">true</p20:txt>");
+    assert_eq!(p20(&own, "").show.ai_feed, Some(true));
+    // A `podcast:` prefix bound to another namespace is not the disclosure.
+    let xml = "<?xml version=\"1.0\"?><rss version=\"2.0\" xmlns:podcast=\"https://example.com/ns\">\
+        <channel><title>T</title><podcast:txt purpose=\"ai-content\">true</podcast:txt></channel></rss>";
+    assert_eq!(parse(xml, now()).unwrap().show.ai_feed, None);
+    // Undeclared prefix: no namespace, no signal.
+    let xml = "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel><title>T</title>\
+        <podcast:txt purpose=\"ai-content\">true</podcast:txt></channel></rss>";
+    assert_eq!(parse(xml, now()).unwrap().show.ai_feed, None);
+    // Default namespace on the element itself.
+    let own_default = format!("<txt xmlns=\"{P20}\" purpose=\"ai-content\">false</txt>");
+    assert_eq!(p20(&own_default, "").show.ai_feed, Some(false));
+}
+
+#[test]
+fn the_early_github_namespace_uri_counts() {
+    let xml = "<?xml version=\"1.0\"?><rss version=\"2.0\" \
+        xmlns:podcast=\"https://github.com/Podcastindex-org/podcast-namespace/blob/main/docs/1.0.md\">\
+        <channel><title>T</title><podcast:txt purpose=\"ai-content\">true</podcast:txt></channel></rss>";
+    assert_eq!(parse(xml, now()).unwrap().show.ai_feed, Some(true));
+}
+
+#[test]
+fn a_nested_tag_is_not_the_channels() {
+    // Only direct children of `<channel>`/`<item>` count (the tag's documented parents).
+    let feed = p20(&format!("<image><url>u</url>{}</image>", tag("true")), "");
+    assert_eq!(feed.show.ai_feed, None);
+}
+
+#[test]
+fn ai_label_and_explicit_are_independent() {
+    for (explicit, ai) in [
+        ("yes", "true"),
+        ("yes", "false"),
+        ("no", "true"),
+        ("no", "false"),
+    ] {
+        let feed = parse(
+            &format!(
+                "<?xml version=\"1.0\"?><rss version=\"2.0\" xmlns:podcast=\"{P20}\" \
+                 xmlns:itunes=\"http://www.itunes.com/dtds/podcast-1.0.dtd\"><channel><title>T</title>\
+                 <itunes:explicit>{explicit}</itunes:explicit>{}</channel></rss>",
+                tag(ai)
+            ),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(feed.show.explicit, explicit == "yes");
+        assert_eq!(feed.show.ai_feed, Some(ai == "true"));
+    }
+}

@@ -1,7 +1,8 @@
 //! `/podcasts/...`: the home page, a followed show, an Apple preview and a category chart
-//! (upstream `app/podcasts/**`). AI labels are not shown yet: until the AI filter (plan Task 0/8)
-//! lands every show counts as unknown, which the filter's rules leave visible.
+//! (upstream `app/podcasts/**`). AI labels, the hide/show pill and the admin label buttons are
+//! kima-only (D-200/D-207, `ai`).
 
+pub mod ai;
 pub mod category;
 pub mod home;
 pub mod search;
@@ -58,7 +59,7 @@ pub fn discovery_card(ctx: &Ctx, item: &DiscoveryItem, index: usize) -> DomNode 
             .into_iter()
             .collect(),
         title: item.title.clone(),
-        subtitle: item.author.clone().unwrap_or_default(),
+        subtitle: ai::with_label(item.author.as_deref().unwrap_or_default(), item.ai_label),
         kind: Kind::Podcast,
         on_play: None,
         index,

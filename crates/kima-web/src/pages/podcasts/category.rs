@@ -4,6 +4,7 @@
 use kima_api_types::podcasts::{Category, DiscoveryItem};
 use vertigo::{DomNode, Value, bind, dom, get_driver};
 
+use super::ai::{hidden_note, pill, show_ai_state, visible};
 use super::{discovery_card, heading};
 use crate::api::client::load;
 use crate::api::podcasts as api;
@@ -56,7 +57,14 @@ pub fn render(ctx: &Ctx, id: u32) -> DomNode {
         get_driver().spawn(async move { first() });
     }
 
-    let grid = items.render_value(bind!(ctx, busy, |all: Vec<DiscoveryItem>| {
+    let show_ai = show_ai_state(ctx);
+    let shown = vertigo::Computed::from(bind!(items, show_ai, |c| (items.get(c), show_ai.get(c))));
+    let grid = shown.render_value(bind!(ctx, busy, |(all, on): (Vec<DiscoveryItem>, bool)| {
+        let (all, hidden) = visible(&all, on, |i| i.ai_label);
+        let note = hidden_note(hidden);
+        if all.is_empty() && hidden > 0 {
+            return note;
+        }
         if all.is_empty() {
             return if vertigo::transaction(|c| busy.get(c)) {
                 dom! { <p class="py-8 text-sm text-[var(--text-muted)]">"Loading…"</p> }
@@ -73,8 +81,9 @@ pub fn render(ctx: &Ctx, id: u32) -> DomNode {
             .enumerate()
             .map(|(i, item)| discovery_card(&ctx, item, i))
             .collect();
-        media_grid(cards)
+        dom! { <div>{note}{media_grid(cards)}</div> }
     }));
+    let ai_pill = pill(&show_ai);
     let more_button = more.render_value(bind!(fetch, busy, |more: bool| {
         if !more {
             return dom! { <span class="hidden" /> };
@@ -97,6 +106,7 @@ pub fn render(ctx: &Ctx, id: u32) -> DomNode {
         <div class="min-h-screen">
             {head}
             <div class="page-shell page-end animate-rise">
+                <div class="flex flex-wrap items-center gap-2 mb-4">{ai_pill}</div>
                 {grid}
                 {error_view}
                 {more_button}

@@ -298,6 +298,32 @@ async fn apple_4xx_is_404_and_a_garbled_reply_is_502(pool: PgPool) {
         .assert_status(StatusCode::BAD_GATEWAY);
 }
 
+// ---- M6 Task 17: podcastChartCountry changes the chart path (`systemSettings.ts:113`) ----
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn chart_country_changes_chart_path(pool: PgPool) {
+    let mut rec = recording();
+    rec.0.push(json_entry(
+        "/de/rss/toppodcasts/limit=200/json",
+        200,
+        json!({"feed": {"entry": []}}),
+    ));
+    let env = env_with(pool, rec).await;
+    // `env`'s first registered user is admin (`users::register`).
+    env.server
+        .post("/api/system-settings")
+        .authorization_bearer(&env.token)
+        .json(&json!({ "podcastChartCountry": "de" }))
+        .await
+        .assert_status_ok();
+    env.get("/api/podcasts/charts").await.assert_status_ok();
+    assert!(
+        env.replay
+            .asked()
+            .contains(&"GET /de/rss/toppodcasts/limit=200/json".to_string())
+    );
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn apple_throttling_is_502_not_no_such_chart(pool: PgPool) {
     let mut rec = recording();

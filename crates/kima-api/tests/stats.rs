@@ -445,6 +445,129 @@ async fn stats_empty_authenticated_contract(pool: PgPool) {
     assert!(v.get("system").is_none());
 }
 
+// ---- M6 Task 17: spoken stats (podcasts real, audiobooks still zero until M6b) ----
+
+async fn store_show_with_episode(pool: &PgPool, title: &str) -> (Uuid, Uuid) {
+    let show = kima_db::podcasts::insert_show(
+        pool,
+        Uuid::now_v7(),
+        &kima_db::podcasts::NewShow {
+            feed_url: &format!("https://feeds.example.invalid/{title}"),
+            title,
+            author: None,
+            description: None,
+            image_url: None,
+            itunes_id: None,
+            category_ids: &[],
+            language: None,
+            explicit: false,
+            episode_count: 1,
+            feed_etag: None,
+            feed_last_modified: None,
+        },
+    )
+    .await
+    .unwrap();
+    kima_db::podcasts::insert_episodes(
+        pool,
+        show.id,
+        &[kima_db::podcasts::NewEpisode {
+            guid: "ep1".into(),
+            title: "Episode 1".into(),
+            description: None,
+            audio_url: "https://audio.example.invalid/ep1.mp3".into(),
+            duration: 1000,
+            published_at: time::OffsetDateTime::now_utc(),
+            episode_number: None,
+            season: None,
+            image_url: None,
+            file_size: None,
+            mime_type: None,
+        }],
+    )
+    .await
+    .unwrap();
+    let episode: Uuid = sqlx::query_scalar("SELECT id FROM podcast_episodes WHERE podcast_id = $1")
+        .bind(show.id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (show.id, episode)
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn spoken_podcasts_counts(pool: PgPool) {
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "ana").await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+
+    let (show_a, ep_a) = store_show_with_episode(&pool, "Show A").await;
+    let (show_b, ep_b) = store_show_with_episode(&pool, "Show B").await;
+    // A third show the user follows but has never opened any episode of (backlog).
+    let (show_c, _ep_c) = store_show_with_episode(&pool, "Show C").await;
+
+    for show in [show_a, show_b, show_c] {
+        sqlx::query("INSERT INTO podcast_subscriptions (user_id, podcast_id) VALUES ($1, $2)")
+            .bind(user.id)
+            .bind(show)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    // Finished episode A: 300 s heard.
+    sqlx::query(
+        "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration, is_finished)
+         VALUES ($1, $2, 300, 1000, true)",
+    )
+    .bind(user.id)
+    .bind(ep_a)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Unfinished episode B: 150 s heard.
+    sqlx::query(
+        "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration, is_finished)
+         VALUES ($1, $2, 150, 1000, false)",
+    )
+    .bind(user.id)
+    .bind(ep_b)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let v: Value = server
+        .get("/api/stats")
+        .authorization_bearer(&token)
+        .await
+        .json();
+    assert_eq!(
+        v["spoken"]["podcasts"],
+        json!({
+            "seconds": 450,
+            "finished": 1,
+            "inProgress": 1,
+            "subscriptions": 3,
+            "backlog": 1,
+        })
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn spoken_audiobooks_still_zero(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let v: Value = server
+        .get("/api/stats")
+        .authorization_bearer(&token)
+        .await
+        .json();
+    assert_eq!(
+        v["spoken"]["audiobooks"],
+        json!({"seconds":0,"finished":0,"inProgress":0,"setAside":0,"topAuthors":[],"current":null})
+    );
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn stats_shelf_and_listening_are_isolated_per_user(pool: PgPool) {
     let first = seed(&pool, Seed::new("Artist", "Album", Some(1994), "One")).await;

@@ -300,6 +300,60 @@ pub async fn chart_country(pool: &PgPool) -> sqlx::Result<Option<String>> {
     .flatten())
 }
 
+/// One in-progress podcast row for `GET /library/recently-listened` (upstream
+/// `routes/library/tracks.ts:90-125`): the caller's most recently played episode of a show
+/// they have not finished, at most one per show.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct InProgressPodcast {
+    pub podcast_id: Uuid,
+    pub episode_id: Uuid,
+    pub name: String,
+    pub cover_art: Option<String>,
+    pub author: Option<String>,
+    /// Rounded percent (0 when the stored duration is not yet known).
+    pub progress: i32,
+    pub last_played_at: OffsetDateTime,
+}
+
+/// `user`'s in-progress episodes, newest `lastPlayedAt` first, deduplicated to the most recent
+/// episode of each show (upstream takes `overall_limit * 2` progress rows, dedupes keeping the
+/// first/most recent per show, then slices to `ceil(overall_limit / 3)`; `tracks.ts:90-125`).
+pub async fn recent_in_progress(
+    pool: &PgPool,
+    user: Uuid,
+    overall_limit: i64,
+) -> sqlx::Result<Vec<InProgressPodcast>> {
+    let take_rows = overall_limit.saturating_mul(2).max(1);
+    let take_shows = overall_limit.saturating_add(2) / 3;
+    if take_shows <= 0 {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(
+        "WITH recent AS (
+             SELECT p.episode_id, e.podcast_id, p.last_played_at, p.\"current_time\", p.duration
+             FROM podcast_progress p JOIN podcast_episodes e ON e.id = p.episode_id
+             WHERE p.user_id = $1 AND NOT p.is_finished AND p.\"current_time\" > 0
+             ORDER BY p.last_played_at DESC LIMIT $2
+         ),
+         deduped AS (
+             SELECT DISTINCT ON (podcast_id) episode_id, podcast_id, last_played_at,
+                    \"current_time\", duration
+             FROM recent ORDER BY podcast_id, last_played_at DESC
+         )
+         SELECT d.podcast_id, d.episode_id, s.title AS name, s.image_url AS cover_art, s.author,
+                (CASE WHEN d.duration > 0 THEN round(d.\"current_time\" / d.duration * 100)
+                      ELSE 0 END)::int AS progress,
+                d.last_played_at
+         FROM deduped d JOIN podcasts s ON s.id = d.podcast_id
+         ORDER BY d.last_played_at DESC LIMIT $3",
+    )
+    .bind(user)
+    .bind(take_rows)
+    .bind(take_shows)
+    .fetch_all(pool)
+    .await
+}
+
 /// A subscribed show in newest-subscription-first order.
 #[derive(sqlx::FromRow)]
 pub struct FollowedShowRow {

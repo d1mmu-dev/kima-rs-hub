@@ -54,6 +54,7 @@ async fn show(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<V
         "autoEnrichMetadataLocked": state.identify.locked(),
         "enrichmentConcurrency": kv.enrichment_concurrency,
         "autotagAutoApply": kv.autotag_auto_apply.as_str(),
+        "podcastChartCountry": kv.podcast_chart_country,
     })))
 }
 
@@ -129,6 +130,17 @@ fn changes(
                     ));
                 }
             },
+            Key::PodcastChartCountry => {
+                let bad = || invalid(format!("{} must be a two-letter country code", key.name()));
+                let s = value.as_str().ok_or_else(bad)?;
+                let normalized = s.trim().to_lowercase();
+                if normalized.chars().count() != 2
+                    || !normalized.chars().all(|c| c.is_ascii_lowercase())
+                {
+                    return Err(bad());
+                }
+                out.push(Change::Plain(key, Value::String(normalized)));
+            }
         }
     }
     Ok((registration_open, out))

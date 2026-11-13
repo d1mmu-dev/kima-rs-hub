@@ -18,16 +18,19 @@ pub enum Key {
     AutoEnrichMetadata,
     EnrichmentConcurrency,
     AutotagAutoApply,
+    /// ISO 3166 alpha-2, lowercase; the Apple podcast chart country (M6 Task 17, D-038 amended).
+    PodcastChartCountry,
 }
 
 impl Key {
-    pub const ALL: [Key; 6] = [
+    pub const ALL: [Key; 7] = [
         Key::AcoustidApiKey,
         Key::FanartApiKey,
         Key::FanartEnabled,
         Key::AutoEnrichMetadata,
         Key::EnrichmentConcurrency,
         Key::AutotagAutoApply,
+        Key::PodcastChartCountry,
     ];
 
     /// The camelCase key of spec §15.1, used as the row key and the JSON field.
@@ -39,6 +42,7 @@ impl Key {
             Key::AutoEnrichMetadata => "autoEnrichMetadata",
             Key::EnrichmentConcurrency => "enrichmentConcurrency",
             Key::AutotagAutoApply => "autotagAutoApply",
+            Key::PodcastChartCountry => "podcastChartCountry",
         }
     }
 
@@ -82,6 +86,7 @@ pub struct KvSettings {
     pub auto_enrich_metadata: bool,
     pub enrichment_concurrency: u8,
     pub autotag_auto_apply: AutoApply,
+    pub podcast_chart_country: String,
 }
 
 impl Default for KvSettings {
@@ -93,6 +98,7 @@ impl Default for KvSettings {
             auto_enrich_metadata: true,
             enrichment_concurrency: 1,
             autotag_auto_apply: AutoApply::Off,
+            podcast_chart_country: "us".to_string(),
         }
     }
 }
@@ -113,6 +119,7 @@ impl std::fmt::Debug for KvSettings {
             .field("auto_enrich_metadata", &self.auto_enrich_metadata)
             .field("enrichment_concurrency", &self.enrichment_concurrency)
             .field("autotag_auto_apply", &self.autotag_auto_apply)
+            .field("podcast_chart_country", &self.podcast_chart_country)
             .finish()
     }
 }
@@ -172,6 +179,11 @@ pub async fn load(pool: &PgPool, cipher: &Cipher) -> sqlx::Result<KvSettings> {
             }
             Key::AutotagAutoApply => {
                 out.autotag_auto_apply = serde_json::from_value(value).unwrap_or_default();
+            }
+            Key::PodcastChartCountry => {
+                if let Some(s) = value.as_str() {
+                    out.podcast_chart_country = s.to_string();
+                }
             }
             _ => {}
         }

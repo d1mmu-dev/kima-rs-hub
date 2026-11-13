@@ -1,0 +1,98 @@
+[
+  {
+    "because": [
+      "Race Show"
+    ],
+    "category": {
+      "id": 1495,
+      "name": "Improv",
+      "parentId": 1303
+    },
+    "podcasts": [
+      {
+        "aiLabel": "unknown",
+        "aiLabelSource": null,
+        "author": "Preview Author",
+        "categoryIds": [
+          1495
+        ],
+        "chartRank": 2,
+        "coverUrl": "http://127.0.0.1:46427/img/apple-888.png",
+        "description": "A show to preview before following.",
+        "episodeCount": 0,
+        "feedUrl": null,
+        "genres": [
+          "Improv"
+        ],
+        "id": "888",
+        "isExternal": true,
+        "itunesId": "888",
+        "title": "Preview Show"
+      }
+    ]
+  },
+  {
+    "because": [
+      "Robot Radio"
+    ],
+    "category": {
+      "id": 1318,
+      "name": "Technology",
+      "parentId": null
+    },
+    "podcasts": [
+      {
+        "aiLabel": "unknown",
+        "aiLabelSource": null,
+        "author": "Chart Author",
+        "categoryIds": [
+          1318
+        ],
+        "chartRank": 2,
+        "coverUrl": "http://127.0.0.1:46427/img/apple-999.png",
+        "description": "Only on the chart.",
+        "episodeCount": 0,
+        "feedUrl": null,
+        "genres": [
+          "Technology"
+        ],
+        "id": "999",
+        "isExternal": true,
+        "itunesId": "999",
+        "title": "Chart Only"
+      }
+    ]
+  },
+  {
+    "because": [
+      "Race Show"
+    ],
+    "category": {
+      "id": 1303,
+      "name": "Comedy",
+      "parentId": null
+    },
+    "podcasts": [
+      {
+        "aiLabel": "unknown",
+        "aiLabelSource": null,
+        "author": "Preview Author",
+        "categoryIds": [
+          1495
+        ],
+        "chartRank": 2,
+        "coverUrl": "http://127.0.0.1:46427/img/apple-888.png",
+        "description": "A show to preview before following.",
+        "episodeCount": 0,
+        "feedUrl": null,
+        "genres": [
+          "Improv"
+        ],
+        "id": "888",
+        "isExternal": true,
+        "itunesId": "888",
+        "title": "Preview Show"
+      }
+    ]
+  }
+]

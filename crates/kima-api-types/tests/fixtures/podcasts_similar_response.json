@@ -1,0 +1,22 @@
+[
+  {
+    "aiLabel": "unknown",
+    "aiLabelSource": null,
+    "author": "Preview Author",
+    "categoryIds": [
+      1495
+    ],
+    "chartRank": 2,
+    "coverUrl": "http://127.0.0.1:46427/img/apple-888.png",
+    "description": "A show to preview before following.",
+    "episodeCount": 0,
+    "feedUrl": null,
+    "genres": [
+      "Improv"
+    ],
+    "id": "888",
+    "isExternal": true,
+    "itunesId": "888",
+    "title": "Preview Show"
+  }
+]

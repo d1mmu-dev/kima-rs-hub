@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "aiLabel": "human",
+      "aiLabelSource": "feed-episode",
+      "author": "Race Author",
+      "coverArt": "http://127.0.0.1:46427/img/race.png",
+      "episodeId": "01a1d732-73fc-773f-88aa-8e794cd0dac5",
+      "id": "01a1d732-73f5-741e-8603-638478e907b3",
+      "lastPlayedAt": "2026-11-13T23:16:13.474Z",
+      "name": "Race Show",
+      "progress": 10,
+      "type": "podcast"
+    },
+    {
+      "albumCount": 1,
+      "coverArt": null,
+      "heroUrl": null,
+      "id": "01a1d732-5e21-7190-aca2-dcc705aaf906",
+      "lastPlayedAt": "2026-11-13T23:16:06.764Z",
+      "mbid": null,
+      "name": "Untagged Artist",
+      "trackCount": 3,
+      "type": "artist",
+      "userHeroUrl": null
+    }
+  ]
+}

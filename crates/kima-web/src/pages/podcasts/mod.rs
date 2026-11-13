@@ -4,6 +4,7 @@
 
 pub mod category;
 pub mod home;
+pub mod search;
 pub mod show;
 
 use kima_api_types::playback_state::{QueueAlbum, QueueArtist, QueueItem};

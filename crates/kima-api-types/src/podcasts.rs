@@ -208,6 +208,41 @@ pub struct Subscribed {
     pub message: Option<String>,
 }
 
+/// A show from Apple's search (`GET /search/discover?type=podcasts`); `id` is Apple's id.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ShowHit {
+    pub id: i64,
+    pub name: String,
+    pub artist: Option<String>,
+    pub cover_url: Option<String>,
+}
+
+/// `GET /search/discover?type=podcasts`.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct ShowSearch {
+    #[serde(default)]
+    pub results: Vec<ShowHit>,
+}
+
+/// An episode of a followed show found by `GET /search?type=episodes`.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EpisodeHit {
+    pub id: Uuid,
+    pub podcast_id: Uuid,
+    pub podcast_title: String,
+    pub title: String,
+    pub published_at: Option<String>,
+}
+
+/// The episode part of `GET /search?type=episodes`.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct EpisodeSearch {
+    #[serde(default)]
+    pub episodes: Vec<EpisodeHit>,
+}
+
 /// `POST /podcasts/refresh-all`.
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct RefreshAll {
@@ -265,6 +300,26 @@ mod tests {
         assert_eq!(got.itunes_id, "555");
         assert_eq!(got.preview_episodes[0].title, "E");
         assert_eq!(got.subscribed_podcast_id, None);
+    }
+
+    #[test]
+    fn search_results_decode_the_captured_shapes() {
+        let shows: ShowSearch = serde_json::from_str(
+            r#"{"aliasInfo":null,"results":[{"aiLabel":"unknown","aiLabelSource":null,"artist":"Race Author",
+            "categoryIds":[1495],"coverUrl":"https://img.example.invalid/600x600bb.jpg","description":"d",
+            "feedUrl":"http://127.0.0.1:1/race-mock.xml","genres":["Comedy"],"id":555,"name":"Race Show",
+            "trackCount":3,"type":"podcast"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(shows.results[0].id, 555);
+        let found: EpisodeSearch = serde_json::from_str(
+            r#"{"albums":[],"artists":[],"audiobooks":[],"episodes":[{"aiLabel":"unknown","aiLabelSource":null,
+            "audioUrl":"http://127.0.0.1:1/race-a.mp3","description":"The main race.","duration":3600,
+            "id":"e0057b8e-440b-4269-8eaf-2cc0406d54cc","podcastId":"9ec5f550-95f3-4945-b6de-571729d25a70",
+            "podcastTitle":"Race Show","publishedAt":"2026-11-12T08:53:58.628Z","title":"Grand Prix"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(found.episodes[0].podcast_title, "Race Show");
     }
 
     #[test]

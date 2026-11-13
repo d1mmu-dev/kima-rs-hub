@@ -159,7 +159,7 @@ Settings page and changes it back, so it can be repeated.
 
 `/podcasts` (home), `/podcasts/show?id=` (followed show), `/podcasts/show?itunesId=` (Apple preview) and
 `/podcasts/category?id=` (a category's chart); episodes play in the shared player and save their progress. Differences
-from upstream (category links instead of per-category shelves, no podcast search or sort selects yet, no AI badges until
+from upstream (category links instead of per-category shelves, search results inline, no sort selects yet, no AI badges until
 the AI filter, episodes not restored after a reload) are listed in `docs/DIVERGENCES.md` D-215. Not yet visually compared.
 
 ## Visual parity: compromises and assets

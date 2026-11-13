@@ -5,9 +5,9 @@
 //! (`fixtures/podcasts_upstream_keys.json`, itself re-checked against the pinned upstream
 //! sources by `tools/check-podcast-upstream-keys.py`).
 //!
-//! Tests marked `#[ignore = "…capture…"]` read the captured fixtures; they stay ignored until the
-//! fixtures are captured from the current checkout (never hand-written). The key-file and
-//! comparison-machinery tests run without them.
+//! The fixtures are committed as captured from the checkout named in
+//! `podcasts_capture_manifest.json` (never hand-written; recapture, do not edit). Every test runs
+//! by default: the key-file and comparison-machinery tests need no fixture, the rest read them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -710,6 +710,70 @@ fn podcast_fixtures_share_captured_identities() {
         json!({"aiLabel": "ai", "aiLabelSource": "admin"})
     );
     assert_eq!(fixture("unsubscribe")["success"], true);
+}
+
+/// `/library/recently-listened` mixes artist and podcast rows, so the key file can only list
+/// their union as optional keys. Each row type carries exactly its own upstream keys
+/// (c7527577 `backend/src/routes/library/tracks.ts`: artist = the `select` at 67-73 spread at
+/// 131-137 plus `coverArt`/`albumCount` at 196-203; podcast = 161-173; audiobook rows are not
+/// served, M6b), plus only the kima extras the key file lists for that type.
+#[test]
+fn recently_listened_rows_carry_their_own_type_keys() {
+    let set = |keys: &[&str]| {
+        keys.iter()
+            .map(|k| (*k).to_owned())
+            .collect::<BTreeSet<_>>()
+    };
+    let artist = set(&[
+        "id",
+        "mbid",
+        "name",
+        "heroUrl",
+        "userHeroUrl",
+        "type",
+        "lastPlayedAt",
+        "coverArt",
+        "albumCount",
+    ]);
+    let podcast = set(&[
+        "id",
+        "episodeId",
+        "name",
+        "coverArt",
+        "type",
+        "author",
+        "progress",
+        "lastPlayedAt",
+    ]);
+    // D-059 (artist) and D-207 (podcast) extras, as in the key file's `kimaOnly`.
+    let artist_extra = set(&["trackCount"]);
+    let podcast_extra = set(&["aiLabel", "aiLabelSource"]);
+    let mut seen = BTreeSet::new();
+    for row in fixture("recently_listened")["items"].as_array().unwrap() {
+        let keys: BTreeSet<String> = row.as_object().unwrap().keys().cloned().collect();
+        let kind = row["type"].as_str().unwrap().to_owned();
+        let (required, extra) = match kind.as_str() {
+            "artist" => (&artist, &artist_extra),
+            "podcast" => (&podcast, &podcast_extra),
+            other => panic!("unexpected row type {other}"),
+        };
+        let missing: Vec<_> = required.difference(&keys).collect();
+        assert!(missing.is_empty(), "{kind} row lacks {missing:?}: {row}");
+        let allowed: BTreeSet<String> = required.union(extra).cloned().collect();
+        let foreign: Vec<_> = keys.difference(&allowed).collect();
+        assert!(foreign.is_empty(), "{kind} row carries {foreign:?}: {row}");
+        seen.insert(kind);
+    }
+    assert_eq!(seen, set(&["artist", "podcast"]), "both row types captured");
+    let kima_only = &keys()["recently_listened"]["kimaOnly"];
+    let listed: BTreeSet<String> = kima_only
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.trim_start_matches(".items[].").to_owned())
+        .collect();
+    let extras: BTreeSet<String> = artist_extra.union(&podcast_extra).cloned().collect();
+    assert_eq!(listed, extras, "extras match the key file's kimaOnly");
 }
 
 /// Every upstream route answered 2xx/3xx in the capture run, and every list that hides AI

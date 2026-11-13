@@ -237,7 +237,8 @@ async fn status_with_a_bad_token_falls_back_to_the_basic_answer(pool: PgPool) {
 /// The `podcasts` flag (M6 Task 20) is on only because every route of upstream's
 /// `routes/podcasts.ts` (v1.12.3, 24 registrations) is served: an authenticated request reaches
 /// a handler, never the API's "Not found" fallback or a 405 for a missing method. Unknown ids
-/// and the disabled test network answer the handlers' own errors, which is all this checks.
+/// and the disabled test network answer the handlers' own errors. The single-segment routes
+/// that `GET /podcasts/{id}` would also match must give their own handler's exact answer.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn every_upstream_podcast_route_is_served(pool: PgPool) {
     let server = common::server(pool);
@@ -297,6 +298,40 @@ async fn every_upstream_podcast_route_is_served(pool: PgPool) {
         .await;
     res.assert_status(StatusCode::NOT_FOUND);
     assert_eq!(res.json::<Value>(), json!({"error": "Not found"}));
+    // `categories`, `charts`, `for-you` and `listening` also fit `GET /podcasts/{id}`: without
+    // their own registration the show handler would answer them (a 404, never the fallback),
+    // so each must give its own handler's answer. The test network is off, so the three
+    // Apple-backed ones answer their Apple failure.
+    let res = server
+        .get("/api/podcasts/no-such-segment")
+        .authorization_bearer(token)
+        .await;
+    res.assert_status(StatusCode::NOT_FOUND);
+    let show_handler = res.json::<Value>();
+    assert_ne!(show_handler, json!({"error": "Not found"}));
+    let apple_down = json!({"error": "Apple Podcasts did not answer; try again shortly"});
+    let own = [
+        ("categories", StatusCode::BAD_GATEWAY, apple_down.clone()),
+        ("charts", StatusCode::BAD_GATEWAY, apple_down.clone()),
+        ("for-you", StatusCode::BAD_GATEWAY, apple_down),
+        (
+            "listening",
+            StatusCode::OK,
+            json!({"aiHidden": 0, "inProgress": [], "newEpisodes": []}),
+        ),
+    ];
+    for (segment, status, body) in own {
+        let res = server
+            .get(&format!("/api/podcasts/{segment}"))
+            .authorization_bearer(token)
+            .await;
+        let got = (res.status_code(), res.json::<Value>());
+        assert_ne!(
+            got.1, show_handler,
+            "{segment} reached GET /podcasts/{{id}}"
+        );
+        assert_eq!(got, (status, body), "{segment}");
+    }
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

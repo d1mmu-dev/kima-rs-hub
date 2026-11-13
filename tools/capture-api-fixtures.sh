@@ -35,14 +35,15 @@ for set in "${sets[@]}"; do
 done
 [[ ${#copy[@]} -gt 0 ]] || { echo 'Set KIMA_CAPTURE_SET (msync, mstats, m6; comma-separated)' >&2; exit 2; }
 # Refuse before anything expensive when a fixture this run would overwrite has uncommitted
-# changes: they would be lost. A file HEAD does not have yet is not flagged.
+# changes or exists untracked: either would be lost. A file absent from disk is not flagged.
 dirty=()
 for f in "${copy[@]}"; do
   f="crates/kima-api-types/tests/fixtures/$f"
-  if [[ -e "$f" ]] && ! git diff --quiet HEAD -- "$f" 2>/dev/null; then dirty+=("$f"); fi
+  if [[ -e "$f" ]] && { ! git diff --quiet HEAD -- "$f" 2>/dev/null ||
+    [[ -n "$(git status --porcelain -- "$f")" ]]; }; then dirty+=("$f"); fi
 done
 if [[ ${#dirty[@]} -gt 0 ]]; then
-  printf 'Uncommitted changes in fixtures this run would overwrite:\n' >&2
+  printf 'Uncommitted or untracked fixtures this run would overwrite:\n' >&2
   printf '  %s\n' "${dirty[@]}" >&2
   exit 1
 fi

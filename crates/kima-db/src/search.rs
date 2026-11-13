@@ -2,6 +2,8 @@
 //! flagged missing are excluded, and so are albums and artists with no present track.
 
 use sqlx::PgPool;
+use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::browse::{ALBUM_SELECT, ARTIST_COLUMNS, AlbumRow, ArtistRow, TRACK_SELECT, TrackRow};
 
@@ -82,4 +84,77 @@ pub async fn tracks(
         .bind(offset)
         .fetch_all(pool)
         .await
+}
+
+/// A followed show matching a search (M6 Task 16, upstream `searchPodcastsFTS`): only shows
+/// `user` follows are searched.
+#[derive(sqlx::FromRow)]
+pub struct PodcastSearchRow {
+    pub id: Uuid,
+    pub title: String,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub image_url: Option<String>,
+    pub episode_count: i32,
+}
+
+pub async fn podcasts(
+    pool: &PgPool,
+    user: Uuid,
+    query: &str,
+    limit: i64,
+    offset: i64,
+) -> sqlx::Result<Vec<PodcastSearchRow>> {
+    sqlx::query_as(
+        "SELECT p.id, p.title, p.author, p.description, p.image_url, p.episode_count
+         FROM podcasts p
+         JOIN podcast_subscriptions s ON s.podcast_id = p.id AND s.user_id = $1
+         WHERE p.search @@ $2::tsquery
+         ORDER BY ts_rank(p.search, $2::tsquery) DESC, lower(p.title) ASC, p.id ASC
+         LIMIT $3 OFFSET $4",
+    )
+    .bind(user)
+    .bind(query)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+}
+
+/// An episode of a followed show matching a search (upstream `searchEpisodes`).
+#[derive(sqlx::FromRow)]
+pub struct EpisodeSearchRow {
+    pub id: Uuid,
+    pub podcast_id: Uuid,
+    pub podcast_title: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub published_at: OffsetDateTime,
+    pub duration: i32,
+    pub audio_url: String,
+}
+
+pub async fn episodes(
+    pool: &PgPool,
+    user: Uuid,
+    query: &str,
+    limit: i64,
+    offset: i64,
+) -> sqlx::Result<Vec<EpisodeSearchRow>> {
+    sqlx::query_as(
+        "SELECT e.id, e.podcast_id, p.title AS podcast_title, e.title, e.description,
+                e.published_at, e.duration, e.audio_url
+         FROM podcast_episodes e
+         JOIN podcasts p ON p.id = e.podcast_id
+         JOIN podcast_subscriptions s ON s.podcast_id = p.id AND s.user_id = $1
+         WHERE e.search @@ $2::tsquery
+         ORDER BY ts_rank(e.search, $2::tsquery) DESC, e.published_at DESC, e.id ASC
+         LIMIT $3 OFFSET $4",
+    )
+    .bind(user)
+    .bind(query)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
 }

@@ -6,6 +6,7 @@ use axum::extract::{Query, RawQuery, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use kima_api_types::stats::js_iso;
 use kima_db::plays::{self, Listen, PlayOutcome, Source};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -103,7 +104,8 @@ async fn recently_listened(
             let mut v = artist_json(&r.artist);
             v["userHeroUrl"] = Value::Null;
             v["type"] = json!("artist");
-            v["lastPlayedAt"] = json!(iso(r.last_played_at));
+            // A JS `Date` on the wire: milliseconds and `Z` (`toISOString`), like upstream.
+            v["lastPlayedAt"] = json!(js_iso(r.last_played_at));
             (r.last_played_at, v)
         })
         .collect();
@@ -118,7 +120,7 @@ async fn recently_listened(
                 "type": "podcast",
                 "author": r.author,
                 "progress": r.progress,
-                "lastPlayedAt": iso(r.last_played_at),
+                "lastPlayedAt": js_iso(r.last_played_at),
         });
         put_label(&mut v, from_db(&r.ai_label, r.ai_label_source.as_deref()));
         (r.last_played_at, v)

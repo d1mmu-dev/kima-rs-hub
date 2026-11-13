@@ -1,12 +1,16 @@
 //! M6 Task 11: `GET /api/podcasts/{podcast}/episodes/{episode}/stream` (`podcasts.ts:916-1084`):
 //! the episode's audio from its host, with ranges, status mapping and SSRF handled by
-//! `kima_net::open_audio` (D-203); this binary covers the route around it. `KIMA_NET_DENY_REAL=1`.
+//! `kima_net::open_audio` (D-203); this binary covers the route around it. A cached copy
+//! (`kima_podcast::cache`, Task 12) is served first, without asking the host; a miss streams from
+//! the host and queues one background download (D-214). `KIMA_NET_DENY_REAL=1`.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use axum::http::header::{ACCEPT_RANGES, CACHE_CONTROL, CONTENT_RANGE, CONTENT_TYPE, RANGE};
+use axum::http::header::{
+    ACCEPT_RANGES, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE,
+};
 use kima_api::AppState;
 use kima_core::identify::IdentifySwitch;
 use kima_db::PgPool;
@@ -73,6 +77,7 @@ async fn seed(pool: &PgPool, audio_url: String, mime_type: Option<String>) -> (U
 struct Env {
     server: axum_test::TestServer,
     token: String,
+    user: Uuid,
     state: AppState,
 }
 
@@ -87,11 +92,12 @@ fn env(pool: PgPool) -> impl std::future::Future<Output = Env> {
 }
 
 async fn env_from(state: AppState) -> Env {
-    let token = common::user_with_token(&state, "podder").await.1;
+    let (user, token) = common::user_with_token(&state, "podder").await;
     let server = axum_test::TestServer::new(kima_api::router(state.clone())).unwrap();
     Env {
         server,
         token,
+        user: user.id,
         state,
     }
 }
@@ -317,4 +323,199 @@ async fn the_route_releases_its_audio_permit_once_the_response_completes(pool: P
             .await;
         assert!(matches!(out, kima_net::Outcome::Answered(_)), "{out:?}");
     }
+}
+
+// Cache first (`podcasts.ts:933-1015`, D-214): a cached copy is served without asking the host,
+// a miss streams from the host and queues the episode's download once.
+
+/// The jobs queued for `episode`'s download: (state, payload user).
+async fn download_jobs(pool: &PgPool, episode: Uuid) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT state, payload ->> 'user' FROM jobs
+         WHERE queue = $1 AND payload ->> 'key' = $2 ORDER BY created_at",
+    )
+    .bind(kima_podcast::cache::QUEUE)
+    .bind(format!("episode:{episode}"))
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// An environment whose server keeps its files under `data_dir` (the cache lives there).
+async fn env_with_data(pool: PgPool, data_dir: &std::path::Path) -> Env {
+    let net = Arc::new(Net::new(
+        NetConfig::for_tests(Bases::all("http://127.0.0.1:9")),
+        pool.clone(),
+        IdentifySwitch::new(false, false),
+    ));
+    env_from(
+        common::state(pool)
+            .with_net(net)
+            .with_data_dir(data_dir.to_path_buf()),
+    )
+    .await
+}
+
+/// Puts `bytes` in the cache as `episode`'s complete download, as the worker leaves it.
+async fn cache_episode(env: &Env, data_dir: &std::path::Path, episode: Uuid, data: &[u8]) {
+    let dir = kima_podcast::cache::cache_dir(data_dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{episode}.audio")), data).unwrap();
+    podcasts::upsert_download(
+        &env.state.pool,
+        env.user,
+        episode,
+        &format!("podcast-audio/{episode}.audio"),
+        data.len() as f64 / 1024.0 / 1024.0,
+    )
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_cached_episode_is_served_from_the_cache_without_asking_its_host(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = AudioHost::start(bytes(10), AudioMode::Normal).await;
+    let (podcast, episode) = seed(
+        &pool,
+        format!("{}/ep.mp3", host.url()),
+        Some("audio/x-custom".into()),
+    )
+    .await;
+    let env = env_with_data(pool.clone(), tmp.path()).await;
+    let cached: Vec<u8> = bytes(5000).into_iter().rev().collect();
+    cache_episode(&env, tmp.path(), episode, &cached).await;
+
+    let res = env.stream(podcast, episode).await;
+    res.assert_status_ok();
+    assert_eq!(res.as_bytes().as_ref(), &cached[..]);
+    assert_eq!(res.header(CONTENT_TYPE), "audio/x-custom");
+    assert_eq!(res.header(ACCEPT_RANGES), "bytes");
+    assert_eq!(res.header(CACHE_CONTROL), "public, max-age=3600");
+    assert_eq!(res.header(CONTENT_LENGTH), "5000");
+    assert!(host.hits().is_empty(), "{:?}", host.hits());
+    // Nothing to download: it is already cached.
+    assert!(download_jobs(&pool, episode).await.is_empty());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_range_on_a_cached_episode_is_answered_from_the_file(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = AudioHost::start(bytes(10), AudioMode::Normal).await;
+    let (podcast, episode) = seed(&pool, format!("{}/ep.mp3", host.url()), None).await;
+    let env = env_with_data(pool.clone(), tmp.path()).await;
+    let cached: Vec<u8> = bytes(1000).into_iter().rev().collect();
+    cache_episode(&env, tmp.path(), episode, &cached).await;
+
+    let res = env.stream_ranged(podcast, episode, "bytes=10-19").await;
+    res.assert_status(StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.header(CONTENT_RANGE), "bytes 10-19/1000");
+    assert_eq!(res.header(CONTENT_LENGTH), "10");
+    assert_eq!(res.header(ACCEPT_RANGES), "bytes");
+    assert_eq!(res.header(CONTENT_TYPE), "audio/mpeg");
+    assert_eq!(res.as_bytes().as_ref(), &cached[10..20]);
+
+    let res = env.stream_ranged(podcast, episode, "bytes=-100").await;
+    res.assert_status(StatusCode::PARTIAL_CONTENT);
+    assert_eq!(res.header(CONTENT_RANGE), "bytes 900-999/1000");
+    assert_eq!(res.as_bytes().as_ref(), &cached[900..]);
+
+    let res = env.stream_ranged(podcast, episode, "bytes=5000-").await;
+    res.assert_status(StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(res.header(CONTENT_RANGE), "bytes */1000");
+
+    // Several ranges at once: the whole file, as 200 (RFC 9110).
+    let res = env.stream_ranged(podcast, episode, "bytes=0-1,5-9").await;
+    res.assert_status_ok();
+    assert_eq!(res.as_bytes().as_ref(), &cached[..]);
+    assert!(host.hits().is_empty(), "{:?}", host.hits());
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_cold_episode_streams_from_its_host_and_queues_one_download(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = bytes(1000);
+    let host = AudioHost::start(data.clone(), AudioMode::Normal).await;
+    let (podcast, episode) = seed(&pool, format!("{}/ep.mp3", host.url()), None).await;
+    let env = env_with_data(pool.clone(), tmp.path()).await;
+
+    let res = env.stream(podcast, episode).await;
+    res.assert_status_ok();
+    assert_eq!(res.as_bytes().as_ref(), &data[..]);
+    assert_eq!(host.hits().len(), 1);
+    let user = env.user.to_string();
+    assert_eq!(
+        download_jobs(&pool, episode).await,
+        vec![("queued".to_string(), user.clone())]
+    );
+
+    // Played again (and seeked) before the download ran: still the host, still one job.
+    env.stream(podcast, episode).await.assert_status_ok();
+    env.stream_ranged(podcast, episode, "bytes=10-19")
+        .await
+        .assert_status(StatusCode::PARTIAL_CONTENT);
+    assert_eq!(host.hits().len(), 3);
+    assert_eq!(download_jobs(&pool, episode).await.len(), 1);
+
+    // While the download runs, plays do not queue a second one beside it.
+    let claimed = kima_jobs::queue::claim(
+        &pool,
+        kima_podcast::cache::QUEUE,
+        10,
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    assert_eq!(claimed.len(), 1);
+    env.stream(podcast, episode).await.assert_status_ok();
+    assert_eq!(
+        download_jobs(&pool, episode).await,
+        vec![("running".to_string(), user)]
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_download_in_progress_is_not_served_from_the_cache(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = bytes(1000);
+    let host = AudioHost::start(data.clone(), AudioMode::Normal).await;
+    let (podcast, episode) = seed(&pool, format!("{}/ep.mp3", host.url()), None).await;
+    let env = env_with_data(pool.clone(), tmp.path()).await;
+
+    // Only the worker's temp file exists yet: never served.
+    let dir = kima_podcast::cache::cache_dir(tmp.path());
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{episode}.tmp")), b"partial").unwrap();
+    let res = env.stream(podcast, episode).await;
+    res.assert_status_ok();
+    assert_eq!(res.as_bytes().as_ref(), &data[..]);
+    assert_eq!(host.hits().len(), 1);
+
+    // A complete-looking file whose download job is still running is not served either.
+    let cached: Vec<u8> = data.iter().rev().copied().collect();
+    cache_episode(&env, tmp.path(), episode, &cached).await;
+    let claimed = kima_jobs::queue::claim(
+        &pool,
+        kima_podcast::cache::QUEUE,
+        10,
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    assert_eq!(claimed.len(), 1);
+    let res = env.stream(podcast, episode).await;
+    res.assert_status_ok();
+    assert_eq!(res.as_bytes().as_ref(), &data[..]);
+    assert_eq!(host.hits().len(), 2);
+
+    // Once it is done, the cached copy is served.
+    assert!(
+        kima_jobs::queue::complete(&pool, &claimed[0])
+            .await
+            .unwrap()
+    );
+    let res = env.stream(podcast, episode).await;
+    res.assert_status_ok();
+    assert_eq!(res.as_bytes().as_ref(), &cached[..]);
+    assert_eq!(host.hits().len(), 2);
 }

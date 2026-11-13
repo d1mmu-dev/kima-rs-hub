@@ -781,3 +781,49 @@ async fn pending_with_key_finds_a_queued_or_running_job_by_payload_key(pool: PgP
         None
     );
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_unless_pending_with_key_skips_a_queued_or_running_job_with_that_key(pool: PgPool) {
+    let payload = |user: &str| json!({"key": "episode:e1", "user": user});
+    let first = queue::enqueue_unless_pending_with_key(&pool, "q", payload("a"), 3)
+        .await
+        .unwrap()
+        .expect("a fresh job");
+    // Queued: the same key is not queued again, whatever else the payload says.
+    assert_eq!(
+        queue::enqueue_unless_pending_with_key(&pool, "q", payload("b"), 3)
+            .await
+            .unwrap(),
+        None
+    );
+    // Another key or another queue is its own job.
+    assert!(
+        queue::enqueue_unless_pending_with_key(&pool, "q", json!({"key": "episode:e2"}), 3)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        queue::enqueue_unless_pending_with_key(&pool, "other", payload("a"), 3)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let claimed = queue::claim(&pool, "q", 1, LEASE).await.unwrap();
+    assert_eq!(claimed[0].id, first);
+    // Running: still not queued again.
+    assert_eq!(
+        queue::enqueue_unless_pending_with_key(&pool, "q", payload("a"), 3)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(queue::complete(&pool, &claimed[0]).await.unwrap());
+    // Done: a new job.
+    assert!(
+        queue::enqueue_unless_pending_with_key(&pool, "q", payload("a"), 3)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

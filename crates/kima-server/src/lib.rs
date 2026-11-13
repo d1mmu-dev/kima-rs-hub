@@ -148,6 +148,40 @@ pub fn schedule_entries(
     entries
 }
 
+/// The podcast entries of the scheduler: the daily episode-cache cleanup at 04:00 UTC (upstream's
+/// 24-hour interval after the startup run, `index.ts:571-576`). Kept apart from
+/// [`schedule_entries`] because it needs the podcast context (data directory, client).
+pub fn podcast_schedule_entries(
+    ctx: kima_podcast::ctx::PodcastCtx,
+) -> Vec<(&'static str, Cron, EnqueueFn)> {
+    vec![(
+        "podcast-cache-cleanup",
+        Cron::parse("0 4 * * *").expect("a valid cron expression"),
+        podcast_cache_cleanup_job(ctx),
+    )]
+}
+
+/// The scheduler passes only a `PgPool` to its entries; `ctx` already carries its own pool
+/// clone (and `net`/`data_dir`), so the one the scheduler hands over is unused here.
+fn podcast_cache_cleanup_job(ctx: kima_podcast::ctx::PodcastCtx) -> EnqueueFn {
+    std::sync::Arc::new(move |_pool| {
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            let (deleted, freed_mb) = kima_podcast::cache::cleanup(&ctx)
+                .await
+                .map_err(|e| e.to_string())?;
+            if deleted > 0 {
+                tracing::info!(
+                    deleted,
+                    freed_mb,
+                    "cleaned up expired podcast episode cache"
+                );
+            }
+            Ok(())
+        })
+    })
+}
+
 /// Queues the incremental reconcile; it dedupes against one already queued or running.
 fn library_sync_job() -> EnqueueFn {
     std::sync::Arc::new(|pool| {

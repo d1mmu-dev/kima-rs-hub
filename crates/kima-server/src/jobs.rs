@@ -154,25 +154,58 @@ fn podcast_cache_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
     })
 }
 
-/// Startup for the podcast episode cache (Task 12): measures episodes cached before lengths
-/// were measured (once, via a marker file), then runs the 30-day cleanup immediately so a
-/// restart does not wait for the next 04:00 UTC fire.
-pub async fn prepare_podcast_cache(ctx: &kima_podcast::ctx::PodcastCtx) {
-    let measured = kima_podcast::cache::measure_cached_once(ctx).await;
-    if measured > 0 {
-        tracing::info!(measured, "measured the length of cached podcast episodes");
-    }
-    match kima_podcast::cache::cleanup(ctx).await {
-        Ok((deleted, freed_mb)) if deleted > 0 => {
-            tracing::info!(
-                deleted,
-                freed_mb,
-                "cleaned up expired podcast episode cache"
-            );
+/// What the podcast startup work did (for its log line and its test).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PodcastStartup {
+    /// Cached episodes deleted by the 30-day cleanup.
+    pub cleaned: u64,
+    /// Cached episodes whose length was measured.
+    pub measured: usize,
+    /// Shows given Apple's categories.
+    pub categories_filled: usize,
+}
+
+/// The podcast work done once per start (upstream `index.ts:553-569`): the 30-day episode-cache
+/// cleanup and then the measuring of what stays cached (once, via a marker file), and, beside
+/// them, the category fill-in for shows with an Apple id and no categories (one batched Apple
+/// lookup, `assignMissingCategories`). Failures are logged, never fatal.
+pub async fn podcast_startup(ctx: &kima_podcast::ctx::PodcastCtx) -> PodcastStartup {
+    let cache = async {
+        let cleaned = match kima_podcast::cache::cleanup(ctx).await {
+            Ok((deleted, freed_mb)) => {
+                if deleted > 0 {
+                    tracing::info!(
+                        deleted,
+                        freed_mb,
+                        "cleaned up expired podcast episode cache"
+                    );
+                }
+                deleted
+            }
+            Err(error) => {
+                warn!(%error, "podcast episode cache cleanup failed");
+                0
+            }
+        };
+        let measured = kima_podcast::cache::measure_cached_once(ctx).await;
+        if measured > 0 {
+            tracing::info!(measured, "measured the length of cached podcast episodes");
         }
-        Ok(_) => {}
-        Err(error) => warn!(%error, "podcast episode cache cleanup failed"),
+        (cleaned, measured)
+    };
+    let catalog = kima_podcast::catalog::Catalog::new(ctx.net.clone(), ctx.pool.clone());
+    let ((cleaned, measured), categories_filled) =
+        tokio::join!(cache, catalog.assign_missing_categories());
+    PodcastStartup {
+        cleaned,
+        measured,
+        categories_filled,
     }
+}
+
+/// Runs [`podcast_startup`] in the background, so the server does not wait for it to start.
+pub fn spawn_podcast_startup(ctx: kima_podcast::ctx::PodcastCtx) -> JoinHandle<PodcastStartup> {
+    tokio::spawn(async move { podcast_startup(&ctx).await })
 }
 
 /// Startup step for the `autotag` queue; call before [`spawn_all`]. Requeues searches left

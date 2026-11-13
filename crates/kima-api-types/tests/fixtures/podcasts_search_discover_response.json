@@ -1,0 +1,25 @@
+{
+  "aliasInfo": null,
+  "results": [
+    {
+      "aiLabel": "unknown",
+      "aiLabelSource": null,
+      "artist": "Race Author",
+      "categoryIds": [
+        1495,
+        1303
+      ],
+      "coverUrl": "http://127.0.0.1:46427/img/apple-555.png",
+      "description": "A show about racing.",
+      "feedUrl": "http://127.0.0.1:46427/feeds/race.xml",
+      "genres": [
+        "Improv",
+        "Comedy"
+      ],
+      "id": 555,
+      "name": "Race Show",
+      "trackCount": 4,
+      "type": "podcast"
+    }
+  ]
+}

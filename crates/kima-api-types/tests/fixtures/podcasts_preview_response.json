@@ -1,0 +1,47 @@
+{
+  "aiLabel": "unknown",
+  "aiLabelSource": null,
+  "author": "Preview Author",
+  "categories": [
+    {
+      "id": 1495,
+      "name": "Improv"
+    },
+    {
+      "id": 1303,
+      "name": "Comedy"
+    }
+  ],
+  "coverUrl": "http://127.0.0.1:46427/img/apple-888.png",
+  "description": "A show to preview.",
+  "episodeCount": 2,
+  "feedUrl": "http://127.0.0.1:46427/feeds/preview.xml",
+  "genres": [
+    "Improv",
+    "Comedy"
+  ],
+  "isSubscribed": false,
+  "itunesId": "888",
+  "previewEpisodes": [
+    {
+      "description": "The newer one.",
+      "duration": 640,
+      "publishedAt": "2026-11-07T08:00:00.000Z",
+      "title": "Preview Two"
+    },
+    {
+      "description": "The first one.",
+      "duration": 420,
+      "publishedAt": "2026-11-04T08:00:00.000Z",
+      "title": "Preview One"
+    }
+  ],
+  "snippet": {
+    "description": "The first one.",
+    "duration": 420,
+    "publishedAt": "2026-11-04T08:00:00.000Z",
+    "title": "Preview One"
+  },
+  "subscribedPodcastId": null,
+  "title": "Preview Show"
+}

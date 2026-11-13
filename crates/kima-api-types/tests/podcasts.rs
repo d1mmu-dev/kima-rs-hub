@@ -384,7 +384,6 @@ fn decode<T: DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
-#[ignore = "M6 podcast fixtures not captured yet: see tools/capture-api-fixtures.md"]
 fn podcast_types_round_trip() {
     round_trip::<Vec<FollowedShow>>("list", &fixture("list"));
     round_trip::<Vec<FollowedShow>>("list_ai_show", &fixture("list_ai_show"));
@@ -414,7 +413,6 @@ fn podcast_types_round_trip() {
 }
 
 #[test]
-#[ignore = "M6 podcast fixtures not captured yet: see tools/capture-api-fixtures.md"]
 fn podcast_fixtures_cover_upstream_keys() {
     let keys = keys();
     let problems: Vec<String> = FIXTURES
@@ -428,7 +426,6 @@ fn podcast_fixtures_cover_upstream_keys() {
 /// populate them: every required upstream path of these fixtures is observed with a non-null
 /// value at least once (a key that may be null still needs one non-null occurrence).
 #[test]
-#[ignore = "M6 podcast fixtures not captured yet: see tools/capture-api-fixtures.md"]
 fn populated_cases_observe_every_nested_key() {
     let keys = keys();
     // (fixture, paths that may legitimately stay null/absent in the populated case)
@@ -505,7 +502,6 @@ fn by_title<'a>(rows: &'a Value, title: &str) -> &'a Value {
 /// human-tagged episode) and Robot Radio (Apple 777, channel tagged AI) followed through
 /// `POST /subscribe`; Preview Show (888) only previewed.
 #[test]
-#[ignore = "M6 podcast fixtures not captured yet: see tools/capture-api-fixtures.md"]
 fn podcast_fixtures_share_captured_identities() {
     let race = fixture("subscribe")["podcast"]["id"]
         .as_str()
@@ -719,7 +715,6 @@ fn podcast_fixtures_share_captured_identities() {
 /// Every upstream route answered 2xx/3xx in the capture run, and every list that hides AI
 /// items carried `X-Kima-Ai-Hidden`, equal to the body's `aiHidden` where the body has one.
 #[test]
-#[ignore = "M6 podcast fixtures not captured yet: see tools/capture-api-fixtures.md"]
 fn capture_manifest_counts_every_route_and_hidden_header() {
     let manifest = manifest();
     let captures = manifest["captures"].as_array().expect("captures");
@@ -798,7 +793,6 @@ fn timestamps(v: &Value, path: String, out: &mut Vec<(String, String)>) {
 
 /// Upstream's dates are JS `Date`s serialized by `toISOString`: `YYYY-MM-DDTHH:MM:SS.mmmZ`.
 #[test]
-#[ignore = "M6 podcast fixtures not captured yet: see tools/capture-api-fixtures.md"]
 fn timestamps_are_js_iso() {
     // `0000-00-00T00:00:00.000Z`: digits where the template has `0`, the rest literal.
     let js_iso = |s: &str| {
@@ -841,7 +835,6 @@ fn integral_floats(v: &Value, path: String, out: &mut Vec<String>) {
 }
 
 #[test]
-#[ignore = "M6 podcast fixtures not captured yet: see tools/capture-api-fixtures.md"]
 fn no_integral_floats_on_the_wire() {
     let mut found = Vec::new();
     for name in FIXTURES {

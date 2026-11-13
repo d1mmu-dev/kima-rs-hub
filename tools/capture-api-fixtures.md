@@ -137,10 +137,4 @@ shapes, cross-response ids, `toISOString` timestamps, the header/body hidden cou
 route count. `tools/check-podcast-upstream-keys.py <kima-hub checkout>` re-checks the key file
 against the cited upstream source lines at `c7527577`, independently of the key file's claims.
 
-Status (2026-11-13): script, mock, key file and tests are committed; **the fixtures are not**.
-They must be captured from the committed checkout (`docker run` is needed, see
-`~/.hermes/cache/scratch/m6-task19/CAPTURE.md`); until then the fixture tests are `#[ignore]`d.
-A dry run of the same include file against a scratch database in the isolated cluster
-`m6-fx-pg-58815` (not committed) passed every check and all ten tests, after the wire fixes made in
-the same task (preview `description`/`subscribedPodcastId` read from upstream's handler;
-`recently-listened` timestamps, caught by `timestamps_are_js_iso` on the first dry run).
+Status (2026-11-13): fixtures captured with `KIMA_CAPTURE_SET=m6` from `b204515` (container `msync18-capture-1794611746-3183913`, loopback host port 32788, Apple/feed/audio mock on loopback; not an Apple recording, not SQL seeding). 31 files copied (30 responses + manifest); fixture tests un-ignored, 10/10 pass; `tools/check-podcast-upstream-keys.py` reports 0 problems on 255 upstream key names. Dynamic UUIDs, timestamps and the mock's port in feed/cover URLs are kept as observed.

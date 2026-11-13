@@ -57,9 +57,11 @@ async fn refresh_one(
             "totalEpisodes": result.total_episodes,
             "message": format!("Found {} new episodes", result.new_episodes),
         }))),
-        Err(RefreshError::Feed(FeedFailure::Gone(_))) => {
-            Err(ApiError::NotFound("The show's feed is gone"))
-        }
+        // Upstream `answerUpstreamFailure` answers "missing" (404, the route's one missing text)
+        // for a feed 4xx other than 429 and for an address its SSRF guard refuses (D-205).
+        Err(RefreshError::Feed(
+            FeedFailure::Gone(_) | FeedFailure::Absent(_) | FeedFailure::Blocked(_),
+        )) => Err(ApiError::NotFound("The show's feed is gone")),
         // Upstream wraps every feed read failure in `FeedReadError`, answered as "down" (502),
         // including a page that is not a feed and a permanent fetch failure.
         Err(

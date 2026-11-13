@@ -1415,3 +1415,118 @@ async fn next_and_episode_pages_break_equal_date_ties_by_id(pool: PgPool) {
     ids.reverse();
     assert_eq!(got, ids);
 }
+
+// ---- Task 15: legacy cover redirects `/:id/cover`, `/episodes/:id/cover` (D-210) ----
+
+mod cover {
+    use super::*;
+
+    fn location(res: &axum_test::TestResponse) -> String {
+        res.headers()
+            .get(axum::http::header::LOCATION)
+            .expect("a redirect has a Location header")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn show_cover_redirects_to_the_proxy(pool: PgPool) {
+        let env = env(pool.clone()).await;
+        let show = env.stored_show().await;
+        let res = env.get(&format!("/api/podcasts/{show}/cover")).await;
+        res.assert_status(StatusCode::FOUND);
+        assert_eq!(
+            location(&res),
+            "/api/library/cover-art?url=https%3A%2F%2Ffeed.example%2Fcover.jpg"
+        );
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn show_cover_without_an_image_is_404(pool: PgPool) {
+        let env = env(pool.clone()).await;
+        let show = env.stored_show().await;
+        sqlx::query("UPDATE podcasts SET image_url = NULL WHERE id = $1")
+            .bind(show)
+            .execute(env.pool())
+            .await
+            .unwrap();
+        let res = env.get(&format!("/api/podcasts/{show}/cover")).await;
+        res.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(res.json::<Value>()["error"], "Cover not found");
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn unknown_show_cover_is_404(pool: PgPool) {
+        let env = env(pool.clone()).await;
+        let res = env
+            .get(&format!("/api/podcasts/{}/cover", Uuid::now_v7()))
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(res.json::<Value>()["error"], "Cover not found");
+        let bad = env.get("/api/podcasts/not-a-uuid/cover").await;
+        bad.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn episode_cover_redirects_to_the_proxy(pool: PgPool) {
+        let env = env(pool.clone()).await;
+        let show = env.stored_show().await;
+        add_episodes(&pool, show, &[("ep1", day(1))]).await;
+        let episode = episode_id(&pool, "ep1").await;
+        let res = env
+            .get(&format!("/api/podcasts/episodes/{episode}/cover"))
+            .await;
+        res.assert_status(StatusCode::FOUND);
+        assert_eq!(
+            location(&res),
+            "/api/library/cover-art?url=https%3A%2F%2Fa.invalid%2Fep1.jpg"
+        );
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn episode_cover_without_an_image_is_404(pool: PgPool) {
+        let env = env(pool.clone()).await;
+        let show = env.stored_show().await;
+        add_episodes(&pool, show, &[("ep1", day(1))]).await;
+        let episode = episode_id(&pool, "ep1").await;
+        sqlx::query("UPDATE podcast_episodes SET image_url = NULL WHERE id = $1")
+            .bind(episode)
+            .execute(env.pool())
+            .await
+            .unwrap();
+        let res = env
+            .get(&format!("/api/podcasts/episodes/{episode}/cover"))
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(res.json::<Value>()["error"], "Cover not found");
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn unknown_episode_cover_is_404(pool: PgPool) {
+        let env = env(pool.clone()).await;
+        let res = env
+            .get(&format!("/api/podcasts/episodes/{}/cover", Uuid::now_v7()))
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+        assert_eq!(res.json::<Value>()["error"], "Cover not found");
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn cover_redirect_forwards_a_token_query(pool: PgPool) {
+        let env = env(pool.clone()).await;
+        let show = env.stored_show().await;
+        let res = env
+            .server
+            .get(&format!("/api/podcasts/{show}/cover?token={}", env.token))
+            .await;
+        res.assert_status(StatusCode::FOUND);
+        assert_eq!(
+            location(&res),
+            format!(
+                "/api/library/cover-art?url=https%3A%2F%2Ffeed.example%2Fcover.jpg&token={}",
+                env.token
+            )
+        );
+    }
+}

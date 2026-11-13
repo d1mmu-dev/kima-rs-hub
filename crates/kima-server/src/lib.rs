@@ -72,19 +72,20 @@ pub fn app_with_web(
     app.layer(TraceLayer::new_for_http().make_span_with(span_for))
 }
 
-/// Subsonic clients send credentials in the query string, so `/rest` spans record the method and
-/// path only. Other paths keep the default fields.
+/// Query strings can contain credentials or private remote URLs on any route.
 fn span_for(request: &Request<Body>) -> Span {
-    if request.uri().path().starts_with("/rest") {
-        tracing::debug_span!("request", method = %request.method(), path = %request.uri().path())
+    let path = request.uri().path();
+    let path = if path == "/api/library/cover-art" || path.starts_with("/api/library/cover-art/") {
+        "/api/library/cover-art/{id}"
     } else {
-        tracing::debug_span!(
-            "request",
-            method = %request.method(),
-            uri = %request.uri(),
-            version = ?request.version(),
-        )
-    }
+        path
+    };
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        path = %path,
+        version = ?request.version(),
+    )
 }
 
 /// Any origin, method and header; no credentials. Browser players on other origins put their
@@ -170,4 +171,82 @@ fn enrich_kick_job() -> EnqueueFn {
                 .map_err(|e| e.to_string())
         })
     })
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Capture;
+        fn make_writer(&'a self) -> Capture {
+            self.clone()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_trace_omits_query_even_for_redirects() {
+        use axum::routing::get;
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let router = Router::new()
+            .route("/api/podcasts/123/cover", get(|| async {
+                axum::response::Redirect::temporary("/api/library/cover-art?url=https%3A%2F%2Fexample.test%2Fimage-secret&token=sample-token")
+            }))
+            .route("/api/library/cover-art", get(|| async { "ok" }))
+            .route("/api/library/cover-art/{id}", get(|| async { "ok" }))
+            .layer(TraceLayer::new_for_http().make_span_with(span_for));
+        let server = axum_test::TestServer::new(router).unwrap();
+        server
+            .get("/api/podcasts/123/cover?token=sample-token")
+            .await
+            .assert_status(axum::http::StatusCode::TEMPORARY_REDIRECT);
+        server.get("/api/library/cover-art?url=https%3A%2F%2Fexample.test%2Fimage-secret%3Fkey%3Dimage-key&token=sample-token").await.assert_status_ok();
+        server.get("/api/library/cover-art/https%3A%2F%2Fexample.test%2Fimage-secret%3Fkey%3Dimage-key").await.assert_status_ok();
+        let listener = tokio::net::TcpSocket::new_v4().unwrap();
+        listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let proxy = std::sync::Arc::new(web_proxy::WebProxy::new(port, vec![]));
+        let proxy_server =
+            axum_test::TestServer::new(web_proxy::layer(Router::new(), proxy)).unwrap();
+        proxy_server
+            .get("/login?token=sample-token")
+            .await
+            .assert_status(axum::http::StatusCode::BAD_GATEWAY);
+        let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("/api/podcasts/123/cover"));
+        assert!(log.contains("/api/library/cover-art"));
+        assert!(log.contains("SSR server did not answer"));
+        assert!(log.contains("/login"));
+        for secret in [
+            "sample-token",
+            "image-secret",
+            "image-key",
+            "example.test",
+            "?",
+        ] {
+            assert!(
+                !log.contains(secret),
+                "request trace contains sensitive query data"
+            );
+        }
+    }
 }

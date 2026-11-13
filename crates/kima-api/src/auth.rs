@@ -32,10 +32,12 @@ pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// Whether `path` is a media path where `<audio>`/`<img>` cannot send headers: a stream, a
-/// podcast preview sample, or the cover-art proxy.
+/// podcast preview sample, the cover-art proxy, or a legacy podcast cover redirect link
+/// (Task 15) that itself carries a `?token=` on to the proxy.
 fn is_media_path(path: &str) -> bool {
     path.ends_with("/stream")
         || path.ends_with("/snippet")
+        || path.ends_with("/cover")
         || path.starts_with("/api/library/cover-art")
 }
 

@@ -361,6 +361,42 @@ pub async fn pending_with_key(pool: &PgPool, queue: &str, key: &str) -> sqlx::Re
     .await
 }
 
+/// Like [`enqueue`], unless a job whose payload `key` field has the same text as `payload`'s is
+/// already queued or running on `queue` (the key-matched sibling of [`enqueue_unless_pending`],
+/// whose check is the one [`pending_with_key`] reads). Returns the new job's id, or `None` when
+/// one is pending. Serialised per queue by the same advisory lock as the other enqueue helpers.
+pub async fn enqueue_unless_pending_with_key(
+    pool: &PgPool,
+    queue: &str,
+    payload: serde_json::Value,
+    max_attempts: i32,
+) -> sqlx::Result<Option<Uuid>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('kima_jobs_enqueue:' || $1))")
+        .bind(queue)
+        .execute(&mut *tx)
+        .await?;
+    let id = sqlx::query_scalar!(
+        r#"INSERT INTO jobs (id, queue, payload, max_attempts)
+           SELECT $1::uuid, $2::text, $3::jsonb, $4::int4
+           WHERE NOT EXISTS (SELECT 1 FROM jobs
+                             WHERE queue = $2 AND state IN ('queued', 'running')
+                               AND payload ->> 'key' IS NOT DISTINCT FROM $3::jsonb ->> 'key')
+           RETURNING id"#,
+        Uuid::now_v7(),
+        queue,
+        payload,
+        max_attempts
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if id.is_some() {
+        notify(&mut tx, queue).await?;
+    }
+    tx.commit().await?;
+    Ok(id)
+}
+
 /// Like [`enqueue_unless_pending`], but always returns a job id: the new job's, or the one
 /// already pending. Retries if the pending job finishes between the two steps.
 pub async fn enqueue_or_pending(

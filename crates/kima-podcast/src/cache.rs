@@ -102,8 +102,9 @@ async fn discard(path: &Path, pool: &PgPool, episode: Uuid) {
     let _ = kima_db::podcasts::delete_downloads_for_episode(pool, episode).await;
 }
 
-/// Queues `episode`'s download, unless one is already queued (upstream's in-process `Set`,
-/// now the job queue itself, D-204). Returns the new job's id, or `None` for a duplicate.
+/// Queues `episode`'s download, unless one is already queued or running (upstream's in-process
+/// `Set` behind `isDownloading`, now the job queue itself, D-204): a second job beside a running
+/// one would reuse its temp file. Returns the new job's id, or `None` for a duplicate.
 pub async fn enqueue_download(
     pool: &PgPool,
     episode: Uuid,
@@ -116,8 +117,7 @@ pub async fn enqueue_download(
         "episode": episode,
         "user": user,
     });
-    kima_jobs::queue::enqueue_unless_queued_with_key(pool, QUEUE, payload, MAX_ATTEMPTS, "key")
-        .await
+    kima_jobs::queue::enqueue_unless_pending_with_key(pool, QUEUE, payload, MAX_ATTEMPTS).await
 }
 
 /// Downloads the episode's audio to the cache: a temp file, checked against the host's own

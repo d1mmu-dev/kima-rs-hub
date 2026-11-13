@@ -245,6 +245,43 @@ async fn download_is_queued_once_per_episode(pool: PgPool) {
     assert!(other.is_some());
 }
 
+/// A download that is running counts as one in progress (upstream's `isDownloading` is true
+/// from the start of the download to its end): a second job for the same episode would run
+/// beside it and remove its temp file.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn download_is_not_queued_again_while_one_runs(pool: PgPool) {
+    let episode = Uuid::now_v7();
+    let user = Uuid::now_v7();
+    let first = cache::enqueue_download(&pool, episode, user)
+        .await
+        .unwrap()
+        .expect("a fresh job");
+    let claimed =
+        kima_jobs::queue::claim(&pool, cache::QUEUE, 10, std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+    assert_eq!(
+        claimed.iter().map(|j| j.id).collect::<Vec<_>>(),
+        vec![first]
+    );
+    assert_eq!(
+        cache::enqueue_download(&pool, episode, user).await.unwrap(),
+        None
+    );
+    // Once it is done, a later play may queue the episode again.
+    assert!(
+        kima_jobs::queue::complete(&pool, &claimed[0])
+            .await
+            .unwrap()
+    );
+    assert!(
+        cache::enqueue_download(&pool, episode, user)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
 async fn two_episodes(pool: &PgPool) -> (Uuid, Uuid) {
     let show = podcasts::insert_show(
         pool,

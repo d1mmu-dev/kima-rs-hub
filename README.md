@@ -172,8 +172,9 @@ old; two refreshes at a time, three attempts), independently of `KIMA_IDENTIFY`;
 removed at start and daily at 04:00 UTC. **AI-generated content** is labelled from the feed's Podcasting 2.0
 `podcast:txt purpose="ai-content"` tag (show and episode) or an admin's label and hidden by default; a pill on the pages
 and a Settings switch show it (D-200, D-207). Audiobooks (Audiobookshelf) are M6b and stay off (`"audiobooks": false`).
-Known gaps: the stream does not yet use the episode cache (D-214) and missing categories are not filled at startup
-(D-211).
+A played episode is cached in the background (one download per episode) and later plays are served from the cache
+(D-214); shows Apple knows but that have no categories get them at startup (D-211). Known gaps: none recorded for
+M6a's jobs; audiobooks and the stream's CORS headers wait for M6b.
 
 ## Local development
 

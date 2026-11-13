@@ -6,9 +6,16 @@
 
 use std::rc::Rc;
 
-use kima_api_types::podcasts::{DiscoveryItem, EpisodePage, EpisodeRow, Preview, ShowDetail};
-use vertigo::{DomNode, Value, bind, dom, get_driver};
+use kima_api_types::auth::MeResponse;
+use kima_api_types::podcasts::{
+    AiLabel, AiLabelSource, DiscoveryItem, EpisodePage, EpisodeRow, Preview, ShowDetail,
+};
+use vertigo::{Computed, DomNode, Value, bind, dom, get_driver};
 
+use super::ai::{
+    ShowAi, admin_buttons, badge, hidden_note, pill, row_visible, show_ai_state, visible,
+    when_known,
+};
 use super::{ShowInfo, discovery_card, episode_item, image_url, resume_point};
 use crate::api::client::load;
 use crate::api::podcasts::{self as api, Order};
@@ -37,11 +44,27 @@ pub fn episode_meta(e: &EpisodeRow) -> String {
     parts.join(" · ")
 }
 
+type Label = (AiLabel, Option<AiLabelSource>);
+
+/// Whether the signed-in user may set AI labels (admins only; the server checks too).
+fn is_admin(ctx: &Ctx) -> Computed<bool> {
+    let me = load(bind!(ctx, async move {
+        ctx.client.get::<MeResponse>("/api/auth/me").await
+    }));
+    me.map(|state| matches!(state, vertigo::Resource::Ready(me) if me.role == "admin"))
+}
+
+/// A label badge that follows `label` (an admin's change shows at once).
+fn live_badge(label: &Value<Label>) -> DomNode {
+    label.render_value(|(l, s)| badge(l, s))
+}
+
 fn hero(
     cover: Option<String>,
     title: String,
     author: String,
     genres: String,
+    label: DomNode,
     actions: DomNode,
 ) -> DomNode {
     let art = match cover {
@@ -54,7 +77,10 @@ fn hero(
                 {art}
             </div>
             <div class="flex flex-col justify-end min-w-0">
-                <p class="t-eyebrow mb-2">"podcast"</p>
+                <div class="flex items-center gap-2 mb-2">
+                    <p class="t-eyebrow">"podcast"</p>
+                    {label}
+                </div>
                 <h1 class="text-3xl md:text-5xl font-bold tracking-tight text-white">{title}</h1>
                 <p class="t-body mt-2">{author}</p>
                 <p class="t-meta mt-1">{genres}</p>
@@ -76,24 +102,59 @@ fn description(text: Option<String>) -> DomNode {
     }
 }
 
-fn episode_rows(ctx: &Ctx, show: &Rc<ShowInfo>, rows: &[EpisodeRow]) -> DomNode {
+fn episode_rows(
+    ctx: &Ctx,
+    show: &Rc<ShowInfo>,
+    rows: &[EpisodeRow],
+    admin: &Computed<bool>,
+    show_ai: &ShowAi,
+    reload: &Value<u32>,
+) -> DomNode {
     let rows: Vec<DomNode> = rows
         .iter()
         .map(|e| {
+            let label = Value::new((e.ai_label, e.ai_label_source));
+            let label_badge = live_badge(&label);
+            // An admin's change shows at once; marked AI while hiding, the row leaves the page.
+            let wrap = Computed::from(bind!(label, show_ai, |c| {
+                if row_visible(show_ai.get(c), label.get(c).0) {
+                    String::new()
+                } else {
+                    "hidden".to_owned()
+                }
+            }));
+            let (show_id, episode_id) = (show.id.clone(), e.id.to_string());
+            let controls = admin.render_value(bind!(ctx, show_id, episode_id, label, reload, |on| {
+                if on {
+                    admin_buttons(
+                        &ctx,
+                        show_id.clone(),
+                        Some(episode_id.clone()),
+                        label.clone(),
+                        reload.clone(),
+                    )
+                } else {
+                    dom! { <span class="hidden" /> }
+                }
+            }));
             let (title, meta) = (e.title.clone(), episode_meta(e));
             let item = episode_item(show, &e.id.to_string(), &e.title, e.duration, e.image_url.as_deref());
             let resume = resume_point(e.progress.as_ref());
             let label = format!("Play {}", e.title);
             let play = bind!(ctx, |_| ctx.player.play_episode(item.clone(), resume));
             dom! {
-                <div class="flex items-center gap-3 py-3 px-2 border-b border-white/5" data-episode="row">
-                    <button type="button" name="play-episode" aria-label={label} on_click={play}
-                        class="w-9 h-9 shrink-0 rounded-full bg-brand text-black flex items-center justify-center hover:bg-brand-hover">
-                        {icon("play", "w-4 h-4 fill-current ml-0.5")}
-                    </button>
-                    <div class="flex-1 min-w-0">
-                        <p class="text-sm font-medium text-white truncate">{title}</p>
-                        <p class="t-meta">{meta}</p>
+                <div class={wrap}>
+                    <div class="flex items-center gap-3 py-3 px-2 border-b border-white/5" data-episode="row">
+                        <button type="button" name="play-episode" aria-label={label} on_click={play}
+                            class="w-9 h-9 shrink-0 rounded-full bg-brand text-black flex items-center justify-center hover:bg-brand-hover">
+                            {icon("play", "w-4 h-4 fill-current ml-0.5")}
+                        </button>
+                        <div class="flex-1 min-w-0">
+                            <p class="text-sm font-medium text-white truncate">{title}</p>
+                            <p class="t-meta">{meta}</p>
+                        </div>
+                        {label_badge}
+                        {controls}
                     </div>
                 </div>
             }
@@ -102,88 +163,114 @@ fn episode_rows(ctx: &Ctx, show: &Rc<ShowInfo>, rows: &[EpisodeRow]) -> DomNode 
     dom! { <div>{..rows}</div> }
 }
 
-fn episodes(ctx: &Ctx, detail: &ShowDetail) -> DomNode {
+fn order_text(order: Order) -> &'static str {
+    match order {
+        Order::Newest => "newest first",
+        Order::Oldest => "oldest first",
+    }
+}
+
+/// A show's episodes a page at a time. Each page is asked for with the pill's position, so the
+/// server hides AI-labelled episodes before paging (full pages, a true `x–y of N`) and says how
+/// many it hid; flipping the pill starts again at the first page.
+fn episodes(
+    ctx: &Ctx,
+    detail: &ShowDetail,
+    show_ai: &ShowAi,
+    admin: &Computed<bool>,
+    reload: &Value<u32>,
+) -> DomNode {
     let id = detail.id.to_string();
     let show = Rc::new(ShowInfo {
         id: id.clone(),
         title: detail.title.clone(),
         cover_url: detail.cover_url.clone(),
     });
-    // The order and the page's offset; every change fetches that page.
-    let view = Value::new((Order::Newest, 0u32));
-    let pages = view.render_value(bind!(ctx, id, view, show, |(order, offset): (Order, u32)| {
-        let page = load(bind!(ctx, id, async move {
-            api::episodes(&ctx.client, &id, offset, PAGE, order).await
-        }));
-        resource_view(page, bind!(ctx, view, show, |page: Rc<EpisodePage>| {
-            let label = page_label(page.offset, page.episodes.len(), page.total);
-            let has_prev = page.offset > 0;
-            let has_next = page.offset + (page.episodes.len() as i64) < page.total;
-            let prev = bind!(view, |_| view.change(|(_, o)| *o = o.saturating_sub(PAGE)));
-            let next = bind!(view, |_| view.change(|(_, o)| *o += PAGE));
-            let rows = episode_rows(&ctx, &show, &page.episodes);
-            dom! {
-                <div>
-                    {rows}
-                    <div class="flex items-center justify-between mt-4">
-                        <span class="t-meta">{label}</span>
-                        <div class="flex gap-2">
-                            <button name="previous" class={format!("{ACTION} {SECONDARY}")} disabled={flag_now(!has_prev)} on_click={prev}>"previous"</button>
-                            <button name="next" class={format!("{ACTION} {SECONDARY}")} disabled={flag_now(!has_next)} on_click={next}>"next"</button>
+    let order = Value::new(Order::Newest);
+    let body = when_known(
+        show_ai,
+        bind!(ctx, id, show, show_ai, admin, reload, order, |on| {
+            let offset = Value::new(0u32);
+            let key = Computed::from(bind!(order, offset, reload, |c| {
+                (order.get(c), offset.get(c), reload.get(c))
+            }));
+            key.render_value(bind!(ctx, id, show, show_ai, admin, reload, order, offset, on, |(sort, at, _): (Order, u32, u32)| {
+            let page = load(bind!(ctx, id, async move {
+                api::episodes(&ctx.client, &id, at, PAGE, sort, on).await
+            }));
+            resource_view(page, bind!(ctx, show, show_ai, admin, reload, order, offset, |page: Rc<EpisodePage>| {
+                let label = page_label(page.offset, page.episodes.len(), page.total);
+                let has_prev = page.offset > 0;
+                let has_next = page.offset + (page.episodes.len() as i64) < page.total;
+                let prev = bind!(offset, |_| offset.change(|o| *o = o.saturating_sub(PAGE)));
+                let next = bind!(offset, |_| offset.change(|o| *o += PAGE));
+                let flip = bind!(order, offset, |_| {
+                    order.change(|o| {
+                        *o = match o {
+                            Order::Newest => Order::Oldest,
+                            Order::Oldest => Order::Newest,
+                        }
+                    });
+                    offset.set(0);
+                });
+                let order_label = order_text(vertigo::transaction(|c| order.get(c)));
+                let header = section_header(Kind::Podcast, "episodes", page.total);
+                let rows = episode_rows(&ctx, &show, &page.episodes, &admin, &show_ai, &reload);
+                let note = hidden_note(page.ai_hidden.max(0) as usize);
+                dom! {
+                    <div>
+                        {header}
+                        <div class="flex justify-end mb-2">
+                            <button name="order" class={format!("{ACTION} {SECONDARY}")} on_click={flip}>{order_label}</button>
+                        </div>
+                        {note}
+                        {rows}
+                        <div class="flex items-center justify-between mt-4">
+                            <span class="t-meta">{label}</span>
+                            <div class="flex gap-2">
+                                <button name="previous" class={format!("{ACTION} {SECONDARY}")} disabled={flag_now(!has_prev)} on_click={prev}>"previous"</button>
+                                <button name="next" class={format!("{ACTION} {SECONDARY}")} disabled={flag_now(!has_next)} on_click={next}>"next"</button>
+                            </div>
                         </div>
                     </div>
-                </div>
-            }
+                }
+            }))
         }))
-    }));
-    let toggle = bind!(view, |_| {
-        view.change(|(order, offset)| {
-            *order = match order {
-                Order::Newest => Order::Oldest,
-                Order::Oldest => Order::Newest,
-            };
-            *offset = 0;
-        })
-    });
-    let order_label = view.map(|(o, _)| match o {
-        Order::Newest => "newest first".to_owned(),
-        Order::Oldest => "oldest first".to_owned(),
-    });
-    let header = section_header(Kind::Podcast, "episodes", detail.episode_total);
-    dom! {
-        <section class="page-shell page-end">
-            {header}
-            <div class="flex justify-end mb-2">
-                <button name="order" class={format!("{ACTION} {SECONDARY}")} on_click={toggle}>{order_label}</button>
-            </div>
-            {pages}
-        </section>
-    }
+        }),
+    );
+    dom! { <section class="page-shell page-end">{body}</section> }
 }
 
-fn similar(ctx: &Ctx, id: String) -> DomNode {
+fn similar(ctx: &Ctx, id: String, show_ai: &ShowAi) -> DomNode {
     let found = load(bind!(
         ctx,
         async move { api::similar(&ctx.client, &id).await }
     ));
     resource_view(
         found,
-        bind!(ctx, |items: Rc<Vec<DiscoveryItem>>| {
-            if items.is_empty() {
-                return dom! { <span class="hidden" /> };
-            }
-            let cards = items
-                .iter()
-                .enumerate()
-                .map(|(i, item)| discovery_card(&ctx, item, i))
-                .collect();
-            let header = section_header(Kind::Podcast, "similar shows", items.len() as i64);
-            dom! { <section class="page-shell page-end">{header}{media_grid(cards)}</section> }
+        bind!(ctx, show_ai, |all: Rc<Vec<DiscoveryItem>>| {
+            when_known(
+                &show_ai,
+                bind!(ctx, all, |on| {
+                    let (items, hidden) = visible(&all, on, |i| i.ai_label);
+                    if items.is_empty() && hidden == 0 {
+                        return dom! { <span class="hidden" /> };
+                    }
+                    let cards = items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, item)| discovery_card(&ctx, item, i))
+                        .collect();
+                    let header = section_header(Kind::Podcast, "similar shows", items.len() as i64);
+                    let note = hidden_note(hidden);
+                    dom! { <section class="page-shell page-end">{header}{note}{media_grid(cards)}</section> }
+                }),
+            )
         }),
     )
 }
 
-fn show_page(ctx: &Ctx, detail: Rc<ShowDetail>) -> DomNode {
+fn show_page(ctx: &Ctx, detail: Rc<ShowDetail>, show_ai: &ShowAi, reload: &Value<u32>) -> DomNode {
     let token = ctx.session.current_token();
     let following = Value::new(detail.is_subscribed);
     let busy = Value::new(false);
@@ -245,15 +332,34 @@ fn show_page(ctx: &Ctx, detail: Rc<ShowDetail>) -> DomNode {
         </div>
     };
     let genres = detail.genres.join(" · ");
+    let admin = is_admin(ctx);
+    let label = Value::new((detail.ai_label, detail.ai_label_source));
+    let show_controls = admin.render_value(bind!(ctx, id, label, reload, |on| {
+        if on {
+            // `reload`: the episodes that inherit the show's label are fetched again.
+            admin_buttons(&ctx, id.clone(), None, label.clone(), reload.clone())
+        } else {
+            dom! { <span class="hidden" /> }
+        }
+    }));
+    let ai_pill = pill(show_ai);
+    let actions = dom! {
+        <div class="flex flex-wrap items-center gap-2">
+            {actions}
+            {ai_pill}
+            {show_controls}
+        </div>
+    };
     let hero = hero(
         image_url(detail.cover_url.as_deref(), 600, token.as_deref()),
         detail.title.clone(),
         detail.author.clone().unwrap_or_default(),
         genres,
+        live_badge(&label),
         actions,
     );
-    let episodes = episodes(ctx, &detail);
-    let similar = similar(ctx, detail.id.to_string());
+    let episodes = episodes(ctx, &detail, show_ai, &admin, reload);
+    let similar = similar(ctx, detail.id.to_string(), show_ai);
     dom! {
         <div class="min-h-screen animate-rise">
             {hero}
@@ -270,7 +376,15 @@ pub fn render(ctx: &Ctx, id: String) -> DomNode {
         id,
         async move { api::show(&ctx.client, &id).await }
     ));
-    resource_view(detail, bind!(ctx, |d| show_page(&ctx, d)))
+    // Made once for the page, so a re-render of the show keeps the pill where it was put.
+    let show_ai = show_ai_state(ctx);
+    let reload = Value::new(0u32);
+    resource_view(
+        detail,
+        bind!(ctx, show_ai, reload, |d| show_page(
+            &ctx, d, &show_ai, &reload
+        )),
+    )
 }
 
 fn preview_page(ctx: &Ctx, p: Rc<Preview>) -> DomNode {
@@ -306,6 +420,7 @@ fn preview_page(ctx: &Ctx, p: Rc<Preview>) -> DomNode {
         p.title.clone(),
         p.author.clone().unwrap_or_default(),
         p.genres.join(" · "),
+        badge(p.ai_label, p.ai_label_source),
         actions,
     );
     let rows: Vec<DomNode> = p

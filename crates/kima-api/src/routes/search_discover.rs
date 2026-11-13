@@ -7,7 +7,8 @@
 
 use std::time::Duration;
 
-use axum::extract::{Query, State};
+use axum::extract::{Query, RawQuery, State};
+use axum::http::HeaderMap;
 use axum::routing::get;
 use axum::{Json, Router};
 use kima_db::http_cache::{self, CacheOutcome};
@@ -15,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::library::parse_int;
+use super::podcasts::ai::{AiFilter, label_apple_items};
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -42,8 +44,8 @@ fn normalize(q: &str) -> String {
         .join(" ")
 }
 
-/// One Apple search result mapped to a discover item (`searchShows` map in `routes/search.ts`);
-/// `aiLabel`/`aiLabelSource` are deferred to Task 0/Task 8, as in Task 13's `DiscoveryItem`.
+/// One Apple search result mapped to a discover item (`searchShows` map in `routes/search.ts`).
+/// Labels are added per request after the cache ([`labelled`]), so a label set later applies.
 fn to_item(r: &Value) -> Value {
     let text = |k: &str| r.get(k).and_then(Value::as_str).map(str::to_string);
     let cover = text("artworkUrl600")
@@ -71,19 +73,34 @@ fn to_item(r: &Value) -> Value {
         "genres": genres,
         "categoryIds": kima_podcast::catalog::category_ids_from(r.get("genreIds")),
         "trackCount": r.get("trackCount").cloned().unwrap_or(Value::Null),
-        "aiLabel": "unknown",
-        "aiLabelSource": Value::Null,
     })
+}
+
+/// Labels the podcast results (D-207, spec S3) and applies the AI filter.
+async fn labelled(
+    state: &AppState,
+    mut payload: Value,
+    filter: AiFilter,
+) -> Result<(HeaderMap, Json<Value>), ApiError> {
+    let results = payload["results"].as_array().cloned().unwrap_or_default();
+    let (results, hidden) = label_apple_items(state, &results, "id", filter).await?;
+    payload["results"] = json!(results);
+    Ok((filter.headers(hidden), Json(payload)))
 }
 
 async fn discover(
     State(state): State<AppState>,
-    _user: AuthUser,
+    user: AuthUser,
     Query(params): Query<Params>,
-) -> Result<Json<Value>, ApiError> {
+    RawQuery(raw): RawQuery,
+) -> Result<(HeaderMap, Json<Value>), ApiError> {
+    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
     let q = params.q.as_deref().unwrap_or("").trim().to_string();
     if q.is_empty() {
-        return Ok(Json(json!({"results": [], "aliasInfo": null})));
+        return Ok((
+            filter.headers(0),
+            Json(json!({"results": [], "aliasInfo": null})),
+        ));
     }
     let limit = params
         .limit
@@ -96,7 +113,7 @@ async fn discover(
 
     if let Ok(Some((CacheOutcome::Answered, body))) = http_cache::get(&state.pool, &cache_key).await
     {
-        return Ok(Json(body));
+        return labelled(&state, body, filter).await;
     }
 
     let mut results = Vec::new();
@@ -127,5 +144,5 @@ async fn discover(
             tracing::warn!(error = %e, "could not cache a discover search answer");
         }
     }
-    Ok(Json(payload))
+    labelled(&state, payload, filter).await
 }

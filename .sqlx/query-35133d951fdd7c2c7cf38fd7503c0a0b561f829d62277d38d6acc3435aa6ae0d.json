@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, feed_url, title, author, description, image_url, itunes_id, category_ids,\n                language, explicit, episode_count, last_refreshed, feed_etag,\n                feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,\n                created_at, updated_at\n         FROM podcasts WHERE feed_url = $1 OR ($2::text IS NOT NULL AND itunes_id = $2)\n         ORDER BY (feed_url = $1) DESC LIMIT 1",
+  "query": "SELECT id, feed_url, title, author, description, image_url, itunes_id, category_ids,\n                language, explicit, episode_count, last_refreshed, feed_etag,\n                feed_last_modified, refresh_error, refresh_failed_at, refresh_failures,\n                created_at, updated_at, ai_feed, ai_override\n         FROM podcasts WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -97,12 +97,21 @@
         "ordinal": 18,
         "name": "updated_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 19,
+        "name": "ai_feed",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 20,
+        "name": "ai_override",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
-        "Text"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -124,8 +133,10 @@
       true,
       false,
       false,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "f1ebdf454c5c9cc41534b13214e570e60622637d2c1a098c0ffce145e8704c90"
+  "hash": "35133d951fdd7c2c7cf38fd7503c0a0b561f829d62277d38d6acc3435aa6ae0d"
 }

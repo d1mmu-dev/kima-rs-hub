@@ -26,6 +26,7 @@ fn settings_json(s: &UserSettings) -> Value {
         "offlineEnabled": s.offline_enabled,
         "maxCacheSizeMb": s.max_cache_size_mb,
         "shareLiveListening": s.share_live_listening,
+        "podcastAiContent": s.podcast_ai_filter,
         "hasListenbrainzToken": false,
         "liveSharingAvailable": false,
     })
@@ -90,6 +91,17 @@ fn parse(body: &Value) -> Result<Patch, Vec<Value>> {
             }
         }
         Some(_) => issues.push(issue("maxCacheSizeMb", "Expected number")),
+    }
+    // kima-only (D-207): whether podcast lists hide AI-labelled content.
+    match obj.get("podcastAiContent") {
+        None => {}
+        Some(Value::String(v)) if v == "hide" || v == "show" => {
+            patch.podcast_ai_filter = Some(v.clone());
+        }
+        Some(_) => issues.push(issue(
+            "podcastAiContent",
+            "podcastAiContent must be hide or show",
+        )),
     }
     // `listenbrainzToken` is accepted (string or null) and ignored (D-103); anything else is
     // still a type error, as upstream.

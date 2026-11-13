@@ -18,4 +18,11 @@ pub struct UserSettings {
     pub has_listenbrainz_token: bool,
     /// Always `false` in kima-rs.
     pub live_sharing_available: bool,
+    /// kima-only (D-207): `hide` (default) or `show` AI-labelled podcasts and episodes.
+    #[serde(default = "hide")]
+    pub podcast_ai_content: String,
+}
+
+fn hide() -> String {
+    "hide".into()
 }

@@ -1,5 +1,6 @@
 use crate::routes::podcasts::progress::{clear, progress};
 use axum::extract::{Path, RawQuery, State};
+use axum::http::HeaderMap;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
@@ -9,6 +10,7 @@ use crate::error::ApiError;
 use crate::extract::ApiJson;
 use crate::state::AppState;
 
+pub(crate) mod ai;
 mod cover;
 mod discovery;
 mod preview;
@@ -34,7 +36,10 @@ pub fn routes() -> Router<AppState> {
         .merge(discovery::routes())
         .merge(preview::routes())
         .merge(cover::routes())
+        .merge(ai::routes())
 }
+
+use ai::{AiFilter, from_db, put_label, retain_visible};
 
 async fn refresh_one(
     State(state): State<AppState>,
@@ -239,6 +244,11 @@ async fn subscribe(
                 tracing::warn!(error = %e, "could not assign podcast categories");
                 Vec::new()
             });
+        let labels: Vec<(String, Option<bool>)> = parsed
+            .episodes
+            .iter()
+            .map(|e| (e.guid.clone(), e.ai_feed))
+            .collect();
         let input = kima_db::podcasts::NewShow {
             feed_url,
             title: &parsed.show.title,
@@ -274,6 +284,13 @@ async fn subscribe(
                     })
                     .collect();
                 kima_db::podcasts::insert_episodes_on(&mut tx, show.id, &episodes).await?;
+                kima_db::podcasts::set_feed_labels_on(
+                    &mut tx,
+                    show.id,
+                    parsed.show.ai_feed,
+                    &labels,
+                )
+                .await?;
                 tx.commit().await?;
                 show
             }
@@ -306,12 +323,17 @@ async fn subscribe(
 async fn list(
     State(state): State<AppState>,
     user: AuthUser,
-) -> Result<Json<Vec<kima_api_types::podcasts::FollowedShow>>, ApiError> {
+    RawQuery(raw): RawQuery,
+) -> Result<(HeaderMap, Json<Vec<kima_api_types::podcasts::FollowedShow>>), ApiError> {
     use kima_api_types::podcasts::{EpisodeSummary, FollowedShow};
     use kima_api_types::stats::js_iso;
+    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    let mut shows = kima_db::podcasts::followed_shows(&state.pool, user.id).await?;
+    let mut hidden = retain_visible(filter, &mut shows, |s| from_db(&s.ai_label, None).0);
     let mut out = Vec::new();
-    for show in kima_db::podcasts::followed_shows(&state.pool, user.id).await? {
-        let rows = kima_db::podcasts::recent_episodes(&state.pool, user.id, show.id).await?;
+    for show in shows {
+        let mut rows = kima_db::podcasts::recent_episodes(&state.pool, user.id, show.id).await?;
+        hidden += retain_visible(filter, &mut rows, |e| from_db(&e.ai_label, None).0);
         let episodes: Vec<_> = rows
             .into_iter()
             .map(|e| {
@@ -321,6 +343,8 @@ async fn list(
                     e.is_finished,
                     e.last_played_at,
                 );
+                let (ai_label, ai_label_source) =
+                    from_db(&e.ai_label, e.ai_label_source.as_deref());
                 EpisodeSummary {
                     id: e.id,
                     title: e.title,
@@ -329,9 +353,12 @@ async fn list(
                     published_at: js_iso(e.published_at),
                     cover_url: e.image_url,
                     progress,
+                    ai_label,
+                    ai_label_source,
                 }
             })
             .collect();
+        let (ai_label, ai_label_source) = from_db(&show.ai_label, show.ai_label_source.as_deref());
         out.push(FollowedShow {
             id: show.id,
             title: show.title,
@@ -342,9 +369,11 @@ async fn list(
             auto_download_episodes: false,
             latest_episode_at: episodes.first().map(|e| e.published_at.clone()),
             episodes,
+            ai_label,
+            ai_label_source,
         });
     }
-    Ok(Json(out))
+    Ok((filter.headers(hidden), Json(out)))
 }
 
 async fn unsubscribe(
@@ -390,38 +419,46 @@ fn page(raw: Option<String>) -> Page {
     }
 }
 
+struct CheckedPage {
+    id: uuid::Uuid,
+    page: Page,
+    rows: Vec<kima_api_types::podcasts::EpisodeRow>,
+    total: i64,
+    filter: AiFilter,
+    hidden: i64,
+}
+
 async fn checked_page(
     state: &AppState,
     user: uuid::Uuid,
     id: &str,
     raw: Option<String>,
-) -> Result<
-    (
-        uuid::Uuid,
-        Page,
-        Vec<kima_api_types::podcasts::EpisodeRow>,
-        i64,
-    ),
-    ApiError,
-> {
+) -> Result<CheckedPage, ApiError> {
     use kima_api_types::podcasts::EpisodeRow;
     use kima_api_types::stats::js_iso;
     let missing = || ApiError::NotFound("Podcast not found or not subscribed");
+    let filter = AiFilter::from_query(raw.as_deref())?;
     let id = uuid::Uuid::parse_str(id).map_err(|_| missing())?;
     if !kima_db::podcasts::is_subscribed(&state.pool, user, id).await? {
         return Err(missing());
     }
+    let filter = match filter {
+        Some(f) => f,
+        None => AiFilter::resolve(state, user, None).await?,
+    };
     let page = page(raw);
-    let (rows, total) = kima_db::podcasts::episode_page(
+    let found = kima_db::podcasts::episode_page(
         &state.pool,
         user,
         id,
         page.limit,
         page.offset,
         page.oldest,
+        filter.hides(),
     )
     .await?;
-    let rows = rows
+    let rows = found
+        .rows
         .into_iter()
         .map(|e| {
             let progress = progress_of(
@@ -430,6 +467,7 @@ async fn checked_page(
                 e.is_finished,
                 e.last_played_at,
             );
+            let (ai_label, ai_label_source) = from_db(&e.ai_label, e.ai_label_source.as_deref());
             EpisodeRow {
                 id: e.id,
                 title: e.title,
@@ -441,10 +479,19 @@ async fn checked_page(
                 image_url: e.image_url,
                 is_downloaded: e.is_downloaded,
                 progress,
+                ai_label,
+                ai_label_source,
             }
         })
         .collect();
-    Ok((id, page, rows, total))
+    Ok(CheckedPage {
+        id,
+        page,
+        rows,
+        total: found.total,
+        filter,
+        hidden: found.hidden,
+    })
 }
 
 async fn episodes(
@@ -452,21 +499,23 @@ async fn episodes(
     user: AuthUser,
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
-) -> Result<Json<Value>, ApiError> {
-    let (_, page, episodes, total) = checked_page(&state, user.id, &id, raw).await?;
-    Ok(Json(
-        json!({"episodes": episodes, "total": total, "offset": page.offset, "limit": page.limit}),
-    ))
+) -> Result<(HeaderMap, Json<Value>), ApiError> {
+    let found = checked_page(&state, user.id, &id, raw).await?;
+    let mut body = json!({"episodes": found.rows, "total": found.total, "offset": found.page.offset, "limit": found.page.limit});
+    found.filter.put_hidden(&mut body, found.hidden);
+    Ok((found.filter.headers(found.hidden), Json(body)))
 }
 
+/// A direct read: the show answers whatever its label (labelled); its episode page is
+/// filtered like every list.
 async fn detail(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
-) -> Result<Json<Value>, ApiError> {
-    let (id, page, episodes, total) = checked_page(&state, user.id, &id, raw).await?;
-    let show = kima_db::podcasts::show_by_id(&state.pool, id)
+) -> Result<(HeaderMap, Json<Value>), ApiError> {
+    let found = checked_page(&state, user.id, &id, raw).await?;
+    let show = kima_db::podcasts::show_by_id(&state.pool, found.id)
         .await?
         .ok_or(ApiError::NotFound("Podcast not found"))?;
     let mut categories = Vec::new();
@@ -480,24 +529,30 @@ async fn detail(
         }
     }
     let genres: Vec<_> = categories.iter().map(|c| c["name"].clone()).collect();
-    Ok(Json(
-        json!({"id": show.id, "title": show.title, "author": show.author, "description": show.description,
+    let mut body = json!({"id": show.id, "title": show.title, "author": show.author, "description": show.description,
         "coverUrl": show.image_url, "feedUrl": show.feed_url, "genres": genres, "categories": categories,
-        "itunesId": show.itunes_id, "autoDownloadEpisodes": false, "episodes": episodes,
-        "episodeTotal": total, "episodeOffset": page.offset, "episodeLimit": page.limit, "isSubscribed": true}),
-    ))
+        "itunesId": show.itunes_id, "autoDownloadEpisodes": false, "episodes": found.rows,
+        "episodeTotal": found.total, "episodeOffset": found.page.offset, "episodeLimit": found.page.limit, "isSubscribed": true});
+    put_label(
+        &mut body,
+        kima_api_types::podcasts::show_label(show.ai_override.as_deref(), show.ai_feed),
+    );
+    found.filter.put_hidden(&mut body, found.hidden);
+    Ok((found.filter.headers(found.hidden), Json(body)))
 }
 
 async fn next(
     State(state): State<AppState>,
     user: AuthUser,
     Path((show, episode)): Path<(String, String)>,
+    RawQuery(raw): RawQuery,
 ) -> Result<Json<Value>, ApiError> {
     use kima_api_types::stats::js_iso;
+    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
     let missing = || ApiError::NotFound("Episode not found");
     let show = uuid::Uuid::parse_str(&show).map_err(|_| missing())?;
     let episode = uuid::Uuid::parse_str(&episode).map_err(|_| missing())?;
-    let next = kima_db::podcasts::next_episode(&state.pool, user.id, show, episode)
+    let next = kima_db::podcasts::next_episode(&state.pool, user.id, show, episode, filter.hides())
         .await?
         .ok_or_else(missing)?;
     let Some(e) = next else {
@@ -512,15 +567,28 @@ async fn next(
         e.is_finished,
         e.last_played_at,
     );
-    Ok(Json(
-        json!({"podcast": {"id": show.id, "title": show.title, "coverUrl": show.image_url},
-        "episode": {"id": e.id, "title": e.title, "duration": e.duration, "publishedAt": js_iso(e.published_at), "coverUrl": e.image_url, "progress": progress}}),
-    ))
+    let show_label =
+        kima_api_types::podcasts::show_label(show.ai_override.as_deref(), show.ai_feed);
+    let mut podcast = json!({"id": show.id, "title": show.title, "coverUrl": show.image_url});
+    put_label(&mut podcast, show_label);
+    let mut episode = json!({"id": e.id, "title": e.title, "duration": e.duration, "publishedAt": js_iso(e.published_at), "coverUrl": e.image_url, "progress": progress});
+    put_label(
+        &mut episode,
+        from_db(&e.ai_label, e.ai_label_source.as_deref()),
+    );
+    Ok(Json(json!({"podcast": podcast, "episode": episode})))
 }
 
-async fn listening(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
+async fn listening(
+    State(state): State<AppState>,
+    user: AuthUser,
+    RawQuery(raw): RawQuery,
+) -> Result<(HeaderMap, Json<Value>), ApiError> {
     use kima_api_types::stats::js_iso;
-    let (in_progress, new_episodes) = kima_db::podcasts::listening(&state.pool, user.id).await?;
+    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    // Filtered in the query, before the limits and each show's newest pick (D-207).
+    let (in_progress, new_episodes, hidden) =
+        kima_db::podcasts::listening(&state.pool, user.id, filter.hides()).await?;
     let convert = |e: kima_db::podcasts::ListeningRow| {
         let progress = progress_of(
             e.current_time,
@@ -528,14 +596,24 @@ async fn listening(State(state): State<AppState>, user: AuthUser) -> Result<Json
             e.is_finished,
             e.last_played_at,
         );
-        json!({"podcast": {"id": e.podcast_id, "title": e.podcast_title, "coverUrl": e.podcast_image},
-            "episode": {"id": e.id, "title": e.title, "description": e.description, "duration": e.duration,
-            "publishedAt": js_iso(e.published_at), "coverUrl": e.image_url, "progress": progress}})
+        let mut podcast =
+            json!({"id": e.podcast_id, "title": e.podcast_title, "coverUrl": e.podcast_image});
+        put_label(
+            &mut podcast,
+            from_db(&e.podcast_ai_label, e.podcast_ai_label_source.as_deref()),
+        );
+        let mut episode = json!({"id": e.id, "title": e.title, "description": e.description, "duration": e.duration,
+            "publishedAt": js_iso(e.published_at), "coverUrl": e.image_url, "progress": progress});
+        put_label(
+            &mut episode,
+            from_db(&e.ai_label, e.ai_label_source.as_deref()),
+        );
+        json!({"podcast": podcast, "episode": episode})
     };
-    Ok(Json(
-        json!({"inProgress": in_progress.into_iter().map(convert).collect::<Vec<_>>(),
-        "newEpisodes": new_episodes.into_iter().map(convert).collect::<Vec<_>>()}),
-    ))
+    let mut body = json!({"inProgress": in_progress.into_iter().map(convert).collect::<Vec<_>>(),
+        "newEpisodes": new_episodes.into_iter().map(convert).collect::<Vec<_>>()});
+    filter.put_hidden(&mut body, hidden);
+    Ok((filter.headers(hidden), Json(body)))
 }
 
 fn progress_of(

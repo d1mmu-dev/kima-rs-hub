@@ -9,6 +9,10 @@
 //! endpoint needs; it is distinct from Task 9's job-queued sweep (`kima_podcast::refresh::sweep`,
 //! `podcast-refresh-sweep` cron in `kima-server`), which runs independently on its own 15-minute
 //! schedule and does not replace the per-request orchestration below (D-205).
+//!
+//! AI-content filter (D-208): `getPodcasts` and `getNewestPodcasts` hide AI-labelled channels
+//! and episodes per the caller's persisted `podcastAiContent` setting (the protocol has no
+//! per-request switch); `getPodcastEpisode` by id is a direct read and is never filtered.
 
 use axum::Router;
 use axum::extract::State;
@@ -87,7 +91,9 @@ async fn podcasts(
 ) -> Result<Answer, SubsonicError> {
     let include_episodes = params.get("includeEpisodes") != Some("false");
     let raw_id = params.get("id");
-    let mut channels = kima_db::podcasts::followed_channels(&app.pool, user.user.id).await?;
+    let hide_ai = kima_db::user_settings::hides_podcast_ai(&app.pool, user.user.id).await?;
+    let mut channels =
+        kima_db::podcasts::followed_channels(&app.pool, user.user.id, hide_ai).await?;
     if let Some(raw) = raw_id {
         let wanted = ids::parse(raw, &[]);
         channels.retain(|c| wanted == Some(c.id));
@@ -95,7 +101,7 @@ async fn podcasts(
     let mut nodes = Vec::with_capacity(channels.len());
     for c in channels {
         let episodes = if include_episodes {
-            kima_db::podcasts::episodes_for_channel(&app.pool, c.id, EPISODE_LIMIT)
+            kima_db::podcasts::episodes_for_channel(&app.pool, c.id, EPISODE_LIMIT, hide_ai)
                 .await?
                 .iter()
                 .map(episode_node)
@@ -118,7 +124,9 @@ async fn newest_podcasts(
         .paging::<i64>("count")
         .unwrap_or(DEFAULT_NEWEST)
         .clamp(1, MAX_NEWEST);
-    let episodes = kima_db::podcasts::newest_episodes(&app.pool, user.user.id, count).await?;
+    let hide_ai = kima_db::user_settings::hides_podcast_ai(&app.pool, user.user.id).await?;
+    let episodes =
+        kima_db::podcasts::newest_episodes(&app.pool, user.user.id, count, hide_ai).await?;
     Ok(Answer::node(Node::new("newestPodcasts").list(
         "episode",
         episodes.iter().map(episode_node).collect(),

@@ -602,7 +602,7 @@ async fn transcode_stream_song_podcast_other(pool: PgPool) {
     kima_db::podcasts::subscribe(&pool, ALICE_ID, show.id)
         .await
         .unwrap();
-    let episode = kima_db::podcasts::episodes_for_channel(&pool, show.id, 1)
+    let episode = kima_db::podcasts::episodes_for_channel(&pool, show.id, 1, false)
         .await
         .unwrap()
         .remove(0);

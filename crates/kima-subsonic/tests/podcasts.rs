@@ -3,9 +3,8 @@
 //! (`routes/podcasts.rs`, `routes/media.rs`). Rows are seeded directly with `kima_db::podcasts`
 //! helpers, as the other podcast test binaries do; the SQL fixture carries no podcast data.
 //!
-//! `subsonic_hides_ai_by_setting` is **not** implemented here: it depends on the `ai_feed`/
-//! `aiLabel` decision and schema that Task 0/Task 8 own (D-200), which is explicitly out of
-//! scope for this task, the same boundary Tasks 13/14/16 already recorded.
+//! `subsonic_uses_the_setting` (M6 Task 8, D-208) covers the AI filter: the caller's persisted
+//! `podcastAiContent` setting, since the protocol has no per-request switch.
 
 mod common;
 
@@ -274,11 +273,11 @@ async fn get_podcast_episode_only_followed(pool: PgPool) {
     let followed = seeded_show(&pool, "https://feed.example/a.xml", "Show A", 1, true).await;
     let not_followed = seeded_show(&pool, "https://feed.example/b.xml", "Show B", 1, false).await;
 
-    let followed_ep = podcasts::episodes_for_channel(&pool, followed, 1)
+    let followed_ep = podcasts::episodes_for_channel(&pool, followed, 1, false)
         .await
         .unwrap()
         .remove(0);
-    let other_ep = podcasts::episodes_for_channel(&pool, not_followed, 1)
+    let other_ep = podcasts::episodes_for_channel(&pool, not_followed, 1, false)
         .await
         .unwrap()
         .remove(0);
@@ -406,7 +405,7 @@ async fn refresh_podcasts_refreshes_each_followed_show(pool: PgPool) {
         .unwrap()
         .unwrap();
     assert_eq!(refreshed_a.episode_count, 1);
-    let eps = podcasts::episodes_for_channel(&pool, show_a.id, 10)
+    let eps = podcasts::episodes_for_channel(&pool, show_a.id, 10, false)
         .await
         .unwrap();
     assert!(eps.iter().any(|e| e.title == "New A1"), "{eps:?}");
@@ -448,7 +447,7 @@ async fn refresh_mixed_failure_and_success_are_all_settled(pool: PgPool) {
     let good_show = podcasts::show_by_id(&pool, good).await.unwrap().unwrap();
     assert_eq!(good_show.title, "Updated");
     assert_eq!(good_show.refresh_failures, 0);
-    let episodes = podcasts::episodes_for_channel(&pool, good, 10)
+    let episodes = podcasts::episodes_for_channel(&pool, good, 10, false)
         .await
         .unwrap();
     assert_eq!(episodes.len(), 1);
@@ -462,7 +461,7 @@ async fn refresh_mixed_failure_and_success_are_all_settled(pool: PgPool) {
 async fn decision_podcast_direct_only(pool: PgPool) {
     let env = env(pool.clone());
     let show = seeded_show(&pool, "https://feed.example/a.xml", "Show A", 1, true).await;
-    let episode = podcasts::episodes_for_channel(&pool, show, 1)
+    let episode = podcasts::episodes_for_channel(&pool, show, 1, false)
         .await
         .unwrap()
         .remove(0);
@@ -519,4 +518,97 @@ async fn extensions_advertise_get_podcast_episode(pool: PgPool) {
         .map(|e| e["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"getPodcastEpisode"), "{names:?}");
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn subsonic_uses_the_setting(pool: PgPool) {
+    let env = env(pool.clone());
+    let ai = seeded_show(&pool, "https://feed.example/ai.xml", "AI Show", 2, true).await;
+    let plain = seeded_show(&pool, "https://feed.example/p.xml", "Plain", 2, true).await;
+    sqlx::query("UPDATE podcasts SET ai_feed = true WHERE id = $1")
+        .bind(ai)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // One AI-tagged episode on the plain show.
+    let tagged: Uuid = sqlx::query_scalar(
+        "UPDATE podcast_episodes SET ai_feed = true
+         WHERE podcast_id = $1 AND guid = 'ep-1' RETURNING id",
+    )
+    .bind(plain)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Default: hidden.
+    let body = env.json("getPodcasts", &[]).await;
+    let channels = body["podcasts"]["channel"].as_array().unwrap();
+    assert_eq!(channels.len(), 1);
+    assert_eq!(channels[0]["title"], "Plain");
+    assert_eq!(channels[0]["episode"].as_array().unwrap().len(), 1);
+    let body = env.json("getNewestPodcasts", &[]).await;
+    assert_eq!(
+        body["newestPodcasts"]["episode"].as_array().unwrap().len(),
+        1
+    );
+    // A direct read by id is never filtered.
+    let body = env
+        .json("getPodcastEpisode", &[("id", &tagged.to_string())])
+        .await;
+    assert_eq!(body["status"], "ok", "{body}");
+
+    // The persisted setting shows everything.
+    kima_db::user_settings::upsert(
+        &pool,
+        ALICE_ID,
+        kima_db::user_settings::Patch {
+            podcast_ai_filter: Some("show".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let body = env.json("getPodcasts", &[]).await;
+    assert_eq!(body["podcasts"]["channel"].as_array().unwrap().len(), 2);
+    let body = env.json("getNewestPodcasts", &[]).await;
+    assert_eq!(
+        body["newestPodcasts"]["episode"].as_array().unwrap().len(),
+        4
+    );
+}
+
+/// The AI filter runs in the query, before the limit (D-208): hidden episodes never eat into
+/// `count` or the 200-episode channel cap, so the answer is full whenever enough visible
+/// episodes exist.
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn subsonic_filters_ai_before_the_limit(pool: PgPool) {
+    let env = env(pool.clone());
+    let show = seeded_show(&pool, "https://feed.example/many.xml", "Many", 210, true).await;
+    // The 15 newest episodes are AI-tagged.
+    sqlx::query(
+        "UPDATE podcast_episodes SET ai_feed = true
+         WHERE podcast_id = $1 AND episode_number > 195",
+    )
+    .bind(show)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let body = env.json("getNewestPodcasts", &[("count", "20")]).await;
+    let episodes = body["newestPodcasts"]["episode"].as_array().unwrap();
+    assert_eq!(episodes.len(), 20, "full page of visible episodes");
+    assert_eq!(episodes[0]["title"], "Episode 194", "newest visible first");
+    let body = env.json("getPodcasts", &[]).await;
+    let channel = &body["podcasts"]["channel"][0];
+    assert_eq!(
+        channel["episode"].as_array().unwrap().len(),
+        195,
+        "every visible episode under the 200 cap"
+    );
 }

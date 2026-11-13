@@ -96,6 +96,8 @@ pub struct PodcastSearchRow {
     pub description: Option<String>,
     pub image_url: Option<String>,
     pub episode_count: i32,
+    pub ai_label: String,
+    pub ai_label_source: Option<String>,
 }
 
 pub async fn podcasts(
@@ -105,20 +107,24 @@ pub async fn podcasts(
     limit: i64,
     offset: i64,
 ) -> sqlx::Result<Vec<PodcastSearchRow>> {
-    sqlx::query_as(
-        "SELECT p.id, p.title, p.author, p.description, p.image_url, p.episode_count
+    let sql = format!(
+        "SELECT p.id, p.title, p.author, p.description, p.image_url, p.episode_count,
+                {} AS ai_label, {} AS ai_label_source
          FROM podcasts p
          JOIN podcast_subscriptions s ON s.podcast_id = p.id AND s.user_id = $1
          WHERE p.search @@ $2::tsquery
          ORDER BY ts_rank(p.search, $2::tsquery) DESC, lower(p.title) ASC, p.id ASC
          LIMIT $3 OFFSET $4",
-    )
-    .bind(user)
-    .bind(query)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
+        crate::podcasts::show_label_sql("p"),
+        crate::podcasts::show_source_sql("p"),
+    );
+    sqlx::query_as(&sql)
+        .bind(user)
+        .bind(query)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
 }
 
 /// An episode of a followed show matching a search (upstream `searchEpisodes`).
@@ -132,6 +138,8 @@ pub struct EpisodeSearchRow {
     pub published_at: OffsetDateTime,
     pub duration: i32,
     pub audio_url: String,
+    pub ai_label: String,
+    pub ai_label_source: Option<String>,
 }
 
 pub async fn episodes(
@@ -141,20 +149,23 @@ pub async fn episodes(
     limit: i64,
     offset: i64,
 ) -> sqlx::Result<Vec<EpisodeSearchRow>> {
-    sqlx::query_as(
+    let sql = format!(
         "SELECT e.id, e.podcast_id, p.title AS podcast_title, e.title, e.description,
-                e.published_at, e.duration, e.audio_url
+                e.published_at, e.duration, e.audio_url, {} AS ai_label, {} AS ai_label_source
          FROM podcast_episodes e
          JOIN podcasts p ON p.id = e.podcast_id
          JOIN podcast_subscriptions s ON s.podcast_id = p.id AND s.user_id = $1
          WHERE e.search @@ $2::tsquery
          ORDER BY ts_rank(e.search, $2::tsquery) DESC, e.published_at DESC, e.id ASC
          LIMIT $3 OFFSET $4",
-    )
-    .bind(user)
-    .bind(query)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await
+        crate::podcasts::episode_label_sql("e", "p"),
+        crate::podcasts::episode_source_sql("e", "p"),
+    );
+    sqlx::query_as(&sql)
+        .bind(user)
+        .bind(query)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
 }

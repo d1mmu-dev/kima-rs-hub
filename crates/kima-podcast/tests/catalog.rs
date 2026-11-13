@@ -227,6 +227,7 @@ fn samples_a_show_by_its_oldest_dated_episode_with_audio() {
         image_url: None,
         file_size: None,
         mime_type: "audio/mpeg".into(),
+        ai_feed: None,
     };
     let a = "https://a.invalid/x.mp3";
     let feed = [

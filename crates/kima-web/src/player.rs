@@ -48,9 +48,36 @@ pub fn queue_item(t: &Track) -> QueueItem {
     }
 }
 
-/// `/api/library/tracks/:id/stream?token=...`
-pub fn stream_url(track_id: &str, token: &str) -> String {
-    format!("/api/library/tracks/{track_id}/stream?token={token}")
+/// A podcast episode travels through the queue as `podcast:<show id>:<episode id>`; everything
+/// else in the queue is a library track id.
+pub fn episode_item_id(show: &str, episode: &str) -> String {
+    format!("podcast:{show}:{episode}")
+}
+
+/// The show and episode ids of an episode queue entry.
+pub fn episode_ids(item_id: &str) -> Option<(&str, &str)> {
+    item_id.strip_prefix("podcast:")?.split_once(':')
+}
+
+/// `/api/library/tracks/:id/stream?token=...`, or the episode stream for an episode entry.
+pub fn stream_url(item_id: &str, token: &str) -> String {
+    match episode_ids(item_id) {
+        Some((show, episode)) => {
+            format!("/api/podcasts/{show}/episodes/{episode}/stream?token={token}")
+        }
+        None => format!("/api/library/tracks/{item_id}/stream?token={token}"),
+    }
+}
+
+/// Seconds of listening between two progress saves of an episode (upstream
+/// `audio-controls-context.tsx`: every 15 s while playing, plus on pause and at the end).
+pub const PROGRESS_EVERY: f64 = 15.0;
+
+/// Whether an episode's progress is due: it moved [`PROGRESS_EVERY`] seconds since the last save,
+/// or playback paused or ended somewhere new.
+pub fn progress_due(last: f64, position: f64, stopped: bool) -> bool {
+    let moved = (position - last).abs();
+    moved >= PROGRESS_EVERY || (stopped && moved >= 1.0)
 }
 
 pub fn next_index(len: usize, index: usize) -> Option<usize> {
@@ -140,6 +167,8 @@ struct Inner {
     pending_seek: Cell<Option<f64>>,
     /// The last position written to storage.
     last_saved: Cell<f64>,
+    /// The last position an episode's progress was saved at on the server.
+    last_progress: Cell<f64>,
     /// Output volume, 0-100.
     volume: Value<f64>,
     volume_before_mute: Cell<f64>,
@@ -173,6 +202,7 @@ impl Player {
             audio_track: RefCell::new(None),
             pending_seek: Cell::new(None),
             last_saved: Cell::new(NOT_SAVED),
+            last_progress: Cell::new(0.0),
             volume: Value::new(50.0),
             volume_before_mute: Cell::new(50.0),
             shuffle: Value::new(false),
@@ -210,6 +240,15 @@ impl Player {
         });
         self.after_jump(before);
         self.persist();
+    }
+
+    /// Plays one podcast episode from `resume` seconds (its saved progress) or the start.
+    pub fn play_episode(&self, item: QueueItem, resume: Option<f64>) {
+        self.play_queue(vec![item], 0);
+        self.0.last_progress.set(resume.unwrap_or(0.0));
+        if let Some(secs) = resume.filter(|s| *s > 0.0) {
+            self.0.pending_seek.set(Some(secs));
+        }
     }
 
     fn go_to(&self, index: usize) {
@@ -336,6 +375,10 @@ impl Player {
         let Some(current) = queue.get(index) else {
             return;
         };
+        // The web playback state stores library tracks; an episode's place is its progress.
+        if episode_ids(&current.id).is_some() {
+            return;
+        }
         let body = SavePlaybackState {
             playback_type: "track".into(),
             track_id: Some(current.id.clone()),
@@ -447,6 +490,7 @@ impl Player {
             self.0.playing.set(!paused && !ended);
         });
         self.save_position(position);
+        self.save_progress(position, duration, paused || ended, ended);
         let index = Self::read(&self.0.index);
         if ended && Self::read(&self.0.repeat) == Repeat::One {
             // Loop this track: back to the start, play again.
@@ -471,6 +515,32 @@ impl Player {
                 .storage()
                 .set(position::STORAGE_KEY, &position::encode(&id, position));
         }
+    }
+
+    /// For an episode: `POST .../progress` when [`progress_due`] (best effort, like the queue save).
+    fn save_progress(&self, position: f64, duration: f64, stopped: bool, ended: bool) {
+        let Some(id) = self.0.audio_track.borrow().clone() else {
+            return;
+        };
+        let Some((show, episode)) = episode_ids(&id) else {
+            return;
+        };
+        if !(progress_due(self.0.last_progress.get(), position, stopped) || ended) {
+            return;
+        }
+        if ended && self.0.last_progress.get() == position {
+            return;
+        }
+        self.0.last_progress.set(position);
+        let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
+        let mut body = serde_json::json!({ "currentTime": position, "isFinished": ended });
+        if duration > 0.0 {
+            body["duration"] = serde_json::json!(duration);
+        }
+        let client = self.0.client.clone();
+        get_driver().spawn(async move {
+            let _ = client.post::<_, serde_json::Value>(&path, &body).await;
+        });
     }
 
     /// The current queue item (reactive).
@@ -586,7 +656,12 @@ impl Player {
 
     fn cover(&self, item: &QueueItem, size: u32) -> Option<String> {
         let art = item.album.as_ref()?.cover_art.clone()?;
-        cover_url(&art, size, self.0.session.current_token().as_deref())
+        let token = self.0.session.current_token();
+        if art.starts_with("http") {
+            // An episode's or show's image: through the external-image proxy.
+            return crate::pages::podcasts::image_url(Some(&art), size, token.as_deref());
+        }
+        cover_url(&art, size, token.as_deref())
     }
 
     /// The sleep-timer button with its preset popover (legacy `SleepTimer`).
@@ -683,10 +758,14 @@ impl Player {
                 Some(src) => dom! { <img alt="" decoding="async" class="absolute inset-0 w-full h-full object-cover" src={src} /> },
                 None => icon("music", "w-6 h-6 text-[var(--text-muted)]"),
             };
-            let href = item
-                .as_ref()
-                .and_then(|i| i.album.as_ref())
-                .map(|a| Route::Tracks { album: Some(a.id.clone()) }.to_string());
+            // An episode's "album" is its show.
+            let href = item.as_ref().and_then(|i| {
+                let album = i.album.as_ref()?;
+                Some(match episode_ids(&i.id) {
+                    Some(_) => Route::PodcastShow { id: album.id.clone() }.to_string(),
+                    None => Route::Tracks { album: Some(album.id.clone()) }.to_string(),
+                })
+            });
             let tile = dom! {
                 <div class="relative w-full h-full bg-gradient-to-br from-[#2a2a2a] to-[#1a1a1a] rounded-lg overflow-hidden flex items-center justify-center transition-transform duration-300">
                     {inner}
@@ -982,6 +1061,28 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn episodes_stream_from_the_podcast_route() {
+        let id = episode_item_id("s1", "e1");
+        assert_eq!(id, "podcast:s1:e1");
+        assert_eq!(episode_ids(&id), Some(("s1", "e1")));
+        assert_eq!(episode_ids("8d0c4a3e-track"), None);
+        assert_eq!(
+            stream_url(&id, "tok"),
+            "/api/podcasts/s1/episodes/e1/stream?token=tok"
+        );
+    }
+
+    #[test]
+    fn episode_progress_saves_every_15_seconds_and_on_stop() {
+        assert!(!progress_due(0.0, 10.0, false));
+        assert!(progress_due(0.0, 15.0, false));
+        assert!(progress_due(0.0, 10.0, true));
+        assert!(!progress_due(10.0, 10.2, true));
+        // A seek backwards counts as movement too.
+        assert!(progress_due(100.0, 20.0, false));
+    }
 
     #[test]
     fn stream_url_is_the_existing_endpoint_with_the_token() {

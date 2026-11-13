@@ -106,27 +106,65 @@ pub fn resume_point(progress: Option<&Progress>) -> Option<f64> {
 /// Feed descriptions are often HTML; the page shows them as text, so tags are dropped and the
 /// common entities decoded (everything is still escaped by `dom!`).
 pub fn plain_text(html: &str) -> String {
+    let chars: Vec<char> = html.chars().collect();
     let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for c in html.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' if in_tag => {
-                in_tag = false;
-                out.push(' ');
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // `<` opens a tag only before a letter, `/` or `!`; "Rated <3" stays text.
+        let tag = c == '<'
+            && chars
+                .get(i + 1)
+                .is_some_and(|n| n.is_ascii_alphabetic() || *n == '/' || *n == '!');
+        if tag {
+            match chars[i..].iter().position(|&c| c == '>') {
+                Some(end) => {
+                    out.push(' ');
+                    i += end + 1;
+                    continue;
+                }
+                None => break,
             }
-            _ if !in_tag => out.push(c),
-            _ => {}
         }
+        if c == '&'
+            && let Some(len) = chars[i..].iter().take(12).position(|&c| c == ';')
+            && let Some(decoded) = entity(&chars[i + 1..i + len].iter().collect::<String>())
+        {
+            out.push(decoded);
+            i += len + 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
     }
-    let out = out
-        .replace("&nbsp;", " ")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&");
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The character an HTML entity name (without `&` and `;`) stands for, for the ones feeds use.
+fn entity(name: &str) -> Option<char> {
+    if let Some(num) = name.strip_prefix('#') {
+        let code = match num.strip_prefix(['x', 'X']) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+            None => num.parse().ok()?,
+        };
+        return char::from_u32(code);
+    }
+    Some(match name {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => ' ',
+        "rsquo" => '\u{2019}',
+        "lsquo" => '\u{2018}',
+        "rdquo" => '\u{201d}',
+        "ldquo" => '\u{201c}',
+        "mdash" => '\u{2014}',
+        "ndash" => '\u{2013}',
+        "hellip" => '\u{2026}',
+        _ => return None,
+    })
 }
 
 /// A page heading in the style of the other kima-web pages.
@@ -219,7 +257,11 @@ mod tests {
             plain_text("<p>News &amp; <b>views</b></p>\n<p>daily&nbsp;at 6</p>"),
             "News & views daily at 6"
         );
-        assert_eq!(plain_text("a < b"), "a");
+        assert_eq!(plain_text("Rated <3 & a < b"), "Rated <3 & a < b");
+        assert_eq!(
+            plain_text("it&#8217;s &#x27;x&#39; &rsquo;&mdash;&hellip; &bogus;"),
+            "it\u{2019}s 'x' \u{2019}\u{2014}\u{2026} &bogus;"
+        );
         assert_eq!(plain_text("plain"), "plain");
     }
 

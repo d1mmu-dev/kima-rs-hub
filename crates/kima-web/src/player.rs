@@ -9,6 +9,7 @@
 //! `localStorage` key scoped to the track id (see `position.rs`) and applied after a reload.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use kima_api_types::library::Track;
@@ -67,6 +68,25 @@ pub fn stream_url(item_id: &str, token: &str) -> String {
         }
         None => format!("/api/library/tracks/{item_id}/stream?token={token}"),
     }
+}
+
+/// The queue without podcast episodes and the current index in it, for `/api/playback-state`
+/// (which restores library tracks only). `None` when the current item is an episode.
+pub fn library_only(queue: &[QueueItem], index: usize) -> Option<(Vec<QueueItem>, usize)> {
+    let current = queue.get(index)?;
+    if episode_ids(&current.id).is_some() {
+        return None;
+    }
+    let before = queue[..index]
+        .iter()
+        .filter(|i| episode_ids(&i.id).is_some())
+        .count();
+    let kept = queue
+        .iter()
+        .filter(|i| episode_ids(&i.id).is_none())
+        .cloned()
+        .collect();
+    Some((kept, index - before))
 }
 
 /// Seconds of listening between two progress saves of an episode (upstream
@@ -171,6 +191,10 @@ struct Inner {
     last_progress: Cell<f64>,
     /// The current episode's end was reported (it is not reported twice).
     finished_sent: Cell<bool>,
+    /// Where each episode played this session stands (queue id -> seconds; 0 = from the start).
+    /// An episode's `<audio>` resumes from here however it became current (play, queue jump,
+    /// previous, repeat), so a fresh element never reports 0 over the stored progress.
+    episode_marks: RefCell<HashMap<String, f64>>,
     /// Output volume, 0-100.
     volume: Value<f64>,
     volume_before_mute: Cell<f64>,
@@ -206,6 +230,7 @@ impl Player {
             last_saved: Cell::new(NOT_SAVED),
             last_progress: Cell::new(0.0),
             finished_sent: Cell::new(false),
+            episode_marks: RefCell::new(HashMap::new()),
             volume: Value::new(50.0),
             volume_before_mute: Cell::new(50.0),
             shuffle: Value::new(false),
@@ -247,11 +272,40 @@ impl Player {
 
     /// Plays one podcast episode from `resume` seconds (its saved progress) or the start.
     pub fn play_episode(&self, item: QueueItem, resume: Option<f64>) {
+        self.0
+            .episode_marks
+            .borrow_mut()
+            .insert(item.id.clone(), resume.unwrap_or(0.0));
         self.play_queue(vec![item], 0);
+        // In case the element already exists (the same episode again), apply the mark now.
+        self.arm_episode(None);
+    }
+
+    /// Prepares progress bookkeeping for the element of the current item: for an episode, its
+    /// session mark becomes the baseline and the resume point. `id` is the element's item id
+    /// (`None`: the current one).
+    fn arm_episode(&self, id: Option<&str>) {
+        let id = match id {
+            Some(id) => id.to_owned(),
+            None => match self.current_item() {
+                Some(item) => item.id,
+                None => return,
+            },
+        };
         self.0.finished_sent.set(false);
-        self.0.last_progress.set(resume.unwrap_or(0.0));
-        if let Some(secs) = resume.filter(|s| *s > 0.0) {
-            self.0.pending_seek.set(Some(secs));
+        if episode_ids(&id).is_none() {
+            return;
+        }
+        let mark = self
+            .0
+            .episode_marks
+            .borrow()
+            .get(&id)
+            .copied()
+            .unwrap_or(0.0);
+        self.0.last_progress.set(mark);
+        if mark > 0.0 {
+            self.0.pending_seek.set(Some(mark));
         }
     }
 
@@ -380,13 +434,13 @@ impl Player {
             return;
         };
         // The web playback state stores library tracks; an episode's place is its progress.
-        if episode_ids(&current.id).is_some() {
+        let Some((queue, index)) = library_only(&queue, index) else {
             return;
-        }
+        };
         let body = SavePlaybackState {
             playback_type: "track".into(),
             track_id: Some(current.id.clone()),
-            queue: Some(queue.clone()),
+            queue: Some(queue),
             current_index: Some(index as i32),
             is_shuffle: Some(Self::read(&self.0.shuffle)),
         };
@@ -554,6 +608,10 @@ impl Player {
         }
         self.0.finished_sent.set(ended);
         self.0.last_progress.set(position);
+        self.0
+            .episode_marks
+            .borrow_mut()
+            .insert(id.clone(), if ended { 0.0 } else { position });
         let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
         // At the end upstream reports the whole length as the position.
         let at = if ended && duration > 0.0 {
@@ -663,6 +721,7 @@ impl Player {
                     let audio = element.get_ref();
                     *me.0.audio.borrow_mut() = Some(audio.clone());
                     *me.0.audio_track.borrow_mut() = Some(item.id.clone());
+                    me.arm_episode(Some(&item.id));
                     me.0.last_saved.set(NOT_SAVED);
                     let volume = Self::read(&me.0.volume);
                     audio
@@ -1100,6 +1159,31 @@ mod tests {
             stream_url(&id, "tok"),
             "/api/podcasts/s1/episodes/e1/stream?token=tok"
         );
+    }
+
+    #[test]
+    fn playback_state_keeps_library_tracks_only() {
+        let item = |id: &str| QueueItem {
+            id: id.into(),
+            title: id.into(),
+            duration: 1.0,
+            artist: None,
+            album: None,
+        };
+        let queue = [
+            item("podcast:s:e1"),
+            item("t1"),
+            item("podcast:s:e2"),
+            item("t2"),
+        ];
+        let (kept, index) = library_only(&queue, 3).unwrap();
+        assert_eq!(
+            kept.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            ["t1", "t2"]
+        );
+        assert_eq!(index, 1);
+        assert!(library_only(&queue, 2).is_none());
+        assert_eq!(library_only(&queue, 1).unwrap().1, 0);
     }
 
     #[test]

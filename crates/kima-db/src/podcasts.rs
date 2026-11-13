@@ -503,6 +503,18 @@ pub async fn episode_audio(pool: &PgPool, episode: Uuid) -> sqlx::Result<Option<
     .await
 }
 
+/// The episode's own `image_url` (Task 15, `routes/podcasts/cover.rs`); `None` when the
+/// episode does not exist or has none, same as upstream's `episode?.imageUrl`.
+pub async fn episode_cover_url(pool: &PgPool, episode: Uuid) -> sqlx::Result<Option<String>> {
+    sqlx::query_scalar!(
+        "SELECT image_url FROM podcast_episodes WHERE id = $1",
+        episode
+    )
+    .fetch_optional(pool)
+    .await
+    .map(Option::flatten)
+}
+
 // M6 Task 12: the episode cache (`kima_podcast::cache`). The cached file on disk is shared by
 // every follower of the show, but `podcast_downloads` keeps one row per (user, episode), as
 // upstream's `PodcastDownload` does; helpers below that validate or expire the cache act on

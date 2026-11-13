@@ -45,7 +45,7 @@ http-body-util = "0.1"
 jsonwebtoken = "9"
 libc = "0.2"
 insta = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 lofty = "0.25"
 pathfinding = "4"
 rand = "0.8"

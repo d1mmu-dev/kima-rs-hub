@@ -119,7 +119,7 @@ async fn forward(proxy: &WebProxy, req: Request) -> Response {
     let upstream = match out.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = %e, %url, "SSR server did not answer");
+            tracing::warn!(error = %e.without_url(), path = %parts.uri.path(), "SSR server did not answer");
             return (StatusCode::BAD_GATEWAY, "kima-web is unavailable").into_response();
         }
     };

@@ -6,11 +6,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
-use image::{DynamicImage, ImageReader, Limits};
+use image::{DynamicImage, ImageFormat, ImageReader, Limits};
 use lofty::file::TaggedFileExt;
 use lofty::picture::PictureType;
 use lofty::probe::Probe;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -847,4 +848,98 @@ pub fn read_local_image(path: &Path) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     file.take(MAX_LOCAL_IMAGE_BYTES + 1).read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+// ---- the external cover proxy (Task 15, D-210) ----
+
+/// A SHA-256 hex digest used to derive the proxy's process-local cache key.
+/// The response ETag is separately computed as MD5 for upstream compatibility.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// Where a proxied remote cover's cache entry lives: `<data_dir>/artwork/remote/<key>.{bin,json}`,
+/// keyed by the image's own URL and the requested width, so different sizes of one source cache
+/// apart.
+pub fn remote_cover_cache_paths(
+    data_dir: &Path,
+    url: &str,
+    width: Option<u32>,
+) -> (PathBuf, PathBuf) {
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    hasher.update(b"|");
+    if let Some(w) = width {
+        hasher.update(w.to_string().as_bytes());
+    }
+    let key = hex::encode(hasher.finalize());
+    let dir = data_dir.join("artwork").join("remote");
+    (
+        dir.join(format!("{key}.bin")),
+        dir.join(format!("{key}.json")),
+    )
+}
+
+/// Smallest/largest `size` the proxy will resize to (upstream `imageStorage.ts`'s
+/// `resizeImageBuffer`); outside this range, or when the image is already that narrow or
+/// narrower, the original bytes are served unresized.
+pub const REMOTE_COVER_MIN_WIDTH: u32 = 16;
+pub const REMOTE_COVER_MAX_WIDTH: u32 = 2048;
+
+/// The content type of a format this build can decode and (if asked) re-encode, guessed from
+/// the bytes themselves — never the host's claimed `Content-Type` header.
+fn remote_mime(format: ImageFormat) -> Option<&'static str> {
+    match format {
+        ImageFormat::Jpeg => Some("image/jpeg"),
+        ImageFormat::Png => Some("image/png"),
+        ImageFormat::WebP => Some("image/webp"),
+        ImageFormat::Gif => Some("image/gif"),
+        _ => None,
+    }
+}
+
+/// Validates a fetched remote cover and, when asked and worthwhile, resizes it (Task 15):
+/// decoded and dimension-checked under the same decompression-bomb limits as
+/// [`normalize_image`]; `width` outside [`REMOTE_COVER_MIN_WIDTH`]..=[`REMOTE_COVER_MAX_WIDTH`]
+/// or not narrower than the source is left unresized, matching upstream. `None` for bytes this
+/// build cannot decode as one of the formats above (a 404, not a 500: the source is simply
+/// unusable). Blocking.
+pub fn remote_cover_image(
+    bytes: &[u8],
+    width: Option<u32>,
+) -> Result<Option<(Vec<u8>, &'static str)>, ArtworkError> {
+    if bytes.len() as u64 > MAX_LOCAL_IMAGE_BYTES {
+        return Err(ArtworkError::TooLarge);
+    }
+    let Ok(mut probe) = ImageReader::new(Cursor::new(bytes)).with_guessed_format() else {
+        return Ok(None);
+    };
+    let Some(format) = probe.format() else {
+        return Ok(None);
+    };
+    let Some(mime) = remote_mime(format) else {
+        return Ok(None);
+    };
+    probe.limits(untrusted_limits());
+    let Ok((w, h)) = probe.into_dimensions() else {
+        return Ok(None);
+    };
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_UNTRUSTED_PIXELS {
+        return Err(ArtworkError::TooLarge);
+    }
+    let mut full = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    full.limits(untrusted_limits());
+    let img = full.decode()?;
+    let target =
+        width.filter(|n| (REMOTE_COVER_MIN_WIDTH..=REMOTE_COVER_MAX_WIDTH).contains(n) && *n < w);
+    let Some(target) = target else {
+        return Ok(Some((bytes.to_vec(), mime)));
+    };
+    let out_h = ((u64::from(img.height()) * u64::from(target)) / u64::from(img.width().max(1)))
+        .max(1) as u32;
+    let resized = img.resize_exact(target, out_h, FilterType::Lanczos3);
+    let rgb = DynamicImage::ImageRgb8(resized.to_rgb8());
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 85).encode_image(&rgb)?;
+    Ok(Some((jpeg, "image/jpeg")))
 }

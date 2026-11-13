@@ -27,10 +27,20 @@ impl Net {
     /// to 15 MiB. Refusals are `Permanent`: `NOT_PUBLIC`, `BAD_SCHEME`, `NOT_AN_IMAGE`,
     /// `TOO_SMALL`, `TOO_LARGE`. A 404 is `Absent`. Never cached.
     pub async fn get_bytes(&self, url: &str) -> Outcome<Vec<u8>> {
+        self.get_bytes_inner(url, false).await
+    }
+
+    /// Fetch an interactive image independently of enrichment settings, with per-hop SSRF
+    /// and byte limits intact; the caller must validate the returned bytes before serving them.
+    pub async fn get_bytes_user_facing(&self, url: &str) -> Outcome<Vec<u8>> {
+        self.get_bytes_inner(url, true).await
+    }
+
+    async fn get_bytes_inner(&self, url: &str, user_facing: bool) -> Outcome<Vec<u8>> {
         let Some(live) = &self.live else {
             return disabled();
         };
-        if !live.switch.enabled() {
+        if !user_facing && !live.switch.enabled() {
             return disabled();
         }
         let url = match Url::parse(url) {
@@ -44,14 +54,14 @@ impl Net {
             );
         }
         let source = Source::Images;
-        if let Some(until) = self.paused_until(source) {
+        if !user_facing && let Some(until) = self.paused_until(source) {
             return Outcome::RateLimited { until };
         }
         let limits = source.limits();
         let Ok(permit) = live.gates[&source].acquire(None).await else {
             return transient("BUSY", "images is busy");
         };
-        let fetched = tokio::time::timeout(limits.timeout, live.download(url)).await;
+        let fetched = tokio::time::timeout(limits.timeout, live.download(url, user_facing)).await;
         drop(permit);
         let step = match fetched {
             Err(_) => {
@@ -61,15 +71,28 @@ impl Net {
         };
         match step {
             Step::Done(out) => {
-                if matches!(out, Outcome::Answered(_) | Outcome::Absent(_)) {
+                if !user_facing && matches!(out, Outcome::Answered(_) | Outcome::Absent(_)) {
                     live.clear_pause(source).await;
                 }
                 out
             }
             // `images` retries no rate limit itself (spec §7.3): pause at once.
             Step::Limited(limited) => {
-                let until = live.pause(source, &limited.reason).await;
-                Outcome::RateLimited { until }
+                if user_facing {
+                    // This host's rate limit must not pause unrelated hosts or enrichment.
+                    let delay = crate::client::retry_delay(
+                        0,
+                        limited.retry_after.as_deref(),
+                        std::time::Duration::ZERO,
+                    );
+                    let seconds = delay.as_secs().clamp(1, 3600) as i64;
+                    Outcome::RateLimited {
+                        until: time::OffsetDateTime::now_utc() + time::Duration::seconds(seconds),
+                    }
+                } else {
+                    let until = live.pause(source, &limited.reason).await;
+                    Outcome::RateLimited { until }
+                }
             }
         }
     }
@@ -77,7 +100,7 @@ impl Net {
 
 impl Live {
     /// Fetches an image, checking and pinning every hop.
-    async fn download(&self, mut url: Url) -> Step<Vec<u8>> {
+    async fn download(&self, mut url: Url, user_facing: bool) -> Step<Vec<u8>> {
         let secrets = Secrets::default();
         let mut hops = 0;
         loop {
@@ -194,7 +217,7 @@ impl Live {
                 .unwrap_or("")
                 .trim()
                 .to_ascii_lowercase();
-            if !content_type.starts_with("image/") {
+            if !user_facing && !content_type.starts_with("image/") {
                 return Step::Done(permanent(
                     "NOT_AN_IMAGE",
                     format!("{host} answered {:?}, not an image", content_type),
@@ -222,7 +245,7 @@ impl Live {
                     Err(e) => return Step::Done(reqwest_failure(e)),
                 }
             }
-            if bytes.len() < MIN_IMAGE {
+            if !user_facing && bytes.len() < MIN_IMAGE {
                 return Step::Done(permanent(
                     "TOO_SMALL",
                     format!("image from {host} is {} bytes", bytes.len()),

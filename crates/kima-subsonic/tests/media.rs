@@ -518,7 +518,7 @@ async fn transcode_stream_song_podcast_other(pool: PgPool) {
     if !require_ffmpeg() {
         return;
     }
-    let env = env(pool);
+    let env = env(pool.clone());
     let data = env.audio(FLAC_REL);
     let t1 = id(1);
     let song = env
@@ -557,6 +557,70 @@ async fn transcode_stream_song_podcast_other(pool: PgPool) {
         "Podcast episode not found",
     )
     .await;
+
+    // A real episode of a show alice follows: a redirect to its own audio URL, regardless of
+    // `transcodeParams` (D-101/D-167 amended: podcasts are always direct play of the feed).
+    let show = kima_db::podcasts::insert_show(
+        &pool,
+        uuid::Uuid::now_v7(),
+        &kima_db::podcasts::NewShow {
+            feed_url: "https://feed.example/show.xml",
+            title: "A Show",
+            author: None,
+            description: None,
+            image_url: None,
+            itunes_id: None,
+            category_ids: &[],
+            language: None,
+            explicit: false,
+            episode_count: 1,
+            feed_etag: None,
+            feed_last_modified: None,
+        },
+    )
+    .await
+    .unwrap();
+    kima_db::podcasts::insert_episodes(
+        &pool,
+        show.id,
+        &[kima_db::podcasts::NewEpisode {
+            guid: "ep-1".into(),
+            title: "Episode 1".into(),
+            description: None,
+            audio_url: "https://feed.example/ep1.mp3".into(),
+            duration: 120,
+            published_at: time::OffsetDateTime::now_utc(),
+            episode_number: None,
+            season: None,
+            image_url: None,
+            file_size: None,
+            mime_type: None,
+        }],
+    )
+    .await
+    .unwrap();
+    kima_db::podcasts::subscribe(&pool, ALICE_ID, show.id)
+        .await
+        .unwrap();
+    let episode = kima_db::podcasts::episodes_for_channel(&pool, show.id, 1)
+        .await
+        .unwrap()
+        .remove(0);
+    let redirect = env
+        .get(
+            "getTranscodeStream",
+            &[
+                ("mediaId", &episode.id.to_string()),
+                ("mediaType", "podcast"),
+                ("transcodeParams", "anything"),
+            ],
+        )
+        .await;
+    redirect.assert_status(StatusCode::FOUND);
+    assert_eq!(
+        redirect.header(axum::http::header::LOCATION),
+        "https://feed.example/ep1.mp3"
+    );
     env.assert_error(
         "getTranscodeStream",
         &[
@@ -1197,7 +1261,9 @@ async fn transcode_params_kima_would_not_hand_out_are_an_error_not_a_stream(pool
 )]
 async fn a_decision_for_anything_but_a_song_is_an_error(pool: PgPool) {
     let env = env(pool);
-    // Podcasts arrive with M6; until then not a direct play either (D-167).
+    // `id(1)` is a song id, not a real podcast episode id, so the podcast branch (M6 Task 18)
+    // also answers "Media not found"; `decision_podcast_direct_only` (`tests/podcasts.rs`)
+    // covers a real one.
     for kind in ["podcast", "album"] {
         env.assert_error(
             "getTranscodeDecision",

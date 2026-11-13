@@ -1,0 +1,49 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "podcasts": {
+      "channel": [
+        {
+          "coverArt": "00000000-0000-7000-8000-800000000001",
+          "description": "Snap description",
+          "episode": [
+            {
+              "album": "Snapshot Show",
+              "artist": "Podcast",
+              "channelId": "00000000-0000-7000-8000-800000000001",
+              "contentType": "audio/mpeg",
+              "coverArt": "00000000-0000-7000-8000-800000000001",
+              "created": "2026-01-01T00:05:00.000Z",
+              "description": "Ep description",
+              "duration": 125,
+              "id": "00000000-0000-7000-8000-900000000001",
+              "isDir": false,
+              "isVideo": false,
+              "parent": "00000000-0000-7000-8000-800000000001",
+              "publishDate": "2026-01-01T00:00:00.000Z",
+              "size": 2048,
+              "status": "completed",
+              "streamId": "00000000-0000-7000-8000-900000000001",
+              "streamUrl": "https://feed.example/ep1.mp3",
+              "suffix": "mpeg",
+              "title": "Snapshot Episode",
+              "type": "podcast"
+            }
+          ],
+          "id": "00000000-0000-7000-8000-800000000001",
+          "originalImageUrl": "https://img.example/show.png",
+          "title": "Snapshot Show",
+          "url": "https://feed.example/show.xml"
+        }
+      ]
+    },
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

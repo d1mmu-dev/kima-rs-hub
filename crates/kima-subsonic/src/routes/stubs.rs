@@ -17,10 +17,6 @@ const NO_CHAT: &str = "Chat is not supported by this server";
 const NO_JUKEBOX: &str = "Jukebox mode is not supported by this server";
 
 pub fn add_routes(router: Router<SubsonicCtx>) -> Router<SubsonicCtx> {
-    let router = add(router, "getPodcasts", podcasts);
-    let router = add(router, "getNewestPodcasts", newest_podcasts);
-    let router = add(router, "getPodcastEpisode", podcast_episode);
-    let router = add(router, "refreshPodcasts", refresh_podcasts);
     let router = add(router, "getShares", shares);
     let router = add(router, "createShare", no_shares);
     let router = add(router, "updateShare", no_shares);
@@ -39,22 +35,6 @@ pub fn add_routes(router: Router<SubsonicCtx>) -> Router<SubsonicCtx> {
 
 fn empty(name: &'static str) -> Result<Answer, SubsonicError> {
     Ok(Answer::node(Node::new(name)))
-}
-
-async fn podcasts(_user: SubsonicUser) -> Result<Answer, SubsonicError> {
-    empty("podcasts")
-}
-
-async fn newest_podcasts(_user: SubsonicUser) -> Result<Answer, SubsonicError> {
-    empty("newestPodcasts")
-}
-
-async fn podcast_episode(_user: SubsonicUser) -> Result<Answer, SubsonicError> {
-    Err(SubsonicError::not_found("Podcast episode not found"))
-}
-
-async fn refresh_podcasts(_user: SubsonicUser) -> Result<Answer, SubsonicError> {
-    Ok(Answer::ok())
 }
 
 async fn shares(_user: SubsonicUser) -> Result<Answer, SubsonicError> {

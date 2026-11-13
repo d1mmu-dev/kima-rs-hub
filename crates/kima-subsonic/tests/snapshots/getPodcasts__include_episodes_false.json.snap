@@ -1,0 +1,26 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+{
+  "subsonic-response": {
+    "openSubsonic": true,
+    "podcasts": {
+      "channel": [
+        {
+          "coverArt": "00000000-0000-7000-8000-800000000001",
+          "description": "Snap description",
+          "episode": [],
+          "id": "00000000-0000-7000-8000-800000000001",
+          "originalImageUrl": "https://img.example/show.png",
+          "title": "Snapshot Show",
+          "url": "https://feed.example/show.xml"
+        }
+      ]
+    },
+    "serverVersion": "[redacted]",
+    "status": "ok",
+    "type": "Kima",
+    "version": "1.16.1",
+    "xmlns": "http://subsonic.org/restapi"
+  }
+}

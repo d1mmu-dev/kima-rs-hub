@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE podcasts SET title = $2, author = $3, description = $4, image_url = $5,\n                language = $6, explicit = $7, episode_count = $8, feed_etag = $9,\n                feed_last_modified = $10, last_refreshed = now(), updated_at = now(),\n                refresh_error = NULL, refresh_failed_at = NULL, refresh_failures = 0\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "946de9e0db321cc646207690450f50cf171d92a8a92924afa79b3f2d1365c818"
+}

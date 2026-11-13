@@ -217,8 +217,10 @@ pub fn render(ctx: &Ctx) -> DomNode {
         Some(message) => dom! { <p class="w-full text-xs text-danger-light mt-1">{message}</p> },
         None => dom! { <span class="hidden" /> },
     });
+    let search = super::search::render(ctx);
     let add_feed = dom! {
-        <div class="page-shell mb-8">
+        <div class="page-shell mb-8 flex flex-col gap-3">
+            {search}
             <form class="flex flex-wrap items-center gap-2 max-w-xl" on_submit={follow_feed}>
                 <input class={INPUT} type="url" name="feed" aria-label="rss feed address"
                     placeholder="https://example.com/feed.xml" value={feed.clone()}

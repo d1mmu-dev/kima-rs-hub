@@ -1,9 +1,10 @@
 //! Typed calls to `/api/podcasts/...` over the `kima-api-types::podcasts` shapes. The paths are
 //! built by pure functions so they are unit-tested natively; the async calls only send them.
 use super::client::{ApiClient, ApiError};
+use crate::pages::search::encode_query;
 use kima_api_types::podcasts::{
-    Category, DiscoveryItem, EpisodePage, FollowedShow, ForYouRow, Listening, Preview, RefreshAll,
-    ShowDetail, Subscribed,
+    Category, DiscoveryItem, EpisodePage, EpisodeSearch, FollowedShow, ForYouRow, Listening,
+    Preview, RefreshAll, ShowDetail, ShowSearch, Subscribed,
 };
 use serde_json::json;
 
@@ -32,6 +33,26 @@ pub fn chart_path(category: Option<u32>, offset: u32, limit: u32, background: bo
         .unwrap_or_default();
     let lane = if background { "&background=true" } else { "" };
     format!("/api/podcasts/charts?{category}offset={offset}&limit={limit}{lane}")
+}
+
+/// Shows from Apple's catalogue and episodes of followed shows, as upstream `PodcastSearch`.
+pub fn show_search_path(q: &str) -> String {
+    format!(
+        "/api/search/discover?q={}&type=podcasts&limit=8",
+        encode_query(q)
+    )
+}
+
+pub fn episode_search_path(q: &str) -> String {
+    format!("/api/search?q={}&type=episodes&limit=6", encode_query(q))
+}
+
+pub async fn search_shows(api: &ApiClient, q: &str) -> Result<ShowSearch, ApiError> {
+    api.get(&show_search_path(q)).await
+}
+
+pub async fn search_episodes(api: &ApiClient, q: &str) -> Result<EpisodeSearch, ApiError> {
+    api.get(&episode_search_path(q)).await
 }
 
 pub fn preview_path(itunes_id: &str) -> String {
@@ -137,6 +158,18 @@ mod tests {
         assert_eq!(
             chart_path(None, 0, 24, true),
             "/api/podcasts/charts?offset=0&limit=24&background=true"
+        );
+    }
+
+    #[test]
+    fn search_paths_encode_the_query() {
+        assert_eq!(
+            show_search_path("true crime & co"),
+            "/api/search/discover?q=true%20crime%20%26%20co&type=podcasts&limit=8"
+        );
+        assert_eq!(
+            episode_search_path("nvidia"),
+            "/api/search?q=nvidia&type=episodes&limit=6"
         );
     }
 

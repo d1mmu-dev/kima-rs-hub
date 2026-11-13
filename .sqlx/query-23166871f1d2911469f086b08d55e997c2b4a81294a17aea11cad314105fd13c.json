@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT user_id, episode_id, local_path, file_size_mb FROM podcast_downloads\n         WHERE last_accessed_at < $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "episode_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "local_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "file_size_mb",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "23166871f1d2911469f086b08d55e997c2b4a81294a17aea11cad314105fd13c"
+}

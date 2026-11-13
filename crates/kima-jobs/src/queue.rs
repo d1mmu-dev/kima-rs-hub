@@ -346,6 +346,21 @@ pub async fn pending_id(pool: &PgPool, queue: &str, kind: &str) -> sqlx::Result<
     .await
 }
 
+/// The id of a queued or running job on `queue` whose payload `key` field is `key`, oldest
+/// first. For a caller that dedupes by `enqueue_unless_queued_with_key`'s `key` rather than
+/// `kind` (e.g. "is this episode downloading now?").
+pub async fn pending_with_key(pool: &PgPool, queue: &str, key: &str) -> sqlx::Result<Option<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT id FROM jobs
+         WHERE queue = $1 AND state IN ('queued', 'running') AND payload ->> 'key' = $2
+         ORDER BY created_at, id LIMIT 1",
+    )
+    .bind(queue)
+    .bind(key)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Like [`enqueue_unless_pending`], but always returns a job id: the new job's, or the one
 /// already pending. Retries if the pending job finishes between the two steps.
 pub async fn enqueue_or_pending(

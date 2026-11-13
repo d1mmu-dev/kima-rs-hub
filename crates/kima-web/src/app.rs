@@ -77,6 +77,10 @@ pub fn render() -> DomNode {
                 Route::Playlists => pages::playlists::list::render(&ctx),
                 Route::Playlist { id } => pages::playlists::detail::render(&ctx, id),
                 Route::Settings => pages::settings::render(&ctx),
+                Route::Podcasts => pages::podcasts::home(&ctx),
+                Route::PodcastShow { id } => pages::podcasts::show(&ctx, id),
+                Route::PodcastPreview { itunes_id } => pages::podcasts::preview(&ctx, itunes_id),
+                Route::PodcastCategory { id } => pages::podcasts::category(&ctx, id),
                 Route::NotFound => pages::not_found(),
             }
         }))

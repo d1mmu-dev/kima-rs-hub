@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum_test::TestServer;
 use common::library::{Seed, seed};
 use kima_db::PgPool;
+use kima_db::users::Registration;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -116,6 +117,91 @@ async fn embedding_api_progress_status_and_failure_counts_agree(pool: PgPool) {
         assert_eq!(f["failures"][0]["entityType"], "audio");
         assert_eq!(f["failures"][0]["metadata"]["stage"], "embedding");
     }
+}
+
+/// A failed podcast refresh must surface through the HTTP control-plane routes that
+/// `retry_failed_and_blocked` re-queues, with the same failure methodology as music
+/// enrichment failures. All assertions key to the fresh podcast UUID, so unrelated test
+/// state left in the shared SQLx database cannot make or break this test.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn podcast_refresh_failure_shows_in_http_counts_and_retries(pool: PgPool) {
+    let podcast = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO podcasts (id, feed_url, title, refresh_error, refresh_failed_at,\n         refresh_failures)\n         VALUES ($1, $2, 'Lost Show', 'feed is gone', now(), 1)",
+    )
+    .bind(podcast)
+    .bind(format!("https://example.invalid/{podcast}"))
+    .execute(&pool)
+    .await
+    .unwrap();
+    // The control-plane retry deliberately skips shows that are not followed; subscribe a
+    // first user, who also becomes admin of this isolated test database.
+    let state = common::state(pool.clone());
+    let user = match kima_db::users::register(&pool, Uuid::now_v7(), "podcast-retry", "hash").await
+    {
+        sqlx::Result::Ok(Registration::Created(u)) => u,
+        _ => panic!("registration failed"),
+    };
+    sqlx::query(
+        "INSERT INTO podcast_subscriptions (user_id, podcast_id) VALUES ($1::uuid, $2::uuid)",
+    )
+    .bind(user.id)
+    .bind(podcast)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let admin = state
+        .jwt
+        .issue_access(user.id, &user.username, &user.role, user.token_version);
+
+    let srv = TestServer::new(kima_api::router(state.clone())).unwrap();
+
+    // The control plane counts the failed podcast, lists it under entityType=podcast, and
+    // nothing else changes: other enrichment subsystems (tracks, artists, ...) must stay out.
+    let counts = get(&srv, &admin, "/api/enrichment/failures/counts").await;
+    assert_eq!(counts["podcast"], 1, "the failed podcast is counted");
+    assert_eq!(
+        counts["total"], 1,
+        "the failure list total includes the podcast"
+    );
+    let list = get(&srv, &admin, "/api/enrichment/failures").await;
+    assert_eq!(list["total"], 1);
+    assert_eq!(list["failures"][0]["entityType"], "podcast");
+    assert_eq!(list["failures"][0]["entityId"], podcast.to_string());
+    assert_eq!(
+        list["failures"][0]["errorMessage"].clone(),
+        json!("feed is gone")
+    );
+
+    // The administrative retry requeues our failed show right now, independent of the sweep
+    // backoff, and again it must not double-enqueue the same show.
+    let first =
+        post(&srv, &admin, "/api/enrichment/retry-failed-and-blocked").await["queued"].clone();
+    assert_eq!(first, 1, "explicit retry queues the failed followed show");
+    let first_job: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM jobs WHERE queue = 'podcasts'\n         AND payload ->> 'key' = 'podcast-' || $1\n         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(podcast.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(first_job["podcast_id"], podcast.to_string());
+
+    let second =
+        post(&srv, &admin, "/api/enrichment/retry-failed-and-blocked").await["queued"].clone();
+    assert_eq!(second, 0, "the already-queued show is not re-queued");
+    let second_job: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM jobs WHERE queue = 'podcasts'\n         AND payload ->> 'key' = 'podcast-' || $1\n         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(podcast.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        second_job["podcast_id"],
+        podcast.to_string(),
+        "a second call must not add a job"
+    );
 }
 
 #[tokio::test]

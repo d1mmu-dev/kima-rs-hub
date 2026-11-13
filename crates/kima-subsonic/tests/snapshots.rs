@@ -1471,9 +1471,6 @@ snap_mut!(missing_xml, missing_json, |s| {
 snap!(stubs, |s| {
     let track1 = track_id(1).to_string();
     for endpoint in [
-        "getPodcasts",
-        "getNewestPodcasts",
-        "refreshPodcasts",
         "getShares",
         "createShare",
         "updateShare",
@@ -1488,8 +1485,6 @@ snap!(stubs, |s| {
     ] {
         s.case(endpoint, "stub", &alice(&[("id", &track1)])).await;
     }
-    s.case("getPodcastEpisode", "stub", &alice(&[("id", "1")]))
-        .await;
     s.case("getVideoInfo", "stub", &alice(&[("id", "1")])).await;
     s.case("getVideoInfo", "missing_id", &alice(&[])).await;
     s.case("getCaptions", "stub", &alice(&[("id", "1")])).await;
@@ -1500,6 +1495,93 @@ snap!(stubs, |s| {
         .await;
     s.case("noSuchEndpoint", "not_implemented", &alice(&[]))
         .await;
+});
+
+// Subsonic podcast views (M6 Task 18): `getPodcasts`, `getNewestPodcasts`, `getPodcastEpisode`,
+// `refreshPodcasts`. Rows seeded by raw SQL (kind 8 = podcasts, kind 9 = episodes), since the
+// shared fixture carries no podcast data. `getTranscodeDecision`/`getTranscodeStream`'s podcast
+// branches stay in `media_errors` above; their id-not-found snapshots there are unaffected by
+// this task (an unknown/non-episode id answers the same "Media not found"/"Podcast episode not
+// found" either way).
+snap!(podcasts, |s| {
+    let show = fixture_id(8, 1).to_string();
+    let other_show = fixture_id(8, 2).to_string();
+    let episode = fixture_id(9, 1).to_string();
+    let other_episode = fixture_id(9, 2).to_string();
+    s.sql(&format!(
+        "INSERT INTO podcasts (id, feed_url, title, author, description, image_url, \
+         itunes_id, category_ids, language, explicit, episode_count) \
+         VALUES ('{show}', 'https://feed.example/show.xml', 'Snapshot Show', 'Snap Author', \
+         'Snap description', 'https://img.example/show.png', NULL, '{{}}', NULL, false, 1)"
+    ))
+    .await;
+    s.sql(&format!(
+        "INSERT INTO podcast_episodes (id, podcast_id, guid, title, description, audio_url, \
+         duration, published_at, episode_number, season, image_url, file_size, mime_type, \
+         created_at) VALUES ('{episode}', '{show}', 'guid-1', 'Snapshot Episode', \
+         'Ep description', 'https://feed.example/ep1.mp3', 125, '2026-01-01T00:00:00Z', 1, \
+         NULL, NULL, 2048, 'audio/mpeg', '2026-01-01T00:05:00Z')"
+    ))
+    .await;
+    s.sql(&format!(
+        "INSERT INTO podcasts (id, feed_url, title, category_ids, episode_count) \
+         VALUES ('{other_show}', 'https://feed.example/other.xml', 'Not Followed', '{{}}', 1)"
+    ))
+    .await;
+    s.sql(&format!(
+        "INSERT INTO podcast_episodes (id, podcast_id, guid, title, audio_url, duration, \
+         published_at) VALUES ('{other_episode}', '{other_show}', 'guid-2', 'Other Episode', \
+         'https://feed.example/other.mp3', 60, '2026-01-01T00:00:00Z')"
+    ))
+    .await;
+    s.sql(&format!(
+        "INSERT INTO podcast_subscriptions (user_id, podcast_id, subscribed_at) \
+         VALUES ('{ALICE_ID}', '{show}', '2026-01-01T00:00:00Z')"
+    ))
+    .await;
+
+    s.case("getPodcasts", "no_followed_shows", &admin(&[]))
+        .await;
+    s.case("getPodcasts", "followed", &alice(&[])).await;
+    s.case(
+        "getPodcasts",
+        "include_episodes_false",
+        &alice(&[("includeEpisodes", "false")]),
+    )
+    .await;
+    s.case("getPodcasts", "by_id", &alice(&[("id", &show)]))
+        .await;
+    s.case(
+        "getPodcasts",
+        "unfollowed_id",
+        &alice(&[("id", &other_show)]),
+    )
+    .await;
+    s.case("getNewestPodcasts", "default_count", &alice(&[]))
+        .await;
+    s.case(
+        "getNewestPodcasts",
+        "count_clamped",
+        &alice(&[("count", "99999")]),
+    )
+    .await;
+    s.case("getPodcastEpisode", "ok", &alice(&[("id", &episode)]))
+        .await;
+    s.case(
+        "getPodcastEpisode",
+        "not_followed",
+        &alice(&[("id", &other_episode)]),
+    )
+    .await;
+    s.case("getPodcastEpisode", "unknown", &alice(&[("id", UNKNOWN)]))
+        .await;
+    s.case("getPodcastEpisode", "missing_id", &alice(&[])).await;
+});
+
+snap_mut!(refresh_podcasts_xml, refresh_podcasts_json, |s| {
+    // Net is disabled in this harness, so every refresh is a swallowed failure; the answer is
+    // still empty `ok`, as upstream's `Promise.allSettled` (no followed shows is ok too).
+    s.case("refreshPodcasts", "no_net", &alice(&[])).await;
 });
 
 // Artist and album info and lyrics (spec §18 rows 58-63): stored data only.

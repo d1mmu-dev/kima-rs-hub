@@ -25,6 +25,7 @@ pub const WEB_ROUTES: &[&str] = &[
     "/search",
     "/playlists",
     "/settings",
+    "/podcasts",
 ];
 
 /// Pages matched by the exact path only. `/` is `kima-web`'s browse root (`Route::new` maps it to
@@ -119,7 +120,7 @@ async fn forward(proxy: &WebProxy, req: Request) -> Response {
     let upstream = match out.send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = %e, %url, "SSR server did not answer");
+            tracing::warn!(error = %e.without_url(), path = %parts.uri.path(), "SSR server did not answer");
             return (StatusCode::BAD_GATEWAY, "kima-web is unavailable").into_response();
         }
     };
@@ -161,6 +162,9 @@ mod tests {
             "/playlists",
             "/playlists/0b1c",
             "/settings",
+            "/podcasts",
+            "/podcasts/show",
+            "/podcasts/category",
         ] {
             assert!(is_web_route(ok), "{ok}");
         }
@@ -170,7 +174,8 @@ mod tests {
             "/searching",
             "/collections",
             "/playlist",
-            "/podcasts",
+            "/podcastsx",
+            "/api/podcasts",
             "/api/library/tracks",
             "/rest/ping",
             "/health",

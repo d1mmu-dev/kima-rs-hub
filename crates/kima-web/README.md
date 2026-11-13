@@ -155,6 +155,13 @@ the file): login, browse, playback, seek, resume position after a reload, search
 its remote-debugging port are `CHROME` and `DEBUG_PORT`. The run changes the admin password through the
 Settings page and changes it back, so it can be repeated.
 
+## Podcasts (M6 Phase G)
+
+`/podcasts` (home), `/podcasts/show?id=` (followed show), `/podcasts/show?itunesId=` (Apple preview) and
+`/podcasts/category?id=` (a category's chart); episodes play in the shared player and save their progress. Differences
+from upstream (category links instead of per-category shelves, search results inline, no sort selects yet, no AI badges until
+the AI filter, episodes not restored after a reload) are listed in `docs/DIVERGENCES.md` D-215. Not yet visually compared.
+
 ## Visual parity: compromises and assets
 
 kima-web does **not** reproduce the upstream UI as a finished goal. The target is the upstream kima-hub **v1.12.3** UI,

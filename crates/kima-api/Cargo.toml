@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+md-5.workspace = true
+hex.workspace = true
 form_urlencoded.workspace = true
 anyhow.workspace = true
 axum.workspace = true
@@ -18,9 +20,11 @@ kima-ident.workspace = true
 kima-jobs.workspace = true
 kima-library.workspace = true
 kima-net.workspace = true
+kima-podcast.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
@@ -33,7 +37,6 @@ uuid.workspace = true
 time = { workspace = true, features = ["parsing"] }
 axum-test.workspace = true
 image.workspace = true
-tempfile.workspace = true
 http-body-util.workspace = true
 tower.workspace = true
 kima-test-support.workspace = true

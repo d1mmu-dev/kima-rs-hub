@@ -69,6 +69,7 @@ fn config(frontend: Option<&Path>) -> Config {
         identify_env_off: false,
         contact: kima_core::config::DEFAULT_CONTACT.into(),
         musicbrainz_base_url: kima_core::config::DEFAULT_MUSICBRAINZ_BASE_URL.into(),
+        itunes_base_url: kima_core::config::DEFAULT_ITUNES_BASE_URL.into(),
         fingerprint_workers: 1,
         clap_model_dir: None,
         disable_clap: false,
@@ -88,8 +89,12 @@ fn legacy_export() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("index.html"), "legacy home").unwrap();
     std::fs::write(dir.path().join("404.html"), "legacy 404").unwrap();
-    std::fs::create_dir_all(dir.path().join("podcasts")).unwrap();
-    std::fs::write(dir.path().join("podcasts/index.html"), "legacy podcasts").unwrap();
+    std::fs::create_dir_all(dir.path().join("audiobooks")).unwrap();
+    std::fs::write(
+        dir.path().join("audiobooks/index.html"),
+        "legacy audiobooks",
+    )
+    .unwrap();
     dir
 }
 
@@ -146,6 +151,9 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
         "/playlists",
         "/playlists/0b1c2d3e",
         "/settings",
+        "/podcasts",
+        "/podcasts/show?id=0b1c2d3e",
+        "/podcasts/category?id=1303",
         ASSETS[0],
         ASSETS[1],
     ] {
@@ -171,10 +179,10 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
     assert!(body.contains("Not found"), "{body}");
     let (status, body) = get("/rest/ping.view").await;
     assert!(!body.starts_with("ssr:"), "{status} {body}");
-    // The legacy export keeps what is not a kima-web route (`/podcasts` is its page here).
+    // The legacy export keeps what is not a kima-web route (`/audiobooks` is its page here).
     assert_eq!(
-        get("/podcasts/").await,
-        (StatusCode::OK, "legacy podcasts".into())
+        get("/audiobooks/").await,
+        (StatusCode::OK, "legacy audiobooks".into())
     );
     for path in [
         "/no/such/page",
@@ -217,7 +225,7 @@ async fn the_proxy_works_without_a_legacy_export(pool: PgPool) {
         assert_eq!(res.text().await.unwrap(), format!("ssr:{path}"));
     }
     let reached = hits.load(Ordering::SeqCst);
-    for path in ["/podcasts", "/nope", "/loginx", "/build/x"] {
+    for path in ["/audiobooks", "/nope", "/loginx", "/build/x"] {
         let res = reqwest::get(format!("{base}{path}")).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
     }
@@ -375,13 +383,13 @@ async fn login_is_server_rendered_markup(pool: PgPool) {
 
     // Not-kima-web paths keep the app's routing while the SSR server is up.
     assert_eq!(
-        reqwest::get(format!("{base}/podcasts/"))
+        reqwest::get(format!("{base}/audiobooks/"))
             .await
             .unwrap()
             .text()
             .await
             .unwrap(),
-        "legacy podcasts"
+        "legacy audiobooks"
     );
     assert_eq!(
         reqwest::get(format!("{base}/api/health"))

@@ -33,6 +33,16 @@ fn is_collection(route: &Route) -> bool {
     )
 }
 
+fn is_podcasts(route: &Route) -> bool {
+    matches!(
+        route,
+        Route::Podcasts
+            | Route::PodcastShow { .. }
+            | Route::PodcastPreview { .. }
+            | Route::PodcastCategory { .. }
+    )
+}
+
 fn is_playlists(route: &Route) -> bool {
     matches!(route, Route::Playlists | Route::Playlist { .. })
 }
@@ -308,6 +318,12 @@ fn sidebar(ctx: &Ctx, route: Computed<Route>) -> DomNode {
         "Playlists",
         route.map(|r| is_playlists(&r)),
     );
+    let podcasts_nav = nav_item(
+        Route::Podcasts.to_string(),
+        "04",
+        "Podcasts",
+        route.map(|r| is_podcasts(&r)),
+    );
     let stack = playlist_stack(ctx, route);
     dom! {
         <aside class="w-64 bg-[var(--bg-primary)] flex flex-col overflow-hidden relative z-(--z-raised) rounded-lg tablet:hidden">
@@ -320,6 +336,7 @@ fn sidebar(ctx: &Ctx, route: Computed<Route>) -> DomNode {
                     {collection}
                     {search}
                     {playlists_nav}
+                    {podcasts_nav}
                 </div>
                 <div class="mt-4 mb-4 border-t-2 border-white/10"></div>
             </nav>
@@ -547,12 +564,19 @@ fn bottom_nav(route: Computed<Route>) -> DomNode {
         "list-music",
         route.map(|r| is_playlists(&r)),
     );
+    let podcasts = bottom_nav_item(
+        Route::Podcasts.to_string(),
+        "Podcasts",
+        "mic-vocal",
+        route.map(|r| is_podcasts(&r)),
+    );
     dom! {
         <nav class="fixed bottom-0 left-0 right-0 z-(--z-nav) bg-black border-t border-white/10 min-[1025px]:hidden" role="navigation" aria-label="Main navigation">
             <div class="flex items-center justify-around" style="height: var(--nav-h);">
                 {collection}
                 {search}
                 {playlists}
+                {podcasts}
             </div>
         </nav>
     }

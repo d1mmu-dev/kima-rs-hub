@@ -5,6 +5,8 @@ use axum_test::TestServer;
 use common::library::{Seed, mark_missing, seed};
 use kima_db::PgPool;
 use serde_json::Value;
+use time::macros::datetime;
+use uuid::Uuid;
 
 struct Env {
     server: TestServer,
@@ -28,6 +30,165 @@ async fn search(e: &Env, path: &str) -> Value {
 
 fn len(v: &Value, key: &str) -> usize {
     v[key].as_array().unwrap().len()
+}
+
+/// A followed show with `title`/`description`, subscribed by `user`.
+async fn followed_show(pool: &PgPool, user: Uuid, title: &str, description: &str) -> Uuid {
+    use kima_db::podcasts::{self, NewShow};
+    let show = podcasts::insert_show(
+        pool,
+        Uuid::now_v7(),
+        &NewShow {
+            feed_url: &format!("https://feeds.example.invalid/{title}"),
+            title,
+            author: Some("Someone"),
+            description: Some(description),
+            image_url: None,
+            itunes_id: None,
+            category_ids: &[],
+            language: None,
+            explicit: false,
+            episode_count: 0,
+            feed_etag: None,
+            feed_last_modified: None,
+        },
+    )
+    .await
+    .unwrap();
+    podcasts::subscribe(pool, user, show.id).await.unwrap();
+    show.id
+}
+
+async fn episode(
+    pool: &PgPool,
+    show: Uuid,
+    guid: &str,
+    title: &str,
+    description: &str,
+    published_at: time::OffsetDateTime,
+) {
+    use kima_db::podcasts::{self, NewEpisode};
+    podcasts::insert_episodes(
+        pool,
+        show,
+        &[NewEpisode {
+            guid: guid.to_string(),
+            title: title.to_string(),
+            description: Some(description.to_string()),
+            audio_url: format!("https://cdn.example.invalid/{guid}.mp3"),
+            duration: 100,
+            published_at,
+            episode_number: None,
+            season: None,
+            image_url: None,
+            file_size: None,
+            mime_type: None,
+        }],
+    )
+    .await
+    .unwrap();
+}
+
+/// M6 Task 16: `GET /search?type=podcasts` and `?type=episodes` search only the shows and
+/// episodes `user` follows (upstream `searchPodcastsFTS`/`searchEpisodes`, followed-only).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn search_finds_only_followed_shows_and_their_episodes(pool: PgPool) {
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "poduser").await;
+    let followed = followed_show(&pool, user.id, "Jazz Café Talk", "about jazz").await;
+    // Another show exists but is not followed; it must never surface in search.
+    let other = {
+        use kima_db::podcasts::{self, NewShow};
+        let show = podcasts::insert_show(
+            &pool,
+            Uuid::now_v7(),
+            &NewShow {
+                feed_url: "https://feeds.example.invalid/unfollowed",
+                title: "Jazz Lounge",
+                author: None,
+                description: Some("also about jazz"),
+                image_url: None,
+                itunes_id: None,
+                category_ids: &[],
+                language: None,
+                explicit: false,
+                episode_count: 0,
+                feed_etag: None,
+                feed_last_modified: None,
+            },
+        )
+        .await
+        .unwrap();
+        show.id
+    };
+    episode(
+        &pool,
+        followed,
+        "ep-1",
+        "Jazz Interview",
+        "jazz talk",
+        datetime!(2026-01-01 00:00 UTC),
+    )
+    .await;
+    episode(
+        &pool,
+        other,
+        "ep-unfollowed",
+        "Jazz Interview Too",
+        "jazz talk",
+        datetime!(2026-01-01 00:00 UTC),
+    )
+    .await;
+
+    let e = Env {
+        server: TestServer::new(kima_api::router(state)).unwrap(),
+        token,
+    };
+    let v = search(&e, "/api/search?q=jazz&type=podcasts").await;
+    assert_eq!(len(&v, "podcasts"), 1);
+    assert_eq!(v["podcasts"][0]["title"], "Jazz Café Talk");
+    assert_eq!(v["podcasts"][0]["aiLabel"], "unknown");
+    assert!(v["podcasts"][0]["aiLabelSource"].is_null());
+
+    let v = search(&e, "/api/search?q=jazz&type=episodes").await;
+    assert_eq!(len(&v, "episodes"), 1);
+    assert_eq!(v["episodes"][0]["title"], "Jazz Interview");
+    assert_eq!(v["episodes"][0]["podcastTitle"], "Jazz Café Talk");
+}
+
+/// `searchEpisodes`: rank desc, then `publishedAt` desc.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn search_episodes_rank_then_newest(pool: PgPool) {
+    let state = common::state(pool.clone());
+    let (user, token) = common::user_with_token(&state, "poduser2").await;
+    let show = followed_show(&pool, user.id, "A Show", "about things").await;
+    episode(
+        &pool,
+        show,
+        "older",
+        "Older Dungeons Episode",
+        "",
+        datetime!(2026-01-01 00:00 UTC),
+    )
+    .await;
+    episode(
+        &pool,
+        show,
+        "newer",
+        "Newer Dungeons Episode",
+        "",
+        datetime!(2026-02-01 00:00 UTC),
+    )
+    .await;
+
+    let e = Env {
+        server: TestServer::new(kima_api::router(state)).unwrap(),
+        token,
+    };
+    let v = search(&e, "/api/search?q=dungeons&type=episodes").await;
+    assert_eq!(len(&v, "episodes"), 2);
+    assert_eq!(v["episodes"][0]["title"], "Newer Dungeons Episode");
+    assert_eq!(v["episodes"][1]["title"], "Older Dungeons Episode");
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

@@ -732,3 +732,52 @@ async fn advance_or_enqueue_moves_a_queued_job_to_now(pool: PgPool) {
             .unwrap();
     assert_ne!(new, id);
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn pending_with_key_finds_a_queued_or_running_job_by_payload_key(pool: PgPool) {
+    assert_eq!(
+        queue::pending_with_key(&pool, "q", "episode:e1")
+            .await
+            .unwrap(),
+        None
+    );
+    let id = queue::enqueue(&pool, "q", json!({"key": "episode:e1"}), 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        queue::pending_with_key(&pool, "q", "episode:e1")
+            .await
+            .unwrap(),
+        Some(id)
+    );
+    // A different key, queue or state does not match.
+    assert_eq!(
+        queue::pending_with_key(&pool, "q", "episode:e2")
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        queue::pending_with_key(&pool, "other", "episode:e1")
+            .await
+            .unwrap(),
+        None
+    );
+    let claimed = queue::claim(&pool, "q", 10, LEASE).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    // Still pending while running.
+    assert_eq!(
+        queue::pending_with_key(&pool, "q", "episode:e1")
+            .await
+            .unwrap(),
+        Some(id)
+    );
+    assert!(queue::complete(&pool, &claimed[0]).await.unwrap());
+    // Done jobs are not pending.
+    assert_eq!(
+        queue::pending_with_key(&pool, "q", "episode:e1")
+            .await
+            .unwrap(),
+        None
+    );
+}

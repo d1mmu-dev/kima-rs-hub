@@ -17,6 +17,7 @@ kima-ident = { path = "crates/kima-ident" }
 kima-jobs = { path = "crates/kima-jobs" }
 kima-library = { path = "crates/kima-library" }
 kima-net = { path = "crates/kima-net" }
+kima-podcast = { path = "crates/kima-podcast" }
 kima-subsonic = { path = "crates/kima-subsonic" }
 kima-ml = { path = "crates/kima-ml" }
 kima-test-support = { path = "crates/kima-test-support" }
@@ -26,6 +27,7 @@ argon2 = "0.5"
 axum = "0.8"
 axum-test = "17"
 base64 = "0.22"
+bytes = "1"
 chacha20poly1305 = "0.10"
 hex = "0.4"
 hkdf = "0.13"
@@ -43,7 +45,7 @@ http-body-util = "0.1"
 jsonwebtoken = "9"
 libc = "0.2"
 insta = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 lofty = "0.25"
 pathfinding = "4"
 rand = "0.8"

@@ -35,6 +35,7 @@ uuid.workspace = true
 vertigo-cli.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 axum-test.workspace = true
 kima-net = { workspace = true, features = ["testing"] }
 kima-test-support.workspace = true

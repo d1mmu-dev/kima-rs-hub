@@ -77,11 +77,61 @@ impl Registry {
         self.register(search::QUEUE, 1, search::handler(ctx));
     }
 
+    /// Registers feed refresh independently of the identification switch.
+    pub fn register_podcast_refresh(&mut self, ctx: kima_podcast::ctx::PodcastCtx) {
+        self.register("podcasts", 2, podcast_refresh_handler(ctx));
+    }
+
     /// Registers the `podcast-cache` queue: one episode download per job (Task 12, D-204).
     /// Concurrency 2, 3 attempts with the default 5 s/10 s/... backoff.
     pub fn register_podcast_cache(&mut self, ctx: kima_podcast::ctx::PodcastCtx) {
         self.register(kima_podcast::cache::QUEUE, 2, podcast_cache_handler(ctx));
     }
+}
+
+fn podcast_refresh_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
+    let catalog = kima_podcast::catalog::Catalog::new(ctx.net.clone(), ctx.pool.clone());
+    kima_jobs::worker::handler_ctx(move |job, job_ctx| {
+        let ctx = ctx.clone();
+        let catalog = catalog.clone();
+        async move {
+            use kima_jobs::worker::JobError;
+            let id = job
+                .payload
+                .get("podcast_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                .ok_or_else(|| {
+                    JobError::Permanent("podcast job missing or invalid podcast_id".into())
+                })?;
+            let run = async {
+                let followed: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM podcast_subscriptions WHERE podcast_id = $1)",
+                )
+                .bind(id)
+                .fetch_one(&ctx.pool)
+                .await
+                .map_err(|e| JobError::Retry(e.to_string()))?;
+                if followed {
+                    match kima_podcast::refresh::refresh_job(&catalog, id, job.id).await {
+                        Ok(_) => {}
+                        Err(kima_podcast::refresh::RefreshError::Feed(
+                            kima_podcast::refresh::FeedFailure::Gone(_),
+                        )) => {
+                            // Feed says it is gone: permanent, never retry.
+                            return Err(JobError::Permanent("podcast feed is gone".into()));
+                        }
+                        Err(error) => return Err(JobError::Retry(error.to_string())),
+                    }
+                }
+                Ok(())
+            };
+            tokio::select! {
+                result = run => result,
+                _ = job_ctx.cancel.cancelled() => Err(JobError::Retry("podcast refresh cancelled".into())),
+            }
+        }
+    })
 }
 
 fn podcast_cache_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {

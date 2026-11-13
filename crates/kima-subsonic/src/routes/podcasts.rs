@@ -6,16 +6,14 @@
 //! `refreshPodcasts` here is a synchronous, best-effort refresh of every show the caller
 //! follows (upstream's `Promise.allSettled`): one show's feed failing never stops the others,
 //! and the answer is always empty `ok`, as upstream. This is scoped to what the Subsonic
-//! endpoint needs; it is not the eventual job-queued sweep (plan Task 9, D-205), which still has
-//! no implementation in this codebase and may later replace the orchestration below.
-
-use std::time::Duration;
+//! endpoint needs; it is distinct from Task 9's job-queued sweep (`kima_podcast::refresh::sweep`,
+//! `podcast-refresh-sweep` cron in `kima-server`), which runs independently on its own 15-minute
+//! schedule and does not replace the per-request orchestration below (D-205).
 
 use axum::Router;
 use axum::extract::State;
 use kima_api::AppState;
 use kima_db::podcasts::SubsonicEpisode;
-use kima_net::{Conditional, FeedFetch, Outcome};
 
 use super::add;
 use crate::auth::SubsonicUser;
@@ -31,8 +29,6 @@ const EPISODE_LIMIT: i64 = 200;
 /// `getNewestPodcasts`' `count`: default and ceiling.
 const DEFAULT_NEWEST: i64 = 20;
 const MAX_NEWEST: i64 = 500;
-/// How long one show's refresh may take before `refreshPodcasts` moves on (all settled).
-const REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn add_routes(router: Router<SubsonicCtx>) -> Router<SubsonicCtx> {
     let router = add(router, "getPodcasts", podcasts);
@@ -150,82 +146,13 @@ async fn podcast_episode(
     Ok(Answer::node(episode_node(&episode)))
 }
 
-/// Best-effort refresh of one show: a conditional fetch against its stored `etag`/
-/// `last-modified`, then either a bare `last_refreshed` bump (304) or a full metadata + episode
-/// update. Any failure (host down, bad feed, SSRF refusal) is swallowed here: the caller settles
-/// every show regardless, as upstream's `Promise.allSettled`.
-async fn refresh_one(app: &AppState, show: &kima_db::podcasts::Show) {
-    let cond = Conditional {
-        etag: show.feed_etag.as_deref(),
-        last_modified: show.feed_last_modified.as_deref(),
-    };
-    let fetched = app
-        .net
-        .get_feed(&show.feed_url, cond, REFRESH_TIMEOUT)
-        .await;
-    match fetched {
-        Outcome::Answered(FeedFetch::NotModified) => {
-            let _ = kima_db::podcasts::bump_last_refreshed(&app.pool, show.id).await;
-        }
-        Outcome::Answered(FeedFetch::Body {
-            text,
-            etag,
-            last_modified,
-        }) => {
-            let Ok(parsed) = kima_podcast::feed::parse(&text, time::OffsetDateTime::now_utc())
-            else {
-                return;
-            };
-            let episodes: Vec<_> = parsed
-                .episodes
-                .into_iter()
-                .map(|e| kima_db::podcasts::NewEpisode {
-                    guid: e.guid,
-                    title: e.title,
-                    description: e.description,
-                    audio_url: e.audio_url,
-                    duration: e.duration,
-                    published_at: e.published_at,
-                    episode_number: e.episode_number,
-                    season: e.season,
-                    image_url: e.image_url,
-                    file_size: e.file_size,
-                    mime_type: Some(e.mime_type),
-                })
-                .collect();
-            let episode_count = episodes.len() as i32;
-            let _ = kima_db::podcasts::insert_episodes(&app.pool, show.id, &episodes).await;
-            let input = kima_db::podcasts::NewShow {
-                feed_url: &show.feed_url,
-                title: &parsed.show.title,
-                author: parsed.show.author.as_deref(),
-                description: parsed.show.description.as_deref(),
-                image_url: parsed.show.image_url.as_deref(),
-                itunes_id: show.itunes_id.as_deref(),
-                category_ids: &show.category_ids,
-                language: parsed.show.language.as_deref(),
-                explicit: parsed.show.explicit,
-                episode_count,
-                feed_etag: etag.as_deref(),
-                feed_last_modified: last_modified.as_deref(),
-            };
-            let _ = kima_db::podcasts::apply_refresh(&app.pool, show.id, &input).await;
-        }
-        // All settled: a host down, a 4xx, a bad feed or an SSRF refusal just leaves the show
-        // as it was. Task 9's eventual sweep is where failures get recorded and retried.
-        _ => {}
-    }
-}
-
 async fn refresh_podcasts(
     user: SubsonicUser,
     State(app): State<AppState>,
 ) -> Result<Answer, SubsonicError> {
     let shows = kima_db::podcasts::followed_shows(&app.pool, user.user.id).await?;
     for row in shows {
-        if let Some(show) = kima_db::podcasts::show_by_id(&app.pool, row.id).await? {
-            refresh_one(&app, &show).await;
-        }
+        let _ = kima_podcast::refresh::refresh(&app.podcast_catalog, row.id).await;
     }
     Ok(Answer::ok())
 }

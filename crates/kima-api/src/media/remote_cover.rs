@@ -72,14 +72,17 @@ const MAX_ENTRIES: usize = 256;
 const MAX_BYTES: usize = 256 * 1024 * 1024;
 const MAX_ENTRY_BYTES: usize = 16 * 1024 * 1024;
 
+/// Entries carry their publication sequence number: eviction drops the lowest one, so the
+/// oldest publication goes first even when a whole page shares one `fetched_at` second.
 #[derive(Default)]
 struct Cache {
-    entries: std::collections::HashMap<PathBuf, (Sidecar, axum::body::Bytes)>,
+    entries: std::collections::HashMap<PathBuf, (Sidecar, axum::body::Bytes, u64)>,
+    next_seq: u64,
 }
 
 impl Cache {
     fn prune(&mut self, now: u64) {
-        self.entries.retain(|_, (meta, _)| {
+        self.entries.retain(|_, (meta, _, _)| {
             let ttl = if meta.not_found {
                 NOT_FOUND_TTL
             } else {
@@ -92,7 +95,7 @@ impl Cache {
     fn size(&self) -> usize {
         self.entries
             .iter()
-            .map(|(key, (meta, bytes))| {
+            .map(|(key, (meta, bytes, _))| {
                 key.as_os_str().len() + meta.content_type.len() + meta.etag.len() + bytes.len()
             })
             .sum()
@@ -119,16 +122,21 @@ impl Cache {
             let Some(oldest) = self
                 .entries
                 .iter()
-                .min_by_key(|(_, (meta, _))| meta.fetched_at)
+                .min_by_key(|(_, (_, _, seq))| *seq)
                 .map(|(key, _)| key.clone())
             else {
                 break;
             };
             self.entries.remove(&oldest);
         }
+        self.next_seq += 1;
         self.entries.insert(
             key.to_owned(),
-            (sidecar.clone(), axum::body::Bytes::copy_from_slice(bytes)),
+            (
+                sidecar.clone(),
+                axum::body::Bytes::copy_from_slice(bytes),
+                self.next_seq,
+            ),
         );
     }
 }
@@ -141,7 +149,7 @@ fn cache() -> &'static std::sync::Mutex<Cache> {
 fn read_cache(_bin: &Path, json: &Path) -> Option<RemoteCoverResult> {
     let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.prune(now_secs());
-    let (sidecar, bytes) = cache.entries.get(json)?;
+    let (sidecar, bytes, _) = cache.entries.get(json)?;
     if sidecar.not_found {
         Some(RemoteCoverResult::NotFound)
     } else {
@@ -328,6 +336,9 @@ async fn not_found(
 mod tests {
     use super::*;
 
+    /// The cache and admission gates are process-wide, so every test that publishes to the
+    /// global cache or calls the proxy holds this lock: an unrelated test filling the cache
+    /// would otherwise evict the entries a proxy test expects to hit.
     static PROXY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]
@@ -735,6 +746,7 @@ mod tests {
 
     #[test]
     fn cache_hits_share_the_same_allocation() {
+        let _guard = PROXY_TEST_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("shared.json");
         let meta = Sidecar {
@@ -774,6 +786,29 @@ mod tests {
     }
 
     #[test]
+    fn memory_cache_evicts_in_publication_order_within_one_second() {
+        // Every entry shares one `fetched_at` second, as a page of covers does. Eviction must
+        // still drop the oldest publication, never the entry published just before.
+        let mut cache = Cache::default();
+        let meta = Sidecar {
+            content_type: String::new(),
+            etag: String::new(),
+            fetched_at: 100,
+            not_found: false,
+        };
+        for i in 0..100 {
+            cache.insert(Path::new(&format!("{i}")), Some(b"x"), &meta, 100, 2, 1024);
+            if i > 0 {
+                assert!(
+                    cache.entries.contains_key(Path::new(&format!("{}", i - 1))),
+                    "publishing {i} evicted the entry published just before it"
+                );
+            }
+        }
+        assert_eq!(cache.entries.len(), 2);
+    }
+
+    #[test]
     fn memory_cache_expires_positive_and_negative_at_their_ttls() {
         let mut cache = Cache::default();
         let meta = Sidecar {
@@ -797,6 +832,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_publisher_finishes_atomic_bounded_insert() {
+        let _guard = PROXY_TEST_LOCK.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("cancel.json");
         let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
@@ -851,6 +887,7 @@ mod tests {
 
     #[test]
     fn cache_publication_never_writes_shared_directory() {
+        let _guard = PROXY_TEST_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let sidecar = Sidecar {
             content_type: String::new(),
@@ -870,6 +907,7 @@ mod tests {
 
     #[test]
     fn cached_etag_matches_upstream_md5() {
+        let _guard = PROXY_TEST_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("x.bin");
         let json = dir.path().join("x.json");
@@ -888,6 +926,7 @@ mod tests {
 
     #[test]
     fn negative_cache_is_bounded() {
+        let _guard = PROXY_TEST_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let sidecar = Sidecar {
             content_type: String::new(),
@@ -909,6 +948,7 @@ mod tests {
 
     #[test]
     fn concurrent_publication_never_mixes_body_and_metadata() {
+        let _guard = PROXY_TEST_LOCK.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         std::thread::scope(|scope| {
             for n in 0..4 {

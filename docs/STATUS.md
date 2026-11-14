@@ -23,7 +23,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M-STATS S1 | Statystyki odsłuchów | ✅ (S2 po analizie audio) |
 | M9 | kima-web część 1 (logowanie, biblioteka, player, playlisty, ustawienia, SSR) | ✅ (wygląd 1:1 otwarty) |
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
-| **M-PROF** | **Profile w koncie (Netflix)** | 🟡 **następny, ~2–3 tyg.** |
+| **M-PROF** | **Profile w koncie (Netflix)** | 🟡 **w toku (logowanie i sesje, Task 4/17); ~3–3,5 tyg.** |
 | M5 | Vibe (podobne utwory, nastrój) | ⏳ gałąź istnieje, ~1 tydz. |
 | M5b | Mixy, radio, „co nowego” | ⏳ ~1 tydz. |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
@@ -44,7 +44,7 @@ Odłożone (nieblokujące): porównanie wizualne stron podcastów (M10); `/searc
 
 ## M-PROF — następny etap
 
-Do napisania: plan (`docs/superpowers/plans/`), potem implementacja. Szczegóły i decyzje w sekcji niżej.
+Plan gotowy (gałąź `docs/m-prof-plan`, `docs/superpowers/plans/2026-11-14-m-prof.md`): 17 zadań w fazach 0/A–F, ~3–3,5 tygodnia z przeglądami. Kluczowa decyzja: id profilu głównego = id konta, więc migracja tylko przepina klucze, a stare tokeny działają jako profil główny. Decyzje właściciela (2026-11-14): awatary z gotowych presetów; kilka profili dziecięcych dozwolone; profilami zarządza tylko profil główny; usunięcie profilu kasuje jego dane; logowanie hasłem w Subsonic tylko do profilu głównego (pozostałe przez token aplikacji); publiczne playlisty innych profili widoczne. Implementacja w toku: faza 0 i baza danych gotowe lokalnie (D-240..D-248, migracja `0060`, moduł profili, limit 5 pilnowany w bazie, test wyścigu); przegląd fazy A czysty (0 krytycznych); przepięcie wszystkich zapytań na profil gotowe (Task 3, 1887 testów zielonych, przy okazji naprawiony błąd „teraz odtwarzane” dla profili innych niż główny). Trwa: profil w tokenach i sesjach (Task 4) oraz przegląd Task 3.
 
 ## Decyzje właściciela (wiążące, nie pytać ponownie)
 

@@ -1,0 +1,281 @@
+{
+  "source": {
+    "head": "b20451597a6da494b6f3d1f80dff5819f882f66d",
+    "apple": "tools/podcast-capture-mock.py on loopback (synthetic data, not an Apple recording)",
+    "feeds": "tools/podcast-capture-mock.py on loopback, fetched by the server (KIMA_NET_ALLOW_LOOPBACK)"
+  },
+  "captures": [
+    {
+      "name": "categories",
+      "route": "GET /podcasts/categories",
+      "method": "GET",
+      "path": "/podcasts/categories",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "subscribe",
+      "route": "POST /podcasts/subscribe",
+      "method": "POST",
+      "path": "/podcasts/subscribe",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "progress",
+      "route": "POST /podcasts/:podcastId/episodes/:episodeId/progress",
+      "method": "POST",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/episodes/01a1d732-73fc-773f-88aa-8e794cd0dac5/progress",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "list",
+      "route": "GET /podcasts",
+      "method": "GET",
+      "path": "/podcasts",
+      "status": 200,
+      "aiHidden": "2"
+    },
+    {
+      "name": "list_ai_show",
+      "route": "GET /podcasts",
+      "method": "GET",
+      "path": "/podcasts?ai=show",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "detail",
+      "route": "GET /podcasts/:id",
+      "method": "GET",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3",
+      "status": 200,
+      "aiHidden": "1"
+    },
+    {
+      "name": "episodes",
+      "route": "GET /podcasts/:id/episodes",
+      "method": "GET",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/episodes",
+      "status": 200,
+      "aiHidden": "1"
+    },
+    {
+      "name": "next",
+      "route": "GET /podcasts/:podcastId/episodes/:episodeId/next",
+      "method": "GET",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/episodes/01a1d732-73fd-7053-903a-1743fabc7126/next",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "next_end",
+      "route": "GET /podcasts/:podcastId/episodes/:episodeId/next",
+      "method": "GET",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/episodes/01a1d732-73f8-7296-b8cb-66ccded0d5ff/next",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "listening",
+      "route": "GET /podcasts/listening",
+      "method": "GET",
+      "path": "/podcasts/listening",
+      "status": 200,
+      "aiHidden": "1"
+    },
+    {
+      "name": "listening_ai_show",
+      "route": "GET /podcasts/listening",
+      "method": "GET",
+      "path": "/podcasts/listening",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "charts",
+      "route": "GET /podcasts/charts",
+      "method": "GET",
+      "path": "/podcasts/charts",
+      "status": 200,
+      "aiHidden": "1"
+    },
+    {
+      "name": "discover_top",
+      "route": "GET /podcasts/discover/top",
+      "method": "GET",
+      "path": "/podcasts/discover/top",
+      "status": 200,
+      "aiHidden": "1"
+    },
+    {
+      "name": "discover_genre",
+      "route": "GET /podcasts/discover/genre/:genreId",
+      "method": "GET",
+      "path": "/podcasts/discover/genre/1495",
+      "status": 200,
+      "aiHidden": "0"
+    },
+    {
+      "name": "discover_genres",
+      "route": "GET /podcasts/discover/genres",
+      "method": "GET",
+      "path": "/podcasts/discover/genres?genres=1495,1318",
+      "status": 200,
+      "aiHidden": "1"
+    },
+    {
+      "name": "for_you",
+      "route": "GET /podcasts/for-you",
+      "method": "GET",
+      "path": "/podcasts/for-you",
+      "status": 200,
+      "aiHidden": "0"
+    },
+    {
+      "name": "similar",
+      "route": "GET /podcasts/:id/similar",
+      "method": "GET",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/similar",
+      "status": 200,
+      "aiHidden": "0"
+    },
+    {
+      "name": "preview",
+      "route": "GET /podcasts/preview/:itunesId",
+      "method": "GET",
+      "path": "/podcasts/preview/888",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "preview_followed",
+      "route": "GET /podcasts/preview/:itunesId",
+      "method": "GET",
+      "path": "/podcasts/preview/555",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "preview_similar",
+      "route": "GET /podcasts/preview/:itunesId/similar",
+      "method": "GET",
+      "path": "/podcasts/preview/888/similar",
+      "status": 200,
+      "aiHidden": "0"
+    },
+    {
+      "name": "search",
+      "route": "GET /search",
+      "method": "GET",
+      "path": "/search?q=race&type=all",
+      "status": 200,
+      "aiHidden": "4"
+    },
+    {
+      "name": "search_discover",
+      "route": "GET /search/discover",
+      "method": "GET",
+      "path": "/search/discover?q=race&type=podcasts",
+      "status": 200,
+      "aiHidden": "0"
+    },
+    {
+      "name": "recently_listened",
+      "route": "GET /library/recently-listened",
+      "method": "GET",
+      "path": "/library/recently-listened",
+      "status": 200,
+      "aiHidden": "1"
+    },
+    {
+      "name": "stats_spoken",
+      "route": "GET /stats",
+      "method": "GET",
+      "path": "/stats?period=all&tz=UTC",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": null,
+      "route": "GET /podcasts/:podcastId/episodes/:episodeId/stream",
+      "method": "GET",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/episodes/01a1d732-73f8-7296-b8cb-66ccded0d5ff/stream",
+      "status": 206,
+      "aiHidden": null
+    },
+    {
+      "name": null,
+      "route": "GET /podcasts/preview/:itunesId/snippet",
+      "method": "GET",
+      "path": "/podcasts/preview/888/snippet",
+      "status": 206,
+      "aiHidden": null
+    },
+    {
+      "name": null,
+      "route": "GET /podcasts/:id/cover",
+      "method": "GET",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/cover",
+      "status": 302,
+      "aiHidden": null
+    },
+    {
+      "name": null,
+      "route": "GET /podcasts/episodes/:episodeId/cover",
+      "method": "GET",
+      "path": "/podcasts/episodes/01a1d732-73f8-7296-b8cb-66ccded0d5ff/cover",
+      "status": 302,
+      "aiHidden": null
+    },
+    {
+      "name": "refresh",
+      "route": "GET /podcasts/:id/refresh",
+      "method": "GET",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/refresh",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "refresh_all",
+      "route": "POST /podcasts/refresh-all",
+      "method": "POST",
+      "path": "/podcasts/refresh-all",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "progress_clear",
+      "route": "DELETE /podcasts/:podcastId/episodes/:episodeId/progress",
+      "method": "DELETE",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/episodes/01a1d732-73fc-773f-88aa-8e794cd0dac5/progress",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "ai_label_show",
+      "route": "PUT /podcasts/:id/ai-label",
+      "method": "PUT",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/ai-label",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "ai_label_episode",
+      "route": "PUT /podcasts/:podcastId/episodes/:episodeId/ai-label",
+      "method": "PUT",
+      "path": "/podcasts/01a1d732-73f5-741e-8603-638478e907b3/episodes/01a1d732-73f8-7296-b8cb-66ccded0d5ff/ai-label",
+      "status": 200,
+      "aiHidden": null
+    },
+    {
+      "name": "unsubscribe",
+      "route": "DELETE /podcasts/:id/unsubscribe",
+      "method": "DELETE",
+      "path": "/podcasts/01a1d732-7fa8-7741-9884-364e4992daa8/unsubscribe",
+      "status": 200,
+      "aiHidden": null
+    }
+  ]
+}

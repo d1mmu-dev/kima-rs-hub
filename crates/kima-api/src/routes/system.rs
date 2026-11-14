@@ -21,7 +21,10 @@ async fn features(State(state): State<AppState>, _user: AuthUser) -> Json<Value>
         "audiobookshelfEnabled": false,
         "fpcalc": state.fpcalc,
         "library": true,
-        "podcasts": false,
+        // M6a: every `/podcasts/*` route the v1.12.3 pages call is served (D-030/D-170,
+        // `tests/auth_flow.rs::every_upstream_podcast_route_is_served`); audiobooks are M6b
+        // (D-201).
+        "podcasts": true,
         "audiobooks": false,
         "discover": false,
         "mixes": false,

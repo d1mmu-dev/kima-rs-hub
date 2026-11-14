@@ -1,0 +1,106 @@
+[
+  {
+    "aiLabel": "ai",
+    "aiLabelSource": "feed-show",
+    "author": "Robot Author",
+    "autoDownloadEpisodes": false,
+    "coverUrl": "http://127.0.0.1:46427/img/robot.png",
+    "description": "Synthetic race radio.",
+    "episodeCount": 2,
+    "episodes": [
+      {
+        "aiLabel": "ai",
+        "aiLabelSource": "feed-show",
+        "coverUrl": "http://127.0.0.1:46427/img/robot.png",
+        "description": "Second race hour.",
+        "duration": 1500,
+        "id": "01a1d732-7fad-749c-bcb7-b8bc6dfcd7b6",
+        "progress": {
+          "currentTime": 300,
+          "isFinished": false,
+          "lastPlayedAt": "2026-11-13T23:16:13.514Z",
+          "progress": 20
+        },
+        "publishedAt": "2026-11-07T12:00:00.000Z",
+        "title": "Robot Hour 2"
+      },
+      {
+        "aiLabel": "ai",
+        "aiLabelSource": "feed-show",
+        "coverUrl": "http://127.0.0.1:46427/img/robot.png",
+        "description": "First race hour.",
+        "duration": 1500,
+        "id": "01a1d732-7faf-7048-9525-ea7f73105cf3",
+        "progress": null,
+        "publishedAt": "2026-11-06T12:00:00.000Z",
+        "title": "Robot Hour 1"
+      }
+    ],
+    "id": "01a1d732-7fa8-7741-9884-364e4992daa8",
+    "latestEpisodeAt": "2026-11-07T12:00:00.000Z",
+    "title": "Robot Radio"
+  },
+  {
+    "aiLabel": "unknown",
+    "aiLabelSource": null,
+    "author": "Race Author",
+    "autoDownloadEpisodes": false,
+    "coverUrl": "http://127.0.0.1:46427/img/race.png",
+    "description": "Everything about the race weekend.",
+    "episodeCount": 4,
+    "episodes": [
+      {
+        "aiLabel": "unknown",
+        "aiLabelSource": null,
+        "coverUrl": "http://127.0.0.1:46427/img/race-gp.png",
+        "description": "The main race, start to flag.",
+        "duration": 3600,
+        "id": "01a1d732-73f8-7296-b8cb-66ccded0d5ff",
+        "progress": null,
+        "publishedAt": "2026-11-08T10:00:00.000Z",
+        "title": "Grand Prix"
+      },
+      {
+        "aiLabel": "ai",
+        "aiLabelSource": "feed-episode",
+        "coverUrl": "http://127.0.0.1:46427/img/race.png",
+        "description": "A generated race recap.",
+        "duration": 900,
+        "id": "01a1d732-73fb-74db-8b3f-7fd2e79ec5cd",
+        "progress": null,
+        "publishedAt": "2026-11-07T10:00:00.000Z",
+        "title": "Race Recap"
+      },
+      {
+        "aiLabel": "human",
+        "aiLabelSource": "feed-episode",
+        "coverUrl": "http://127.0.0.1:46427/img/race.png",
+        "description": "The sprint race.",
+        "duration": 1200,
+        "id": "01a1d732-73fc-773f-88aa-8e794cd0dac5",
+        "progress": {
+          "currentTime": 120,
+          "isFinished": false,
+          "lastPlayedAt": "2026-11-13T23:16:13.474Z",
+          "progress": 10
+        },
+        "publishedAt": "2026-11-06T10:00:00.000Z",
+        "title": "Sprint"
+      },
+      {
+        "aiLabel": "unknown",
+        "aiLabelSource": null,
+        "coverUrl": "http://127.0.0.1:46427/img/race.png",
+        "description": null,
+        "duration": 1800,
+        "id": "01a1d732-73fd-7053-903a-1743fabc7126",
+        "progress": null,
+        "publishedAt": "2026-11-05T10:00:00.000Z",
+        "title": "Qualifying"
+      }
+    ],
+    "id": "01a1d732-73f5-741e-8603-638478e907b3",
+    "latestEpisodeAt": "2026-11-08T10:00:00.000Z",
+    "title": "Race Show"
+  }
+]

@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1303,
+    "name": "Comedy",
+    "parentId": null
+  },
+  {
+    "id": 1495,
+    "name": "Improv",
+    "parentId": 1303
+  },
+  {
+    "id": 1318,
+    "name": "Technology",
+    "parentId": null
+  }
+]

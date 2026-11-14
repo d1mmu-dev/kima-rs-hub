@@ -511,6 +511,8 @@ async fn preview_answers_from_apple_alone_when_the_feed_is_slow(pool: PgPool) {
     assert_eq!(body["title"], json!("Preview Show"));
     assert_eq!(body["previewEpisodes"], json!([]));
     assert_eq!(body["snippet"], Value::Null);
+    // Upstream starts from `""` and only a feed read fills it (`podcasts.ts:349`).
+    assert_eq!(body["description"], json!(""));
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -556,6 +558,56 @@ async fn preview_marks_a_followed_show(pool: PgPool) {
     let body: Value = res.json();
     assert_eq!(body["isSubscribed"], json!(true));
     assert_eq!(body["subscribedPodcastId"], json!(show.id));
+}
+
+/// Task 19 wire parity: a stored show this user does not follow is not "subscribed" and names
+/// no page to open (`subscribedPodcastId` null, `podcasts.ts:389`); the description is the
+/// feed's channel text, and episode/snippet rows carry the feed's own fields.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn preview_of_a_stored_show_not_followed_names_no_page(pool: PgPool) {
+    let feed = PreviewFeedHost::start(PreviewAudio::SelfHosted).await;
+    let mut rec = recording();
+    rec.0
+        .push(lookup_entry("9001006", &feed.url("/feed.xml"), &[1495]));
+    let replay = Replay::start(rec).await;
+    let state: AppState = common::state(pool.clone()).with_net(net_to(&replay, pool.clone()));
+    let token = common::user_with_token(&state, "preview6").await.1;
+    podcasts::insert_show(
+        &pool,
+        Uuid::now_v7(),
+        &NewShow {
+            feed_url: &feed.url("/feed.xml"),
+            title: "Preview Show",
+            author: None,
+            description: Some("stored text, not the feed's"),
+            image_url: None,
+            itunes_id: Some("9001006"),
+            category_ids: &[1495],
+            language: None,
+            explicit: false,
+            episode_count: 1,
+            feed_etag: None,
+            feed_last_modified: None,
+        },
+    )
+    .await
+    .unwrap();
+    let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    let res = server
+        .get("/api/podcasts/preview/9001006")
+        .authorization_bearer(&token)
+        .await;
+    res.assert_status_ok();
+    let body: Value = res.json();
+    assert_eq!(body["isSubscribed"], json!(false));
+    assert_eq!(body["subscribedPodcastId"], Value::Null);
+    assert_eq!(body["description"], json!("d"));
+    assert_eq!(
+        body["previewEpisodes"],
+        json!([{"title": "Ep 1", "publishedAt": "2026-10-13T10:00:00.000Z", "duration": 0,
+            "description": "first"}])
+    );
+    assert_eq!(body["snippet"], body["previewEpisodes"][0]);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

@@ -302,8 +302,14 @@ async fn user_with_secrets_spans_all_profiles(pool: PgPool) {
 
     let (user, secrets) = api_keys::user_with_secrets(&pool, "ANA").await.unwrap();
     assert_eq!(user.unwrap().id, a.into_uuid());
-    let ids: Vec<Uuid> = secrets.iter().map(|(id, _)| *id).collect();
+    let ids: Vec<Uuid> = secrets.iter().map(|k| k.id).collect();
     assert_eq!(ids, expected, "every profile's tokens, oldest first");
+    let owners: Vec<ProfileId> = secrets.iter().map(|k| k.profile).collect();
+    assert_eq!(
+        owners,
+        vec![main, kid, kid],
+        "each secret names its profile"
+    );
 }
 
 async fn show(pool: &PgPool, n: u32) -> Uuid {

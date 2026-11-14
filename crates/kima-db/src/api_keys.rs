@@ -174,18 +174,27 @@ pub async fn secrets_for_profile(
     Ok(rows.into_iter().map(|r| (r.id, r.secret_enc)).collect())
 }
 
+/// One token's encrypted secret and the profile it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeySecret {
+    pub id: Uuid,
+    pub profile: ProfileId,
+    pub secret_enc: Vec<u8>,
+}
+
 /// The account named `username` (case-insensitive) and the token secrets of ALL its profiles
 /// (at most [`MAX_PER_USER`], oldest first), in ONE query that runs the same way whether or not
 /// the account exists: token+salt auth must not tell a client, by round trips, which usernames
-/// exist. An unknown user gives `(None, [])`. The matched key id names the profile.
+/// exist. An unknown user gives `(None, [])`. Each secret names its profile, so the matched
+/// key says which profile signs in.
 pub async fn user_with_secrets(
     pool: &PgPool,
     username: &str,
-) -> sqlx::Result<(Option<User>, Vec<(Uuid, Vec<u8>)>)> {
+) -> sqlx::Result<(Option<User>, Vec<KeySecret>)> {
     let rows = sqlx::query!(
         r#"SELECT u.id, u.username, u.password_hash, u.role, u.onboarding_complete,
                   u.token_version, u.created_at,
-                  k.id AS "key_id?", k.secret_enc AS "secret_enc?"
+                  k.id AS "key_id?", k.profile_id AS "profile_id?", k.secret_enc AS "secret_enc?"
            FROM users u
            LEFT JOIN (api_keys k JOIN profiles pr ON pr.id = k.profile_id) ON pr.user_id = u.id
            WHERE lower(u.username) = lower($1)
@@ -207,7 +216,13 @@ pub async fn user_with_secrets(
     });
     let secrets = rows
         .into_iter()
-        .filter_map(|r| Some((r.key_id?, r.secret_enc?)))
+        .filter_map(|r| {
+            Some(KeySecret {
+                id: r.key_id?,
+                profile: ProfileId::new(r.profile_id?),
+                secret_enc: r.secret_enc?,
+            })
+        })
         .collect();
     Ok((user, secrets))
 }

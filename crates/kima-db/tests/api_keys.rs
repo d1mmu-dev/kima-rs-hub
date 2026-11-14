@@ -366,7 +366,11 @@ async fn user_with_secrets_one_query_known_or_not(pool: PgPool) {
     let first = add(&pool, ana.id, "phone", 1).await;
     let (found, secrets) = api_keys::user_with_secrets(&pool, "ana").await.unwrap();
     assert_eq!(found.unwrap().id, ana.id);
-    assert_eq!(secrets, vec![(first.id, b"enc".to_vec())]);
+    let got: Vec<_> = secrets
+        .into_iter()
+        .map(|k| (k.id, k.profile, k.secret_enc))
+        .collect();
+    assert_eq!(got, vec![(first.id, ana.main_profile(), b"enc".to_vec())]);
     let (found, secrets) = api_keys::user_with_secrets(&pool, "nobody").await.unwrap();
     assert!(found.is_none() && secrets.is_empty());
 }

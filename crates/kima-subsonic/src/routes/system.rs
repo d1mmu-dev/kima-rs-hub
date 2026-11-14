@@ -98,6 +98,8 @@ async fn token_info(State(app): State<AppState>, params: Params) -> Result<Answe
     let owner = kima_db::api_keys::find_by_hash(&app.pool, &kima_core::app_token::hash(key))
         .await?
         .ok_or_else(SubsonicError::invalid_api_key)?;
+    // M-PROF Task 7: a non-main profile's token is no valid sign-in yet.
+    crate::auth::main_profile_only(&owner.user, owner.profile)?;
     Ok(Answer::node(
         Node::new("tokenInfo").attr("username", owner.user.username),
     ))

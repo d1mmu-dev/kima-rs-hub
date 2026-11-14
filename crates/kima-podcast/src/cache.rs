@@ -108,15 +108,18 @@ pub enum CacheError {
     TimedOut(Duration),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error("the profile the download was for no longer exists")]
+    NoProfile,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
 
 impl CacheError {
     /// Whether a retry cannot help: a host that sent more than the size limit will send as
-    /// much again. Everything else is retried under the queue's policy ([`MAX_ATTEMPTS`]).
+    /// much again, and a deleted profile never comes back. Everything else is retried under
+    /// the queue's policy ([`MAX_ATTEMPTS`]).
     pub fn is_permanent(&self) -> bool {
-        matches!(self, CacheError::TooLarge { .. })
+        matches!(self, CacheError::TooLarge { .. } | CacheError::NoProfile)
     }
 }
 
@@ -197,8 +200,9 @@ pub async fn enqueue_download(
         "kind": "podcast-download",
         "key": key,
         "episode": episode,
-        // M-PROF Task 5: the key becomes "profile" (the job reader then accepts both).
-        "user": profile,
+        // Whose download row the job writes. Jobs queued before M-PROF say "user" (a user id,
+        // which is that account's main profile id); the reader takes either.
+        "profile": profile,
     });
     kima_jobs::queue::enqueue_unless_pending_with_key(pool, QUEUE, payload, MAX_ATTEMPTS).await
 }
@@ -276,8 +280,17 @@ pub async fn download_with_limits(
         .unwrap_or(&final_path)
         .to_string_lossy()
         .into_owned();
-    kima_db::podcasts::upsert_download(&ctx.pool, profile, episode, &relative, size_mb).await?;
-    Ok(())
+    // The profile may have been deleted while the job waited (its rows went with it): the file
+    // stays cached for everyone, the row cannot be written, and no retry changes that.
+    match kima_db::podcasts::upsert_download(&ctx.pool, profile, episode, &relative, size_mb).await
+    {
+        Err(sqlx::Error::Database(e))
+            if e.constraint() == Some("podcast_downloads_profile_id_fkey") =>
+        {
+            Err(CacheError::NoProfile)
+        }
+        other => other.map_err(CacheError::from),
+    }
 }
 
 /// The most bytes a body may have: `expected` plus the size tolerance, never more than the cap

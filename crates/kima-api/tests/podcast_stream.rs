@@ -332,10 +332,10 @@ async fn the_route_releases_its_audio_permit_once_the_response_completes(pool: P
 // Cache first (`podcasts.ts:933-1015`, D-214): a cached copy is served without asking the host,
 // a miss streams from the host and queues the episode's download once.
 
-/// The jobs queued for `episode`'s download: (state, payload user).
+/// The jobs queued for `episode`'s download: (state, payload profile).
 async fn download_jobs(pool: &PgPool, episode: Uuid) -> Vec<(String, String)> {
     sqlx::query_as(
-        "SELECT state, payload ->> 'user' FROM jobs
+        "SELECT state, payload ->> 'profile' FROM jobs
          WHERE queue = $1 AND payload ->> 'key' = $2 ORDER BY created_at",
     )
     .bind(kima_podcast::cache::QUEUE)

@@ -227,3 +227,158 @@ async fn shutdown_during_a_download_gives_the_attempt_back_and_leaves_no_temp_fi
     assert_eq!((state.as_str(), attempts), ("queued", 0));
     assert_eq!(temp_files(), Vec::<std::path::PathBuf>::new());
 }
+
+// ---- M-PROF (plan Task 5): the job carries the profile whose download row it writes ----
+
+/// The podcast context of a test, downloading 4 KiB from a loopback host, and its workers
+/// once started.
+struct Worker {
+    _tmp: tempfile::TempDir,
+    _host: AudioHost,
+    ctx: kima_podcast::ctx::PodcastCtx,
+    episode: Uuid,
+    shutdown: CancellationToken,
+    workers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+async fn worker_for(pool: &PgPool) -> Worker {
+    let tmp = tempfile::tempdir().unwrap();
+    let host = AudioHost::start(vec![0x55; 4096], AudioMode::Normal).await;
+    let episode = episode_at(pool, &format!("{}/e.mp3", host.url())).await;
+    let ctx = kima_podcast::ctx::PodcastCtx {
+        pool: pool.clone(),
+        net: Arc::new(Net::new(
+            NetConfig::for_tests(Bases::all(&host.url())),
+            pool.clone(),
+            IdentifySwitch::new(false, false),
+        )),
+        data_dir: tmp.path().join("data"),
+    };
+    Worker {
+        _tmp: tmp,
+        _host: host,
+        ctx,
+        episode,
+        shutdown: CancellationToken::new(),
+        workers: Vec::new(),
+    }
+}
+
+impl Worker {
+    fn start(&mut self) {
+        let mut registry = Registry::new();
+        registry.register_podcast_cache(self.ctx.clone());
+        self.workers = spawn_all(&self.ctx.pool, registry, self.shutdown.clone());
+    }
+
+    async fn stop(self) {
+        self.shutdown.cancel();
+        drain(self.workers, Duration::from_secs(5)).await;
+    }
+}
+
+async fn download_owners(pool: &PgPool) -> Vec<Uuid> {
+    sqlx::query_scalar("SELECT profile_id FROM podcast_downloads ORDER BY profile_id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+async fn kids_of(pool: &PgPool, account: Uuid) -> ProfileId {
+    kima_db::profiles::create(
+        pool,
+        kima_core::profile::AccountId::new(account),
+        kima_db::profiles::NewProfile {
+            name: "Kids".into(),
+            kind: kima_core::profile::ProfileKind::Kids,
+            avatar: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .id
+}
+
+/// A job queued before M-PROF names its owner `"user"`: a user id, which is that account's
+/// main profile id, so the download row lands in main.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn podcast_download_job_accepts_legacy_user_payload(pool: PgPool) {
+    let ana = user(&pool, "ana").await;
+    let mut w = worker_for(&pool).await;
+    let payload = serde_json::json!({
+        "kind": "podcast-download",
+        "key": format!("episode:{}", w.episode),
+        "episode": w.episode,
+        "user": ana,
+    });
+    let job = kima_jobs::queue::enqueue_unless_pending_with_key(
+        &pool,
+        kima_podcast::cache::QUEUE,
+        payload,
+        kima_podcast::cache::MAX_ATTEMPTS,
+    )
+    .await
+    .unwrap()
+    .expect("a fresh job");
+    w.start();
+    assert_eq!(wait_for_job_state(&pool, job, "done").await, "done");
+    w.stop().await;
+    assert_eq!(download_owners(&pool).await, vec![ana]);
+}
+
+/// A new job names the profile, and the download row is that profile's.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn podcast_download_job_writes_the_profiles_row(pool: PgPool) {
+    let ana = user(&pool, "ana").await;
+    let kids = kids_of(&pool, ana).await;
+    let mut w = worker_for(&pool).await;
+    let job = kima_podcast::cache::enqueue_download(&pool, w.episode, kids)
+        .await
+        .unwrap()
+        .expect("a fresh job");
+    let payload: serde_json::Value = sqlx::query_scalar("SELECT payload FROM jobs WHERE id = $1")
+        .bind(job)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["profile"], serde_json::json!(kids));
+    assert!(payload.get("user").is_none(), "{payload}");
+    w.start();
+    assert_eq!(wait_for_job_state(&pool, job, "done").await, "done");
+    w.stop().await;
+    assert_eq!(download_owners(&pool).await, vec![kids.into_uuid()]);
+}
+
+/// The profile was deleted while its download waited in the queue: the job fails at once,
+/// with a reason, instead of retrying a row that can never be written.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn download_job_for_deleted_profile_fails_permanently(pool: PgPool) {
+    let ana = user(&pool, "ana").await;
+    let kids = kids_of(&pool, ana).await;
+    let mut w = worker_for(&pool).await;
+    // Queued, then the profile goes, then the worker starts.
+    let job = kima_podcast::cache::enqueue_download(&pool, w.episode, kids)
+        .await
+        .unwrap()
+        .expect("a fresh job");
+    kima_db::profiles::delete(&pool, kima_core::profile::AccountId::new(ana), kids)
+        .await
+        .unwrap()
+        .unwrap();
+    w.start();
+    assert_eq!(wait_for_job_state(&pool, job, "failed").await, "failed");
+    w.stop().await;
+    let (attempts, error): (i32, Option<String>) =
+        sqlx::query_as("SELECT attempts, last_error FROM jobs WHERE id = $1")
+            .bind(job)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(attempts, 1, "no retry");
+    assert!(
+        error.as_deref().unwrap_or("").contains("profile"),
+        "{error:?}"
+    );
+    assert!(download_owners(&pool).await.is_empty());
+}

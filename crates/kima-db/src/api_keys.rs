@@ -35,9 +35,10 @@ pub enum Refused {
 /// Stores a token of `profile` for a session of `account` issued at `session_version`. Under a
 /// lock on the ACCOUNT row it checks that version is still current (a password change bumps it
 /// and revokes all tokens, so a revoked session must not mint one afterwards) and that the
-/// profile still belongs to the account, then the account-wide cap, then inserts. Concurrent
-/// creates from any of the account's profiles are serialised by that one lock and cannot
-/// overshoot the cap.
+/// profile still belongs to the account (holding the profile row `FOR SHARE`, so a concurrent
+/// profile delete waits and cascades the new token), then the account-wide cap, then inserts.
+/// Concurrent creates from any of the account's profiles are serialised by that one lock and
+/// cannot overshoot the cap. Lock order: account row, then profile row.
 #[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &PgPool,
@@ -59,13 +60,16 @@ pub async fn create(
     if current != Some(session_version) {
         return Ok(Err(Refused::StaleSession));
     }
+    // FOR SHARE holds the profile until commit: a concurrent profile delete waits and then
+    // takes the new token with it, instead of the insert failing on the dropped foreign key.
     let owned = sqlx::query_scalar!(
-        r#"SELECT EXISTS (SELECT 1 FROM profiles pr WHERE pr.id = $1 AND pr.user_id = $2) AS "owned!""#,
+        "SELECT 1 AS one FROM profiles pr WHERE pr.id = $1 AND pr.user_id = $2 FOR SHARE",
         profile.into_uuid(),
         account.into_uuid()
     )
-    .fetch_one(&mut *tx)
-    .await?;
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
     if !owned {
         return Ok(Err(Refused::StaleSession));
     }

@@ -278,6 +278,54 @@ async fn stale_session_version_is_refused(pool: PgPool) {
     assert_eq!(gone.unwrap_err(), Refused::StaleSession);
 }
 
+/// Parks every `api_keys` insert after `create`'s checks (BEFORE INSERT trigger, shared
+/// advisory lock 4244) until the returned connection unlocks 4244.
+async fn gate_key_inserts(pool: &PgPool) -> sqlx::pool::PoolConnection<sqlx::Postgres> {
+    sqlx::query(
+        "CREATE FUNCTION test_key_gate() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN PERFORM pg_advisory_xact_lock_shared(4244); RETURN NEW; END $$",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER zz_test_key_gate BEFORE INSERT ON api_keys \
+         FOR EACH ROW EXECUTE FUNCTION test_key_gate()",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let mut gate = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(4244)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    gate
+}
+
+/// Sessions of this database waiting on a lock whose query matches `like`.
+async fn waiting(pool: &PgPool, like: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE $1",
+    )
+    .bind(like)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn kids_of(pool: &PgPool, account: Uuid) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO profiles (id, user_id, name, kind) VALUES ($1, $2, 'Kids', 'kids') RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(account)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn concurrent_creates_respect_the_cap(pool: PgPool) {
     let ana = user(&pool, "ana").await;
@@ -286,41 +334,48 @@ async fn concurrent_creates_respect_the_cap(pool: PgPool) {
     }
     // Racing creates come from two profiles of the account: the cap and its lock are the
     // account's (M-PROF).
-    let kids: Uuid = sqlx::query_scalar(
-        "INSERT INTO profiles (id, user_id, name, kind) VALUES ($1, $2, 'Kids', 'kids') RETURNING id",
-    )
-    .bind(Uuid::now_v7())
-    .bind(ana.id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let handles: Vec<_> = (0..6u32)
-        .map(|i| {
-            let pool = pool.clone();
-            let profile = ProfileId::new(if i % 2 == 0 { ana.id } else { kids });
-            tokio::spawn(async move {
-                api_keys::create(
-                    &pool,
-                    Uuid::now_v7(),
-                    AccountId::new(ana.id),
-                    profile,
-                    0,
-                    "k",
-                    &hash_of(500 + i),
-                    b"e",
-                )
-                .await
-                .unwrap()
-            })
+    let kids = kids_of(&pool, ana.id).await;
+    let mut gate = gate_key_inserts(&pool).await;
+    let spawn = |profile: Uuid, n: u32| {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            api_keys::create(
+                &pool,
+                Uuid::now_v7(),
+                AccountId::new(ana.id),
+                ProfileId::new(profile),
+                0,
+                "k",
+                &hash_of(500 + n),
+                b"e",
+            )
+            .await
+            .unwrap()
         })
-        .collect();
-    let mut created = 0;
-    for handle in handles {
-        if handle.await.unwrap().is_ok() {
-            created += 1;
+    };
+    let first = spawn(ana.id, 1);
+    let second = spawn(kids, 2);
+    // Both are in flight: one parked on the gate after counting 49, the other on the account
+    // row lock (or, if the count took no lock, both on the gate with the same stale count).
+    for _ in 0..500 {
+        let parked = waiting(&pool, "%INSERT INTO api_keys%").await;
+        let queued = waiting(&pool, "%FROM users WHERE id = $1 FOR UPDATE%").await;
+        if parked + queued >= 2 {
+            break;
         }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert_eq!(created, 1);
+    sqlx::query("SELECT pg_advisory_unlock(4244)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let results = [first.await.unwrap(), second.await.unwrap()];
+    let ok = results.iter().filter(|r| r.is_ok()).count();
+    let refused = results
+        .iter()
+        .filter(|r| r.as_ref().err() == Some(&api_keys::Refused::TooMany))
+        .count();
+    assert_eq!((ok, refused), (1, 1), "{results:?}");
     let held: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM api_keys k JOIN profiles pr ON pr.id = k.profile_id WHERE pr.user_id = $1",
     )
@@ -329,6 +384,76 @@ async fn concurrent_creates_respect_the_cap(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(held, MAX_PER_USER);
+}
+
+/// A profile deleted while a token is being created for it: the delete waits for the create
+/// (which holds the profile row), then takes the new token with it by cascade. Without that
+/// lock the insert would hit the dropped profile's foreign key and fail as a database error
+/// (500) instead of a clean answer.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn profile_deleted_during_create_is_no_database_error(pool: PgPool) {
+    let ana = user(&pool, "ana").await;
+    let kids = kids_of(&pool, ana.id).await;
+    let mut gate = gate_key_inserts(&pool).await;
+    let create = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            api_keys::create(
+                &pool,
+                Uuid::now_v7(),
+                AccountId::new(ana.id),
+                ProfileId::new(kids),
+                0,
+                "tablet",
+                &hash_of(1),
+                b"e",
+            )
+            .await
+        })
+    };
+    for _ in 0..500 {
+        if waiting(&pool, "%INSERT INTO api_keys%").await == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let delete = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            kima_db::profiles::delete(&pool, AccountId::new(ana.id), ProfileId::new(kids)).await
+        })
+    };
+    // The delete either queues behind the create's hold on the profile row or (without it)
+    // finishes at once.
+    for _ in 0..500 {
+        if delete.is_finished() || waiting(&pool, "%DELETE FROM profiles%").await == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        !delete.is_finished(),
+        "the delete must wait for the create's hold on the profile row"
+    );
+    sqlx::query("SELECT pg_advisory_unlock(4244)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let created = create.await.unwrap();
+    assert!(
+        matches!(
+            created,
+            Ok(Ok(_)) | Ok(Err(api_keys::Refused::StaleSession))
+        ),
+        "{created:?}"
+    );
+    assert_eq!(delete.await.unwrap().unwrap(), Ok(()));
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM api_keys WHERE profile_id = $1")
+        .bind(kids)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the deleted profile's token went with it");
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

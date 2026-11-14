@@ -10,7 +10,7 @@ use kima_db::podcasts::{self, NewEpisode, NewShow};
 use kima_db::users::{self, Registration};
 use kima_net::testing::{AudioHost, AudioMode};
 use kima_net::{Bases, Net, NetConfig};
-use kima_podcast::cache::{self, CacheError};
+use kima_podcast::cache::{self, CacheError, DownloadLimits};
 use kima_podcast::ctx::PodcastCtx;
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -190,6 +190,125 @@ async fn keeps_nothing_from_a_download_cut_short_of_the_hosts_content_length(poo
             .join(format!("{episode}.tmp"))
             .exists()
     );
+}
+
+/// A loopback host that answers 200 with a chunked body (no `Content-Length`) and then sends
+/// `chunk` bytes every `every`, forever, until the client goes away.
+async fn endless_host(
+    chunk: usize,
+    every: std::time::Duration,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let start = "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\n\
+                             Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                if sock.write_all(start.as_bytes()).await.is_err() {
+                    return;
+                }
+                let mut frame = format!("{chunk:x}\r\n").into_bytes();
+                frame.extend(std::iter::repeat_n(0xAAu8, chunk));
+                frame.extend_from_slice(b"\r\n");
+                loop {
+                    if sock.write_all(&frame).await.is_err() || sock.flush().await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(every).await;
+                }
+            });
+        }
+    });
+    (url, task)
+}
+
+/// Nothing of an aborted download is left: no temp file, no cached file, no download record.
+async fn assert_nothing_kept(
+    c: &kima_podcast::ctx::PodcastCtx,
+    data_dir: &std::path::Path,
+    episode: Uuid,
+) {
+    let dir = cache::cache_dir(data_dir);
+    assert!(
+        !dir.join(format!("{episode}.tmp")).exists(),
+        "temp file left"
+    );
+    assert!(
+        !dir.join(format!("{episode}.audio")).exists(),
+        "cached file kept"
+    );
+    assert!(cache::cached_path(c, episode).await.is_none());
+    let records: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM podcast_downloads WHERE episode_id = $1")
+            .bind(episode)
+            .fetch_one(&c.pool)
+            .await
+            .unwrap();
+    assert_eq!(records, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn aborts_a_download_of_unknown_length_at_the_size_cap(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let (url, _host) = endless_host(4096, std::time::Duration::from_millis(1)).await;
+    let episode = show_and_episode(&pool, &format!("{url}/e.mp3")).await;
+    let data_dir = tmp.path().join("data");
+    let c = ctx(&pool, &data_dir, &url);
+    let limits = DownloadLimits {
+        max_unknown_length: 64 * 1024,
+        ..DownloadLimits::default()
+    };
+
+    let started = std::time::Instant::now();
+    let err = cache::download_with_limits(&c, episode, Uuid::now_v7(), limits)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, CacheError::TooLarge { limit, .. } if limit == 64 * 1024),
+        "{err:?}"
+    );
+    // A host that never stops sending will not stop sending on a retry either.
+    assert!(err.is_permanent(), "{err:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert_nothing_kept(&c, &data_dir, episode).await;
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn aborts_a_download_that_trickles_past_its_deadline(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    // A byte trickle well inside kima-net's 30 s idle timeout, so only the whole-download
+    // deadline can end it.
+    let (url, _host) = endless_host(16, std::time::Duration::from_millis(20)).await;
+    let episode = show_and_episode(&pool, &format!("{url}/e.mp3")).await;
+    let data_dir = tmp.path().join("data");
+    let c = ctx(&pool, &data_dir, &url);
+    let limits = DownloadLimits {
+        whole: std::time::Duration::from_millis(400),
+        ..DownloadLimits::default()
+    };
+
+    let started = std::time::Instant::now();
+    let err = cache::download_with_limits(&c, episode, Uuid::now_v7(), limits)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, CacheError::TimedOut(_)), "{err:?}");
+    // A slow host may be faster next time: retried under the usual policy.
+    assert!(!err.is_permanent(), "{err:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert_nothing_kept(&c, &data_dir, episode).await;
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

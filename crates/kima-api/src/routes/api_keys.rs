@@ -54,7 +54,9 @@ async fn create(
     let key = api_keys::create(
         &state.pool,
         id,
-        auth.id,
+        auth.account(),
+        // M-PROF Task 5: main profile until AuthUser carries one.
+        auth.main_profile(),
         auth.token_version,
         name,
         &app_token::hash(&token),
@@ -79,7 +81,8 @@ async fn create(
 }
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> Result<Json<Value>, ApiError> {
-    let keys = api_keys::list_for_user(&state.pool, auth.id).await?;
+    // M-PROF Task 5: main profile until AuthUser carries one.
+    let keys = api_keys::list_for_profile(&state.pool, auth.main_profile()).await?;
     let keys: Vec<Value> = keys
         .into_iter()
         .map(|key| {
@@ -100,7 +103,8 @@ async fn revoke(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let id: Uuid = id.parse().map_err(|_| ApiError::NotFound(NOT_FOUND))?;
-    if !api_keys::delete_owned(&state.pool, id, auth.id).await? {
+    // M-PROF Task 5: main profile until AuthUser carries one.
+    if !api_keys::delete_owned(&state.pool, id, auth.main_profile()).await? {
         return Err(ApiError::NotFound(NOT_FOUND));
     }
     Ok(Json(json!({ "message": "API key revoked successfully" })))

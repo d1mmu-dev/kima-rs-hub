@@ -1,11 +1,11 @@
-//! Per-user settings (upstream `UserSettings`): playback quality and client preferences.
+//! Per-profile settings (upstream `UserSettings`, per user there; D-240): playback quality and client preferences.
 
+use kima_core::profile::ProfileId;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserSettings {
-    pub user_id: Uuid,
+    pub profile_id: ProfileId,
     pub playback_quality: String,
     pub wifi_only: bool,
     pub offline_enabled: bool,
@@ -16,10 +16,10 @@ pub struct UserSettings {
 }
 
 impl UserSettings {
-    /// What a user without a row has (the column defaults).
-    pub fn defaults(user_id: Uuid) -> Self {
+    /// What a profile without a row has (the column defaults).
+    pub fn defaults(profile_id: ProfileId) -> Self {
         Self {
-            user_id,
+            profile_id,
             playback_quality: "original".into(),
             wifi_only: false,
             offline_enabled: false,
@@ -41,22 +41,22 @@ pub struct Patch {
     pub podcast_ai_filter: Option<String>,
 }
 
-/// The user's row, or the defaults when there is none. Writes nothing.
-pub async fn get(pool: &PgPool, user_id: Uuid) -> sqlx::Result<UserSettings> {
+/// The profile's row, or the defaults when there is none. Writes nothing.
+pub async fn get(pool: &PgPool, profile: ProfileId) -> sqlx::Result<UserSettings> {
     let row = sqlx::query_as!(
         UserSettings,
-        r#"SELECT profile_id AS user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,
+        r#"SELECT profile_id AS "profile_id: ProfileId", playback_quality, wifi_only, offline_enabled, max_cache_size_mb,
                   share_live_listening, podcast_ai_filter
            FROM user_settings WHERE profile_id = $1"#,
-        user_id
+        profile.into_uuid()
     )
     .fetch_optional(pool)
     .await?;
-    Ok(row.unwrap_or_else(|| UserSettings::defaults(user_id)))
+    Ok(row.unwrap_or_else(|| UserSettings::defaults(profile)))
 }
 
 /// Creates the row from the defaults plus `patch`, or applies `patch` to the existing one.
-pub async fn upsert(pool: &PgPool, user_id: Uuid, patch: Patch) -> sqlx::Result<UserSettings> {
+pub async fn upsert(pool: &PgPool, profile: ProfileId, patch: Patch) -> sqlx::Result<UserSettings> {
     sqlx::query_as!(
         UserSettings,
         r#"INSERT INTO user_settings
@@ -71,9 +71,9 @@ pub async fn upsert(pool: &PgPool, user_id: Uuid, patch: Patch) -> sqlx::Result<
                max_cache_size_mb = COALESCE($5, user_settings.max_cache_size_mb),
                share_live_listening = COALESCE($6, user_settings.share_live_listening),
                podcast_ai_filter = COALESCE($7, user_settings.podcast_ai_filter)
-           RETURNING profile_id AS user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,
+           RETURNING profile_id AS "profile_id: ProfileId", playback_quality, wifi_only, offline_enabled, max_cache_size_mb,
                      share_live_listening, podcast_ai_filter"#,
-        user_id,
+        profile.into_uuid(),
         patch.playback_quality,
         patch.wifi_only,
         patch.offline_enabled,
@@ -85,7 +85,7 @@ pub async fn upsert(pool: &PgPool, user_id: Uuid, patch: Patch) -> sqlx::Result<
     .await
 }
 
-/// Whether `user`'s podcast lists hide AI-labelled content: `true` unless they chose `show`.
-pub async fn hides_podcast_ai(pool: &PgPool, user_id: Uuid) -> sqlx::Result<bool> {
-    Ok(get(pool, user_id).await?.podcast_ai_filter != "show")
+/// Whether the profile's podcast lists hide AI-labelled content: `true` unless they chose `show`.
+pub async fn hides_podcast_ai(pool: &PgPool, profile: ProfileId) -> sqlx::Result<bool> {
+    Ok(get(pool, profile).await?.podcast_ai_filter != "show")
 }

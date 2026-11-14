@@ -1,18 +1,16 @@
 //! Per-user playback state (what is playing and the queue), for resuming on another device.
 
+use kima_core::profile::ProfileId;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use time::OffsetDateTime;
-use uuid::Uuid;
 
 /// The longest queue kept. Upstream reads this from an admin setting; M1 has no such setting.
 pub const QUEUE_LIMIT: usize = 10_000;
 
 #[derive(Debug, Clone, FromRow)]
 pub struct PlaybackState {
-    // Column renamed by migration 0060 (M-PROF); the field follows in the per-profile re-key.
-    #[sqlx(rename = "profile_id")]
-    pub user_id: Uuid,
+    pub profile_id: ProfileId,
     pub playback_type: String,
     pub track_id: Option<String>,
     pub audiobook_id: Option<String>,
@@ -42,15 +40,19 @@ pub struct Patch {
     pub changed_by: Option<Option<String>>,
 }
 
-pub async fn get(pool: &PgPool, user: Uuid) -> sqlx::Result<Option<PlaybackState>> {
+pub async fn get(pool: &PgPool, profile: ProfileId) -> sqlx::Result<Option<PlaybackState>> {
     sqlx::query_as("SELECT * FROM playback_state WHERE profile_id = $1")
-        .bind(user)
+        .bind(profile)
         .fetch_optional(pool)
         .await
 }
 
 /// Inserts the user's state, or applies `patch` to the stored one in a single statement.
-pub async fn upsert(pool: &PgPool, user: Uuid, patch: Patch) -> sqlx::Result<PlaybackState> {
+pub async fn upsert(
+    pool: &PgPool,
+    profile: ProfileId,
+    patch: Patch,
+) -> sqlx::Result<PlaybackState> {
     let flat = |o: &Option<Option<String>>| o.clone().flatten();
     sqlx::query_as(
         "INSERT INTO playback_state AS s
@@ -69,7 +71,7 @@ pub async fn upsert(pool: &PgPool, user: Uuid, patch: Patch) -> sqlx::Result<Pla
              updated_at = now()
          RETURNING *",
     )
-    .bind(user)
+    .bind(profile)
     .bind(&patch.playback_type)
     .bind(flat(&patch.track_id))
     .bind(flat(&patch.audiobook_id))
@@ -89,10 +91,10 @@ pub async fn upsert(pool: &PgPool, user: Uuid, patch: Patch) -> sqlx::Result<Pla
 }
 
 /// Clears the user's state; returns how many rows went (0 when there was none).
-pub async fn delete(pool: &PgPool, user: Uuid) -> sqlx::Result<u64> {
+pub async fn delete(pool: &PgPool, profile: ProfileId) -> sqlx::Result<u64> {
     Ok(
         sqlx::query("DELETE FROM playback_state WHERE profile_id = $1")
-            .bind(user)
+            .bind(profile)
             .execute(pool)
             .await?
             .rows_affected(),

@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT DISTINCT p.profile_id AS user_id, p.id FROM playlist_items i JOIN playlists p ON p.id = i.playlist_id\n         WHERE i.track_id = ANY($1) ORDER BY 1, 2",
+  "query": "SELECT DISTINCT p.profile_id, p.id FROM playlist_items i JOIN playlists p ON p.id = i.playlist_id\n         WHERE i.track_id = ANY($1) ORDER BY 1, 2",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "user_id",
+        "name": "profile_id",
         "type_info": "Uuid"
       },
       {
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "bbcea1fed560f9655b9bd871025ee8b5122d932c840e1c169d79ed60bc835ac1"
+  "hash": "395971d3e1990fbf2525f2ba78ee1b7d0d51ea12ed24b70cf1149b08bc2d797a"
 }

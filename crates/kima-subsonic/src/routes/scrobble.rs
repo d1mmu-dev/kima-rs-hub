@@ -64,7 +64,8 @@ async fn scrobble(
         let parsed: Vec<Option<Uuid>> = raw_ids.iter().map(|raw| ids::parse(raw, &[])).collect();
         // `plays::record` accepts a track flagged missing; a scrobble of one is skipped.
         let wanted: Vec<Uuid> = parsed.iter().flatten().copied().collect();
-        let present: HashSet<Uuid> = subsonic::tracks_by_ids(pool, me.id, &wanted)
+        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+        let present: HashSet<Uuid> = subsonic::tracks_by_ids(pool, me.main_profile(), &wanted)
             .await?
             .iter()
             .map(|s| s.track.id)
@@ -77,7 +78,8 @@ async fn scrobble(
             // As upstream, a play that cannot be written is logged, never the client's problem.
             if let Err(error) = plays::record(
                 pool,
-                me.id,
+                // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+                me.main_profile(),
                 track,
                 Listen::Attested,
                 Source::Subsonic,
@@ -94,7 +96,8 @@ async fn scrobble(
             .iter()
             .filter_map(|raw| ids::parse(raw, &[]))
             .collect();
-        for song in subsonic::tracks_by_ids(pool, me.id, &tracks).await? {
+        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+        for song in subsonic::tracks_by_ids(pool, me.main_profile(), &tracks).await? {
             let t = &song.track;
             ctx.now_playing.report(
                 me.id,
@@ -146,7 +149,8 @@ async fn get_now_playing(
     for (uid, username, track, updated) in subsonic::web_now_playing(pool, wall - WEB_STALE).await?
     {
         offer(
-            (uid, WEB_PLAYER.to_owned()),
+            // M-PROF Task 5: now-playing slots are keyed by profile (Task 7).
+            (uid.into_uuid(), WEB_PLAYER.to_owned()),
             Playing {
                 username,
                 player: WEB_PLAYER.to_owned(),
@@ -161,7 +165,8 @@ async fn get_now_playing(
     });
 
     let wanted: Vec<Uuid> = playing.iter().map(|p| p.track).collect();
-    let songs: HashMap<Uuid, _> = subsonic::tracks_by_ids(pool, user.user.id, &wanted)
+    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    let songs: HashMap<Uuid, _> = subsonic::tracks_by_ids(pool, user.user.main_profile(), &wanted)
         .await?
         .into_iter()
         .map(|s| (s.track.id, s))

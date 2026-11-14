@@ -1,5 +1,6 @@
 //! `plays::record` with attested listening and the play source, on the Subsonic SQL fixture.
 
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::plays::{self, Listen, PlayOutcome, Source};
 use time::OffsetDateTime;
@@ -40,7 +41,7 @@ fixture_test!(source_strings, |pool| {
 fixture_test!(seconds_listen_still_needs_half, |pool| {
     let few = plays::record(
         &pool,
-        ALICE,
+        ProfileId::new(ALICE),
         TRACK,
         Listen::Seconds(10.0),
         Source::Library,
@@ -51,7 +52,7 @@ fixture_test!(seconds_listen_still_needs_half, |pool| {
     assert_eq!(few, PlayOutcome::NotEnoughListened);
     let enough = plays::record(
         &pool,
-        ALICE,
+        ProfileId::new(ALICE),
         TRACK,
         Listen::Seconds(104.0),
         Source::Library,
@@ -68,7 +69,7 @@ fixture_test!(seconds_listen_still_needs_half, |pool| {
 fixture_test!(attested_skips_seconds_and_stores_source, |pool| {
     let out = plays::record(
         &pool,
-        ALICE,
+        ProfileId::new(ALICE),
         TRACK,
         Listen::Attested,
         Source::Subsonic,
@@ -90,7 +91,7 @@ fixture_test!(attested_keeps_floor_and_duplicate_window, |pool| {
         .unwrap();
     let short = plays::record(
         &pool,
-        ALICE,
+        ProfileId::new(ALICE),
         TRACK,
         Listen::Attested,
         Source::Subsonic,
@@ -107,7 +108,7 @@ fixture_test!(attested_keeps_floor_and_duplicate_window, |pool| {
         .unwrap();
     let first = plays::record(
         &pool,
-        ALICE,
+        ProfileId::new(ALICE),
         TRACK,
         Listen::Attested,
         Source::Subsonic,
@@ -118,7 +119,7 @@ fixture_test!(attested_keeps_floor_and_duplicate_window, |pool| {
     assert!(matches!(first, PlayOutcome::Recorded(_)));
     let again = plays::record(
         &pool,
-        ALICE,
+        ProfileId::new(ALICE),
         TRACK,
         Listen::Attested,
         Source::Subsonic,
@@ -129,7 +130,7 @@ fixture_test!(attested_keeps_floor_and_duplicate_window, |pool| {
     assert_eq!(again, PlayOutcome::Duplicate);
     let unknown = plays::record(
         &pool,
-        ALICE,
+        ProfileId::new(ALICE),
         Uuid::now_v7(),
         Listen::Attested,
         Source::Subsonic,
@@ -147,7 +148,7 @@ fixture_test!(web_now_playing_reads_fresh_present_track_states, |pool| {
         track_id: Some(Some(track.into())),
         ..Patch::default()
     };
-    playback::upsert(&pool, ALICE, state(&TRACK.to_string()))
+    playback::upsert(&pool, ProfileId::new(ALICE), state(&TRACK.to_string()))
         .await
         .unwrap();
     let since = OffsetDateTime::now_utc() - time::Duration::hours(2);
@@ -157,10 +158,10 @@ fixture_test!(web_now_playing_reads_fresh_present_track_states, |pool| {
     assert_eq!(rows.len(), 1);
     assert_eq!(
         (rows[0].0, rows[0].1.as_str(), rows[0].2),
-        (ALICE, "alice", TRACK)
+        (ProfileId::new(ALICE), "alice", TRACK)
     );
     // Not parsable, stale, or a missing track: none count.
-    playback::upsert(&pool, ALICE, state("not-a-uuid"))
+    playback::upsert(&pool, ProfileId::new(ALICE), state("not-a-uuid"))
         .await
         .unwrap();
     assert!(
@@ -169,7 +170,7 @@ fixture_test!(web_now_playing_reads_fresh_present_track_states, |pool| {
             .unwrap()
             .is_empty()
     );
-    playback::upsert(&pool, ALICE, state(&TRACK.to_string()))
+    playback::upsert(&pool, ProfileId::new(ALICE), state(&TRACK.to_string()))
         .await
         .unwrap();
     let future = OffsetDateTime::now_utc() + time::Duration::hours(1);
@@ -189,5 +190,36 @@ fixture_test!(web_now_playing_reads_fresh_present_track_states, |pool| {
             .await
             .unwrap()
             .is_empty()
+    );
+});
+
+// M-PROF Task 3: a non-main profile's web player is listed under its account's username.
+fixture_test!(web_now_playing_lists_non_main_profiles, |pool| {
+    use kima_db::playback::{self, Patch};
+    let kids: Uuid = sqlx::query_scalar(
+        "INSERT INTO profiles (id, user_id, name, kind) VALUES ($1, $2, 'Kids', 'kids') RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ALICE)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let patch = Patch {
+        playback_type: "track".into(),
+        track_id: Some(Some(TRACK.to_string())),
+        ..Patch::default()
+    };
+    playback::upsert(&pool, ProfileId::new(kids), patch)
+        .await
+        .unwrap();
+    let since = OffsetDateTime::now_utc() - time::Duration::hours(2);
+    let rows = kima_db::subsonic::web_now_playing(&pool, since)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|r| (r.0, r.1.as_str(), r.2))
+            .collect::<Vec<_>>(),
+        vec![(ProfileId::new(kids), "alice", TRACK)]
     );
 });

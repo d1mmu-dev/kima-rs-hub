@@ -171,7 +171,13 @@ async fn stream(
         // Not cached yet: cache it in the background while this play streams from the host.
         // Deduplicated by the queue (a queued or running download for the episode wins).
         if let Err(error) =
-            kima_podcast::cache::enqueue_download(&state.pool, episode_id, user.id).await
+            // M-PROF Task 5: main profile until AuthUser carries one.
+            kima_podcast::cache::enqueue_download(
+                &state.pool,
+                episode_id,
+                user.main_profile(),
+            )
+            .await
         {
             tracing::warn!(episode = %episode_id, %error, "could not queue the episode download");
         }

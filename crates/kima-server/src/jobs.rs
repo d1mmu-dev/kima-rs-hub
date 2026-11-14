@@ -146,11 +146,13 @@ fn podcast_cache_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
                     .ok_or_else(|| format!("podcast-cache job missing or invalid {name:?}"))
             };
             let episode = uuid_field("episode")?;
-            let user = uuid_field("user")?;
+            // M-PROF Task 5: read "profile" too; "user" holds a profile id (a pre-M-PROF user id
+            // is that account's main profile id).
+            let profile = kima_core::profile::ProfileId::new(uuid_field("user")?);
             // On shutdown or a lost claim the download is dropped (its temp file removed with
             // it) and the attempt handed back as a retry, which shutdown does not count.
             tokio::select! {
-                result = kima_podcast::cache::download(&ctx, episode, user) => {
+                result = kima_podcast::cache::download(&ctx, episode, profile) => {
                     result.map_err(podcast_cache_job_error)
                 }
                 _ = job_ctx.cancel.cancelled() => {

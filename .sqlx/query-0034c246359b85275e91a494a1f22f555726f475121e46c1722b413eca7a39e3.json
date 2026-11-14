@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT count(*) AS \"count!\" FROM api_keys WHERE profile_id = $1",
+  "query": "SELECT count(*) AS \"count!\" FROM api_keys k\n           JOIN profiles pr ON pr.id = k.profile_id WHERE pr.user_id = $1",
   "describe": {
     "columns": [
       {
@@ -18,5 +18,5 @@
       null
     ]
   },
-  "hash": "fcf5880a7d9d77fde97576f77b65ca99bacbeb9c88c4b8534c2386e2be267a29"
+  "hash": "0034c246359b85275e91a494a1f22f555726f475121e46c1722b413eca7a39e3"
 }

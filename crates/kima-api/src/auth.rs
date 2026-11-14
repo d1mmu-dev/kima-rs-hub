@@ -6,6 +6,7 @@ use axum::http::HeaderMap;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use kima_core::auth::TokenKind;
+use kima_core::profile::{AccountId, ProfileId};
 use kima_db::users;
 use uuid::Uuid;
 
@@ -19,6 +20,19 @@ pub struct AuthUser {
     pub role: String,
     /// The user's `token_version` that this session was checked against.
     pub token_version: i32,
+}
+
+impl AuthUser {
+    /// The signed-in account.
+    pub fn account(&self) -> AccountId {
+        AccountId::new(self.id)
+    }
+
+    /// The account's main profile. Until Task 4 puts the profile into the session, every
+    /// session is the main profile's; call sites still using it are marked `M-PROF Task 5`.
+    pub fn main_profile(&self) -> ProfileId {
+        ProfileId::main_of(self.account())
+    }
 }
 
 pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {

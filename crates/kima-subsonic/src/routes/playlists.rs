@@ -45,7 +45,8 @@ async fn owned(
     let playlist = playlists::find(&ctx.app.pool, id)
         .await?
         .ok_or_else(not_found)?;
-    if playlist.user_id != user.user.id {
+    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    if playlist.profile_id != user.user.main_profile() {
         return Err(denied());
     }
     Ok(playlist)
@@ -54,13 +55,15 @@ async fn owned(
 /// The playlist with its `entry` songs, as `getPlaylist` and `createPlaylist` answer.
 async fn full(ctx: &SubsonicCtx, user: &SubsonicUser, id: Uuid) -> Result<Answer, SubsonicError> {
     let pool = &ctx.app.pool;
-    let summary = playlists::summary(pool, id, user.user.id)
+    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    let summary = playlists::summary(pool, id, user.user.main_profile())
         .await?
         .ok_or_else(not_found)?;
     let items = playlists::items(pool, id).await?;
     let duration = items.iter().map(|i| i64::from(i.track.duration_secs)).sum();
     let track_ids: Vec<Uuid> = items.iter().map(|i| i.track.id).collect();
-    let songs = subsonic::tracks_by_ids(pool, user.user.id, &track_ids).await?;
+    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    let songs = subsonic::tracks_by_ids(pool, user.user.main_profile(), &track_ids).await?;
     let entries: Vec<Node> = songs
         .iter()
         .map(|s| map::song(s).renamed("entry"))
@@ -80,7 +83,8 @@ async fn get_playlists(
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
     let pool = &ctx.app.pool;
-    let all: Vec<PlaylistSummary> = playlists::list(pool, user.user.id, i64::MAX, 0)
+    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    let all: Vec<PlaylistSummary> = playlists::list(pool, user.user.main_profile(), i64::MAX, 0)
         .await?
         .into_iter()
         .filter(|p| !p.hidden)
@@ -148,7 +152,8 @@ async fn create_playlist(
     } else if let Some(name) = params.get("name").filter(|n| !n.is_empty()) {
         let songs = song_ids(&params, "songId")?;
         let id = Uuid::now_v7();
-        if !playlists::subsonic_create(pool, id, user.user.id, name, &songs).await? {
+        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+        if !playlists::subsonic_create(pool, id, user.user.main_profile(), name, &songs).await? {
             return Err(SubsonicError::not_found("Song not found"));
         }
         announce(&ctx, user.user.id, id, false);

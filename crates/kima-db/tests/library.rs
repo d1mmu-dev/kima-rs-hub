@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::library::{self, Guessed, ResolvedTrack};
 use time::OffsetDateTime;
@@ -843,7 +844,7 @@ async fn replaced_file_hands_history_to_copy(pool: PgPool) {
         (ben, flac, 2022)
     );
     assert_eq!(r.tracks, 1);
-    assert_eq!(r.playlists, vec![(u, p)]);
+    assert_eq!(r.playlists, vec![(ProfileId::new(u), p)]);
 
     let heard: Vec<bool> = sqlx::query_scalar("SELECT heard FROM plays WHERE track_id = $1")
         .bind(flac)
@@ -1039,7 +1040,7 @@ async fn purged_track_reports_playlists_holding_it(pool: PgPool) {
     make_missing(&pool, mp3, 8).await;
     let mut r = library::retire_missing(&pool, WEEK, None).await.unwrap();
     r.playlists.sort();
-    let mut want = vec![(u, p1), (other, p2)];
+    let mut want = vec![(ProfileId::new(u), p1), (ProfileId::new(other), p2)];
     want.sort();
     assert_eq!(r.playlists, want);
 }
@@ -1251,4 +1252,84 @@ mod acoustid_group {
             .unwrap();
         (id, album)
     }
+}
+
+/// M-PROF Task 3: two profiles of one account keep their own history through a hand-over;
+/// the "already has it on the copy" rule compares profiles, not accounts.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn hand_over_keeps_profiles_apart(pool: PgPool) {
+    let Upgrade { u: main, mp3, flac } = upgrade_fixture(&pool).await;
+    let kid: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO profiles (id, user_id, name, kind) VALUES ($1, $2, 'Kids', 'kids') RETURNING id",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(main)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // Main: star and ignore the old copy, a rating and a bookmark already on the new one.
+    star(&pool, main, mp3).await;
+    rate(&pool, main, mp3, 4).await;
+    rate(&pool, main, flac, 2).await;
+    bookmark(&pool, main, flac, 500).await;
+    // Kids: the opposite.
+    star(&pool, kid, flac).await;
+    rate(&pool, kid, mp3, 5).await;
+    bookmark(&pool, kid, mp3, 1234).await;
+    play(&pool, kid, mp3, true).await;
+    sqlx::query(
+        "INSERT INTO play_audit_ignore (profile_id, track_id, ignored_at)
+         VALUES ($1, $3, '2020-01-01'), ($2, $4, '2021-01-01')",
+    )
+    .bind(main)
+    .bind(kid)
+    .bind(mp3)
+    .bind(flac)
+    .execute(&pool)
+    .await
+    .unwrap();
+    make_missing(&pool, mp3, 8).await;
+
+    let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!((r.tracks, r.handed_over), (1, 1));
+
+    let rows = |sql: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let mut v: Vec<(uuid::Uuid, uuid::Uuid, i64)> =
+                sqlx::query_as(sql).fetch_all(&pool).await.unwrap();
+            v.sort();
+            v
+        }
+    };
+    let mut want_stars = vec![(main, flac, 0), (kid, flac, 0)];
+    want_stars.sort();
+    assert_eq!(
+        rows("SELECT profile_id, track_id, 0::bigint FROM stars").await,
+        want_stars
+    );
+    let mut want_ratings = vec![(main, flac, 2), (kid, flac, 5)];
+    want_ratings.sort();
+    assert_eq!(
+        rows("SELECT profile_id, track_id, rating::bigint FROM ratings").await,
+        want_ratings,
+        "main keeps its own rating on the copy, kids gets its rating handed over"
+    );
+    let mut want_marks = vec![(main, flac, 500), (kid, flac, 1234)];
+    want_marks.sort();
+    assert_eq!(
+        rows("SELECT profile_id, track_id, position_ms FROM subsonic_bookmarks").await,
+        want_marks
+    );
+    let mut want_ignores = vec![(main, flac, 2020), (kid, flac, 2021)];
+    want_ignores.sort();
+    assert_eq!(
+        rows("SELECT profile_id, track_id, extract(year FROM ignored_at)::bigint FROM play_audit_ignore")
+            .await,
+        want_ignores
+    );
+    assert_eq!(
+        rows("SELECT profile_id, track_id, 0::bigint FROM plays").await,
+        vec![(kid, flac, 0)]
+    );
 }

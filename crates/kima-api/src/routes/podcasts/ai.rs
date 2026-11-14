@@ -14,6 +14,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::routing::put;
 use kima_api_types::podcasts::{AiLabel, AiLabelSource, Labelled};
+use kima_core::profile::{AccountId, ProfileId};
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -69,7 +70,13 @@ impl AiFilter {
             return Ok(filter);
         }
         Ok(
-            if kima_db::user_settings::hides_podcast_ai(&state.pool, user).await? {
+            // M-PROF Task 5: take the caller's ProfileId instead of the account's main profile.
+            if kima_db::user_settings::hides_podcast_ai(
+                &state.pool,
+                ProfileId::main_of(AccountId::new(user)),
+            )
+            .await?
+            {
                 AiFilter::Hide
             } else {
                 AiFilter::Show

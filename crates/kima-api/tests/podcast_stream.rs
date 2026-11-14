@@ -4,6 +4,7 @@
 //! (`kima_podcast::cache`, Task 12) is served first, without asking the host; a miss streams from
 //! the host and queues one background download (D-214). `KIMA_NET_DENY_REAL=1`.
 
+use kima_core::profile::ProfileId;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -363,7 +364,7 @@ async fn cache_episode(env: &Env, data_dir: &std::path::Path, episode: Uuid, dat
     std::fs::write(dir.join(format!("{episode}.audio")), data).unwrap();
     podcasts::upsert_download(
         &env.state.pool,
-        env.user,
+        ProfileId::new(env.user),
         episode,
         &format!("podcast-audio/{episode}.audio"),
         data.len() as f64 / 1024.0 / 1024.0,

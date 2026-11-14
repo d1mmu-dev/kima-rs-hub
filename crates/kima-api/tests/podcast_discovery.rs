@@ -6,6 +6,7 @@
 
 mod common;
 
+use kima_core::profile::ProfileId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -195,7 +196,9 @@ async fn builds_for_you_from_the_followed_shows_category_without_the_show_itself
         .fetch_one(&pool)
         .await
         .unwrap();
-    podcasts::subscribe(&pool, user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(user), show)
+        .await
+        .unwrap();
     let res = env.get("/api/podcasts/for-you").await;
     res.assert_status_ok();
     let body: Vec<Value> = res.json();
@@ -548,7 +551,9 @@ async fn preview_marks_a_followed_show(pool: PgPool) {
     )
     .await
     .unwrap();
-    podcasts::subscribe(&pool, user, show.id).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(user), show.id)
+        .await
+        .unwrap();
     let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
     let res = server
         .get("/api/podcasts/preview/9001002")

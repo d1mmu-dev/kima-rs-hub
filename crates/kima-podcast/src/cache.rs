@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_net::Outcome;
 use time::OffsetDateTime;
@@ -189,14 +190,15 @@ async fn discard(path: &Path, pool: &PgPool, episode: Uuid) {
 pub async fn enqueue_download(
     pool: &PgPool,
     episode: Uuid,
-    user: Uuid,
+    profile: ProfileId,
 ) -> sqlx::Result<Option<Uuid>> {
     let key = download_key(episode);
     let payload = serde_json::json!({
         "kind": "podcast-download",
         "key": key,
         "episode": episode,
-        "user": user,
+        // M-PROF Task 5: the key becomes "profile" (the job reader then accepts both).
+        "user": profile,
     });
     kima_jobs::queue::enqueue_unless_pending_with_key(pool, QUEUE, payload, MAX_ATTEMPTS).await
 }
@@ -205,8 +207,12 @@ pub async fn enqueue_download(
 /// `Content-Length` (never a feed's declared length), renamed in, its measured length and
 /// download record stored. Does nothing if a valid cached file already exists. Runs under the
 /// production [`DownloadLimits`].
-pub async fn download(ctx: &PodcastCtx, episode: Uuid, user: Uuid) -> Result<(), CacheError> {
-    download_with_limits(ctx, episode, user, DownloadLimits::default()).await
+pub async fn download(
+    ctx: &PodcastCtx,
+    episode: Uuid,
+    profile: ProfileId,
+) -> Result<(), CacheError> {
+    download_with_limits(ctx, episode, profile, DownloadLimits::default()).await
 }
 
 /// [`download`] under explicit `limits`: abandoned (the temp file deleted, nothing recorded)
@@ -218,7 +224,7 @@ pub async fn download(ctx: &PodcastCtx, episode: Uuid, user: Uuid) -> Result<(),
 pub async fn download_with_limits(
     ctx: &PodcastCtx,
     episode: Uuid,
-    user: Uuid,
+    profile: ProfileId,
     limits: DownloadLimits,
 ) -> Result<(), CacheError> {
     if validate_cached_file(ctx, episode).await.is_some() {
@@ -270,7 +276,7 @@ pub async fn download_with_limits(
         .unwrap_or(&final_path)
         .to_string_lossy()
         .into_owned();
-    kima_db::podcasts::upsert_download(&ctx.pool, user, episode, &relative, size_mb).await?;
+    kima_db::podcasts::upsert_download(&ctx.pool, profile, episode, &relative, size_mb).await?;
     Ok(())
 }
 
@@ -439,7 +445,7 @@ pub async fn cleanup(ctx: &PodcastCtx) -> sqlx::Result<(u64, f64)> {
     for row in expired {
         let path = ctx.data_dir.join(&row.local_path);
         let _ = tokio::fs::remove_file(&path).await;
-        kima_db::podcasts::delete_download_row(&ctx.pool, row.user_id, row.episode_id).await?;
+        kima_db::podcasts::delete_download_row(&ctx.pool, row.profile_id, row.episode_id).await?;
         deleted += 1;
         freed_mb += row.file_size_mb;
     }

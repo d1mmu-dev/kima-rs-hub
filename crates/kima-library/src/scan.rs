@@ -1548,7 +1548,8 @@ async fn reconcile_with(
         // place is told once, after the commit.
         for (owner, playlist) in &retired.playlists {
             ctx.events.publish(Event {
-                user_id: Some(*owner),
+                // M-PROF Task 5: the audience becomes the owning profile (Event::audience).
+                user_id: Some(owner.into_uuid()),
                 data: serde_json::json!({
                     "type": "playlist:updated", "playlistId": playlist, "deleted": false,
                 }),

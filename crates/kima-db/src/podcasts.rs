@@ -1,6 +1,7 @@
 //! Podcasts (M6): shows, their episodes and who follows them. Upstream models `Podcast`,
 //! `PodcastEpisode`, `PodcastSubscription` (`schema.prisma:471-566`); ids are UUIDv7 (D-016).
 
+use kima_core::profile::ProfileId;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -403,11 +404,11 @@ pub async fn insert_episodes_on(
 }
 
 /// Follows a show; `false` when the user already followed it.
-pub async fn subscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result<bool> {
+pub async fn subscribe(pool: &PgPool, profile: ProfileId, podcast: Uuid) -> sqlx::Result<bool> {
     let done = sqlx::query!(
         "INSERT INTO podcast_subscriptions (profile_id, podcast_id) VALUES ($1, $2)
          ON CONFLICT DO NOTHING",
-        user,
+        profile.into_uuid(),
         podcast
     )
     .execute(pool)
@@ -416,11 +417,11 @@ pub async fn subscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result
 }
 
 /// Stops following a show; `false` when the user did not follow it.
-pub async fn unsubscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result<bool> {
+pub async fn unsubscribe(pool: &PgPool, profile: ProfileId, podcast: Uuid) -> sqlx::Result<bool> {
     let mut tx = pool.begin().await?;
     let done =
         sqlx::query("DELETE FROM podcast_subscriptions WHERE profile_id = $1 AND podcast_id = $2")
-            .bind(user)
+            .bind(profile)
             .bind(podcast)
             .execute(&mut *tx)
             .await?;
@@ -433,22 +434,22 @@ pub async fn unsubscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Resu
             "DELETE FROM {table} WHERE profile_id = $1 AND episode_id IN             (SELECT id FROM podcast_episodes WHERE podcast_id = $2)"
         );
         sqlx::query(&query)
-            .bind(user)
+            .bind(profile)
             .bind(podcast)
             .execute(&mut *tx)
             .await?;
     }
     sqlx::query("DELETE FROM playback_state WHERE profile_id = $1 AND playback_type = 'podcast'                  AND left(podcast_id, length($2)) = $2")
-        .bind(user).bind(format!("{podcast}:")).execute(&mut *tx).await?;
+        .bind(profile).bind(format!("{podcast}:")).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(true)
 }
 
-pub async fn is_subscribed(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result<bool> {
+pub async fn is_subscribed(pool: &PgPool, profile: ProfileId, podcast: Uuid) -> sqlx::Result<bool> {
     sqlx::query_scalar!(
         r#"SELECT EXISTS (SELECT 1 FROM podcast_subscriptions
                           WHERE profile_id = $1 AND podcast_id = $2) AS "exists!""#,
-        user,
+        profile.into_uuid(),
         podcast
     )
     .fetch_one(pool)
@@ -487,13 +488,13 @@ pub struct Followed {
 }
 
 /// The shows `user` follows, oldest follow first.
-pub async fn followed(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<Followed>> {
+pub async fn followed(pool: &PgPool, profile: ProfileId) -> sqlx::Result<Vec<Followed>> {
     sqlx::query_as!(
         Followed,
         "SELECT p.title, p.itunes_id, p.category_ids
          FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id
          WHERE s.profile_id = $1 ORDER BY s.subscribed_at, p.id",
-        user
+        profile.into_uuid()
     )
     .fetch_all(pool)
     .await
@@ -539,7 +540,7 @@ pub struct InProgressPodcast {
 /// hiding).
 pub async fn recent_in_progress(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     overall_limit: i64,
     hide_ai: bool,
 ) -> sqlx::Result<(Vec<InProgressPodcast>, i64)> {
@@ -574,7 +575,7 @@ pub async fn recent_in_progress(
     );
     let run = |hide: bool| {
         sqlx::query_as::<_, InProgressPodcast>(&query)
-            .bind(user)
+            .bind(profile)
             .bind(take_rows)
             .bind(take_shows)
             .bind(hide)
@@ -621,19 +622,22 @@ pub struct SummaryRow {
     pub ai_label_source: Option<String>,
 }
 
-pub async fn followed_shows(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<FollowedShowRow>> {
+pub async fn followed_shows(
+    pool: &PgPool,
+    profile: ProfileId,
+) -> sqlx::Result<Vec<FollowedShowRow>> {
     let query = format!(
         "SELECT p.id, p.title, p.author, p.description, p.image_url, p.episode_count, {}
          FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id
          WHERE s.profile_id = $1 ORDER BY s.subscribed_at DESC, p.id DESC",
         show_label_cols("p")
     );
-    sqlx::query_as(&query).bind(user).fetch_all(pool).await
+    sqlx::query_as(&query).bind(profile).fetch_all(pool).await
 }
 
 pub async fn recent_episodes(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     show: Uuid,
 ) -> sqlx::Result<Vec<SummaryRow>> {
     let query = format!(
@@ -646,7 +650,7 @@ pub async fn recent_episodes(
         episode_label_cols("e", "s")
     );
     sqlx::query_as(&query)
-        .bind(user)
+        .bind(profile)
         .bind(show)
         .fetch_all(pool)
         .await
@@ -682,7 +686,7 @@ pub struct EpisodePage {
 
 pub async fn episode_page(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     show: Uuid,
     limit: i64,
     offset: i64,
@@ -705,7 +709,7 @@ pub async fn episode_page(
         cols = episode_label_cols("e", "s"),
     );
     let rows = sqlx::query_as(&query)
-        .bind(user)
+        .bind(profile)
         .bind(show)
         .bind(limit)
         .bind(offset)
@@ -736,7 +740,7 @@ pub async fn episode_page(
 /// distinguishes an unknown current episode from the end of the show.
 pub async fn next_episode(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     show: Uuid,
     current: Uuid,
     hide_ai: bool,
@@ -766,7 +770,7 @@ pub async fn next_episode(
         label = episode_label_sql("e", "s"),
     );
     let next = sqlx::query_as(&query)
-        .bind(user)
+        .bind(profile)
         .bind(show)
         .bind(current)
         .bind(hide_ai)
@@ -805,7 +809,7 @@ pub struct ListeningRow {
 /// hiding).
 pub async fn listening(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     hide_ai: bool,
 ) -> sqlx::Result<(Vec<ListeningRow>, Vec<ListeningRow>, i64)> {
     let columns = format!(
@@ -842,11 +846,11 @@ pub async fn listening(
     async fn run(
         pool: &PgPool,
         query: &str,
-        user: Uuid,
+        profile: ProfileId,
         hide: bool,
     ) -> sqlx::Result<Vec<ListeningRow>> {
         sqlx::query_as(query)
-            .bind(user)
+            .bind(profile)
             .bind(hide)
             .fetch_all(pool)
             .await
@@ -854,14 +858,14 @@ pub async fn listening(
     let hidden = if hide_ai {
         let ai =
             |rows: Vec<ListeningRow>| rows.iter().filter(|r| r.ai_label == "ai").count() as i64;
-        ai(run(pool, &in_progress, user, false).await?)
-            + ai(run(pool, &new_episodes, user, false).await?)
+        ai(run(pool, &in_progress, profile, false).await?)
+            + ai(run(pool, &new_episodes, profile, false).await?)
     } else {
         0
     };
     Ok((
-        run(pool, &in_progress, user, hide_ai).await?,
-        run(pool, &new_episodes, user, hide_ai).await?,
+        run(pool, &in_progress, profile, hide_ai).await?,
+        run(pool, &new_episodes, profile, hide_ai).await?,
         hidden,
     ))
 }
@@ -870,11 +874,11 @@ pub async fn listening(
 /// `None` when the user has no stored progress for this episode yet.
 pub async fn progress(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     episode: Uuid,
 ) -> sqlx::Result<Option<(f64, f64)>> {
     sqlx::query_as("SELECT \"current_time\", duration FROM podcast_progress WHERE profile_id = $1 AND episode_id = $2")
-        .bind(user)
+        .bind(profile)
         .bind(episode)
         .fetch_optional(pool)
         .await
@@ -883,7 +887,7 @@ pub async fn progress(
 /// Store or update playback progress for one episode of one show.
 pub async fn save_progress(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     episode: Uuid,
     current_time: f64,
     duration: f64,
@@ -892,7 +896,7 @@ pub async fn save_progress(
     sqlx::query(
         "INSERT INTO podcast_progress (profile_id, episode_id, \"current_time\", duration, is_finished, last_played_at) VALUES ($1, $2, $3, $4, $5, now()) ON CONFLICT (profile_id, episode_id) DO UPDATE SET \"current_time\" = $3, duration = $4, is_finished = $5, last_played_at = now()",
     )
-    .bind(user)
+    .bind(profile)
     .bind(episode)
     .bind(current_time)
     .bind(duration)
@@ -903,10 +907,10 @@ pub async fn save_progress(
 }
 
 /// Remove playback progress for one episode of one show.
-pub async fn clear_progress(pool: &PgPool, user: Uuid, episode: Uuid) -> sqlx::Result<u64> {
+pub async fn clear_progress(pool: &PgPool, profile: ProfileId, episode: Uuid) -> sqlx::Result<u64> {
     let done =
         sqlx::query("DELETE FROM podcast_progress WHERE profile_id = $1 AND episode_id = $2")
-            .bind(user)
+            .bind(profile)
             .bind(episode)
             .execute(pool)
             .await?;
@@ -970,7 +974,7 @@ pub async fn download_record(pool: &PgPool, episode: Uuid) -> sqlx::Result<Optio
 /// Creates or refreshes `user`'s download record for `episode` with the file it now holds.
 pub async fn upsert_download(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     episode: Uuid,
     local_path: &str,
     file_size_mb: f64,
@@ -980,7 +984,7 @@ pub async fn upsert_download(
          VALUES ($1, $2, $3, $4, now(), now())
          ON CONFLICT (profile_id, episode_id) DO UPDATE
          SET local_path = $3, file_size_mb = $4, downloaded_at = now(), last_accessed_at = now()",
-        user,
+        profile.into_uuid(),
         episode,
         local_path,
         file_size_mb
@@ -1015,10 +1019,14 @@ pub async fn delete_downloads_for_episode(pool: &PgPool, episode: Uuid) -> sqlx:
 }
 
 /// Removes one (user, episode) download record (cleanup, after its file is deleted).
-pub async fn delete_download_row(pool: &PgPool, user: Uuid, episode: Uuid) -> sqlx::Result<()> {
+pub async fn delete_download_row(
+    pool: &PgPool,
+    profile: ProfileId,
+    episode: Uuid,
+) -> sqlx::Result<()> {
     sqlx::query!(
         "DELETE FROM podcast_downloads WHERE profile_id = $1 AND episode_id = $2",
-        user,
+        profile.into_uuid(),
         episode
     )
     .execute(pool)
@@ -1059,7 +1067,7 @@ pub async fn set_episode_duration(
 /// A download record whose cached file [`cleanup`] is about to delete.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExpiredDownload {
-    pub user_id: Uuid,
+    pub profile_id: ProfileId,
     pub episode_id: Uuid,
     pub local_path: String,
     pub file_size_mb: f64,
@@ -1072,7 +1080,7 @@ pub async fn expired_downloads(
 ) -> sqlx::Result<Vec<ExpiredDownload>> {
     sqlx::query_as!(
         ExpiredDownload,
-        "SELECT profile_id AS user_id, episode_id, local_path, file_size_mb FROM podcast_downloads
+        "SELECT profile_id AS \"profile_id: ProfileId\", episode_id, local_path, file_size_mb FROM podcast_downloads
          WHERE last_accessed_at < $1",
         cutoff
     )
@@ -1099,7 +1107,7 @@ pub struct Channel {
 /// [`followed`]); AI-labelled shows left out when `hide_ai`.
 pub async fn followed_channels(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     hide_ai: bool,
 ) -> sqlx::Result<Vec<Channel>> {
     let label = show_label_sql("p");
@@ -1110,7 +1118,7 @@ pub async fn followed_channels(
          ORDER BY s.subscribed_at, p.id"
     );
     sqlx::query_as(&query)
-        .bind(user)
+        .bind(profile)
         .bind(hide_ai)
         .fetch_all(pool)
         .await
@@ -1169,7 +1177,7 @@ pub async fn episodes_for_channel(
 /// left out before the limit when `hide_ai` (D-208).
 pub async fn newest_episodes(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     limit: i64,
     hide_ai: bool,
 ) -> sqlx::Result<Vec<SubsonicEpisode>> {
@@ -1182,7 +1190,7 @@ pub async fn newest_episodes(
         episode_label_sql("e", "p")
     );
     sqlx::query_as(&query)
-        .bind(user)
+        .bind(profile)
         .bind(limit)
         .bind(hide_ai)
         .fetch_all(pool)

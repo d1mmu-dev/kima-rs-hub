@@ -1,6 +1,7 @@
 //! M6 Task 12: the `podcast-cache` queue end to end — a real job claimed and run by the real
 //! worker downloads a real small MP3 from a loopback host and leaves it cached.
 
+use kima_core::profile::ProfileId;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -118,7 +119,7 @@ async fn a_queued_download_job_caches_the_episode(pool: PgPool) {
     let shutdown = CancellationToken::new();
     let workers = spawn_all(&pool, registry, shutdown.clone());
 
-    let job = kima_podcast::cache::enqueue_download(&pool, episode, ana)
+    let job = kima_podcast::cache::enqueue_download(&pool, episode, ProfileId::new(ana))
         .await
         .unwrap()
         .expect("a fresh job");
@@ -190,7 +191,7 @@ async fn shutdown_during_a_download_gives_the_attempt_back_and_leaves_no_temp_fi
     let shutdown = CancellationToken::new();
     let workers = spawn_all(&pool, registry, shutdown.clone());
 
-    let job = kima_podcast::cache::enqueue_download(&pool, episode, ana)
+    let job = kima_podcast::cache::enqueue_download(&pool, episode, ProfileId::new(ana))
         .await
         .unwrap()
         .expect("a fresh job");

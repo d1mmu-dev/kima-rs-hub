@@ -1,5 +1,6 @@
 //! Play history audit (pure judgement) and its four actions. Input rows must be
 //! ordered by (played_at, id).
+use kima_core::profile::ProfileId;
 use sqlx::{FromRow, PgExecutor};
 use std::collections::{HashMap, HashSet};
 use time::OffsetDateTime;
@@ -125,11 +126,17 @@ pub fn collapse_candidates(listens: &[Listen]) -> Vec<Uuid> {
     out
 }
 
-pub async fn audit_rows<'e>(conn: impl PgExecutor<'e>, user: Uuid) -> sqlx::Result<Vec<AuditRow>> {
-    sqlx::query_as!(AuditRow, r#"SELECT p.id, p.track_id, p.played_at, p.heard, coalesce(t.display_title,t.title) AS "title!", coalesce(ar.display_name,ar.name) AS "artist!", t.duration_secs AS duration FROM plays p JOIN tracks t ON t.id=p.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE p.profile_id=$1 ORDER BY p.played_at,p.id"#, user).fetch_all(conn).await
+pub async fn audit_rows<'e>(
+    conn: impl PgExecutor<'e>,
+    profile: ProfileId,
+) -> sqlx::Result<Vec<AuditRow>> {
+    sqlx::query_as!(AuditRow, r#"SELECT p.id, p.track_id, p.played_at, p.heard, coalesce(t.display_title,t.title) AS "title!", coalesce(ar.display_name,ar.name) AS "artist!", t.duration_secs AS duration FROM plays p JOIN tracks t ON t.id=p.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE p.profile_id=$1 ORDER BY p.played_at,p.id"#, profile.into_uuid()).fetch_all(conn).await
 }
-pub async fn ignored<'e>(conn: impl PgExecutor<'e>, user: Uuid) -> sqlx::Result<Vec<IgnoredRow>> {
-    sqlx::query_as!(IgnoredRow, r#"SELECT i.track_id, coalesce(t.display_title,t.title) AS "title!", coalesce(ar.display_name,ar.name) AS "artist!", i.ignored_at FROM play_audit_ignore i JOIN tracks t ON t.id=i.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE i.profile_id=$1 ORDER BY i.ignored_at DESC,i.track_id"#, user).fetch_all(conn).await
+pub async fn ignored<'e>(
+    conn: impl PgExecutor<'e>,
+    profile: ProfileId,
+) -> sqlx::Result<Vec<IgnoredRow>> {
+    sqlx::query_as!(IgnoredRow, r#"SELECT i.track_id, coalesce(t.display_title,t.title) AS "title!", coalesce(ar.display_name,ar.name) AS "artist!", i.ignored_at FROM play_audit_ignore i JOIN tracks t ON t.id=i.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE i.profile_id=$1 ORDER BY i.ignored_at DESC,i.track_id"#, profile.into_uuid()).fetch_all(conn).await
 }
 
 #[derive(Debug)]
@@ -225,15 +232,15 @@ pub fn summarize(listens: &[Listen], ignored: &[IgnoredRow]) -> Audit {
     audit
 }
 
-/// Delete the given rows of this user only; ids never come from a client.
+/// Delete the given rows of this profile only; ids never come from a client.
 async fn delete_plays(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    user: Uuid,
+    profile: ProfileId,
     ids: &[Uuid],
 ) -> sqlx::Result<u64> {
     let done = sqlx::query!(
         "DELETE FROM plays WHERE profile_id = $1 AND id = ANY($2)",
-        user,
+        profile.into_uuid(),
         ids
     )
     .execute(&mut **tx)
@@ -241,16 +248,16 @@ async fn delete_plays(
     Ok(done.rows_affected())
 }
 
-/// Serialises this user's `collapse` and `remove` until commit (namespace 7002
-/// plus the user hash), so a second one reads only after the first has deleted:
+/// Serialises this profile's `collapse` and `remove` until commit (namespace 7002
+/// plus the profile hash), so a second one reads only after the first has deleted:
 /// two collapses judging the same listen from different reads could otherwise
 /// each delete a different heard row (D-179).
-async fn lock_user_audit(
+async fn lock_profile_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    user: Uuid,
+    profile: ProfileId,
 ) -> sqlx::Result<()> {
     sqlx::query("SELECT pg_advisory_xact_lock(7002, hashtext($1))")
-        .bind(user.to_string())
+        .bind(profile.to_string())
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -260,13 +267,13 @@ async fn lock_user_audit(
 /// that are not ignored; read, judgement and delete share one transaction.
 pub async fn remove(
     pool: &sqlx::PgPool,
-    user: Uuid,
+    profile: ProfileId,
     tracks: &[Uuid],
 ) -> sqlx::Result<(u64, usize)> {
     let mut tx = pool.begin().await?;
-    lock_user_audit(&mut tx, user).await?;
-    let rows = audit_rows(&mut *tx, user).await?;
-    let ignored: HashSet<_> = ignored(&mut *tx, user)
+    lock_profile_audit(&mut tx, profile).await?;
+    let rows = audit_rows(&mut *tx, profile).await?;
+    let ignored: HashSet<_> = ignored(&mut *tx, profile)
         .await?
         .into_iter()
         .map(|row| row.track_id)
@@ -286,17 +293,17 @@ pub async fn remove(
         .iter()
         .flat_map(|l| l.play_ids.iter().copied())
         .collect();
-    let removed = delete_plays(&mut tx, user, &ids).await?;
+    let removed = delete_plays(&mut tx, profile, &ids).await?;
     tx.commit().await?;
     Ok((removed, touched.len()))
 }
 
 /// Ids that are no track are skipped; a track already ignored is not counted.
-pub async fn ignore(pool: &sqlx::PgPool, user: Uuid, tracks: &[Uuid]) -> sqlx::Result<u64> {
+pub async fn ignore(pool: &sqlx::PgPool, profile: ProfileId, tracks: &[Uuid]) -> sqlx::Result<u64> {
     let done = sqlx::query!(
         "INSERT INTO play_audit_ignore (profile_id, track_id) \
          SELECT $1, id FROM tracks WHERE id = ANY($2) ON CONFLICT DO NOTHING",
-        user,
+        profile.into_uuid(),
         tracks
     )
     .execute(pool)
@@ -304,10 +311,14 @@ pub async fn ignore(pool: &sqlx::PgPool, user: Uuid, tracks: &[Uuid]) -> sqlx::R
     Ok(done.rows_affected())
 }
 
-pub async fn restore(pool: &sqlx::PgPool, user: Uuid, tracks: &[Uuid]) -> sqlx::Result<u64> {
+pub async fn restore(
+    pool: &sqlx::PgPool,
+    profile: ProfileId,
+    tracks: &[Uuid],
+) -> sqlx::Result<u64> {
     let done = sqlx::query!(
         "DELETE FROM play_audit_ignore WHERE profile_id = $1 AND track_id = ANY($2)",
-        user,
+        profile.into_uuid(),
         tracks
     )
     .execute(pool)
@@ -315,13 +326,13 @@ pub async fn restore(pool: &sqlx::PgPool, user: Uuid, tracks: &[Uuid]) -> sqlx::
     Ok(done.rows_affected())
 }
 
-/// Collapse only rows selected from this user's current history.
-pub async fn collapse(pool: &sqlx::PgPool, user: Uuid) -> sqlx::Result<u64> {
+/// Collapse only rows selected from this profile's current history.
+pub async fn collapse(pool: &sqlx::PgPool, profile: ProfileId) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
-    lock_user_audit(&mut tx, user).await?;
-    let rows = audit_rows(&mut *tx, user).await?;
+    lock_profile_audit(&mut tx, profile).await?;
+    let rows = audit_rows(&mut *tx, profile).await?;
     let ids = collapse_candidates(&listens_of(&rows));
-    let removed = delete_plays(&mut tx, user, &ids).await?;
+    let removed = delete_plays(&mut tx, profile, &ids).await?;
     tx.commit().await?;
     Ok(removed)
 }

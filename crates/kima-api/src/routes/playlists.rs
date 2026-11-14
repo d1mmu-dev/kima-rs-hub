@@ -10,6 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use kima_core::events::Event;
+use kima_core::profile::ProfileId;
 use kima_db::playlists::{self, ItemRow, MoveError, Playlist, PlaylistSummary};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -67,7 +68,8 @@ async fn guard(
     let playlist = playlists::find(&state.pool, id)
         .await?
         .ok_or_else(not_found)?;
-    let owner = playlist.user_id == user.id;
+    // M-PROF Task 5: main profile until AuthUser carries one.
+    let owner = playlist.profile_id == user.main_profile();
     if !owner && !playlist.is_public {
         return Err(not_found());
     }
@@ -80,7 +82,7 @@ async fn guard(
 fn playlist_json(p: &Playlist) -> Value {
     json!({
         "id": p.id,
-        "userId": p.user_id,
+        "userId": p.account_id,
         "mixId": null,
         "name": p.name,
         "isPublic": p.is_public,
@@ -115,12 +117,12 @@ fn tagged_item_json(i: &ItemRow) -> Value {
     v
 }
 
-fn summary_json(s: &PlaylistSummary, viewer: Uuid) -> Value {
+fn summary_json(s: &PlaylistSummary, viewer: ProfileId) -> Value {
     let mut v = playlist_json(&s.playlist);
     v["user"] = json!({ "username": s.username });
     v["trackCount"] = json!(s.track_count);
     v["_count"] = json!({ "items": s.track_count });
-    v["isOwner"] = json!(s.playlist.user_id == viewer);
+    v["isOwner"] = json!(s.playlist.profile_id == viewer);
     v["isHidden"] = json!(s.hidden);
     v
 }
@@ -152,7 +154,8 @@ async fn list(
         .clamp(1, 100);
     let rows = playlists::list(
         &state.pool,
-        user.id,
+        // M-PROF Task 5: main profile until AuthUser carries one.
+        user.main_profile(),
         limit,
         (page - 1).saturating_mul(limit),
     )
@@ -162,7 +165,8 @@ async fn list(
     let out: Vec<Value> = rows
         .iter()
         .map(|s| {
-            let mut v = summary_json(s, user.id);
+            // M-PROF Task 5: main profile until AuthUser carries one.
+            let mut v = summary_json(s, user.main_profile());
             v["items"] = Value::Array(
                 firsts
                     .iter()
@@ -202,7 +206,8 @@ async fn create(
     let p = playlists::create(
         &state.pool,
         Uuid::now_v7(),
-        user.id,
+        // M-PROF Task 5: main profile until AuthUser carries one.
+        user.main_profile(),
         &body.name,
         body.is_public,
     )
@@ -248,7 +253,8 @@ async fn detail(
         Some("rev") => true,
         Some(_) => return Ok(invalid_order()),
     };
-    let summary = playlists::summary(&state.pool, p.id, user.id)
+    // M-PROF Task 5: main profile until AuthUser carries one.
+    let summary = playlists::summary(&state.pool, p.id, user.main_profile())
         .await?
         .ok_or(ApiError::NotFound(NOT_FOUND))?;
     let items = playlists::items(&state.pool, p.id).await?;
@@ -256,7 +262,8 @@ async fn detail(
     if reversed {
         items.reverse();
     }
-    let mut v = summary_json(&summary, user.id);
+    // M-PROF Task 5: main profile until AuthUser carries one.
+    let mut v = summary_json(&summary, user.main_profile());
     v["pendingCount"] = json!(0);
     v["pendingTracks"] = json!([]);
     v["mergedItems"] = Value::Array(items.clone());
@@ -313,7 +320,8 @@ async fn hide(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let p = guard(&state, &user, &id, Need::Reader).await?;
-    if playlists::hide(&state.pool, user.id, p.id).await? {
+    // M-PROF Task 5: main profile until AuthUser carries one.
+    if playlists::hide(&state.pool, user.main_profile(), p.id).await? {
         announce(&state, user.id, p.id, false);
     }
     Ok(Json(
@@ -327,7 +335,8 @@ async fn unhide(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     if let Ok(p) = id.parse::<Uuid>() {
-        if playlists::unhide(&state.pool, user.id, p).await? {
+        // M-PROF Task 5: main profile until AuthUser carries one.
+        if playlists::unhide(&state.pool, user.main_profile(), p).await? {
             announce(&state, user.id, p, false);
         }
     }

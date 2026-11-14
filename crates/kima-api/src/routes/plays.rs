@@ -54,7 +54,8 @@ async fn create(
     };
     let outcome = plays::record(
         &state.pool,
-        user.id,
+        // M-PROF Task 5: main profile until AuthUser carries one.
+        user.main_profile(),
         track,
         Listen::Seconds(body.seconds_listened),
         Source::Library,
@@ -95,8 +96,14 @@ async fn recently_listened(
     let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
     let limit = limit_of(&params, 10, 100);
     let (artist_rows, (podcast_rows, hidden)) = tokio::try_join!(
-        plays::recent_artists(&state.pool, user.id, limit),
-        kima_db::podcasts::recent_in_progress(&state.pool, user.id, limit, filter.hides()),
+        // M-PROF Task 5: main profile until AuthUser carries one.
+        plays::recent_artists(&state.pool, user.main_profile(), limit),
+        kima_db::podcasts::recent_in_progress(
+            &state.pool,
+            user.main_profile(),
+            limit,
+            filter.hides()
+        ),
     )?;
     let mut items: Vec<(OffsetDateTime, Value)> = artist_rows
         .iter()

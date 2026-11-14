@@ -1,3 +1,4 @@
+use kima_core::profile::AccountId;
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -332,7 +333,7 @@ pub async fn set_role_unless_last_admin_in(
     Ok(RoleChange::Changed)
 }
 
-/// Sets a new password hash, bumps the token version and revokes all of the user's app tokens.
+/// Sets a new password hash, bumps the token version and revokes all of the account's app tokens (every profile's).
 /// `seen_version` is what the caller verified the old password against: the update then applies
 /// only if the version is unchanged. `None` updates unconditionally. Returns the new version,
 /// or `None` if nothing matched (the user changed meanwhile or is gone).
@@ -355,7 +356,7 @@ pub async fn set_password(
     .fetch_optional(&mut *conn)
     .await?;
     if version.is_some() {
-        api_keys::delete_all_for_user(conn, id).await?;
+        api_keys::delete_all_for_account(conn, AccountId::new(id)).await?;
     }
     Ok(version)
 }

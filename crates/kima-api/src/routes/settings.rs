@@ -5,6 +5,7 @@
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
+use kima_core::profile::AccountId;
 use kima_db::user_settings::{self, Patch, UserSettings};
 use serde_json::{Value, json};
 
@@ -18,9 +19,10 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// `hasListenbrainzToken` and `liveSharingAvailable` are always false in kima-rs (D-103).
-fn settings_json(s: &UserSettings) -> Value {
+/// `userId` is the account (D-242), whichever of its profiles the settings belong to.
+fn settings_json(s: &UserSettings, account: AccountId) -> Value {
     json!({
-        "userId": s.user_id,
+        "userId": account,
         "playbackQuality": s.playback_quality,
         "wifiOnly": s.wifi_only,
         "offlineEnabled": s.offline_enabled,
@@ -33,8 +35,9 @@ fn settings_json(s: &UserSettings) -> Value {
 }
 
 async fn read(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    let s = user_settings::get(&state.pool, user.id).await?;
-    Ok(Json(settings_json(&s)))
+    // M-PROF Task 5: main profile until AuthUser carries one.
+    let s = user_settings::get(&state.pool, user.main_profile()).await?;
+    Ok(Json(settings_json(&s, user.account())))
 }
 
 fn issue(path: &str, message: &str) -> Value {
@@ -131,6 +134,7 @@ async fn save(
         message: "Invalid settings".into(),
         details,
     })?;
-    let s = user_settings::upsert(&state.pool, user.id, patch).await?;
-    Ok(Json(settings_json(&s)))
+    // M-PROF Task 5: main profile until AuthUser carries one.
+    let s = user_settings::upsert(&state.pool, user.main_profile(), patch).await?;
+    Ok(Json(settings_json(&s, user.account())))
 }

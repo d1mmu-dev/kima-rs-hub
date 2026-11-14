@@ -4,6 +4,7 @@
 //! the daily 04:00 UTC cleanup entry. Driven through the same `kima_server` functions `main`
 //! calls, against a loopback Apple stand-in and a temporary data directory.
 
+use kima_core::profile::ProfileId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -143,7 +144,7 @@ async fn cached(
     let mb = std::fs::metadata(&path).unwrap().len() as f64 / 1024.0 / 1024.0;
     podcasts::upsert_download(
         pool,
-        user,
+        ProfileId::new(user),
         episode,
         &format!("podcast-audio/{episode}.audio"),
         mb,

@@ -68,10 +68,12 @@ async fn search(
             tracks = search::tracks(&state.pool, &tsq, limit, 0).await?;
         }
         if want("podcasts") {
-            podcasts = search::podcasts(&state.pool, user.id, &tsq, limit, 0).await?;
+            // M-PROF Task 5: main profile until AuthUser carries one.
+            podcasts = search::podcasts(&state.pool, user.main_profile(), &tsq, limit, 0).await?;
         }
         if want("episodes") {
-            episodes = search::episodes(&state.pool, user.id, &tsq, limit, 0).await?;
+            // M-PROF Task 5: main profile until AuthUser carries one.
+            episodes = search::episodes(&state.pool, user.main_profile(), &tsq, limit, 0).await?;
         }
     }
     // Followed shows and their episodes are filtered like every podcast list (D-207).

@@ -1,5 +1,6 @@
 //! M6 Task 1: the podcast tables (`0036_podcasts.sql`) and `kima_db::podcasts` basics.
 
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::podcasts::{self, NewEpisode, NewShow};
 use kima_db::users::{self, Registration};
@@ -94,7 +95,11 @@ async fn cascade_from_user_and_show(pool: PgPool) {
         .unwrap();
     for u in [ana, bo] {
         for s in [a.id, b.id] {
-            assert!(podcasts::subscribe(&pool, u, s).await.unwrap());
+            assert!(
+                podcasts::subscribe(&pool, ProfileId::new(u), s)
+                    .await
+                    .unwrap()
+            );
         }
         // Progress and downloads have no helpers yet (Tasks 10, 12): seeded directly.
         sqlx::query(
@@ -138,8 +143,16 @@ async fn cascade_from_user_and_show(pool: PgPool) {
     assert_eq!(count(&pool, "podcast_subscriptions").await, 1);
     assert_eq!(count(&pool, "podcast_progress").await, 1);
     assert_eq!(count(&pool, "podcast_downloads").await, 1);
-    assert!(podcasts::is_subscribed(&pool, bo, b.id).await.unwrap());
-    assert!(!podcasts::is_subscribed(&pool, bo, a.id).await.unwrap());
+    assert!(
+        podcasts::is_subscribed(&pool, ProfileId::new(bo), b.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !podcasts::is_subscribed(&pool, ProfileId::new(bo), a.id)
+            .await
+            .unwrap()
+    );
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -325,12 +338,32 @@ async fn subscribe_twice_is_one_row_and_unsubscribe_reports(pool: PgPool) {
     )
     .await
     .unwrap();
-    assert!(podcasts::subscribe(&pool, ana, s.id).await.unwrap());
-    assert!(!podcasts::subscribe(&pool, ana, s.id).await.unwrap());
+    assert!(
+        podcasts::subscribe(&pool, ProfileId::new(ana), s.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !podcasts::subscribe(&pool, ProfileId::new(ana), s.id)
+            .await
+            .unwrap()
+    );
     assert_eq!(count(&pool, "podcast_subscriptions").await, 1);
-    assert!(podcasts::unsubscribe(&pool, ana, s.id).await.unwrap());
-    assert!(!podcasts::unsubscribe(&pool, ana, s.id).await.unwrap());
-    assert!(!podcasts::is_subscribed(&pool, ana, s.id).await.unwrap());
+    assert!(
+        podcasts::unsubscribe(&pool, ProfileId::new(ana), s.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !podcasts::unsubscribe(&pool, ProfileId::new(ana), s.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !podcasts::is_subscribed(&pool, ProfileId::new(ana), s.id)
+            .await
+            .unwrap()
+    );
 }
 
 fn is_unique_violation(e: &sqlx::Error) -> bool {
@@ -373,15 +406,27 @@ async fn upsert_download_then_fetch_the_record(pool: PgPool) {
             .unwrap()
             .is_none()
     );
-    podcasts::upsert_download(&pool, ana, ep, "podcast-audio/x.audio", 12.5)
-        .await
-        .unwrap();
+    podcasts::upsert_download(
+        &pool,
+        ProfileId::new(ana),
+        ep,
+        "podcast-audio/x.audio",
+        12.5,
+    )
+    .await
+    .unwrap();
     let rec = podcasts::download_record(&pool, ep).await.unwrap().unwrap();
     assert_eq!(rec.file_size_mb, 12.5);
     // Upsert again for the same user replaces the row, not adds another.
-    podcasts::upsert_download(&pool, ana, ep, "podcast-audio/x.audio", 13.0)
-        .await
-        .unwrap();
+    podcasts::upsert_download(
+        &pool,
+        ProfileId::new(ana),
+        ep,
+        "podcast-audio/x.audio",
+        13.0,
+    )
+    .await
+    .unwrap();
     assert_eq!(count(&pool, "podcast_downloads").await, 1);
     assert_eq!(
         podcasts::download_record(&pool, ep)
@@ -398,10 +443,10 @@ async fn touch_download_updates_every_user_row_for_the_episode(pool: PgPool) {
     let ana = user(&pool, "ana").await;
     let bo = user(&pool, "bo").await;
     let (_, ep) = show_and_episode(&pool).await;
-    podcasts::upsert_download(&pool, ana, ep, "podcast-audio/x.audio", 1.0)
+    podcasts::upsert_download(&pool, ProfileId::new(ana), ep, "podcast-audio/x.audio", 1.0)
         .await
         .unwrap();
-    podcasts::upsert_download(&pool, bo, ep, "podcast-audio/x.audio", 1.0)
+    podcasts::upsert_download(&pool, ProfileId::new(bo), ep, "podcast-audio/x.audio", 1.0)
         .await
         .unwrap();
     sqlx::query("UPDATE podcast_downloads SET last_accessed_at = now() - interval '40 days'")
@@ -424,10 +469,10 @@ async fn delete_downloads_for_episode_removes_every_users_row(pool: PgPool) {
     let ana = user(&pool, "ana").await;
     let bo = user(&pool, "bo").await;
     let (_, ep) = show_and_episode(&pool).await;
-    podcasts::upsert_download(&pool, ana, ep, "podcast-audio/x.audio", 1.0)
+    podcasts::upsert_download(&pool, ProfileId::new(ana), ep, "podcast-audio/x.audio", 1.0)
         .await
         .unwrap();
-    podcasts::upsert_download(&pool, bo, ep, "podcast-audio/x.audio", 1.0)
+    podcasts::upsert_download(&pool, ProfileId::new(bo), ep, "podcast-audio/x.audio", 1.0)
         .await
         .unwrap();
     assert_eq!(
@@ -474,7 +519,7 @@ async fn set_episode_file_size_and_duration(pool: PgPool) {
 async fn expired_downloads_lists_only_rows_past_their_last_access_cutoff(pool: PgPool) {
     let ana = user(&pool, "ana").await;
     let (_, ep) = show_and_episode(&pool).await;
-    podcasts::upsert_download(&pool, ana, ep, "podcast-audio/x.audio", 2.0)
+    podcasts::upsert_download(&pool, ProfileId::new(ana), ep, "podcast-audio/x.audio", 2.0)
         .await
         .unwrap();
     let cutoff_future = OffsetDateTime::now_utc() + time::Duration::days(1);
@@ -483,7 +528,7 @@ async fn expired_downloads_lists_only_rows_past_their_last_access_cutoff(pool: P
         .unwrap();
     assert_eq!(expired.len(), 1);
     assert_eq!(expired[0].episode_id, ep);
-    assert_eq!(expired[0].user_id, ana);
+    assert_eq!(expired[0].profile_id, ProfileId::new(ana));
     assert_eq!(expired[0].local_path, "podcast-audio/x.audio");
     assert_eq!(expired[0].file_size_mb, 2.0);
     let cutoff_past = OffsetDateTime::now_utc() - time::Duration::days(1);
@@ -493,7 +538,9 @@ async fn expired_downloads_lists_only_rows_past_their_last_access_cutoff(pool: P
             .unwrap()
             .is_empty()
     );
-    podcasts::delete_download_row(&pool, ana, ep).await.unwrap();
+    podcasts::delete_download_row(&pool, ProfileId::new(ana), ep)
+        .await
+        .unwrap();
     assert!(
         podcasts::expired_downloads(&pool, cutoff_future)
             .await

@@ -2,6 +2,7 @@
 //! rule): the track is longer than 30 seconds and was heard for half its length or four minutes,
 //! whichever comes first.
 
+use kima_core::profile::ProfileId;
 use sqlx::{FromRow, PgPool};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -86,7 +87,7 @@ pub async fn count_present_tracks(pool: &PgPool) -> sqlx::Result<i64> {
 /// advisory lock, so concurrent reports of one play cannot both write.
 pub async fn record(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     track: Uuid,
     listen: Listen,
     source: Source,
@@ -117,7 +118,7 @@ pub async fn record(
     // Namespace 7001 plus the user/track hash. READ COMMITTED (the default) is what lets the
     // waiting writer see the committed row.
     sqlx::query("SELECT pg_advisory_xact_lock(7001, hashtext($1))")
-        .bind(format!("{user}:{track}"))
+        .bind(format!("{profile}:{track}"))
         .execute(&mut *tx)
         .await?;
     // Strict bounds on both sides: exactly one duration away, the song has finished and that
@@ -126,7 +127,7 @@ pub async fn record(
         "SELECT id FROM plays WHERE profile_id = $1 AND track_id = $2
            AND played_at > $3 AND played_at < $4 LIMIT 1",
     )
-    .bind(user)
+    .bind(profile)
     .bind(track)
     .bind(anchor - window)
     .bind(anchor + window)
@@ -141,7 +142,7 @@ pub async fn record(
          VALUES ($1, $2, $3, $4, true, $5)",
     )
     .bind(id)
-    .bind(user)
+    .bind(profile)
     .bind(track)
     .bind(anchor)
     .bind(source.as_str())
@@ -154,9 +155,7 @@ pub async fn record(
 #[derive(Debug, Clone, FromRow)]
 pub struct PlayRow {
     pub id: Uuid,
-    // Column renamed by migration 0060 (M-PROF); the field follows in the per-profile re-key.
-    #[sqlx(rename = "profile_id")]
-    pub user_id: Uuid,
+    pub profile_id: ProfileId,
     pub track_id: Uuid,
     pub played_at: OffsetDateTime,
     pub heard: bool,
@@ -166,7 +165,7 @@ pub struct PlayRow {
 /// A user's plays, newest first, whose tracks are still present.
 pub async fn recent(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     limit: i64,
 ) -> sqlx::Result<Vec<(PlayRow, TrackRow)>> {
     let plays: Vec<PlayRow> = sqlx::query_as(
@@ -174,7 +173,7 @@ pub async fn recent(
          FROM plays p JOIN tracks t ON t.id = p.track_id AND t.missing_since IS NULL
          WHERE p.profile_id = $1 ORDER BY p.played_at DESC, p.id DESC LIMIT $2",
     )
-    .bind(user)
+    .bind(profile)
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -202,7 +201,7 @@ pub struct RecentArtist {
 /// no one.
 pub async fn recent_artists(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     limit: i64,
 ) -> sqlx::Result<Vec<RecentArtist>> {
     sqlx::query_as(
@@ -226,7 +225,7 @@ pub async fn recent_artists(
          FROM last JOIN artists ar ON ar.id = last.id
          ORDER BY last.last_played_at DESC",
     )
-    .bind(user)
+    .bind(profile)
     .bind(limit)
     .bind(crate::browse::NO_ONE_KEYS.as_slice())
     .fetch_all(pool)

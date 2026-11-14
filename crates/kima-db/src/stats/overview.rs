@@ -1,5 +1,5 @@
+use kima_core::profile::ProfileId;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use super::listens::{Period, listen_rows};
 
@@ -43,7 +43,7 @@ pub struct Overview {
     pub era: Vec<EraRow>,
 }
 
-pub async fn overview(pool: &PgPool, user: Uuid, period: Period) -> sqlx::Result<Overview> {
+pub async fn overview(pool: &PgPool, profile: ProfileId, period: Period) -> sqlx::Result<Overview> {
     let all = listen_rows(Period::All, false);
     let prefix = listen_rows(period, false);
     let totals_sql = format!(
@@ -66,22 +66,22 @@ pub async fn overview(pool: &PgPool, user: Uuid, period: Period) -> sqlx::Result
     );
     let (total, heard, decades, concentration, habit, era) = tokio::try_join!(
         sqlx::query_as::<_, TallyRow>(&totals_sql)
-            .bind(user)
+            .bind(profile)
             .fetch_one(pool),
         sqlx::query_as::<_, TallyRow>(&heard_sql)
-            .bind(user)
+            .bind(profile)
             .fetch_one(pool),
         sqlx::query_as::<_, DecadeRow>(&decades_sql)
-            .bind(user)
+            .bind(profile)
             .fetch_all(pool),
         sqlx::query_as::<_, Concentration>(&conc_sql)
-            .bind(user)
+            .bind(profile)
             .fetch_one(pool),
         sqlx::query_as::<_, Habit>(&habit_sql)
-            .bind(user)
+            .bind(profile)
             .fetch_one(pool),
         sqlx::query_as::<_, EraRow>(&era_sql)
-            .bind(user)
+            .bind(profile)
             .fetch_all(pool),
     )?;
     Ok(Overview {

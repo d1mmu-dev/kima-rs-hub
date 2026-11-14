@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.username, u.password_hash, u.role, u.onboarding_complete,\n                  u.token_version, u.created_at,\n                  k.id AS \"key_id?\", k.secret_enc AS \"secret_enc?\"\n           FROM users u LEFT JOIN api_keys k ON k.profile_id = u.id\n           WHERE lower(u.username) = lower($1)\n           ORDER BY k.created_at ASC, k.id ASC\n           LIMIT $2",
+  "query": "SELECT u.id, u.username, u.password_hash, u.role, u.onboarding_complete,\n                  u.token_version, u.created_at,\n                  k.id AS \"key_id?\", k.secret_enc AS \"secret_enc?\"\n           FROM users u\n           LEFT JOIN (api_keys k JOIN profiles pr ON pr.id = k.profile_id) ON pr.user_id = u.id\n           WHERE lower(u.username) = lower($1)\n           ORDER BY k.created_at ASC, k.id ASC\n           LIMIT $2",
   "describe": {
     "columns": [
       {
@@ -67,5 +67,5 @@
       false
     ]
   },
-  "hash": "65d243f3010e2cc44c60a66c432fcc3c135c478733362a4e512486d76ef372c8"
+  "hash": "305d64d71c0414116a2e11f34740d87eb3e0badc4b9d4755f342dc43bb1f6a9e"
 }

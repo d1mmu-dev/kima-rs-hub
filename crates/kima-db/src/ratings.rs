@@ -1,6 +1,7 @@
 //! Subsonic ratings 1..=5 per (user, track | album | artist), spec §7.3. Setting a rating again
 //! replaces it; `clear` is what `setRating` with 0 does.
 
+use kima_core::profile::ProfileId;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -11,7 +12,7 @@ use crate::stars::{StarKind, target_exists};
 /// validate first.
 pub async fn set(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     kind: StarKind,
     id: Uuid,
     rating: i16,
@@ -28,7 +29,7 @@ pub async fn set(
     );
     match sqlx::query(&sql)
         .bind(Uuid::now_v7())
-        .bind(user)
+        .bind(profile)
         .bind(id)
         .bind(rating)
         .execute(pool)
@@ -41,11 +42,20 @@ pub async fn set(
     }
 }
 
-pub async fn clear(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx::Result<()> {
+pub async fn clear(
+    pool: &PgPool,
+    profile: ProfileId,
+    kind: StarKind,
+    id: Uuid,
+) -> sqlx::Result<()> {
     let sql = format!(
         "DELETE FROM ratings WHERE profile_id = $1 AND {} = $2",
         kind.column()
     );
-    sqlx::query(&sql).bind(user).bind(id).execute(pool).await?;
+    sqlx::query(&sql)
+        .bind(profile)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }

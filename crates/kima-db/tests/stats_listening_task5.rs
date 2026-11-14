@@ -1,10 +1,11 @@
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::stats::{listening::listening_stats, listens::Period};
 use uuid::Uuid;
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn empty_user_has_empty_listening_stats(pool: PgPool) {
-    let stats = listening_stats(&pool, Uuid::now_v7(), "UTC", Period::All)
+    let stats = listening_stats(&pool, ProfileId::new(Uuid::now_v7()), "UTC", Period::All)
         .await
         .unwrap();
     assert_eq!(stats.plays, 0);
@@ -60,7 +61,7 @@ async fn listening_values_isolate_users_and_respect_boundaries(pool: PgPool) {
     ] {
         sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at,source) VALUES ($1,$2,$3,$4::timestamptz,$5)").bind(Uuid::now_v7()).bind(who).bind(track).bind(timestamp).bind(source).execute(&pool).await.unwrap();
     }
-    let stats = listening_stats(&pool, user, "Europe/Warsaw", Period::All)
+    let stats = listening_stats(&pool, ProfileId::new(user), "Europe/Warsaw", Period::All)
         .await
         .unwrap();
     assert_eq!(
@@ -94,14 +95,14 @@ async fn listening_values_isolate_users_and_respect_boundaries(pool: PgPool) {
     assert_eq!(stats.top_tracks[0].title, "title0");
     assert_eq!(stats.top_artists[0].name, "display0");
     assert_eq!(
-        listening_stats(&pool, user, "UTC", Period::Days30)
+        listening_stats(&pool, ProfileId::new(user), "UTC", Period::Days30)
             .await
             .unwrap()
             .plays,
         0
     );
     assert_eq!(
-        listening_stats(&pool, user, "UTC", Period::All)
+        listening_stats(&pool, ProfileId::new(user), "UTC", Period::All)
             .await
             .unwrap()
             .drift[0]
@@ -109,7 +110,7 @@ async fn listening_values_isolate_users_and_respect_boundaries(pool: PgPool) {
         "2026-03"
     );
     assert_eq!(
-        listening_stats(&pool, other, "UTC", Period::All)
+        listening_stats(&pool, ProfileId::new(other), "UTC", Period::All)
             .await
             .unwrap()
             .plays,
@@ -118,7 +119,7 @@ async fn listening_values_isolate_users_and_respect_boundaries(pool: PgPool) {
     for track in &tracks[2..] {
         sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,'2026-03-31 22:30:00+00')").bind(Uuid::now_v7()).bind(user).bind(track).execute(&pool).await.unwrap();
     }
-    let stats = listening_stats(&pool, user, "UTC", Period::All)
+    let stats = listening_stats(&pool, ProfileId::new(user), "UTC", Period::All)
         .await
         .unwrap();
     assert_eq!((stats.top_tracks.len(), stats.top_artists.len()), (8, 8));
@@ -160,7 +161,7 @@ async fn tied_peak_chooses_earliest_cell(pool: PgPool) {
         .await
         .unwrap();
     }
-    let stats = listening_stats(&pool, user, "UTC", Period::All)
+    let stats = listening_stats(&pool, ProfileId::new(user), "UTC", Period::All)
         .await
         .unwrap();
     assert_eq!(

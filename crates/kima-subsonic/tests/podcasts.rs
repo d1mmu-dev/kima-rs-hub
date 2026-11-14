@@ -8,6 +8,7 @@
 
 mod common;
 
+use kima_core::profile::ProfileId;
 use std::net::SocketAddr;
 
 use axum::extract::connect_info::MockConnectInfo;
@@ -143,7 +144,9 @@ async fn seeded_show(pool: &PgPool, feed_url: &str, title: &str, n: usize, follo
         .await
         .unwrap();
     if follow {
-        podcasts::subscribe(pool, ALICE_ID, show.id).await.unwrap();
+        podcasts::subscribe(pool, ProfileId::new(ALICE_ID), show.id)
+            .await
+            .unwrap();
     }
     show.id
 }
@@ -388,10 +391,10 @@ async fn refresh_podcasts_refreshes_each_followed_show(pool: PgPool) {
     )
     .await
     .unwrap();
-    podcasts::subscribe(&pool, ALICE_ID, show_a.id)
+    podcasts::subscribe(&pool, ProfileId::new(ALICE_ID), show_a.id)
         .await
         .unwrap();
-    podcasts::subscribe(&pool, ALICE_ID, show_b.id)
+    podcasts::subscribe(&pool, ProfileId::new(ALICE_ID), show_b.id)
         .await
         .unwrap();
     let _ = show_c;
@@ -563,7 +566,7 @@ async fn subsonic_uses_the_setting(pool: PgPool) {
     // The persisted setting shows everything.
     kima_db::user_settings::upsert(
         &pool,
-        ALICE_ID,
+        ProfileId::new(ALICE_ID),
         kima_db::user_settings::Patch {
             podcast_ai_filter: Some("show".into()),
             ..Default::default()

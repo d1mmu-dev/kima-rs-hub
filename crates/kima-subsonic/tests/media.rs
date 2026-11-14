@@ -4,6 +4,7 @@
 
 mod common;
 
+use kima_core::profile::ProfileId;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -599,7 +600,7 @@ async fn transcode_stream_song_podcast_other(pool: PgPool) {
     )
     .await
     .unwrap();
-    kima_db::podcasts::subscribe(&pool, ALICE_ID, show.id)
+    kima_db::podcasts::subscribe(&pool, ProfileId::new(ALICE_ID), show.id)
         .await
         .unwrap();
     let episode = kima_db::podcasts::episodes_for_channel(&pool, show.id, 1, false)

@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT profile_id AS user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,\n                  share_live_listening, podcast_ai_filter\n           FROM user_settings WHERE profile_id = $1",
+  "query": "SELECT profile_id AS \"profile_id: ProfileId\", playback_quality, wifi_only, offline_enabled, max_cache_size_mb,\n                  share_live_listening, podcast_ai_filter\n           FROM user_settings WHERE profile_id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "user_id",
+        "name": "profile_id: ProfileId",
         "type_info": "Uuid"
       },
       {
@@ -54,5 +54,5 @@
       false
     ]
   },
-  "hash": "edd9524c163c4f30e9fa19dfc87a6c8a7c90023273dbeebf4a21f837cc7f4e49"
+  "hash": "9a3c50ac3fe42733f1bf61279d990e4d9f379b03c72e95a2571f0c9afba30675"
 }

@@ -1,6 +1,7 @@
 //! Library search over the `search` tsvector columns (`simple` config, unaccented). Tracks
 //! flagged missing are excluded, and so are albums and artists with no present track.
 
+use kima_core::profile::ProfileId;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -102,7 +103,7 @@ pub struct PodcastSearchRow {
 
 pub async fn podcasts(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     query: &str,
     limit: i64,
     offset: i64,
@@ -119,7 +120,7 @@ pub async fn podcasts(
         crate::podcasts::show_source_sql("p"),
     );
     sqlx::query_as(&sql)
-        .bind(user)
+        .bind(profile)
         .bind(query)
         .bind(limit)
         .bind(offset)
@@ -144,7 +145,7 @@ pub struct EpisodeSearchRow {
 
 pub async fn episodes(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     query: &str,
     limit: i64,
     offset: i64,
@@ -162,7 +163,7 @@ pub async fn episodes(
         crate::podcasts::episode_source_sql("e", "p"),
     );
     sqlx::query_as(&sql)
-        .bind(user)
+        .bind(profile)
         .bind(query)
         .bind(limit)
         .bind(offset)

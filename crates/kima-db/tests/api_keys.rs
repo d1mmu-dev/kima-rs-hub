@@ -1,3 +1,4 @@
+use kima_core::profile::{AccountId, ProfileId};
 use kima_db::PgPool;
 use kima_db::api_keys::{self, MAX_PER_USER};
 use kima_db::users::{self, Registration, User};
@@ -24,10 +25,19 @@ fn hash_of(n: u32) -> [u8; 32] {
 }
 
 async fn add(pool: &PgPool, user: Uuid, name: &str, n: u32) -> api_keys::ApiKey {
-    api_keys::create(pool, Uuid::now_v7(), user, 0, name, &hash_of(n), b"enc")
-        .await
-        .unwrap()
-        .unwrap()
+    api_keys::create(
+        pool,
+        Uuid::now_v7(),
+        AccountId::new(user),
+        ProfileId::new(user),
+        0,
+        name,
+        &hash_of(n),
+        b"enc",
+    )
+    .await
+    .unwrap()
+    .unwrap()
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -38,22 +48,27 @@ async fn create_list_delete_owned(pool: PgPool) {
     assert_eq!(first.name, "phone");
     assert_eq!(first.last_used_at, None);
 
-    let listed = api_keys::list_for_user(&pool, ana.id).await.unwrap();
+    let listed = api_keys::list_for_profile(&pool, ProfileId::new(ana.id))
+        .await
+        .unwrap();
     let ids: Vec<_> = listed.iter().map(|k| k.id).collect();
     assert_eq!(ids, vec![second.id, first.id], "newest first");
 
     assert!(
-        api_keys::delete_owned(&pool, first.id, ana.id)
+        api_keys::delete_owned(&pool, first.id, ProfileId::new(ana.id))
             .await
             .unwrap()
     );
     assert!(
-        !api_keys::delete_owned(&pool, first.id, ana.id)
+        !api_keys::delete_owned(&pool, first.id, ProfileId::new(ana.id))
             .await
             .unwrap()
     );
     assert_eq!(
-        api_keys::list_for_user(&pool, ana.id).await.unwrap().len(),
+        api_keys::list_for_profile(&pool, ProfileId::new(ana.id))
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -65,11 +80,20 @@ async fn fifty_first_is_too_many(pool: PgPool) {
     for n in 0..MAX_PER_USER as u32 {
         add(&pool, ana.id, "k", n).await;
     }
-    let refused = api_keys::create(&pool, Uuid::now_v7(), ana.id, 0, "k", &hash_of(999), b"e")
-        .await
-        .unwrap();
+    let refused = api_keys::create(
+        &pool,
+        Uuid::now_v7(),
+        AccountId::new(ana.id),
+        ProfileId::new(ana.id),
+        0,
+        "k",
+        &hash_of(999),
+        b"e",
+    )
+    .await
+    .unwrap();
     assert!(refused.is_err());
-    // The cap is per user.
+    // The cap is per account.
     add(&pool, bob.id, "k", 1000).await;
 }
 
@@ -82,6 +106,7 @@ async fn find_by_hash_returns_owner(pool: PgPool) {
         .unwrap()
         .unwrap();
     assert_eq!(found.key_id, key.id);
+    assert_eq!(found.profile, ProfileId::new(ana.id));
     assert_eq!(found.user, ana);
     assert!(
         api_keys::find_by_hash(&pool, &hash_of(8))
@@ -90,11 +115,15 @@ async fn find_by_hash_returns_owner(pool: PgPool) {
             .is_none()
     );
 
-    let secrets = api_keys::secrets_for_user(&pool, ana.id).await.unwrap();
+    let secrets = api_keys::secrets_for_profile(&pool, ProfileId::new(ana.id))
+        .await
+        .unwrap();
     assert_eq!(secrets, vec![(key.id, b"enc".to_vec())]);
 
     api_keys::touch(&pool, key.id).await.unwrap();
-    let listed = api_keys::list_for_user(&pool, ana.id).await.unwrap();
+    let listed = api_keys::list_for_profile(&pool, ProfileId::new(ana.id))
+        .await
+        .unwrap();
     assert!(listed[0].last_used_at.is_some());
 }
 
@@ -103,9 +132,16 @@ async fn delete_owned_ignores_other_users(pool: PgPool) {
     let ana = user(&pool, "ana").await;
     let bob = user(&pool, "bob").await;
     let key = add(&pool, ana.id, "phone", 1).await;
-    assert!(!api_keys::delete_owned(&pool, key.id, bob.id).await.unwrap());
+    assert!(
+        !api_keys::delete_owned(&pool, key.id, ProfileId::new(bob.id))
+            .await
+            .unwrap()
+    );
     assert_eq!(
-        api_keys::list_for_user(&pool, ana.id).await.unwrap().len(),
+        api_keys::list_for_profile(&pool, ProfileId::new(ana.id))
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -129,7 +165,10 @@ async fn set_password_deletes_tokens_in_same_tx(pool: PgPool) {
     assert_eq!(after.password_hash, "hash");
     assert_eq!(after.token_version, 0);
     assert_eq!(
-        api_keys::list_for_user(&pool, ana.id).await.unwrap().len(),
+        api_keys::list_for_profile(&pool, ProfileId::new(ana.id))
+            .await
+            .unwrap()
+            .len(),
         2
     );
 
@@ -143,13 +182,16 @@ async fn set_password_deletes_tokens_in_same_tx(pool: PgPool) {
     assert_eq!(after.password_hash, "new");
     assert_eq!(after.token_version, 1);
     assert!(
-        api_keys::list_for_user(&pool, ana.id)
+        api_keys::list_for_profile(&pool, ProfileId::new(ana.id))
             .await
             .unwrap()
             .is_empty()
     );
     assert_eq!(
-        api_keys::list_for_user(&pool, bob.id).await.unwrap().len(),
+        api_keys::list_for_profile(&pool, ProfileId::new(bob.id))
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -167,7 +209,10 @@ async fn stale_version_keeps_tokens(pool: PgPool) {
     );
     drop(conn);
     assert_eq!(
-        api_keys::list_for_user(&pool, ana.id).await.unwrap().len(),
+        api_keys::list_for_profile(&pool, ProfileId::new(ana.id))
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -183,26 +228,46 @@ async fn stale_session_version_is_refused(pool: PgPool) {
     drop(conn);
 
     // A session that saw version 0 must not mint a token after the change to version 1.
-    let stale = api_keys::create(&pool, Uuid::now_v7(), ana.id, 0, "k", &hash_of(1), b"e")
-        .await
-        .unwrap();
+    let stale = api_keys::create(
+        &pool,
+        Uuid::now_v7(),
+        AccountId::new(ana.id),
+        ProfileId::new(ana.id),
+        0,
+        "k",
+        &hash_of(1),
+        b"e",
+    )
+    .await
+    .unwrap();
     assert_eq!(stale.unwrap_err(), Refused::StaleSession);
     assert!(
-        api_keys::list_for_user(&pool, ana.id)
+        api_keys::list_for_profile(&pool, ProfileId::new(ana.id))
             .await
             .unwrap()
             .is_empty()
     );
     // The current version works.
-    api_keys::create(&pool, Uuid::now_v7(), ana.id, 1, "k", &hash_of(2), b"e")
-        .await
-        .unwrap()
-        .unwrap();
+    api_keys::create(
+        &pool,
+        Uuid::now_v7(),
+        AccountId::new(ana.id),
+        ProfileId::new(ana.id),
+        1,
+        "k",
+        &hash_of(2),
+        b"e",
+    )
+    .await
+    .unwrap()
+    .unwrap();
     // A user who is gone is a stale session too, not a foreign-key error.
+    let gone_id = Uuid::now_v7();
     let gone = api_keys::create(
         &pool,
         Uuid::now_v7(),
-        Uuid::now_v7(),
+        AccountId::new(gone_id),
+        ProfileId::new(gone_id),
         0,
         "k",
         &hash_of(3),
@@ -219,14 +284,26 @@ async fn concurrent_creates_respect_the_cap(pool: PgPool) {
     for n in 0..(MAX_PER_USER as u32 - 1) {
         add(&pool, ana.id, "k", n).await;
     }
-    let handles: Vec<_> = (0..5u32)
+    // Racing creates come from two profiles of the account: the cap and its lock are the
+    // account's (M-PROF).
+    let kids: Uuid = sqlx::query_scalar(
+        "INSERT INTO profiles (id, user_id, name, kind) VALUES ($1, $2, 'Kids', 'kids') RETURNING id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ana.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let handles: Vec<_> = (0..6u32)
         .map(|i| {
             let pool = pool.clone();
+            let profile = ProfileId::new(if i % 2 == 0 { ana.id } else { kids });
             tokio::spawn(async move {
                 api_keys::create(
                     &pool,
                     Uuid::now_v7(),
-                    ana.id,
+                    AccountId::new(ana.id),
+                    profile,
                     0,
                     "k",
                     &hash_of(500 + i),
@@ -244,10 +321,14 @@ async fn concurrent_creates_respect_the_cap(pool: PgPool) {
         }
     }
     assert_eq!(created, 1);
-    assert_eq!(
-        api_keys::list_for_user(&pool, ana.id).await.unwrap().len() as i64,
-        MAX_PER_USER
-    );
+    let held: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM api_keys k JOIN profiles pr ON pr.id = k.profile_id WHERE pr.user_id = $1",
+    )
+    .bind(ana.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(held, MAX_PER_USER);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -269,7 +350,7 @@ async fn set_password_none_is_unconditional(pool: PgPool) {
     );
     drop(conn);
     assert!(
-        api_keys::list_for_user(&pool, ana.id)
+        api_keys::list_for_profile(&pool, ProfileId::new(ana.id))
             .await
             .unwrap()
             .is_empty()

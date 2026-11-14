@@ -3,6 +3,7 @@
 
 mod common;
 
+use kima_core::profile::ProfileId;
 use std::net::SocketAddr;
 
 use axum::extract::connect_info::MockConnectInfo;
@@ -259,7 +260,7 @@ fixture_test!(
         assert_eq!(list[0]["name"], "Admin Picks");
         assert_eq!(list[0]["owner"], "admin");
         // Alice hides it in the web app: gone from her list.
-        kima_db::playlists::hide(&pool, ALICE_ID, ADMIN_PICKS)
+        kima_db::playlists::hide(&pool, ProfileId::new(ALICE_ID), ADMIN_PICKS)
             .await
             .unwrap();
         let res = call(&server, "getPlaylists", &[]).await;
@@ -339,7 +340,8 @@ fixture_test!(create_with_name_private_full_answer, |server, pool| {
     assert!(p["entry"][0]["title"].is_string());
     let id: Uuid = p["id"].as_str().unwrap().parse().unwrap();
     let stored = kima_db::playlists::find(&pool, id).await.unwrap().unwrap();
-    assert_eq!(stored.user_id, ALICE_ID);
+    assert_eq!(stored.profile_id, ProfileId::new(ALICE_ID));
+    assert_eq!(stored.account_id.into_uuid(), ALICE_ID);
     assert!(!stored.is_public);
     // An empty playlist has no entries; neither name nor playlistId is 10.
     let empty = call(&server, "createPlaylist", &[("name", "Empty".into())]).await;

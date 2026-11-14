@@ -1,6 +1,7 @@
 //! Subsonic state and read models, on the SQL fixture shared with `kima-subsonic`
 //! (see its header for what is in it).
 
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::stars::StarKind;
 use kima_db::subsonic::{self, AlbumListKind, SearchPage};
@@ -89,7 +90,9 @@ async fn sort_name_strips_articles(pool: PgPool) {
 }
 
 fixture_test!(artists_sorted_hide_artists_without_present_tracks, |pool| {
-    let artists = subsonic::artists_sorted(&pool, ALICE).await.unwrap();
+    let artists = subsonic::artists_sorted(&pool, ProfileId::new(ALICE))
+        .await
+        .unwrap();
     // Theatre's only track is missing. The Beatles file under B and La Roux under R.
     assert_eq!(ids(&artists, |a| a.id), [artist(1), artist(2), artist(3)]);
     let sort: Vec<&str> = artists.iter().map(|a| a.sort_name.as_str()).collect();
@@ -97,19 +100,19 @@ fixture_test!(artists_sorted_hide_artists_without_present_tracks, |pool| {
     let albums: Vec<i64> = artists.iter().map(|a| a.album_count).collect();
     assert_eq!(albums, [2, 2, 1]);
     assert!(
-        subsonic::artist_with_albums(&pool, ALICE, artist(4))
+        subsonic::artist_with_albums(&pool, ProfileId::new(ALICE), artist(4))
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        subsonic::album_with_tracks(&pool, ALICE, album(6))
+        subsonic::album_with_tracks(&pool, ProfileId::new(ALICE), album(6))
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        subsonic::track(&pool, ALICE, track(20))
+        subsonic::track(&pool, ProfileId::new(ALICE), track(20))
             .await
             .unwrap()
             .is_none()
@@ -117,7 +120,7 @@ fixture_test!(artists_sorted_hide_artists_without_present_tracks, |pool| {
 });
 
 fixture_test!(album_tracks_ordered_by_disc_then_track, |pool| {
-    let (al, songs) = subsonic::album_with_tracks(&pool, ALICE, album(2))
+    let (al, songs) = subsonic::album_with_tracks(&pool, ProfileId::new(ALICE), album(2))
         .await
         .unwrap()
         .unwrap();
@@ -137,7 +140,7 @@ fixture_test!(album_tracks_ordered_by_disc_then_track, |pool| {
     assert_eq!(songs[0].size, 30000006);
 
     // Equal numbers: by title, then id.
-    let (_, demos) = subsonic::album_with_tracks(&pool, ALICE, album(5))
+    let (_, demos) = subsonic::album_with_tracks(&pool, ProfileId::new(ALICE), album(5))
         .await
         .unwrap()
         .unwrap();
@@ -146,14 +149,15 @@ fixture_test!(album_tracks_ordered_by_disc_then_track, |pool| {
         [track(17), track(18), track(19)]
     );
 
-    let (artist_item, albums) = subsonic::artist_with_albums(&pool, ALICE, artist(1))
-        .await
-        .unwrap()
-        .unwrap();
+    let (artist_item, albums) =
+        subsonic::artist_with_albums(&pool, ProfileId::new(ALICE), artist(1))
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(artist_item.name, "The Beatles");
     // Newest year first, undated last.
     assert_eq!(ids(&albums, |a| a.id), [album(1), album(2)]);
-    let (_, albums) = subsonic::artist_with_albums(&pool, ALICE, artist(2))
+    let (_, albums) = subsonic::artist_with_albums(&pool, ProfileId::new(ALICE), artist(2))
         .await
         .unwrap()
         .unwrap();
@@ -161,45 +165,49 @@ fixture_test!(album_tracks_ordered_by_disc_then_track, |pool| {
 });
 
 fixture_test!(starred_and_rating_joined_for_caller_only, |pool| {
-    let alice = subsonic::track(&pool, ALICE, track(1))
+    let alice = subsonic::track(&pool, ProfileId::new(ALICE), track(1))
         .await
         .unwrap()
         .unwrap();
     assert!(alice.starred_at.is_some());
     assert_eq!(alice.rating, Some(5));
-    let admin = subsonic::track(&pool, ADMIN, track(1))
+    let admin = subsonic::track(&pool, ProfileId::new(ADMIN), track(1))
         .await
         .unwrap()
         .unwrap();
     assert_eq!((admin.starred_at, admin.rating), (None, Some(1)));
-    let admin2 = subsonic::track(&pool, ADMIN, track(2))
+    let admin2 = subsonic::track(&pool, ProfileId::new(ADMIN), track(2))
         .await
         .unwrap()
         .unwrap();
     assert!(admin2.starred_at.is_some());
-    let alice2 = subsonic::track(&pool, ALICE, track(2))
+    let alice2 = subsonic::track(&pool, ProfileId::new(ALICE), track(2))
         .await
         .unwrap()
         .unwrap();
     assert_eq!((alice2.starred_at, alice2.rating), (None, None));
 
-    let (al, songs) = subsonic::album_with_tracks(&pool, ALICE, album(1))
+    let (al, songs) = subsonic::album_with_tracks(&pool, ProfileId::new(ALICE), album(1))
         .await
         .unwrap()
         .unwrap();
     assert!(al.starred_at.is_some());
     assert_eq!(al.rating, Some(4));
     assert_eq!(songs[0].rating, Some(5));
-    let (al, _) = subsonic::album_with_tracks(&pool, ADMIN, album(1))
+    let (al, _) = subsonic::album_with_tracks(&pool, ProfileId::new(ADMIN), album(1))
         .await
         .unwrap()
         .unwrap();
     assert_eq!((al.starred_at, al.rating), (None, None));
 
-    let artists = subsonic::artists_sorted(&pool, ALICE).await.unwrap();
+    let artists = subsonic::artists_sorted(&pool, ProfileId::new(ALICE))
+        .await
+        .unwrap();
     assert!(artists[0].starred_at.is_some() && artists[0].rating.is_none()); // Beatles
     assert_eq!((artists[1].starred_at, artists[1].rating), (None, Some(3))); // La Roux
-    let artists = subsonic::artists_sorted(&pool, ADMIN).await.unwrap();
+    let artists = subsonic::artists_sorted(&pool, ProfileId::new(ADMIN))
+        .await
+        .unwrap();
     assert!(
         artists
             .iter()
@@ -239,12 +247,12 @@ fixture_test!(stars_one_target_check, |pool| {
 fixture_test!(star_set_unknown_target_false, |pool| {
     for kind in [StarKind::Track, StarKind::Album, StarKind::Artist] {
         assert!(
-            !stars::set(&pool, ALICE, kind, Uuid::now_v7())
+            !stars::set(&pool, ProfileId::new(ALICE), kind, Uuid::now_v7())
                 .await
                 .unwrap()
         );
         assert!(
-            !ratings::set(&pool, ALICE, kind, Uuid::now_v7(), 3)
+            !ratings::set(&pool, ProfileId::new(ALICE), kind, Uuid::now_v7(), 3)
                 .await
                 .unwrap()
         );
@@ -252,12 +260,12 @@ fixture_test!(star_set_unknown_target_false, |pool| {
     // Known targets star once, and starring again keeps the first time.
     let before = count(&pool, "SELECT count(*) FROM stars").await;
     assert!(
-        stars::set(&pool, ALICE, StarKind::Track, track(5))
+        stars::set(&pool, ProfileId::new(ALICE), StarKind::Track, track(5))
             .await
             .unwrap()
     );
     assert!(
-        stars::set(&pool, ALICE, StarKind::Track, track(5))
+        stars::set(&pool, ProfileId::new(ALICE), StarKind::Track, track(5))
             .await
             .unwrap()
     );
@@ -270,7 +278,7 @@ fixture_test!(star_set_unknown_target_false, |pool| {
             .await
             .unwrap();
     assert!(
-        stars::set(&pool, ALICE, StarKind::Track, track(5))
+        stars::set(&pool, ProfileId::new(ALICE), StarKind::Track, track(5))
             .await
             .unwrap()
     );
@@ -284,15 +292,15 @@ fixture_test!(star_set_unknown_target_false, |pool| {
     assert_eq!(first, again);
     // A missing track can still be starred (hidden until it returns).
     assert!(
-        stars::set(&pool, ADMIN, StarKind::Track, track(20))
+        stars::set(&pool, ProfileId::new(ADMIN), StarKind::Track, track(20))
             .await
             .unwrap()
     );
 
-    stars::clear(&pool, ALICE, StarKind::Track, track(5))
+    stars::clear(&pool, ProfileId::new(ALICE), StarKind::Track, track(5))
         .await
         .unwrap();
-    stars::clear(&pool, ALICE, StarKind::Track, track(5))
+    stars::clear(&pool, ProfileId::new(ALICE), StarKind::Track, track(5))
         .await
         .unwrap();
     assert_eq!(
@@ -308,31 +316,31 @@ fixture_test!(star_set_unknown_target_false, |pool| {
 fixture_test!(star_lists_are_newest_first_and_present_only, |pool| {
     // Stored: tracks 1 and 20 (missing); albums 3, 1, 6 (no present track); artist 1.
     assert_eq!(
-        stars::list_for_user(&pool, ALICE, StarKind::Track)
+        stars::list_for_user(&pool, ProfileId::new(ALICE), StarKind::Track)
             .await
             .unwrap(),
         [track(1)]
     );
     assert_eq!(
-        stars::list_for_user(&pool, ALICE, StarKind::Album)
+        stars::list_for_user(&pool, ProfileId::new(ALICE), StarKind::Album)
             .await
             .unwrap(),
         [album(1), album(3)]
     );
     assert_eq!(
-        stars::list_for_user(&pool, ALICE, StarKind::Artist)
+        stars::list_for_user(&pool, ProfileId::new(ALICE), StarKind::Artist)
             .await
             .unwrap(),
         [artist(1)]
     );
     assert_eq!(
-        stars::list_for_user(&pool, ADMIN, StarKind::Track)
+        stars::list_for_user(&pool, ProfileId::new(ADMIN), StarKind::Track)
             .await
             .unwrap(),
         [track(2)]
     );
     assert!(
-        stars::list_for_user(&pool, ADMIN, StarKind::Album)
+        stars::list_for_user(&pool, ProfileId::new(ADMIN), StarKind::Album)
             .await
             .unwrap()
             .is_empty()
@@ -341,12 +349,12 @@ fixture_test!(star_lists_are_newest_first_and_present_only, |pool| {
 
 fixture_test!(rating_zero_is_clear, |pool| {
     assert!(
-        ratings::set(&pool, ALICE, StarKind::Track, track(2), 3)
+        ratings::set(&pool, ProfileId::new(ALICE), StarKind::Track, track(2), 3)
             .await
             .unwrap()
     );
     assert_eq!(
-        subsonic::track(&pool, ALICE, track(2))
+        subsonic::track(&pool, ProfileId::new(ALICE), track(2))
             .await
             .unwrap()
             .unwrap()
@@ -355,12 +363,12 @@ fixture_test!(rating_zero_is_clear, |pool| {
     );
     // A new rating replaces the old one.
     assert!(
-        ratings::set(&pool, ALICE, StarKind::Track, track(2), 5)
+        ratings::set(&pool, ProfileId::new(ALICE), StarKind::Track, track(2), 5)
             .await
             .unwrap()
     );
     assert_eq!(
-        subsonic::track(&pool, ALICE, track(2))
+        subsonic::track(&pool, ProfileId::new(ALICE), track(2))
             .await
             .unwrap()
             .unwrap()
@@ -377,25 +385,25 @@ fixture_test!(rating_zero_is_clear, |pool| {
     );
     // Albums and artists rate too.
     assert!(
-        ratings::set(&pool, ALICE, StarKind::Album, album(3), 2)
+        ratings::set(&pool, ProfileId::new(ALICE), StarKind::Album, album(3), 2)
             .await
             .unwrap()
     );
     assert!(
-        ratings::set(&pool, ALICE, StarKind::Artist, artist(3), 1)
+        ratings::set(&pool, ProfileId::new(ALICE), StarKind::Artist, artist(3), 1)
             .await
             .unwrap()
     );
 
     // setRating 0 is `clear`; clearing nothing is fine.
-    ratings::clear(&pool, ALICE, StarKind::Track, track(2))
+    ratings::clear(&pool, ProfileId::new(ALICE), StarKind::Track, track(2))
         .await
         .unwrap();
-    ratings::clear(&pool, ALICE, StarKind::Track, track(2))
+    ratings::clear(&pool, ProfileId::new(ALICE), StarKind::Track, track(2))
         .await
         .unwrap();
     assert_eq!(
-        subsonic::track(&pool, ALICE, track(2))
+        subsonic::track(&pool, ProfileId::new(ALICE), track(2))
             .await
             .unwrap()
             .unwrap()
@@ -404,7 +412,7 @@ fixture_test!(rating_zero_is_clear, |pool| {
     );
     // Stars are untouched by ratings.
     assert!(
-        subsonic::track(&pool, ADMIN, track(2))
+        subsonic::track(&pool, ProfileId::new(ADMIN), track(2))
             .await
             .unwrap()
             .unwrap()
@@ -413,19 +421,21 @@ fixture_test!(rating_zero_is_clear, |pool| {
     );
     // The table only holds 1..=5.
     assert!(
-        ratings::set(&pool, ALICE, StarKind::Track, track(2), 0)
+        ratings::set(&pool, ProfileId::new(ALICE), StarKind::Track, track(2), 0)
             .await
             .is_err()
     );
     assert!(
-        ratings::set(&pool, ALICE, StarKind::Track, track(2), 6)
+        ratings::set(&pool, ProfileId::new(ALICE), StarKind::Track, track(2), 6)
             .await
             .is_err()
     );
 });
 
 fixture_test!(bookmarks_hide_missing_tracks, |pool| {
-    let list = bookmarks::list_for_user(&pool, ALICE).await.unwrap();
+    let list = bookmarks::list_for_user(&pool, ProfileId::new(ALICE))
+        .await
+        .unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].track_id, track(3));
     assert_eq!(
@@ -438,7 +448,7 @@ fixture_test!(bookmarks_hide_missing_tracks, |pool| {
         2
     );
     assert!(
-        bookmarks::list_for_user(&pool, ADMIN)
+        bookmarks::list_for_user(&pool, ProfileId::new(ADMIN))
             .await
             .unwrap()
             .is_empty()
@@ -446,16 +456,18 @@ fixture_test!(bookmarks_hide_missing_tracks, |pool| {
 
     // Moving a bookmark keeps its creation time and puts it first.
     assert!(
-        bookmarks::upsert(&pool, ALICE, track(9), 5, None)
+        bookmarks::upsert(&pool, ProfileId::new(ALICE), track(9), 5, None)
             .await
             .unwrap()
     );
     assert!(
-        bookmarks::upsert(&pool, ALICE, track(3), 91000, Some("later"))
+        bookmarks::upsert(&pool, ProfileId::new(ALICE), track(3), 91000, Some("later"))
             .await
             .unwrap()
     );
-    let list = bookmarks::list_for_user(&pool, ALICE).await.unwrap();
+    let list = bookmarks::list_for_user(&pool, ProfileId::new(ALICE))
+        .await
+        .unwrap();
     assert_eq!(ids(&list, |b| b.track_id), [track(3), track(9)]);
     assert_eq!(
         (list[0].position_ms, list[0].comment.as_deref()),
@@ -468,15 +480,21 @@ fixture_test!(bookmarks_hide_missing_tracks, |pool| {
     assert!(list[0].changed_at > list[0].created_at);
 
     assert!(
-        !bookmarks::upsert(&pool, ALICE, Uuid::now_v7(), 1, None)
+        !bookmarks::upsert(&pool, ProfileId::new(ALICE), Uuid::now_v7(), 1, None)
             .await
             .unwrap()
     );
-    bookmarks::delete(&pool, ALICE, track(3)).await.unwrap();
-    bookmarks::delete(&pool, ALICE, track(3)).await.unwrap();
+    bookmarks::delete(&pool, ProfileId::new(ALICE), track(3))
+        .await
+        .unwrap();
+    bookmarks::delete(&pool, ProfileId::new(ALICE), track(3))
+        .await
+        .unwrap();
     assert_eq!(
         ids(
-            &bookmarks::list_for_user(&pool, ALICE).await.unwrap(),
+            &bookmarks::list_for_user(&pool, ProfileId::new(ALICE))
+                .await
+                .unwrap(),
             |b| b.track_id
         ),
         [track(9)]
@@ -488,7 +506,7 @@ fixture_test!(album_list_each_kind, |pool| {
         let pool = pool.clone();
         async move {
             ids(
-                &subsonic::album_list(&pool, ALICE, kind, 50, 0)
+                &subsonic::album_list(&pool, ProfileId::new(ALICE), kind, 50, 0)
                     .await
                     .unwrap(),
                 |a| a.id,
@@ -552,32 +570,32 @@ fixture_test!(album_list_each_kind, |pool| {
     );
 
     // Another user's plays, stars and ratings do not count.
-    let admin = subsonic::album_list(&pool, ADMIN, AlbumListKind::Frequent, 50, 0)
+    let admin = subsonic::album_list(&pool, ProfileId::new(ADMIN), AlbumListKind::Frequent, 50, 0)
         .await
         .unwrap();
     assert_eq!(ids(&admin, |a| a.id), [album(2)]);
     assert!(
-        subsonic::album_list(&pool, ADMIN, AlbumListKind::Highest, 50, 0)
+        subsonic::album_list(&pool, ProfileId::new(ADMIN), AlbumListKind::Highest, 50, 0)
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
-        subsonic::album_list(&pool, ADMIN, AlbumListKind::Starred, 50, 0)
+        subsonic::album_list(&pool, ProfileId::new(ADMIN), AlbumListKind::Starred, 50, 0)
             .await
             .unwrap()
             .is_empty()
     );
 
     // Paging.
-    let page = subsonic::album_list(&pool, ALICE, AlbumListKind::Newest, 2, 1)
+    let page = subsonic::album_list(&pool, ProfileId::new(ALICE), AlbumListKind::Newest, 2, 1)
         .await
         .unwrap();
     assert_eq!(ids(&page, |a| a.id), [album(4), album(3)]);
 
     // Random: distinct present albums.
     let random = ids(
-        &subsonic::album_list(&pool, ALICE, AlbumListKind::Random, 3, 0)
+        &subsonic::album_list(&pool, ProfileId::new(ALICE), AlbumListKind::Random, 3, 0)
             .await
             .unwrap(),
         |a| a.id,
@@ -590,7 +608,7 @@ fixture_test!(album_list_each_kind, |pool| {
     assert_eq!(unique.len(), 3);
 
     // The row carries the album's own data.
-    let first = &subsonic::album_list(&pool, ALICE, AlbumListKind::Highest, 1, 0)
+    let first = &subsonic::album_list(&pool, ProfileId::new(ALICE), AlbumListKind::Highest, 1, 0)
         .await
         .unwrap()[0];
     assert_eq!(
@@ -604,12 +622,12 @@ fixture_test!(album_list_each_kind, |pool| {
 });
 
 fixture_test!(random_and_top_tracks, |pool| {
-    let all = subsonic::random_tracks(&pool, ALICE, 100, None, None)
+    let all = subsonic::random_tracks(&pool, ProfileId::new(ALICE), 100, None, None)
         .await
         .unwrap();
     assert_eq!(all.len(), 19); // not the missing one
     assert_eq!(
-        subsonic::random_tracks(&pool, ALICE, 5, None, None)
+        subsonic::random_tracks(&pool, ProfileId::new(ALICE), 5, None, None)
             .await
             .unwrap()
             .len(),
@@ -620,7 +638,7 @@ fixture_test!(random_and_top_tracks, |pool| {
         let pool = pool.clone();
         async move {
             let mut got = ids(
-                &subsonic::random_tracks(&pool, ALICE, 100, Some((from, to)), None)
+                &subsonic::random_tracks(&pool, ProfileId::new(ALICE), 100, Some((from, to)), None)
                     .await
                     .unwrap(),
                 |s| s.track.id,
@@ -649,7 +667,7 @@ fixture_test!(random_and_top_tracks, |pool| {
     );
 
     // Top songs: plays of all users, then title; exact names first, else a substring.
-    let top = subsonic::top_tracks(&pool, ALICE, "la roux", 50)
+    let top = subsonic::top_tracks(&pool, ProfileId::new(ALICE), "la roux", 50)
         .await
         .unwrap();
     assert_eq!(
@@ -663,26 +681,28 @@ fixture_test!(random_and_top_tracks, |pool| {
             track(12)
         ]
     );
-    let top = subsonic::top_tracks(&pool, ALICE, "roux", 3).await.unwrap();
+    let top = subsonic::top_tracks(&pool, ProfileId::new(ALICE), "roux", 3)
+        .await
+        .unwrap();
     assert_eq!(ids(&top, |s| s.track.id), [track(10), track(11), track(17)]);
-    let top = subsonic::top_tracks(&pool, ALICE, "KESHA", 50)
+    let top = subsonic::top_tracks(&pool, ProfileId::new(ALICE), "KESHA", 50)
         .await
         .unwrap();
     assert_eq!(ids(&top, |s| s.track.id), [track(13)]);
     assert!(
-        subsonic::top_tracks(&pool, ALICE, "nobody", 50)
+        subsonic::top_tracks(&pool, ProfileId::new(ALICE), "nobody", 50)
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
-        subsonic::top_tracks(&pool, ALICE, "100%", 50)
+        subsonic::top_tracks(&pool, ProfileId::new(ALICE), "100%", 50)
             .await
             .unwrap()
             .is_empty()
     );
     // Plays of every user count: the admin's one play lifts a Beatles song.
-    let top = subsonic::top_tracks(&pool, ALICE, "The Beatles", 2)
+    let top = subsonic::top_tracks(&pool, ProfileId::new(ALICE), "The Beatles", 2)
         .await
         .unwrap();
     assert_eq!(ids(&top, |s| s.track.id), [track(1), track(6)]);
@@ -691,23 +711,33 @@ fixture_test!(random_and_top_tracks, |pool| {
 fixture_test!(tracks_by_ids_keeps_order_drops_missing, |pool| {
     let unknown = Uuid::now_v7();
     let asked = [track(13), unknown, track(1), track(20), track(10)];
-    let got = subsonic::tracks_by_ids(&pool, ALICE, &asked).await.unwrap();
+    let got = subsonic::tracks_by_ids(&pool, ProfileId::new(ALICE), &asked)
+        .await
+        .unwrap();
     assert_eq!(ids(&got, |s| s.track.id), [track(13), track(1), track(10)]);
     assert!(got[1].starred_at.is_some());
     assert!(
-        subsonic::tracks_by_ids(&pool, ALICE, &[])
+        subsonic::tracks_by_ids(&pool, ProfileId::new(ALICE), &[])
             .await
             .unwrap()
             .is_empty()
     );
 
-    let albums = subsonic::albums_by_ids(&pool, ALICE, &[album(4), album(6), album(1)])
-        .await
-        .unwrap();
+    let albums = subsonic::albums_by_ids(
+        &pool,
+        ProfileId::new(ALICE),
+        &[album(4), album(6), album(1)],
+    )
+    .await
+    .unwrap();
     assert_eq!(ids(&albums, |a| a.id), [album(4), album(1)]);
-    let artists = subsonic::artists_by_ids(&pool, ALICE, &[artist(3), artist(4), artist(1)])
-        .await
-        .unwrap();
+    let artists = subsonic::artists_by_ids(
+        &pool,
+        ProfileId::new(ALICE),
+        &[artist(3), artist(4), artist(1)],
+    )
+    .await
+    .unwrap();
     assert_eq!(ids(&artists, |a| a.id), [artist(3), artist(1)]);
 });
 
@@ -720,7 +750,7 @@ fixture_test!(search_offset_pages, |pool| {
         song_count,
         song_offset,
     };
-    let (_, _, everything) = subsonic::search_all(&pool, ALICE, page(500, 0))
+    let (_, _, everything) = subsonic::search_all(&pool, ProfileId::new(ALICE), page(500, 0))
         .await
         .unwrap();
     assert_eq!(everything.len(), 19);
@@ -742,7 +772,7 @@ fixture_test!(search_offset_pages, |pool| {
     // Paging by 7 sees every track exactly once, whatever the ties.
     let mut paged = Vec::new();
     for offset in (0..).step_by(7) {
-        let (_, _, songs) = subsonic::search_all(&pool, ALICE, page(7, offset))
+        let (_, _, songs) = subsonic::search_all(&pool, ProfileId::new(ALICE), page(7, offset))
             .await
             .unwrap();
         let short = songs.len() < 7;
@@ -756,7 +786,7 @@ fixture_test!(search_offset_pages, |pool| {
     // Artists and albums page on their own offsets.
     let (artists, albums, songs) = subsonic::search_all(
         &pool,
-        ALICE,
+        ProfileId::new(ALICE),
         SearchPage {
             artist_count: 2,
             artist_offset: 2,
@@ -830,7 +860,7 @@ fixture_test!(purging_track_cascades_stars_ratings_bookmarks, |pool| {
         (1, 1, 1)
     );
     assert!(
-        stars::list_for_user(&pool, ALICE, StarKind::Track)
+        stars::list_for_user(&pool, ProfileId::new(ALICE), StarKind::Track)
             .await
             .unwrap()
             .iter()
@@ -882,9 +912,14 @@ fixture_test!(purging_track_cascades_stars_ratings_bookmarks, |pool| {
 });
 
 fixture_test!(set_fk_violation_is_false, |pool| {
-    let done = stars::set(&pool, ALICE, StarKind::Track, Uuid::now_v7())
-        .await
-        .unwrap();
+    let done = stars::set(
+        &pool,
+        ProfileId::new(ALICE),
+        StarKind::Track,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
     assert!(!done);
 });
 

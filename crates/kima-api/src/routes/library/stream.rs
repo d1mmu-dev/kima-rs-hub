@@ -35,7 +35,8 @@ async fn stream(
     let quality = match params.quality.as_deref() {
         // Without `quality` the caller's `playbackQuality` setting decides, as upstream.
         None => {
-            let saved = kima_db::user_settings::get(&state.pool, user.id).await?;
+            // M-PROF Task 5: main profile until AuthUser carries one.
+            let saved = kima_db::user_settings::get(&state.pool, user.main_profile()).await?;
             Quality::parse(&saved.playback_quality).unwrap_or(Quality::Original)
         }
         Some(q) => Quality::parse(q).ok_or_else(|| {

@@ -2,6 +2,7 @@
 
 mod common;
 
+use kima_core::profile::ProfileId;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -267,9 +268,13 @@ fixture_test!(
             track_id: Some(Some(t.to_string())),
             ..Patch::default()
         };
-        playback::upsert(&pool, ALICE_ID, web(a)).await.unwrap();
+        playback::upsert(&pool, ProfileId::new(ALICE_ID), web(a))
+            .await
+            .unwrap();
         // Admin's web state is stale and does not count.
-        playback::upsert(&pool, ADMIN_ID, web(c)).await.unwrap();
+        playback::upsert(&pool, ProfileId::new(ADMIN_ID), web(c))
+            .await
+            .unwrap();
         sqlx::query(
             "UPDATE playback_state SET updated_at = now() - interval '3 hours' WHERE profile_id = $1",
         )

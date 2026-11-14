@@ -270,7 +270,8 @@ async fn for_you(
     let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
     let rows = state
         .podcast_catalog
-        .for_you(user.id)
+        // M-PROF Task 5: main profile until AuthUser carries one.
+        .for_you(user.main_profile())
         .await
         .map_err(apple_failure)?;
     let mut hidden = 0;

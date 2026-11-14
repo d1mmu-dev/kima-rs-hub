@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO api_keys (id, profile_id, name, key_hash, secret_enc)\n           VALUES ($1, $2, $3, $4, $5)\n           RETURNING id, profile_id AS user_id, name, created_at, last_used_at",
+  "query": "SELECT id, profile_id AS \"profile_id: ProfileId\", name, created_at, last_used_at\n           FROM api_keys WHERE profile_id = $1 ORDER BY created_at DESC, id DESC",
   "describe": {
     "columns": [
       {
@@ -10,7 +10,7 @@
       },
       {
         "ordinal": 1,
-        "name": "user_id",
+        "name": "profile_id: ProfileId",
         "type_info": "Uuid"
       },
       {
@@ -31,11 +31,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Uuid",
-        "Text",
-        "Bytea",
-        "Bytea"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -46,5 +42,5 @@
       true
     ]
   },
-  "hash": "c1d16802527d12369f21a34fc552f7e6c2968ab1b818d5c8df71b1bc31b582f1"
+  "hash": "d210b5476fc5806165635594fc2733a4199f08af5185a805bbe500f13e520031"
 }

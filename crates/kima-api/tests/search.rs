@@ -3,6 +3,7 @@ mod common;
 use axum::http::StatusCode;
 use axum_test::TestServer;
 use common::library::{Seed, mark_missing, seed};
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use serde_json::Value;
 use time::macros::datetime;
@@ -55,7 +56,9 @@ async fn followed_show(pool: &PgPool, user: Uuid, title: &str, description: &str
     )
     .await
     .unwrap();
-    podcasts::subscribe(pool, user, show.id).await.unwrap();
+    podcasts::subscribe(pool, ProfileId::new(user), show.id)
+        .await
+        .unwrap();
     show.id
 }
 

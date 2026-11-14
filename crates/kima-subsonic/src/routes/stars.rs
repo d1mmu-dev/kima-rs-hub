@@ -4,6 +4,7 @@
 use axum::Router;
 use axum::extract::State;
 use kima_api::AppState;
+use kima_core::profile::ProfileId;
 use kima_db::stars::{self, StarKind};
 use kima_db::{PgPool, ratings, subsonic};
 use uuid::Uuid;
@@ -72,7 +73,8 @@ async fn star(
         // `set` answers false for a target that does not exist, so an `albumId` that names a
         // song is skipped just as an unknown id is.
         if let Some(kind) = kind
-            && stars::set(&app.pool, user.user.id, kind, id).await?
+            // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+            && stars::set(&app.pool, user.user.main_profile(), kind, id).await?
         {
             valid += 1;
         }
@@ -90,7 +92,8 @@ async fn unstar(
 ) -> Result<Answer, SubsonicError> {
     for (kind, id) in targets(&app.pool, &params).await? {
         if let Some(kind) = kind {
-            stars::clear(&app.pool, user.user.id, kind, id).await?;
+            // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+            stars::clear(&app.pool, user.user.main_profile(), kind, id).await?;
         }
     }
     Ok(Answer::ok())
@@ -102,7 +105,7 @@ struct Starred {
     songs: Vec<subsonic::SongItem>,
 }
 
-async fn starred(pool: &PgPool, me: Uuid) -> Result<Starred, SubsonicError> {
+async fn starred(pool: &PgPool, me: ProfileId) -> Result<Starred, SubsonicError> {
     let artist_ids = stars::list_for_user(pool, me, StarKind::Artist).await?;
     let album_ids = stars::list_for_user(pool, me, StarKind::Album).await?;
     let song_ids = stars::list_for_user(pool, me, StarKind::Track).await?;
@@ -118,7 +121,8 @@ async fn get_starred(
     State(app): State<AppState>,
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
-    let s = starred(&app.pool, user.user.id).await?;
+    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    let s = starred(&app.pool, user.user.main_profile()).await?;
     Ok(Answer::node(
         Node::new("starred")
             .list("artist", s.artists.iter().map(map::artist_id3).collect())
@@ -132,7 +136,8 @@ async fn get_starred2(
     State(app): State<AppState>,
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
-    let s = starred(&app.pool, user.user.id).await?;
+    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    let s = starred(&app.pool, user.user.main_profile()).await?;
     Ok(Answer::node(
         Node::new("starred2")
             .list("artist", s.artists.iter().map(map::artist_id3).collect())
@@ -158,8 +163,9 @@ async fn set_rating(
         .await?
         .ok_or_else(unknown)?;
     if rating == 0 {
-        ratings::clear(&app.pool, user.user.id, kind, id).await?;
-    } else if !ratings::set(&app.pool, user.user.id, kind, id, rating as i16).await? {
+        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+        ratings::clear(&app.pool, user.user.main_profile(), kind, id).await?;
+    } else if !ratings::set(&app.pool, user.user.main_profile(), kind, id, rating as i16).await? {
         return Err(unknown());
     }
     Ok(Answer::ok())

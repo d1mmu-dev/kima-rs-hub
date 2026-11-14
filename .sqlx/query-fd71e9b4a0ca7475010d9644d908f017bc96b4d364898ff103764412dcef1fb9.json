@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT k.id AS key_id,\n                  u.id, u.username, u.password_hash, u.role, u.onboarding_complete,\n                  u.token_version, u.created_at\n           FROM api_keys k JOIN users u ON u.id = k.profile_id\n           WHERE k.key_hash = $1",
+  "query": "SELECT k.id AS key_id, k.profile_id,\n                  u.id, u.username, u.password_hash, u.role, u.onboarding_complete,\n                  u.token_version, u.created_at\n           FROM api_keys k\n           JOIN profiles pr ON pr.id = k.profile_id\n           JOIN users u ON u.id = pr.user_id\n           WHERE k.key_hash = $1",
   "describe": {
     "columns": [
       {
@@ -10,36 +10,41 @@
       },
       {
         "ordinal": 1,
-        "name": "id",
+        "name": "profile_id",
         "type_info": "Uuid"
       },
       {
         "ordinal": 2,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
         "name": "username",
         "type_info": "Text"
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "password_hash",
         "type_info": "Text"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "role",
         "type_info": "Text"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "onboarding_complete",
         "type_info": "Bool"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "token_version",
         "type_info": "Int4"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
@@ -57,8 +62,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "639e9ba2c399f9a9fcc11245ae1b421b6c1e259f1e5bb3359ad2ca328e0a67c5"
+  "hash": "fd71e9b4a0ca7475010d9644d908f017bc96b4d364898ff103764412dcef1fb9"
 }

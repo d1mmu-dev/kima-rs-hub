@@ -87,7 +87,8 @@ async fn source_of(
     id: Uuid,
     not_found: impl FnOnce() -> SubsonicError,
 ) -> Result<Source, SubsonicError> {
-    let song = subsonic::track(&app.pool, user.user.id, id)
+    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    let song = subsonic::track(&app.pool, user.user.main_profile(), id)
         .await?
         .ok_or_else(not_found)?;
     Ok(Source {
@@ -276,7 +277,8 @@ async fn get_transcode_decision(
         return Err(not_found());
     }
     let id = ids::parse(media_id, &[]).ok_or_else(not_found)?;
-    let song = subsonic::track(&app.pool, user.user.id, id)
+    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    let song = subsonic::track(&app.pool, user.user.main_profile(), id)
         .await?
         .ok_or_else(not_found)?;
     let format = params.get("format");
@@ -413,7 +415,8 @@ async fn get_cover_art(
     }
     if image.is_none()
         && let Some(track) = track
-        && let Some(song) = subsonic::track(&app.pool, user.user.id, track).await?
+        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+        && let Some(song) = subsonic::track(&app.pool, user.user.main_profile(), track).await?
     {
         image = media::cover(&app, song.track.album_id, size).await?;
     }

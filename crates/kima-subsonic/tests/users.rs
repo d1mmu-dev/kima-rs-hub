@@ -834,7 +834,10 @@ async fn password_change_revokes_web_sessions(pool: PgPool) {
         assert_eq!(me(&token).await, axum::http::StatusCode::UNAUTHORIZED);
         let event = events.try_recv().expect("a revocation was published");
         assert!(event.is_revocation(), "{event:?}");
-        assert_eq!(event.user_id, Some(bob.id));
+        assert_eq!(
+            event.audience,
+            kima_core::events::Audience::Account(bob.account())
+        );
     }
 }
 

@@ -1,4 +1,3 @@
-use kima_core::profile::ProfileId;
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -16,6 +15,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::auth::AuthUser;
 use crate::error::ApiError;
+use crate::events::StreamOwner;
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -25,8 +25,11 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn issue_ticket(State(state): State<AppState>, user: AuthUser) -> Json<Value> {
-    // M-PROF Task 5: main profile until the route reads `profile`.
-    Json(json!({ "ticket": state.sse.issue_ticket(ProfileId::main_of(user.account).into_uuid()) }))
+    let owner = StreamOwner {
+        account: user.account,
+        profile: user.profile,
+    };
+    Json(json!({ "ticket": state.sse.issue_ticket(owner) }))
 }
 
 #[derive(Deserialize)]
@@ -53,24 +56,26 @@ async fn stream(
     // Subscribing after the redeem would leave a gap where the revoke event is missed while the
     // stored version already matches.
     let receiver = state.events.subscribe();
-    let user = state
+    let owner = state
         .sse
         .redeem_ticket(&ticket)
         .ok_or(ApiError::Unauthorized("Invalid or expired ticket"))?;
-    let version = users::find_by_id(&state.pool, user)
+    // The profile must still exist (and still be the account's): a profile deleted since the
+    // ticket was issued opens nothing.
+    let version = users::find_session(&state.pool, owner.account, owner.profile)
         .await?
         .ok_or(ApiError::Unauthorized("Invalid or expired ticket"))?
         .token_version;
     let slot = state
         .sse
-        .try_open(user)
+        .try_open(owner.profile)
         .ok_or(ApiError::TooManyRequests("Too many event streams open"))?;
 
     let connected = futures::stream::once(async {
         Ok::<_, Infallible>(SseEvent::default().data(r#"{"type":"connected"}"#))
     });
     // A lagging client may have skipped its own revocation, so on lag the session is re-checked
-    // in the DB: revoked (or deleted) ends the stream, otherwise the client gets a resync hint.
+    // in the DB: revoked (or the profile or account deleted) ends the stream, otherwise the client gets a resync hint.
     // A revocation event seen in time also ends the stream (the frame itself is never sent).
     let pool = state.pool.clone();
     let events = BroadcastStream::new(receiver)
@@ -78,7 +83,7 @@ async fn stream(
             let pool = pool.clone();
             async move {
                 match message {
-                    Ok(event) if event.is_for(user) => {
+                    Ok(event) if event.is_for(owner.account, owner.profile) => {
                         if event.is_revocation() {
                             Step::End
                         } else {
@@ -87,7 +92,7 @@ async fn stream(
                     }
                     Ok(_) => Step::Skip,
                     Err(BroadcastStreamRecvError::Lagged(_)) => {
-                        match users::find_by_id(&pool, user).await {
+                        match users::find_session(&pool, owner.account, owner.profile).await {
                             Ok(Some(row)) if row.token_version == version => {
                                 Step::Send(r#"{"type":"resync"}"#.to_owned())
                             }

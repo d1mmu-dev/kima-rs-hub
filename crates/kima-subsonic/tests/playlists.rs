@@ -606,7 +606,10 @@ async fn playlist_events_only_on_committed_changes(pool: PgPool) {
     let check =
         |rx: &mut tokio::sync::broadcast::Receiver<kima_core::events::Event>, id: &str, deleted| {
             let event = rx.try_recv().expect("one event");
-            assert_eq!(event.user_id, Some(ALICE_ID));
+            assert_eq!(
+                event.audience,
+                kima_core::events::Audience::Profile(kima_core::profile::ProfileId::new(ALICE_ID))
+            );
             assert_eq!(
                 event.data,
                 serde_json::json!({"type":"playlist:updated", "playlistId":id, "deleted":deleted})

@@ -120,11 +120,12 @@ fn song_ids(params: &Params, key: &str) -> Result<Vec<Uuid>, SubsonicError> {
         .collect()
 }
 
-fn announce(ctx: &SubsonicCtx, who: Uuid, playlist: Uuid, deleted: bool) {
-    ctx.app.events.publish(Event {
-        user_id: Some(who),
-        data: json!({"type": "playlist:updated", "playlistId": playlist, "deleted": deleted}),
-    });
+/// Tells the open streams of the profile that made the change (D-245).
+fn announce(ctx: &SubsonicCtx, who: ProfileId, playlist: Uuid, deleted: bool) {
+    ctx.app.events.publish(Event::for_profile(
+        who,
+        json!({"type": "playlist:updated", "playlistId": playlist, "deleted": deleted}),
+    ));
 }
 
 fn write_result(result: SubsonicWrite) -> Result<bool, SubsonicError> {
@@ -152,7 +153,7 @@ async fn create_playlist(
             // M-PROF Task 7: main profile until a Subsonic session can be another profile.
             announce(
                 &ctx,
-                ProfileId::main_of(user.user.account).into_uuid(),
+                ProfileId::main_of(user.user.account),
                 playlist.id,
                 false,
             );
@@ -174,12 +175,7 @@ async fn create_playlist(
             return Err(SubsonicError::not_found("Song not found"));
         }
         // M-PROF Task 7: main profile until a Subsonic session can be another profile.
-        announce(
-            &ctx,
-            ProfileId::main_of(user.user.account).into_uuid(),
-            id,
-            false,
-        );
+        announce(&ctx, ProfileId::main_of(user.user.account), id, false);
         id
     } else {
         return Err(SubsonicError::new(
@@ -213,7 +209,7 @@ async fn update_playlist(
         // M-PROF Task 7: main profile until a Subsonic session can be another profile.
         announce(
             &ctx,
-            ProfileId::main_of(user.user.account).into_uuid(),
+            ProfileId::main_of(user.user.account),
             playlist.id,
             false,
         );
@@ -231,7 +227,7 @@ async fn delete_playlist(
         // M-PROF Task 7: main profile until a Subsonic session can be another profile.
         announce(
             &ctx,
-            ProfileId::main_of(user.user.account).into_uuid(),
+            ProfileId::main_of(user.user.account),
             playlist.id,
             true,
         );

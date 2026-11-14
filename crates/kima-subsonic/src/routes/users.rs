@@ -5,6 +5,7 @@
 use axum::Router;
 use axum::extract::State;
 use kima_api::{AppState, revoke_sessions};
+use kima_core::profile::AccountId;
 use kima_db::users::{self, Deletion, ROLE_ADMIN, ROLE_USER, RoleChange, User};
 use uuid::Uuid;
 
@@ -100,7 +101,7 @@ async fn set_password(app: &AppState, id: Uuid, password_hash: &str) -> Result<(
         .await?
         .ok_or_else(user_not_found)?;
     tx.commit().await?;
-    revoke_sessions(app, id);
+    revoke_sessions(app, AccountId::new(id));
     Ok(())
 }
 
@@ -211,7 +212,7 @@ async fn update_user(
     }
     tx.commit().await?;
     if password_hash.is_some() {
-        revoke_sessions(&app, target.id);
+        revoke_sessions(&app, target.account());
     }
     Ok(Answer::ok())
 }
@@ -231,7 +232,7 @@ async fn delete_user(
     }
     match users::delete_unless_last_admin(&app.pool, target.id).await? {
         Deletion::Deleted => {
-            revoke_sessions(&app, target.id);
+            revoke_sessions(&app, target.account());
             Ok(Answer::ok())
         }
         Deletion::NotFound => Err(user_not_found()),

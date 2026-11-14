@@ -4,7 +4,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use common::{Picard, Tags, make_audio, require_ffmpeg, tag_picard};
-use kima_core::events::EventBus;
+use kima_core::events::{Audience, EventBus};
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::library::Guessed;
 use kima_library::scan::{self, LibraryCtx, PathOutcome};
@@ -514,8 +515,17 @@ async fn purged_track_announces_playlists_holding_it(pool: PgPool) {
             .await
             .unwrap();
     }
+    // The playlist that loses tracks belongs to a non-main profile of ana's: only that
+    // profile is told (D-245), not ana's main profile (whose id is ana's).
+    let ana_kids = Uuid::now_v7();
+    sqlx::query("INSERT INTO profiles (id, user_id, name, kind) VALUES ($1, $2, 'Kids', 'kids')")
+        .bind(ana_kids)
+        .bind(ana)
+        .execute(&pool)
+        .await
+        .unwrap();
     let (holds_both, holds_kept) = (Uuid::now_v7(), Uuid::now_v7());
-    for (pl, owner) in [(holds_both, ana), (holds_kept, ben)] {
+    for (pl, owner) in [(holds_both, ana_kids), (holds_kept, ben)] {
         sqlx::query("INSERT INTO playlists (id, profile_id, name) VALUES ($1, $2, 'p')")
             .bind(pl)
             .bind(owner)
@@ -556,7 +566,7 @@ async fn purged_track_announces_playlists_holding_it(pool: PgPool) {
     while let Ok(ev) = rx.try_recv() {
         if ev.data["type"] == "playlist:updated" {
             told.push((
-                ev.user_id,
+                ev.audience,
                 ev.data["playlistId"].clone(),
                 ev.data["deleted"].clone(),
             ));
@@ -565,7 +575,7 @@ async fn purged_track_announces_playlists_holding_it(pool: PgPool) {
     assert_eq!(
         told,
         vec![(
-            Some(ana),
+            Audience::Profile(ProfileId::new(ana_kids)),
             serde_json::json!(holds_both),
             serde_json::json!(false)
         )]
@@ -1013,7 +1023,7 @@ async fn reconcile_publishes_progress(pool: PgPool) {
     scan::reconcile(&c).await.unwrap();
     let mut last = None;
     while let Ok(ev) = rx.try_recv() {
-        assert!(ev.user_id.is_none());
+        assert_eq!(ev.audience, Audience::All);
         last = Some(ev.data);
     }
     assert_eq!(

@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use kima_core::events::{Event, EventBus};
+use kima_core::events::{Audience, Event, EventBus};
 use kima_db::genres::{self, GenreSource};
 use kima_db::library::{self, IndexedTrack, ResolvedTrack, StoredCredit, TagIds};
 use kima_db::{PgConnection, PgPool, retry_once_on_conflict};
@@ -271,7 +271,7 @@ impl<'a> Progress<'a> {
     fn send(&mut self) {
         self.last = Some(Instant::now());
         self.events.publish(Event {
-            user_id: None,
+            audience: Audience::All,
             data: serde_json::json!({
                 "type": "library:progress",
                 "job": "scan",
@@ -1547,13 +1547,12 @@ async fn reconcile_with(
         // Upstream `playlistsHoldingTracks` (`bafecf23`): the owner of each playlist that lost a
         // place is told once, after the commit.
         for (owner, playlist) in &retired.playlists {
-            ctx.events.publish(Event {
-                // M-PROF Task 5: the audience becomes the owning profile (Event::audience).
-                user_id: Some(owner.into_uuid()),
-                data: serde_json::json!({
+            ctx.events.publish(Event::for_profile(
+                *owner,
+                serde_json::json!({
                     "type": "playlist:updated", "playlistId": playlist, "deleted": false,
                 }),
-            });
+            ));
         }
         refresh_albums(&ctx.pool, retired.albums.into_iter().collect()).await?;
     }

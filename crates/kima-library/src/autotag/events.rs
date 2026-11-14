@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use kima_core::events::{Event, EventBus};
+use kima_core::events::{Audience, Event, EventBus};
 use serde_json::{Map, Value, json};
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -106,7 +106,7 @@ impl AutotagEvents {
             data.insert("state".into(), json!(state));
         }
         self.bus.publish(Event {
-            user_id: None,
+            audience: Audience::All,
             data: Value::Object(data),
         });
     }
@@ -163,7 +163,7 @@ mod tests {
             json!({"type": TYPE, "job": "search", "albumId": album, "done": 0, "total": 3,
                    "state": "searching"})
         );
-        assert_eq!(sent[0].user_id, None);
+        assert_eq!(sent[0].audience, Audience::All);
 
         tokio::time::advance(Duration::from_millis(1)).await;
         ev.progress(AutotagJob::Search, Some(album), None, 2, 3, None);

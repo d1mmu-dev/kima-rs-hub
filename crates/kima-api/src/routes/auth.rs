@@ -305,7 +305,7 @@ async fn change_password(
         .await?
         .ok_or_else(|| ApiError::Conflict("Password was changed concurrently, please retry"))?;
     tx.commit().await?;
-    revoke_sessions(&state, auth.account.into_uuid());
+    revoke_sessions(&state, auth.account);
     Ok(Json(json!({
         "message": "Password changed successfully",
         "token": state.jwt.issue_access(auth.account, auth.profile, &auth.username, &auth.role, version),
@@ -404,7 +404,7 @@ async fn delete_user(
         Deletion::NotFound => Err(ApiError::NotFound("User not found")),
         Deletion::LastAdmin => Err(ApiError::BadRequest("Cannot delete the last admin".into())),
         Deletion::Deleted => {
-            revoke_sessions(&state, id);
+            revoke_sessions(&state, AccountId::new(id));
             Ok(Json(json!({ "message": "User deleted successfully" })))
         }
     }

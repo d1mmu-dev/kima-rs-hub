@@ -828,10 +828,15 @@ fn drain(
 ) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     while let Ok(ev) = rx.try_recv() {
-        if ev.is_for(user) && ev.data["type"] == "playlist:updated" {
+        // `user` is a main profile here, whose id is its account's.
+        let (account, profile) = (
+            kima_core::profile::AccountId::new(user),
+            kima_core::profile::ProfileId::new(user),
+        );
+        if ev.is_for(account, profile) && ev.data["type"] == "playlist:updated" {
             assert_eq!(
-                ev.user_id,
-                Some(user),
+                ev.audience,
+                kima_core::events::Audience::Profile(profile),
                 "playlist events are never broadcast"
             );
             out.push((

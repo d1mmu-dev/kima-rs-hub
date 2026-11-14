@@ -1,6 +1,10 @@
 # M-SYNC API fixture capture (Task 18, steps 1–3)
 
-Run `env -u DATABASE_URL -u PGDATABASE tools/capture-api-fixtures.sh` from this checkout.
+Run `env -u DATABASE_URL -u PGDATABASE KIMA_CAPTURE_SET=<sets> tools/capture-api-fixtures.sh`
+from this checkout. `KIMA_CAPTURE_SET` (required since M6 Task 19) is a comma list of
+`msync`, `mstats`, `m6`: every capture runs, but only the named sets are copied into
+`crates/kima-api-types/tests/fixtures/`, and the run refuses to start when one of those
+files has uncommitted changes. The original M-SYNC run below predates the variable.
 The script rejects caller DB variables, starts a **new** labelled pgvector:pg17 container
 with Docker-assigned loopback port and ephemeral data, verifies `kima|kima` over the
 host connection, builds this checkout's `kima-server`, generates the sine-tone library
@@ -81,3 +85,56 @@ database `mstats_capture_1794466228_340749` created in the parent-provided isola
 exit. Only the ten stats fixtures were committed; the nine M-SYNC fixtures from the same run
 differed from the committed ones only in dynamic ids and timestamps and were left as they
 were.
+
+## M6 podcast fixtures (plan `2026-11-12-m6-podcasts.md`, Task 19)
+
+`KIMA_CAPTURE_SET=m6` copies 30 `podcasts_<name>_response.json` files and
+`podcasts_capture_manifest.json`. The M6 part (`tools/capture-podcast-fixtures.inc.sh`,
+sourced after M-STATS so `/library/recently-listened` also has artist rows) is a **real
+loopback flow**, not SQL seeding: `tools/podcast-capture-mock.py` serves synthetic Apple
+answers (genres, charts, lookup, search; **not** an Apple recording), three RSS feeds with
+Podcasting 2.0 `ai-content` tags, range-aware audio and a PNG cover on one loopback port. The
+server reaches exactly that socket through `KIMA_NET_ALLOW_LOOPBACK` (D-216; refused unless
+`KIMA_NET_DENY_REAL=1`) and Apple through `KIMA_ITUNES_BASE_URL`.
+
+Scenario: `POST /podcasts/subscribe` follows Race Show (Apple 555; no channel tag = unknown;
+"Sprint" tagged human, "Race Recap" tagged AI) and Robot Radio (777, channel tagged AI) from
+their feeds; progress 120/1200 s on Sprint (captured) and 300 s on a Robot Radio episode; the
+default filter (`hide`) then hides Robot Radio and Race Recap everywhere it lists them.
+`?ai=show` (`list_ai_show`) and the persisted setting (`POST /settings
+{"podcastAiContent":"show"}` before `listening_ai_show`, reset to `hide` after) show them.
+Preview Show (888) is only previewed, so its preview carries `previewEpisodes` and a
+`snippet` read from its feed. The mock then adds "Pit Stop" to the Race Show feed and the
+manual refresh finds exactly it. Admin label overrides and the unsubscribe run last.
+
+| Fixture | Route | Condition |
+| --- | --- | --- |
+| categories | GET /podcasts/categories | mock genre tree (Comedy > Improv, Technology) |
+| subscribe | POST /podcasts/subscribe | Race Show by feed + Apple id 555, new |
+| progress | POST .../episodes/{Sprint}/progress | 120 of 1200 s |
+| list / list_ai_show | GET /podcasts, `?ai=show` | hide: Robot Radio and Race Recap hidden (header 2) |
+| detail / episodes | GET /podcasts/{race}, `/episodes` | `aiHidden: 1`; Sprint human (feed-episode) |
+| next / next_end | GET .../episodes/{Qualifying,Grand Prix}/next | Sprint with progress / `{episode: null}` |
+| listening / listening_ai_show | GET /podcasts/listening | setting hide (`aiHidden`) / setting show |
+| charts, discover_top, discover_genre, discover_genres, for_you, similar, preview_similar | discovery routes | 777 hidden by its stored AI label |
+| preview / preview_followed | GET /podcasts/preview/{888,555} | feed read (episodes + snippet) / followed |
+| search / search_discover | GET /search?q=race&type=all, /search/discover?type=podcasts | followed show and visible episodes / Apple 555 |
+| recently_listened | GET /library/recently-listened | artist row + Race Show (Sprint) |
+| stats_spoken | GET /stats?period=all&tz=UTC | 2 follows, 2 in progress, backlog 4 |
+| refresh / refresh_all | GET /podcasts/{race}/refresh, POST /podcasts/refresh-all | 1 new of 5 / 2 queued |
+| progress_clear | DELETE .../episodes/{Sprint}/progress | |
+| ai_label_show / ai_label_episode | PUT .../ai-label | human (show) / ai (Grand Prix), admin |
+| unsubscribe | DELETE /podcasts/{robot}/unsubscribe | |
+
+The manifest records, per request, the upstream route template, path, HTTP status and
+`X-Kima-Ai-Hidden`; it also holds the status-only checks of the four non-JSON routes (episode
+stream and preview snippet with `Range`, show and episode cover redirects). The script fails
+before copying unless 30 named captures exist and all 24 upstream `routes/podcasts.ts`
+registrations answered 2xx/3xx. `crates/kima-api-types/tests/podcasts.rs` then checks the DTOs,
+key paths against `podcasts_upstream_keys.json` (upstream keys from the backend handlers, each
+kima-only key with its DIVERGENCES row: D-207 AI keys, D-059 `trackCount`), populated nested
+shapes, cross-response ids, `toISOString` timestamps, the header/body hidden counts and the
+route count. `tools/check-podcast-upstream-keys.py <kima-hub checkout>` re-checks the key file
+against the cited upstream source lines at `c7527577`, independently of the key file's claims.
+
+Status (2026-11-13): fixtures captured with `KIMA_CAPTURE_SET=m6` from `b204515` (container `msync18-capture-1794611746-3183913`, loopback host port 32788, Apple/feed/audio mock on loopback; not an Apple recording, not SQL seeding). 31 files copied (30 responses + manifest); fixture tests un-ignored, 10/10 pass; `tools/check-podcast-upstream-keys.py` reports 0 problems on 255 upstream key names. Dynamic UUIDs, timestamps and the mock's port in feed/cover URLs are kept as observed.

@@ -781,3 +781,72 @@ async fn pending_with_key_finds_a_queued_or_running_job_by_payload_key(pool: PgP
         None
     );
 }
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_unless_pending_with_key_skips_a_queued_or_running_job_with_that_key(pool: PgPool) {
+    let payload = |user: &str| json!({"key": "episode:e1", "user": user});
+    let first = queue::enqueue_unless_pending_with_key(&pool, "q", payload("a"), 3)
+        .await
+        .unwrap()
+        .expect("a fresh job");
+    // Queued: the same key is not queued again, whatever else the payload says.
+    assert_eq!(
+        queue::enqueue_unless_pending_with_key(&pool, "q", payload("b"), 3)
+            .await
+            .unwrap(),
+        None
+    );
+    // Another key or another queue is its own job.
+    assert!(
+        queue::enqueue_unless_pending_with_key(&pool, "q", json!({"key": "episode:e2"}), 3)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        queue::enqueue_unless_pending_with_key(&pool, "other", payload("a"), 3)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let claimed = queue::claim(&pool, "q", 1, LEASE).await.unwrap();
+    assert_eq!(claimed[0].id, first);
+    // Running: still not queued again.
+    assert_eq!(
+        queue::enqueue_unless_pending_with_key(&pool, "q", payload("a"), 3)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(queue::complete(&pool, &claimed[0]).await.unwrap());
+    // Done: a new job.
+    assert!(
+        queue::enqueue_unless_pending_with_key(&pool, "q", payload("a"), 3)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enqueue_unless_pending_with_key_refuses_a_payload_without_a_text_key(pool: PgPool) {
+    // Without a key every keyless payload would count as a duplicate of every other one.
+    for payload in [
+        json!({"user": "a"}),
+        json!({"key": 7}),
+        json!({"key": null}),
+    ] {
+        let err = queue::enqueue_unless_pending_with_key(&pool, "q", payload.clone(), 3)
+            .await
+            .expect_err("a payload without a text key is refused");
+        assert!(
+            matches!(err, sqlx::Error::InvalidArgument(_)),
+            "{payload}: {err:?}"
+        );
+    }
+    let jobs: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 0);
+}

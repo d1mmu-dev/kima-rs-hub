@@ -57,13 +57,14 @@ fn header(v: impl AsRef<str>) -> HeaderValue {
 }
 
 /// `{title,publishedAt,duration,description}`, without `audioUrl` (used for both a preview
-/// episode row and the preview's own `snippet` key).
+/// episode row and the preview's own `snippet` key); a missing description is `""` like
+/// upstream's `ep.description || ""` (`podcasts.ts:363-366,402`).
 fn episode_json(ep: &FeedEpisode) -> Value {
     json!({
         "title": ep.title,
         "publishedAt": js_iso(ep.published_at),
         "duration": ep.duration,
-        "description": ep.description,
+        "description": ep.description.as_deref().unwrap_or_default(),
     })
 }
 
@@ -101,13 +102,15 @@ async fn preview_show(
         Some(&itunes_id),
     )
     .await?;
-    let (is_subscribed, subscribed_podcast_id) = match &stored {
-        Some(s) => (
-            kima_db::podcasts::is_subscribed(&state.pool, user.id, s.id).await?,
-            Some(s.id),
-        ),
-        None => (false, None),
+    // `subscribedPodcastId` only when this user follows it (`podcasts.ts:389`): a stored show
+    // someone else follows is not this user's page to open.
+    let is_subscribed = match &stored {
+        Some(s) => kima_db::podcasts::is_subscribed(&state.pool, user.id, s.id).await?,
+        None => false,
     };
+    let subscribed_podcast_id = stored.as_ref().filter(|_| is_subscribed).map(|s| s.id);
+    // The feed's own channel description, `""` when it was not read (`podcasts.ts:349,358`).
+    let mut description = String::new();
 
     let mut preview_episodes: Vec<Value> = Vec::new();
     let mut snippet_json = Value::Null;
@@ -123,6 +126,7 @@ async fn preview_show(
         if let Outcome::Answered(FeedFetch::Body { text, .. }) = fetched
             && let Ok(parsed) = kima_podcast::feed::parse(&text, time::OffsetDateTime::now_utc())
         {
+            description = parsed.show.description.clone().unwrap_or_default();
             preview_episodes = preview::newest_episodes(&parsed.episodes)
                 .into_iter()
                 .map(episode_json)
@@ -162,7 +166,7 @@ async fn preview_show(
         "itunesId": show.itunes_id,
         "title": show.title,
         "author": show.author,
-        "description": stored.as_ref().and_then(|s| s.description.clone()),
+        "description": description,
         "coverUrl": show.cover_url,
         "feedUrl": show.feed_url,
         "genres": genres,

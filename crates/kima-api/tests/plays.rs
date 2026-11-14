@@ -228,6 +228,12 @@ async fn recently_listened_orders_by_last_play(pool: PgPool) {
     }
     assert_eq!(items[0]["type"], "artist");
     assert_eq!(items[0]["id"], json!(a.artist));
+    // `lastPlayedAt` is a JS `Date` on the wire (`toISOString`: milliseconds, `Z`).
+    let at = items[0]["lastPlayedAt"].as_str().unwrap();
+    assert!(
+        at.len() == 24 && at.ends_with('Z') && at.as_bytes()[19] == b'.',
+        "{at} is not toISOString"
+    );
     assert_eq!(items[0]["albumCount"], 1);
 
     let limited = get(&e, &e.ana, "/api/library/recently-listened?limit=1").await;

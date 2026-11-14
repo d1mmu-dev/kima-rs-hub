@@ -167,6 +167,7 @@ restored after a reload) are listed in `docs/DIVERGENCES.md` D-215. Not yet visu
 - Not measured with `tools/compare-kima-web-visual.mjs`: the podcast pages have no diff/ink/SSIM numbers yet, so their
   look is unverified against v1.12.3 (the legacy reference itself was only smoke-tested against this backend: home,
   category, preview, follow, show page, play with a ranged seek, next episode, unfollow, no failing `/api/podcasts*`).
+  **Deferred to M10 visual-parity work** (M6 plan Definition of done 8), not a styling gap fixed in M6a.
 - Home: top categories are links to their chart page, not one shelf each (each shelf would be one Apple request through
   the 1-per-3-s limiter); search results render inline under the box, not in a floating dropdown.
 - Category page: 24 shows per page with a "more shows" button instead of loading on scroll; no hidden-AI count (the

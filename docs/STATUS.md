@@ -1,6 +1,6 @@
 # kima-rs-hub — stan prac
 
-_Ostatnia aktualizacja: 2026-11-14 · M6a na `main`_
+_Ostatnia aktualizacja: 2026-11-14 21:00 · `main` = `d935036`_
 
 <!-- private -->
 > Podsumowanie stanu projektu (aktualizowane po każdym etapie, publikowane razem z kolejnym merge'em do `main`). Źródłem prawdy jest historia gita; szczegóły różnic od upstreamu są w `docs/DIVERGENCES.md`, plan w `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md`.
@@ -23,7 +23,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M-STATS S1 | Statystyki odsłuchów | ✅ (S2 po analizie audio) |
 | M9 | kima-web część 1 (logowanie, biblioteka, player, playlisty, ustawienia, SSR) | ✅ (wygląd 1:1 otwarty) |
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
-| **M-PROF** | **Profile w koncie (Netflix)** | 🟡 **w toku (logowanie i sesje, Task 4/17); ~3–3,5 tyg.** |
+| **M-PROF** | **Profile w koncie (Netflix)** | 🟡 **w toku: baza i logowanie gotowe (Task 1–4), dalej trasy API, Subsonic, kima-web** |
 | M5 | Vibe (podobne utwory, nastrój) | ⏳ gałąź istnieje, ~1 tydz. |
 | M5b | Mixy, radio, „co nowego” | ⏳ ~1 tydz. |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
@@ -42,9 +42,13 @@ Na `main`: wszystkie 24 trasy upstreamu `/podcasts` + trasy etykiet AI, wyszukiw
 
 Odłożone (nieblokujące): porównanie wizualne stron podcastów (M10); `/search` filtruje AI po `LIMIT`; przełącznik AI w Ustawieniach startuje od `false`; brak odznaki „E” (explicit); błędny Range na pliku z cache → 200 zamiast 416 (D-214).
 
-## M-PROF — następny etap
+## M-PROF — w toku
 
-Plan gotowy (gałąź `docs/m-prof-plan`, `docs/superpowers/plans/2026-11-14-m-prof.md`): 17 zadań w fazach 0/A–F, ~3–3,5 tygodnia z przeglądami. Kluczowa decyzja: id profilu głównego = id konta, więc migracja tylko przepina klucze, a stare tokeny działają jako profil główny. Decyzje właściciela (2026-11-14): awatary z gotowych presetów; kilka profili dziecięcych dozwolone; profilami zarządza tylko profil główny; usunięcie profilu kasuje jego dane; logowanie hasłem w Subsonic tylko do profilu głównego (pozostałe przez token aplikacji); publiczne playlisty innych profili widoczne. Implementacja w toku: faza 0 i baza danych gotowe lokalnie (D-240..D-248, migracja `0060`, moduł profili, limit 5 pilnowany w bazie, test wyścigu); przegląd fazy A czysty (0 krytycznych); przepięcie wszystkich zapytań na profil gotowe (Task 3, 1887 testów zielonych, przy okazji naprawiony błąd „teraz odtwarzane” dla profili innych niż główny). Trwa: profil w tokenach i sesjach (Task 4) oraz przegląd Task 3.
+Gałąź `feature/m-prof` (lokalnie): migracja 0060 (tabela profili, limit 5, ochrona profilu głównego i przypisania do konta w bazie), osobne typy id konta/profilu, wszystkie osobiste zapytania kluczowane profilem (Task 3), logowanie z profilem w tokenach i sesjach, admin = rola admin + profil główny (Task 4). Przeglądy: faza A i Task 3 zatwierdzone (0 Critical); poprawki do Task 3 i przegląd Task 4 w toku.
+
+Decyzje właściciela (2026-11-14): awatary z gotowych presetów; kilka profili dziecięcych dozwolone; profilami zarządza tylko profil główny; usunięcie profilu kasuje jego dane; Subsonic hasłem loguje do profilu głównego, inne profile przez swoje tokeny aplikacji; publiczne playlisty innych profili widoczne. Nazwa profilu głównego startuje od nazwy użytkownika, potem niezależna.
+
+Zostało: Task 5 (wszystkie trasy API na profil), Task 6 (API profili, przełączanie), Task 7–8 (Subsonic, tokeny aplikacji), Task 9 (macierz izolacji), Task 10–14 (kima-web: „Kto słucha?”, przełącznik, zarządzanie), Task 15–16 (zgodność, test aktualizacji, zamknięcie).
 
 ## Decyzje właściciela (wiążące, nie pytać ponownie)
 

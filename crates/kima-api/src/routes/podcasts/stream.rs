@@ -15,6 +15,7 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
+use kima_core::profile::ProfileId;
 use kima_net::{AudioResponse, Outcome};
 use kima_podcast::ctx::PodcastCtx;
 use std::io::SeekFrom;
@@ -175,7 +176,7 @@ async fn stream(
             kima_podcast::cache::enqueue_download(
                 &state.pool,
                 episode_id,
-                user.main_profile(),
+                ProfileId::main_of(user.account),
             )
             .await
         {

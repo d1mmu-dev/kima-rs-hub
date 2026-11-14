@@ -17,6 +17,7 @@
 use axum::Router;
 use axum::extract::State;
 use kima_api::AppState;
+use kima_core::profile::ProfileId;
 use kima_db::podcasts::SubsonicEpisode;
 
 use super::add;
@@ -91,12 +92,10 @@ async fn podcasts(
 ) -> Result<Answer, SubsonicError> {
     let include_episodes = params.get("includeEpisodes") != Some("false");
     let raw_id = params.get("id");
+    let hide_ai = kima_db::user_settings::hides_podcast_ai(&app.pool, user.user.profile).await?;
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    let hide_ai =
-        kima_db::user_settings::hides_podcast_ai(&app.pool, user.user.main_profile()).await?;
-    let mut channels =
-        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-        kima_db::podcasts::followed_channels(&app.pool, user.user.main_profile(), hide_ai).await?;
+    let owner = ProfileId::main_of(user.user.account);
+    let mut channels = kima_db::podcasts::followed_channels(&app.pool, owner, hide_ai).await?;
     if let Some(raw) = raw_id {
         let wanted = ids::parse(raw, &[]);
         channels.retain(|c| wanted == Some(c.id));
@@ -127,12 +126,10 @@ async fn newest_podcasts(
         .paging::<i64>("count")
         .unwrap_or(DEFAULT_NEWEST)
         .clamp(1, MAX_NEWEST);
+    let hide_ai = kima_db::user_settings::hides_podcast_ai(&app.pool, user.user.profile).await?;
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    let hide_ai =
-        kima_db::user_settings::hides_podcast_ai(&app.pool, user.user.main_profile()).await?;
-    let episodes =
-        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-        kima_db::podcasts::newest_episodes(&app.pool, user.user.main_profile(), count, hide_ai).await?;
+    let owner = ProfileId::main_of(user.user.account);
+    let episodes = kima_db::podcasts::newest_episodes(&app.pool, owner, count, hide_ai).await?;
     Ok(Answer::node(Node::new("newestPodcasts").list(
         "episode",
         episodes.iter().map(episode_node).collect(),
@@ -155,8 +152,12 @@ async fn podcast_episode(
         .await?
         .ok_or_else(not_found)?;
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    if !kima_db::podcasts::is_subscribed(&app.pool, user.user.main_profile(), episode.podcast_id)
-        .await?
+    if !kima_db::podcasts::is_subscribed(
+        &app.pool,
+        ProfileId::main_of(user.user.account),
+        episode.podcast_id,
+    )
+    .await?
     {
         return Err(not_found());
     }
@@ -168,7 +169,8 @@ async fn refresh_podcasts(
     State(app): State<AppState>,
 ) -> Result<Answer, SubsonicError> {
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    let shows = kima_db::podcasts::followed_shows(&app.pool, user.user.main_profile()).await?;
+    let shows =
+        kima_db::podcasts::followed_shows(&app.pool, ProfileId::main_of(user.user.account)).await?;
     for row in shows {
         let _ = kima_podcast::refresh::refresh(&app.podcast_catalog, row.id).await;
     }

@@ -607,3 +607,60 @@ async fn login_and_me_add_profile_key(pool: PgPool) {
     assert_eq!(body["profile"]["id"], body["user"]["id"]);
     assert_eq!(body["profile"]["kind"], "main");
 }
+
+/// The podcast AI switch is a setting, so it is the session's profile's: a kids profile that
+/// shows AI content sees it shown while main keeps the default (hide), and the other way round
+/// (D-246). `X-Kima-Ai-Hidden` is sent exactly when the resolved filter hides.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn podcast_ai_switch_is_the_profiles_setting(pool: PgPool) {
+    let state = common::state(pool);
+    let (user, main) = common::user_with_token(&state, "ana").await;
+    let kids = add_profile(&state, &user, "Kids", ProfileKind::Kids).await;
+    let kids_token = access(&state, &user, kids.id);
+    let server = TestServer::new(kima_api::router(state)).unwrap();
+    let set = |token: String, value: &'static str| {
+        let server = &server;
+        async move {
+            server
+                .post("/api/settings")
+                .authorization_bearer(token)
+                .json(&json!({ "podcastAiContent": value }))
+                .await
+                .assert_status_ok();
+        }
+    };
+    let hides = |token: String| {
+        let server = &server;
+        async move {
+            let mut seen = Vec::new();
+            for path in [
+                "/api/podcasts",
+                "/api/podcasts/listening",
+                "/api/library/recently-listened",
+            ] {
+                let res = server.get(path).authorization_bearer(&token).await;
+                res.assert_status_ok();
+                seen.push((path, res.headers().contains_key("x-kima-ai-hidden")));
+            }
+            seen
+        }
+    };
+    let all = |hide: bool| {
+        [
+            "/api/podcasts",
+            "/api/podcasts/listening",
+            "/api/library/recently-listened",
+        ]
+        .map(|path| (path, hide))
+        .to_vec()
+    };
+
+    set(kids_token.clone(), "show").await;
+    assert_eq!(hides(kids_token.clone()).await, all(false), "kids shows");
+    assert_eq!(hides(main.clone()).await, all(true), "main keeps hide");
+
+    set(kids_token.clone(), "hide").await;
+    set(main.clone(), "show").await;
+    assert_eq!(hides(kids_token).await, all(true), "kids hides");
+    assert_eq!(hides(main).await, all(false), "main shows");
+}

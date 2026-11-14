@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get};
 use axum::{Json, Router};
 use kima_core::app_token;
+use kima_core::profile::ProfileId;
 use kima_db::api_keys::{self, Refused};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -56,7 +57,7 @@ async fn create(
         id,
         auth.account,
         // M-PROF Task 5: main profile until AuthUser carries one.
-        auth.main_profile(),
+        ProfileId::main_of(auth.account),
         auth.token_version,
         name,
         &app_token::hash(&token),
@@ -82,7 +83,7 @@ async fn create(
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> Result<Json<Value>, ApiError> {
     // M-PROF Task 5: main profile until AuthUser carries one.
-    let keys = api_keys::list_for_profile(&state.pool, auth.main_profile()).await?;
+    let keys = api_keys::list_for_profile(&state.pool, ProfileId::main_of(auth.account)).await?;
     let keys: Vec<Value> = keys
         .into_iter()
         .map(|key| {
@@ -104,7 +105,7 @@ async fn revoke(
 ) -> Result<Json<Value>, ApiError> {
     let id: Uuid = id.parse().map_err(|_| ApiError::NotFound(NOT_FOUND))?;
     // M-PROF Task 5: main profile until AuthUser carries one.
-    if !api_keys::delete_owned(&state.pool, id, auth.main_profile()).await? {
+    if !api_keys::delete_owned(&state.pool, id, ProfileId::main_of(auth.account)).await? {
         return Err(ApiError::NotFound(NOT_FOUND));
     }
     Ok(Json(json!({ "message": "API key revoked successfully" })))

@@ -4,6 +4,7 @@
 use axum::Router;
 use axum::extract::State;
 use kima_core::events::Event;
+use kima_core::profile::ProfileId;
 use kima_db::playlists::{self, Playlist, PlaylistSummary, SubsonicWrite};
 use kima_db::subsonic;
 use serde_json::json;
@@ -46,7 +47,7 @@ async fn owned(
         .await?
         .ok_or_else(not_found)?;
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    if playlist.profile_id != user.user.main_profile() {
+    if playlist.profile_id != ProfileId::main_of(user.user.account) {
         return Err(denied());
     }
     Ok(playlist)
@@ -56,14 +57,15 @@ async fn owned(
 async fn full(ctx: &SubsonicCtx, user: &SubsonicUser, id: Uuid) -> Result<Answer, SubsonicError> {
     let pool = &ctx.app.pool;
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    let summary = playlists::summary(pool, id, user.user.main_profile())
+    let summary = playlists::summary(pool, id, ProfileId::main_of(user.user.account))
         .await?
         .ok_or_else(not_found)?;
     let items = playlists::items(pool, id).await?;
     let duration = items.iter().map(|i| i64::from(i.track.duration_secs)).sum();
     let track_ids: Vec<Uuid> = items.iter().map(|i| i.track.id).collect();
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    let songs = subsonic::tracks_by_ids(pool, user.user.main_profile(), &track_ids).await?;
+    let songs =
+        subsonic::tracks_by_ids(pool, ProfileId::main_of(user.user.account), &track_ids).await?;
     let entries: Vec<Node> = songs
         .iter()
         .map(|s| map::song(s).renamed("entry"))
@@ -84,11 +86,12 @@ async fn get_playlists(
 ) -> Result<Answer, SubsonicError> {
     let pool = &ctx.app.pool;
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    let all: Vec<PlaylistSummary> = playlists::list(pool, user.user.main_profile(), i64::MAX, 0)
-        .await?
-        .into_iter()
-        .filter(|p| !p.hidden)
-        .collect();
+    let all: Vec<PlaylistSummary> =
+        playlists::list(pool, ProfileId::main_of(user.user.account), i64::MAX, 0)
+            .await?
+            .into_iter()
+            .filter(|p| !p.hidden)
+            .collect();
     let ids: Vec<Uuid> = all.iter().map(|p| p.playlist.id).collect();
     let durations = playlists::durations(pool, &ids).await?;
     let nodes = all
@@ -149,7 +152,7 @@ async fn create_playlist(
             // M-PROF Task 5: main profile until the route reads `profile`.
             announce(
                 &ctx,
-                user.user.main_profile().into_uuid(),
+                ProfileId::main_of(user.user.account).into_uuid(),
                 playlist.id,
                 false,
             );
@@ -159,11 +162,24 @@ async fn create_playlist(
         let songs = song_ids(&params, "songId")?;
         let id = Uuid::now_v7();
         // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-        if !playlists::subsonic_create(pool, id, user.user.main_profile(), name, &songs).await? {
+        if !playlists::subsonic_create(
+            pool,
+            id,
+            ProfileId::main_of(user.user.account),
+            name,
+            &songs,
+        )
+        .await?
+        {
             return Err(SubsonicError::not_found("Song not found"));
         }
         // M-PROF Task 5: main profile until the route reads `profile`.
-        announce(&ctx, user.user.main_profile().into_uuid(), id, false);
+        announce(
+            &ctx,
+            ProfileId::main_of(user.user.account).into_uuid(),
+            id,
+            false,
+        );
         id
     } else {
         return Err(SubsonicError::new(
@@ -197,7 +213,7 @@ async fn update_playlist(
         // M-PROF Task 5: main profile until the route reads `profile`.
         announce(
             &ctx,
-            user.user.main_profile().into_uuid(),
+            ProfileId::main_of(user.user.account).into_uuid(),
             playlist.id,
             false,
         );
@@ -215,7 +231,7 @@ async fn delete_playlist(
         // M-PROF Task 5: main profile until the route reads `profile`.
         announce(
             &ctx,
-            user.user.main_profile().into_uuid(),
+            ProfileId::main_of(user.user.account).into_uuid(),
             playlist.id,
             true,
         );

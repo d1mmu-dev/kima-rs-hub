@@ -14,7 +14,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::routing::put;
 use kima_api_types::podcasts::{AiLabel, AiLabelSource, Labelled};
-use kima_core::profile::{AccountId, ProfileId};
+use kima_core::profile::ProfileId;
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -60,23 +60,18 @@ impl AiFilter {
         }
     }
 
-    /// The request's `?ai=`, else `user`'s persisted setting (default hide).
+    /// The request's `?ai=`, else the profile's persisted setting (default hide). The switch is
+    /// a setting, so it is the session's profile's (D-246), never its account's main profile.
     pub async fn resolve(
         state: &AppState,
-        user: Uuid,
+        profile: ProfileId,
         raw: Option<&str>,
     ) -> Result<AiFilter, ApiError> {
         if let Some(filter) = AiFilter::from_query(raw)? {
             return Ok(filter);
         }
         Ok(
-            // M-PROF Task 5: take the caller's ProfileId instead of the account's main profile.
-            if kima_db::user_settings::hides_podcast_ai(
-                &state.pool,
-                ProfileId::main_of(AccountId::new(user)),
-            )
-            .await?
-            {
+            if kima_db::user_settings::hides_podcast_ai(&state.pool, profile).await? {
                 AiFilter::Hide
             } else {
                 AiFilter::Show

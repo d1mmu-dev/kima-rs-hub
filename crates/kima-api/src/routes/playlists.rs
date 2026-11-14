@@ -69,7 +69,7 @@ async fn guard(
         .await?
         .ok_or_else(not_found)?;
     // M-PROF Task 5: main profile until AuthUser carries one.
-    let owner = playlist.profile_id == user.main_profile();
+    let owner = playlist.profile_id == ProfileId::main_of(user.account);
     if !owner && !playlist.is_public {
         return Err(not_found());
     }
@@ -155,7 +155,7 @@ async fn list(
     let rows = playlists::list(
         &state.pool,
         // M-PROF Task 5: main profile until AuthUser carries one.
-        user.main_profile(),
+        ProfileId::main_of(user.account),
         limit,
         (page - 1).saturating_mul(limit),
     )
@@ -166,7 +166,7 @@ async fn list(
         .iter()
         .map(|s| {
             // M-PROF Task 5: main profile until AuthUser carries one.
-            let mut v = summary_json(s, user.main_profile());
+            let mut v = summary_json(s, ProfileId::main_of(user.account));
             v["items"] = Value::Array(
                 firsts
                     .iter()
@@ -207,13 +207,18 @@ async fn create(
         &state.pool,
         Uuid::now_v7(),
         // M-PROF Task 5: main profile until AuthUser carries one.
-        user.main_profile(),
+        ProfileId::main_of(user.account),
         &body.name,
         body.is_public,
     )
     .await?;
     // M-PROF Task 5: main profile until the route reads `profile`.
-    announce(&state, user.main_profile().into_uuid(), p.id, false);
+    announce(
+        &state,
+        ProfileId::main_of(user.account).into_uuid(),
+        p.id,
+        false,
+    );
     Ok(Json(playlist_json(&p)))
 }
 
@@ -255,7 +260,7 @@ async fn detail(
         Some(_) => return Ok(invalid_order()),
     };
     // M-PROF Task 5: main profile until AuthUser carries one.
-    let summary = playlists::summary(&state.pool, p.id, user.main_profile())
+    let summary = playlists::summary(&state.pool, p.id, ProfileId::main_of(user.account))
         .await?
         .ok_or(ApiError::NotFound(NOT_FOUND))?;
     let items = playlists::items(&state.pool, p.id).await?;
@@ -264,7 +269,7 @@ async fn detail(
         items.reverse();
     }
     // M-PROF Task 5: main profile until AuthUser carries one.
-    let mut v = summary_json(&summary, user.main_profile());
+    let mut v = summary_json(&summary, ProfileId::main_of(user.account));
     v["pendingCount"] = json!(0);
     v["pendingTracks"] = json!([]);
     v["mergedItems"] = Value::Array(items.clone());
@@ -301,7 +306,12 @@ async fn update(
     .await?
     .ok_or(ApiError::NotFound(NOT_FOUND))?;
     // M-PROF Task 5: main profile until the route reads `profile`.
-    announce(&state, user.main_profile().into_uuid(), p.id, false);
+    announce(
+        &state,
+        ProfileId::main_of(user.account).into_uuid(),
+        p.id,
+        false,
+    );
     Ok(Json(playlist_json(&updated)))
 }
 
@@ -313,7 +323,12 @@ async fn remove(
     let p = guard(&state, &user, &id, Need::Owner).await?;
     playlists::delete(&state.pool, p.id).await?;
     // M-PROF Task 5: main profile until the route reads `profile`.
-    announce(&state, user.main_profile().into_uuid(), p.id, true);
+    announce(
+        &state,
+        ProfileId::main_of(user.account).into_uuid(),
+        p.id,
+        true,
+    );
     Ok(Json(json!({ "message": "Playlist deleted" })))
 }
 
@@ -324,9 +339,14 @@ async fn hide(
 ) -> Result<Json<Value>, ApiError> {
     let p = guard(&state, &user, &id, Need::Reader).await?;
     // M-PROF Task 5: main profile until AuthUser carries one.
-    if playlists::hide(&state.pool, user.main_profile(), p.id).await? {
+    if playlists::hide(&state.pool, ProfileId::main_of(user.account), p.id).await? {
         // M-PROF Task 5: main profile until the route reads `profile`.
-        announce(&state, user.main_profile().into_uuid(), p.id, false);
+        announce(
+            &state,
+            ProfileId::main_of(user.account).into_uuid(),
+            p.id,
+            false,
+        );
     }
     Ok(Json(
         json!({ "message": "Playlist hidden", "isHidden": true }),
@@ -340,9 +360,14 @@ async fn unhide(
 ) -> Result<Json<Value>, ApiError> {
     if let Ok(p) = id.parse::<Uuid>() {
         // M-PROF Task 5: main profile until AuthUser carries one.
-        if playlists::unhide(&state.pool, user.main_profile(), p).await? {
+        if playlists::unhide(&state.pool, ProfileId::main_of(user.account), p).await? {
             // M-PROF Task 5: main profile until the route reads `profile`.
-            announce(&state, user.main_profile().into_uuid(), p, false);
+            announce(
+                &state,
+                ProfileId::main_of(user.account).into_uuid(),
+                p,
+                false,
+            );
         }
     }
     Ok(Json(
@@ -410,7 +435,12 @@ async fn add_items(
     rejected.extend(result.rejected.iter().map(Uuid::to_string));
     if result.added > 0 {
         // M-PROF Task 5: main profile until the route reads `profile`.
-        announce(&state, user.main_profile().into_uuid(), p.id, false);
+        announce(
+            &state,
+            ProfileId::main_of(user.account).into_uuid(),
+            p.id,
+            false,
+        );
     }
     if result.added == 0 && result.duplicates == 0 {
         return Ok((
@@ -448,7 +478,12 @@ async fn add_batch(
         .ok_or(ApiError::NotFound(NOT_FOUND))?;
     if result.added > 0 {
         // M-PROF Task 5: main profile until the route reads `profile`.
-        announce(&state, user.main_profile().into_uuid(), p.id, false);
+        announce(
+            &state,
+            ProfileId::main_of(user.account).into_uuid(),
+            p.id,
+            false,
+        );
     }
     let items = playlists::items_for_tracks(&state.pool, p.id, &ids).await?;
     Ok(Json(json!({
@@ -472,7 +507,12 @@ async fn remove_item(
         return Err(not_in());
     }
     // M-PROF Task 5: main profile until the route reads `profile`.
-    announce(&state, user.main_profile().into_uuid(), p.id, false);
+    announce(
+        &state,
+        ProfileId::main_of(user.account).into_uuid(),
+        p.id,
+        false,
+    );
     Ok(Json(json!({ "success": true, "removed": removed })))
 }
 
@@ -499,7 +539,12 @@ async fn move_item(
     match playlists::move_item(&state.pool, p.id, item, after).await? {
         Ok(sort) => {
             // M-PROF Task 5: main profile until the route reads `profile`.
-            announce(&state, user.main_profile().into_uuid(), p.id, false);
+            announce(
+                &state,
+                ProfileId::main_of(user.account).into_uuid(),
+                p.id,
+                false,
+            );
             Ok(Json(json!({ "success": true, "rank": rank_of(sort) })))
         }
         Err(MoveError::ItemNotFound) => Err(no_item()),

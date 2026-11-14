@@ -2,6 +2,7 @@
 //! not followed yet, read from its own feed, with its oldest dated episode playable as a
 //! sample before subscribing.
 
+use kima_core::profile::ProfileId;
 use std::time::Duration;
 
 use axum::Json;
@@ -106,7 +107,10 @@ async fn preview_show(
     // someone else follows is not this user's page to open.
     let is_subscribed = match &stored {
         // M-PROF Task 5: main profile until AuthUser carries one.
-        Some(s) => kima_db::podcasts::is_subscribed(&state.pool, user.main_profile(), s.id).await?,
+        Some(s) => {
+            kima_db::podcasts::is_subscribed(&state.pool, ProfileId::main_of(user.account), s.id)
+                .await?
+        }
         None => false,
     };
     let subscribed_podcast_id = stored.as_ref().filter(|_| is_subscribed).map(|s| s.id);

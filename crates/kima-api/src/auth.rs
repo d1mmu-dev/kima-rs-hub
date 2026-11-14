@@ -29,12 +29,6 @@ pub struct AuthUser {
 }
 
 impl AuthUser {
-    /// The account's main profile, whichever profile the session acts as. Call sites still
-    /// using it are marked `M-PROF Task 5` (they move to `profile` there).
-    pub fn main_profile(&self) -> ProfileId {
-        ProfileId::main_of(self.account)
-    }
-
     pub fn is_main_profile(&self) -> bool {
         self.profile_kind == ProfileKind::Main
     }

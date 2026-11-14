@@ -74,7 +74,7 @@ async fn star(
         // song is skipped just as an unknown id is.
         if let Some(kind) = kind
             // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-            && stars::set(&app.pool, user.user.main_profile(), kind, id).await?
+            && stars::set(&app.pool, ProfileId::main_of(user.user.account), kind, id).await?
         {
             valid += 1;
         }
@@ -93,7 +93,7 @@ async fn unstar(
     for (kind, id) in targets(&app.pool, &params).await? {
         if let Some(kind) = kind {
             // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-            stars::clear(&app.pool, user.user.main_profile(), kind, id).await?;
+            stars::clear(&app.pool, ProfileId::main_of(user.user.account), kind, id).await?;
         }
     }
     Ok(Answer::ok())
@@ -122,7 +122,7 @@ async fn get_starred(
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    let s = starred(&app.pool, user.user.main_profile()).await?;
+    let s = starred(&app.pool, ProfileId::main_of(user.user.account)).await?;
     Ok(Answer::node(
         Node::new("starred")
             .list("artist", s.artists.iter().map(map::artist_id3).collect())
@@ -137,7 +137,7 @@ async fn get_starred2(
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    let s = starred(&app.pool, user.user.main_profile()).await?;
+    let s = starred(&app.pool, ProfileId::main_of(user.user.account)).await?;
     Ok(Answer::node(
         Node::new("starred2")
             .list("artist", s.artists.iter().map(map::artist_id3).collect())
@@ -164,8 +164,16 @@ async fn set_rating(
         .ok_or_else(unknown)?;
     if rating == 0 {
         // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-        ratings::clear(&app.pool, user.user.main_profile(), kind, id).await?;
-    } else if !ratings::set(&app.pool, user.user.main_profile(), kind, id, rating as i16).await? {
+        ratings::clear(&app.pool, ProfileId::main_of(user.user.account), kind, id).await?;
+    } else if !ratings::set(
+        &app.pool,
+        ProfileId::main_of(user.user.account),
+        kind,
+        id,
+        rating as i16,
+    )
+    .await?
+    {
         return Err(unknown());
     }
     Ok(Answer::ok())

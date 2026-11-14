@@ -1,3 +1,4 @@
+use kima_core::profile::ProfileId;
 use std::convert::Infallible;
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ pub fn routes() -> Router<AppState> {
 
 async fn issue_ticket(State(state): State<AppState>, user: AuthUser) -> Json<Value> {
     // M-PROF Task 5: main profile until the route reads `profile`.
-    Json(json!({ "ticket": state.sse.issue_ticket(user.main_profile().into_uuid()) }))
+    Json(json!({ "ticket": state.sse.issue_ticket(ProfileId::main_of(user.account).into_uuid()) }))
 }
 
 #[derive(Deserialize)]

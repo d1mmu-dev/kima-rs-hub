@@ -1,5 +1,6 @@
 //! `scrobble` and `getNowPlaying` (spec §4.5 #34, §4.3 #25, §6.3).
 
+use kima_core::profile::ProfileId;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -65,11 +66,12 @@ async fn scrobble(
         // `plays::record` accepts a track flagged missing; a scrobble of one is skipped.
         let wanted: Vec<Uuid> = parsed.iter().flatten().copied().collect();
         // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-        let present: HashSet<Uuid> = subsonic::tracks_by_ids(pool, me.main_profile(), &wanted)
-            .await?
-            .iter()
-            .map(|s| s.track.id)
-            .collect();
+        let present: HashSet<Uuid> =
+            subsonic::tracks_by_ids(pool, ProfileId::main_of(me.account), &wanted)
+                .await?
+                .iter()
+                .map(|s| s.track.id)
+                .collect();
         for (i, track) in parsed.iter().enumerate() {
             let Some(track) = track.filter(|t| present.contains(t)) else {
                 continue;
@@ -79,7 +81,7 @@ async fn scrobble(
             if let Err(error) = plays::record(
                 pool,
                 // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-                me.main_profile(),
+                ProfileId::main_of(me.account),
                 track,
                 Listen::Attested,
                 Source::Subsonic,
@@ -92,18 +94,18 @@ async fn scrobble(
         }
         // M-PROF Task 5: main profile until the route reads `profile`.
         ctx.now_playing
-            .finish(me.main_profile().into_uuid(), &player);
+            .finish(ProfileId::main_of(me.account).into_uuid(), &player);
     } else {
         let tracks: Vec<Uuid> = raw_ids
             .iter()
             .filter_map(|raw| ids::parse(raw, &[]))
             .collect();
         // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-        for song in subsonic::tracks_by_ids(pool, me.main_profile(), &tracks).await? {
+        for song in subsonic::tracks_by_ids(pool, ProfileId::main_of(me.account), &tracks).await? {
             let t = &song.track;
             // M-PROF Task 5: main profile until the route reads `profile`.
             ctx.now_playing.report(
-                me.main_profile().into_uuid(),
+                ProfileId::main_of(me.account).into_uuid(),
                 &me.username,
                 &player,
                 t.id,
@@ -169,11 +171,12 @@ async fn get_now_playing(
 
     let wanted: Vec<Uuid> = playing.iter().map(|p| p.track).collect();
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    let songs: HashMap<Uuid, _> = subsonic::tracks_by_ids(pool, user.user.main_profile(), &wanted)
-        .await?
-        .into_iter()
-        .map(|s| (s.track.id, s))
-        .collect();
+    let songs: HashMap<Uuid, _> =
+        subsonic::tracks_by_ids(pool, ProfileId::main_of(user.user.account), &wanted)
+            .await?
+            .into_iter()
+            .map(|s| (s.track.id, s))
+            .collect();
     let entries: Vec<Node> = playing
         .iter()
         .filter_map(|p| {

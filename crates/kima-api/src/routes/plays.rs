@@ -7,6 +7,7 @@ use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kima_api_types::stats::js_iso;
+use kima_core::profile::ProfileId;
 use kima_db::plays::{self, Listen, PlayOutcome, Source};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,7 +56,7 @@ async fn create(
     let outcome = plays::record(
         &state.pool,
         // M-PROF Task 5: main profile until AuthUser carries one.
-        user.main_profile(),
+        ProfileId::main_of(user.account),
         track,
         Listen::Seconds(body.seconds_listened),
         Source::Library,
@@ -93,15 +94,14 @@ async fn recently_listened(
     Query(params): Query<LimitParams>,
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
-    // M-PROF Task 5: main profile until the route reads `profile`.
-    let filter = AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?;
+    let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
     let limit = limit_of(&params, 10, 100);
     let (artist_rows, (podcast_rows, hidden)) = tokio::try_join!(
         // M-PROF Task 5: main profile until AuthUser carries one.
-        plays::recent_artists(&state.pool, user.main_profile(), limit),
+        plays::recent_artists(&state.pool, ProfileId::main_of(user.account), limit),
         kima_db::podcasts::recent_in_progress(
             &state.pool,
-            user.main_profile(),
+            ProfileId::main_of(user.account),
             limit,
             filter.hides()
         ),

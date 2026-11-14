@@ -1,6 +1,7 @@
 //! Bookmarks (spec §4.5 #39-#41), on Task 9's `bookmarks` layer. A bookmark of a track flagged
 //! missing is kept and left out of the list.
 
+use kima_core::profile::ProfileId;
 use std::collections::HashMap;
 
 use axum::Router;
@@ -33,7 +34,7 @@ async fn get_bookmarks(
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    let me = user.user.main_profile();
+    let me = ProfileId::main_of(user.user.account);
     let list = bookmarks::list_for_user(&app.pool, me).await?;
     let track_ids: Vec<_> = list.iter().map(|b| b.track_id).collect();
     let songs: HashMap<_, _> = subsonic::tracks_by_ids(&app.pool, me, &track_ids)
@@ -77,7 +78,7 @@ async fn create_bookmark(
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
     if !bookmarks::upsert(
         &app.pool,
-        user.user.main_profile(),
+        ProfileId::main_of(user.user.account),
         track,
         position,
         comment,
@@ -96,6 +97,6 @@ async fn delete_bookmark(
 ) -> Result<Answer, SubsonicError> {
     let track = ids::parse(params.required("id")?, &[]).ok_or_else(unknown)?;
     // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
-    bookmarks::delete(&app.pool, user.user.main_profile(), track).await?;
+    bookmarks::delete(&app.pool, ProfileId::main_of(user.user.account), track).await?;
     Ok(Answer::ok())
 }

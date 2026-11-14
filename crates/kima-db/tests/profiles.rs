@@ -358,3 +358,46 @@ async fn list_orders_main_first(pool: PgPool) {
     assert!(listed.iter().skip(1).all(|p| !p.is_main()));
     assert!(listed.iter().all(|p| p.account == a));
 }
+
+/// Names and avatar keys the table's checks refuse come back as `Invalid`, not as a database
+/// error (which the API would answer with 500).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn bad_name_or_avatar_is_invalid(pool: PgPool) {
+    let a = account(&pool, "Ana").await;
+    let long = "x".repeat(51);
+    for name in ["", " Kids", "Kids ", long.as_str()] {
+        let refused = profiles::create(&pool, a, new(name, ProfileKind::Kids))
+            .await
+            .unwrap();
+        assert_eq!(refused, Err(ProfileError::Invalid), "{name:?}");
+    }
+    let bad_avatar = NewProfile {
+        avatar: Some("Not A Key!".into()),
+        ..new("Kids", ProfileKind::Kids)
+    };
+    assert_eq!(
+        profiles::create(&pool, a, bad_avatar).await.unwrap(),
+        Err(ProfileError::Invalid)
+    );
+
+    let kids = create_ok(&pool, a, "Kids", ProfileKind::Kids).await;
+    for change in [
+        ProfileUpdate {
+            name: Some(String::new()),
+            ..Default::default()
+        },
+        ProfileUpdate {
+            avatar: Some(Some("UPPER".into())),
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(
+            profiles::update(&pool, a, kids, change.clone())
+                .await
+                .unwrap(),
+            Err(ProfileError::Invalid),
+            "{change:?}"
+        );
+    }
+    assert_eq!(count(&pool, a).await, 2);
+}

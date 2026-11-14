@@ -3,7 +3,10 @@
 -- Production rollback is the `pg_dump -Fc` taken before the upgrade; this script exists so
 -- `migrations_m_prof::down_script_restores_0039_schema` can prove the upgrade is reversible.
 -- Refuses when a non-main profile owns a row, unless run after `SET kima.drop_profiles = 'on'`
--- (then those rows are deleted with their profiles).
+-- (then those rows are deleted with their profiles). One transaction: a run that stops
+-- half-way changes nothing.
+
+BEGIN;
 
 DO $$
 DECLARE
@@ -47,5 +50,8 @@ DROP FUNCTION users_main_profile();
 DROP TABLE profiles;
 DROP FUNCTION profiles_limit();
 DROP FUNCTION profiles_keep_main();
+DROP FUNCTION profiles_keep_owner();
 DROP FUNCTION profiles_main_name(text);
 DELETE FROM _sqlx_migrations WHERE version = 60;
+
+COMMIT;

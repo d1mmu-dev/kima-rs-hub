@@ -19,8 +19,9 @@ CREATE TABLE profiles (
     CONSTRAINT profiles_main_is_account CHECK ((kind = 'main') = (id = user_id))
 );
 -- Names are unique per account regardless of case ("Kids" and "kids" are the same).
+-- It leads with `user_id`, so it also serves every per-account lookup (limit count, list,
+-- the cascade from `users`); no separate index on `user_id`.
 CREATE UNIQUE INDEX profiles_user_name_key ON profiles (user_id, lower(name));
-CREATE INDEX profiles_user_idx ON profiles (user_id);
 
 -- The main profile's name: the username (at most 50 characters, trimmed by the app), with a
 -- fallback for rows written by SQL that the app would have refused.
@@ -34,7 +35,9 @@ SELECT id, id, profiles_main_name(username), 'main', created_at FROM users;
 
 -- At most 5 profiles per account, race-free: lock the account row (the same lock
 -- `api_keys::create` takes), then count. A concurrent insert waits for the lock and then
--- counts the committed rows (READ COMMITTED: a fresh snapshot per statement).
+-- counts the committed rows (READ COMMITTED: a fresh snapshot per statement). Under
+-- REPEATABLE READ or SERIALIZABLE the count would read the transaction's snapshot; the app
+-- writes profiles only at the default READ COMMITTED.
 CREATE FUNCTION profiles_limit() RETURNS trigger
     LANGUAGE plpgsql AS
 $$
@@ -49,6 +52,22 @@ END
 $$;
 CREATE TRIGGER profiles_limit BEFORE INSERT ON profiles
     FOR EACH ROW EXECUTE FUNCTION profiles_limit();
+
+-- A profile never changes account or id: moving it would carry its rows past the other
+-- account's limit and name rules. Every other column stays writable.
+CREATE FUNCTION profiles_keep_owner() RETURNS trigger
+    LANGUAGE plpgsql AS
+$$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id OR NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+        RAISE EXCEPTION 'profile cannot change account or id'
+            USING ERRCODE = 'P0001', HINT = 'kima:profile_owner';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER profiles_keep_owner BEFORE UPDATE OF id, user_id ON profiles
+    FOR EACH ROW EXECUTE FUNCTION profiles_keep_owner();
 
 -- Every new account gets its main profile in the same statement (register, create-user,
 -- Subsonic createUser and SQL fixtures alike: no code path can forget it).

@@ -15,6 +15,10 @@ const HINT_LIMIT: &str = "kima:profile_limit";
 const HINT_MAIN: &str = "kima:profile_main";
 const NAME_KEY: &str = "profiles_user_name_key";
 const ACCOUNT_FKEY: &str = "profiles_user_id_fkey";
+/// The CHECKs on what a caller writes (the kind and main-is-account checks cannot fire
+/// through this module: it never writes `main` or an id).
+const NAME_CHECK: &str = "profiles_name_check";
+const AVATAR_CHECK: &str = "profiles_avatar_check";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
@@ -44,6 +48,9 @@ pub enum ProfileError {
     Main,
     /// No such profile in this account (or no such account).
     NotFound,
+    /// The name (not trimmed, empty or longer than 50 characters; the database trims only
+    /// spaces, so callers trim the text first) or the avatar key breaks the table's checks.
+    Invalid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +104,7 @@ fn refusal(error: &sqlx::Error) -> Option<ProfileError> {
         ("P0001", Some(HINT_MAIN), _) => Some(ProfileError::Main),
         ("23505", _, Some(NAME_KEY)) => Some(ProfileError::NameTaken),
         ("23503", _, Some(ACCOUNT_FKEY)) => Some(ProfileError::NotFound),
+        ("23514", _, Some(NAME_CHECK | AVATAR_CHECK)) => Some(ProfileError::Invalid),
         _ => None,
     }
 }

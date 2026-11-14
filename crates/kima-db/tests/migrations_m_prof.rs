@@ -543,7 +543,15 @@ async fn down_script_restores_0039_schema(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let blocked = sqlx::raw_sql(DOWN_0060).execute(&pool).await.unwrap_err();
+    // The script runs in its own `BEGIN`; after the error the session stays in the failed
+    // transaction (as psql would) until the caller rolls it back.
+    let mut conn = pool.acquire().await.unwrap();
+    let blocked = sqlx::raw_sql(DOWN_0060)
+        .execute(&mut *conn)
+        .await
+        .unwrap_err();
+    sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.unwrap();
+    drop(conn);
     assert!(
         pg_error(&blocked)
             .message()
@@ -602,4 +610,142 @@ async fn combined_order_with_m5_migration(pool: PgPool) {
     migrator_upto(40).run(&pool).await.unwrap();
     kima_db::MIGRATOR.run(&pool).await.unwrap();
     assert_eq!(snapshot(&pool, "profile_id").await, rows);
+}
+
+/// Moving a profile to another account (or giving it another id) would carry its rows past
+/// that account's limit and name rules, so the database refuses both.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn profile_cannot_move_between_accounts(pool: PgPool) {
+    let a = account(&pool, "a").await;
+    let b = account(&pool, "b").await;
+    let kids = add_profile(&pool, a, "Kids", "kids").await.unwrap();
+
+    let moved = sqlx::query("UPDATE profiles SET user_id = $2 WHERE id = $1")
+        .bind(kids)
+        .bind(b)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert_eq!(pg_error(&moved).hint(), Some("kima:profile_owner"));
+    let renumbered = sqlx::query("UPDATE profiles SET id = $2 WHERE id = $1")
+        .bind(kids)
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert_eq!(pg_error(&renumbered).hint(), Some("kima:profile_owner"));
+    let owner: Uuid = sqlx::query_scalar("SELECT user_id FROM profiles WHERE id = $1")
+        .bind(kids)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, a);
+
+    // Every other column stays writable, and writing the same owner back is no move.
+    sqlx::query("UPDATE profiles SET name = 'Teen', kind = 'standard', user_id = $2 WHERE id = $1")
+        .bind(kids)
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+/// Usernames the app would refuse (written by SQL), each with the main profile name
+/// `profiles_main_name` must give it.
+fn odd_usernames() -> Vec<(String, String)> {
+    let mut all = vec![
+        (String::new(), "Main".to_string()),
+        ("   ".into(), "Main".into()),
+    ];
+    all.push(("x".repeat(60), "x".repeat(50)));
+    // The cut at 50 characters ends on a space, which is trimmed again.
+    all.push((
+        format!("{} {}", "a".repeat(49), "b".repeat(10)),
+        "a".repeat(49),
+    ));
+    all.push(("  Bob  ".into(), "Bob".into()));
+    all.push((format!("{}ż", "ż".repeat(55)), "ż".repeat(50)));
+    all
+}
+
+async fn insert_users(pool: &PgPool, names: &[(String, String)]) -> Vec<(Uuid, String)> {
+    let mut out = Vec::new();
+    for (username, expected) in names {
+        out.push((account(pool, username).await, expected.clone()));
+    }
+    out
+}
+
+async fn assert_main_names(pool: &PgPool, expected: &[(Uuid, String)]) {
+    for (id, name) in expected {
+        let (got, kind): (String, String) =
+            sqlx::query_as("SELECT name, kind FROM profiles WHERE id = $1 AND user_id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!((got.as_str(), kind.as_str()), (name.as_str(), "main"));
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn main_name_fallback_in_trigger(pool: PgPool) {
+    let expected = insert_users(&pool, &odd_usernames()).await;
+    assert_main_names(&pool, &expected).await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn main_name_fallback_in_backfill(pool: PgPool) {
+    migrator_upto(39).run(&pool).await.unwrap();
+    let expected = insert_users(&pool, &odd_usernames()).await;
+    kima_db::MIGRATOR.run(&pool).await.unwrap();
+    assert_main_names(&pool, &expected).await;
+}
+
+/// `profiles_user_name_key (user_id, lower(name))` leads with the account, so it serves every
+/// per-account lookup (the limit count, `list`, the cascade from `users`); a separate index on
+/// `user_id` alone would only cost writes.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn account_lookups_use_the_name_index(pool: PgPool) {
+    let mut indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT indexrelid::regclass::text FROM pg_index WHERE indrelid = 'profiles'::regclass",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    indexes.sort();
+    assert_eq!(indexes, vec!["profiles_pkey", "profiles_user_name_key"]);
+
+    let a = account(&pool, "a").await;
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("SET enable_seqscan = off")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    for sql in [
+        "EXPLAIN SELECT count(*) FROM profiles WHERE user_id = $1",
+        "EXPLAIN SELECT id FROM profiles WHERE user_id = $1 ORDER BY kind <> 'main', created_at, id",
+    ] {
+        let plan: Vec<String> = sqlx::query_scalar(sql)
+            .bind(a)
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
+        assert!(
+            plan.iter().any(|l| l.contains("profiles_user_name_key")),
+            "{sql}: {plan:#?}"
+        );
+    }
+}
+
+/// The down script is one transaction, so a run that stops half-way (psql without `-1`
+/// included) changes nothing.
+#[test]
+fn down_script_is_one_transaction() {
+    let statements: Vec<&str> = DOWN_0060
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("--") && !l.trim().is_empty())
+        .collect();
+    assert_eq!(statements.first().map(|l| l.trim()), Some("BEGIN;"));
+    assert_eq!(statements.last().map(|l| l.trim()), Some("COMMIT;"));
 }

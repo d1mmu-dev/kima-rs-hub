@@ -62,7 +62,7 @@ pub fn listen_rows(period: Period, one_track: bool) -> String {
                 OVER (PARTITION BY p.track_id ORDER BY p.played_at, p.id))), 1e9)
                 > GREATEST(t.duration_secs, 30) AS opens_run
         FROM plays p JOIN tracks t ON t.id = p.track_id
-        WHERE p.user_id = $1 {track}
+        WHERE p.profile_id = $1 {track}
     ), grouped AS (
         SELECT o.*, sum(CASE WHEN o.opens_run THEN 1 ELSE 0 END)
             OVER (PARTITION BY o.track_id ORDER BY o.played_at, o.id) AS run_id

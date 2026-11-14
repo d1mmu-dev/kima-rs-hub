@@ -612,7 +612,7 @@ async fn user(pool: &PgPool, name: &str) -> uuid::Uuid {
 
 async fn playlist(pool: &PgPool, owner: uuid::Uuid, tracks: &[uuid::Uuid]) -> uuid::Uuid {
     let id = uuid::Uuid::now_v7();
-    sqlx::query("INSERT INTO playlists (id, user_id, name) VALUES ($1, $2, 'P')")
+    sqlx::query("INSERT INTO playlists (id, profile_id, name) VALUES ($1, $2, 'P')")
         .bind(id)
         .bind(owner)
         .execute(pool)
@@ -634,7 +634,7 @@ async fn playlist(pool: &PgPool, owner: uuid::Uuid, tracks: &[uuid::Uuid]) -> uu
 }
 
 async fn star(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid) {
-    sqlx::query("INSERT INTO stars (id, user_id, track_id) VALUES ($1, $2, $3)")
+    sqlx::query("INSERT INTO stars (id, profile_id, track_id) VALUES ($1, $2, $3)")
         .bind(uuid::Uuid::now_v7())
         .bind(u)
         .bind(t)
@@ -644,7 +644,7 @@ async fn star(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid) {
 }
 
 async fn rate(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, r: i16) {
-    sqlx::query("INSERT INTO ratings (id, user_id, track_id, rating) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO ratings (id, profile_id, track_id, rating) VALUES ($1, $2, $3, $4)")
         .bind(uuid::Uuid::now_v7())
         .bind(u)
         .bind(t)
@@ -656,7 +656,7 @@ async fn rate(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, r: i16) {
 
 async fn bookmark(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, ms: i64) {
     sqlx::query(
-        "INSERT INTO subsonic_bookmarks (user_id, track_id, position_ms) VALUES ($1, $2, $3)",
+        "INSERT INTO subsonic_bookmarks (profile_id, track_id, position_ms) VALUES ($1, $2, $3)",
     )
     .bind(u)
     .bind(t)
@@ -667,7 +667,7 @@ async fn bookmark(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, ms: i64) {
 }
 
 async fn play(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, heard: bool) {
-    sqlx::query("INSERT INTO plays (id, user_id, track_id, heard) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO plays (id, profile_id, track_id, heard) VALUES ($1, $2, $3, $4)")
         .bind(uuid::Uuid::now_v7())
         .bind(u)
         .bind(t)
@@ -822,13 +822,13 @@ async fn replaced_file_hands_history_to_copy(pool: PgPool) {
     bookmark(&pool, u, mp3, 1234).await;
     let p = playlist(&pool, u, &[mp3]).await;
     let ben = user(&pool, "ben").await;
-    sqlx::query("INSERT INTO play_audit_ignore (user_id, track_id, ignored_at) VALUES ($1, $3, '2020-01-01'), ($2, $3, '2021-01-01'), ($2, $4, '2022-01-01')")
+    sqlx::query("INSERT INTO play_audit_ignore (profile_id, track_id, ignored_at) VALUES ($1, $3, '2020-01-01'), ($2, $3, '2021-01-01'), ($2, $4, '2022-01-01')")
         .bind(u).bind(ben).bind(mp3).bind(flac).execute(&pool).await.unwrap();
     make_missing(&pool, mp3, 8).await;
 
     let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
     let ignores: Vec<(uuid::Uuid, uuid::Uuid, OffsetDateTime)> = sqlx::query_as(
-        "SELECT user_id, track_id, ignored_at FROM play_audit_ignore ORDER BY ignored_at",
+        "SELECT profile_id, track_id, ignored_at FROM play_audit_ignore ORDER BY ignored_at",
     )
     .fetch_all(&pool)
     .await
@@ -920,7 +920,7 @@ async fn concurrent_destination_ignore_does_not_abort_retirement(pool: PgPool) {
     );
     assert_eq!(result.unwrap().tracks, 1);
     let rows: Vec<(uuid::Uuid, OffsetDateTime)> =
-        sqlx::query_as("SELECT track_id, ignored_at FROM play_audit_ignore WHERE user_id = $1")
+        sqlx::query_as("SELECT track_id, ignored_at FROM play_audit_ignore WHERE profile_id = $1")
             .bind(u)
             .fetch_all(&pool)
             .await
@@ -951,7 +951,7 @@ async fn failed_retirement_rolls_back_ignore_handover(pool: PgPool) {
         .execute(&pool).await.unwrap();
     assert!(library::retire_missing(&pool, WEEK, None).await.is_err());
     let rows: Vec<(uuid::Uuid, OffsetDateTime)> =
-        sqlx::query_as("SELECT track_id, ignored_at FROM play_audit_ignore WHERE user_id = $1")
+        sqlx::query_as("SELECT track_id, ignored_at FROM play_audit_ignore WHERE profile_id = $1")
             .bind(u)
             .fetch_all(&pool)
             .await
@@ -1048,7 +1048,7 @@ async fn purged_track_reports_playlists_holding_it(pool: PgPool) {
 async fn purge_nulls_playback_state_and_lists_transcode_artifacts(pool: PgPool) {
     let Upgrade { u, mp3, .. } = upgrade_fixture(&pool).await;
     sqlx::query(
-        "INSERT INTO playback_state (user_id, playback_type, track_id) VALUES ($1, 'track', $2)",
+        "INSERT INTO playback_state (profile_id, playback_type, track_id) VALUES ($1, 'track', $2)",
     )
     .bind(u)
     .bind(mp3.to_string())
@@ -1068,7 +1068,7 @@ async fn purge_nulls_playback_state_and_lists_transcode_artifacts(pool: PgPool) 
         .unwrap();
     assert_eq!(r.artifacts, vec![mine.clone()]);
     let state: Option<String> =
-        sqlx::query_scalar("SELECT track_id FROM playback_state WHERE user_id = $1")
+        sqlx::query_scalar("SELECT track_id FROM playback_state WHERE profile_id = $1")
             .bind(u)
             .fetch_one(&pool)
             .await

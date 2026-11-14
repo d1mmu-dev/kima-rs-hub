@@ -97,7 +97,7 @@ impl Setup {
     }
 
     async fn tokens_of(&self, user: &User) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM api_keys WHERE user_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM api_keys WHERE profile_id = $1")
             .bind(user.id)
             .fetch_one(&self.state.pool)
             .await

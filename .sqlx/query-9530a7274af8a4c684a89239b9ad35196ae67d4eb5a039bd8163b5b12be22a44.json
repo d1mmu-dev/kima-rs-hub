@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT p.id, p.track_id, p.played_at, p.heard, coalesce(t.display_title,t.title) AS \"title!\", coalesce(ar.display_name,ar.name) AS \"artist!\", t.duration_secs AS duration FROM plays p JOIN tracks t ON t.id=p.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE p.user_id=$1 ORDER BY p.played_at,p.id",
+  "query": "SELECT p.id, p.track_id, p.played_at, p.heard, coalesce(t.display_title,t.title) AS \"title!\", coalesce(ar.display_name,ar.name) AS \"artist!\", t.duration_secs AS duration FROM plays p JOIN tracks t ON t.id=p.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE p.profile_id=$1 ORDER BY p.played_at,p.id",
   "describe": {
     "columns": [
       {
@@ -54,5 +54,5 @@
       false
     ]
   },
-  "hash": "0bf48b0e817851b560bef6988d4980a8cb3e4792d26696aa691e45025d59759a"
+  "hash": "9530a7274af8a4c684a89239b9ad35196ae67d4eb5a039bd8163b5b12be22a44"
 }

@@ -405,7 +405,7 @@ pub async fn insert_episodes_on(
 /// Follows a show; `false` when the user already followed it.
 pub async fn subscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result<bool> {
     let done = sqlx::query!(
-        "INSERT INTO podcast_subscriptions (user_id, podcast_id) VALUES ($1, $2)
+        "INSERT INTO podcast_subscriptions (profile_id, podcast_id) VALUES ($1, $2)
          ON CONFLICT DO NOTHING",
         user,
         podcast
@@ -419,7 +419,7 @@ pub async fn subscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result
 pub async fn unsubscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result<bool> {
     let mut tx = pool.begin().await?;
     let done =
-        sqlx::query("DELETE FROM podcast_subscriptions WHERE user_id = $1 AND podcast_id = $2")
+        sqlx::query("DELETE FROM podcast_subscriptions WHERE profile_id = $1 AND podcast_id = $2")
             .bind(user)
             .bind(podcast)
             .execute(&mut *tx)
@@ -430,7 +430,7 @@ pub async fn unsubscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Resu
     }
     for table in ["podcast_progress", "podcast_downloads"] {
         let query = format!(
-            "DELETE FROM {table} WHERE user_id = $1 AND episode_id IN             (SELECT id FROM podcast_episodes WHERE podcast_id = $2)"
+            "DELETE FROM {table} WHERE profile_id = $1 AND episode_id IN             (SELECT id FROM podcast_episodes WHERE podcast_id = $2)"
         );
         sqlx::query(&query)
             .bind(user)
@@ -438,7 +438,7 @@ pub async fn unsubscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Resu
             .execute(&mut *tx)
             .await?;
     }
-    sqlx::query("DELETE FROM playback_state WHERE user_id = $1 AND playback_type = 'podcast'                  AND left(podcast_id, length($2)) = $2")
+    sqlx::query("DELETE FROM playback_state WHERE profile_id = $1 AND playback_type = 'podcast'                  AND left(podcast_id, length($2)) = $2")
         .bind(user).bind(format!("{podcast}:")).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(true)
@@ -447,7 +447,7 @@ pub async fn unsubscribe(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Resu
 pub async fn is_subscribed(pool: &PgPool, user: Uuid, podcast: Uuid) -> sqlx::Result<bool> {
     sqlx::query_scalar!(
         r#"SELECT EXISTS (SELECT 1 FROM podcast_subscriptions
-                          WHERE user_id = $1 AND podcast_id = $2) AS "exists!""#,
+                          WHERE profile_id = $1 AND podcast_id = $2) AS "exists!""#,
         user,
         podcast
     )
@@ -492,7 +492,7 @@ pub async fn followed(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<Followed>> 
         Followed,
         "SELECT p.title, p.itunes_id, p.category_ids
          FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id
-         WHERE s.user_id = $1 ORDER BY s.subscribed_at, p.id",
+         WHERE s.profile_id = $1 ORDER BY s.subscribed_at, p.id",
         user
     )
     .fetch_all(pool)
@@ -553,7 +553,7 @@ pub async fn recent_in_progress(
              SELECT p.episode_id, e.podcast_id, p.last_played_at, p.\"current_time\", p.duration
              FROM podcast_progress p JOIN podcast_episodes e ON e.id = p.episode_id
              JOIN podcasts s ON s.id = e.podcast_id
-             WHERE p.user_id = $1 AND NOT p.is_finished AND p.\"current_time\" > 0
+             WHERE p.profile_id = $1 AND NOT p.is_finished AND p.\"current_time\" > 0
                AND (NOT $4 OR {label} <> 'ai')
              ORDER BY p.last_played_at DESC LIMIT $2
          ),
@@ -625,7 +625,7 @@ pub async fn followed_shows(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<Follo
     let query = format!(
         "SELECT p.id, p.title, p.author, p.description, p.image_url, p.episode_count, {}
          FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id
-         WHERE s.user_id = $1 ORDER BY s.subscribed_at DESC, p.id DESC",
+         WHERE s.profile_id = $1 ORDER BY s.subscribed_at DESC, p.id DESC",
         show_label_cols("p")
     );
     sqlx::query_as(&query).bind(user).fetch_all(pool).await
@@ -641,7 +641,7 @@ pub async fn recent_episodes(
                 p.\"current_time\", p.duration AS progress_duration, p.is_finished,
                 p.last_played_at, {}
          FROM podcast_episodes e JOIN podcasts s ON s.id = e.podcast_id
-         LEFT JOIN podcast_progress p ON p.episode_id = e.id AND p.user_id = $1
+         LEFT JOIN podcast_progress p ON p.episode_id = e.id AND p.profile_id = $1
          WHERE e.podcast_id = $2 ORDER BY e.published_at DESC, e.id DESC LIMIT 5",
         episode_label_cols("e", "s")
     );
@@ -694,12 +694,12 @@ pub async fn episode_page(
     let query = format!(
         "SELECT e.id, e.title, e.description, e.duration, e.published_at, e.episode_number,
                 e.season, e.image_url,
-                EXISTS(SELECT 1 FROM podcast_downloads d WHERE d.episode_id=e.id AND d.user_id=$1)
+                EXISTS(SELECT 1 FROM podcast_downloads d WHERE d.episode_id=e.id AND d.profile_id=$1)
                     AS is_downloaded,
                 p.\"current_time\", p.duration AS progress_duration, p.is_finished,
                 p.last_played_at, {cols}
          FROM podcast_episodes e JOIN podcasts s ON s.id = e.podcast_id
-         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1
+         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.profile_id=$1
          WHERE e.podcast_id=$2 AND (NOT $5 OR {label} <> 'ai')
          ORDER BY e.published_at {order}, e.id {order} LIMIT $3 OFFSET $4",
         cols = episode_label_cols("e", "s"),
@@ -758,7 +758,7 @@ pub async fn next_episode(
                 p.last_played_at, {cols}
          FROM podcast_episodes e JOIN podcasts s ON s.id = e.podcast_id
          JOIN podcast_episodes cur ON cur.id=$3 AND cur.podcast_id=$2
-         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1
+         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.profile_id=$1
          WHERE e.podcast_id=$2 AND (e.published_at,e.id) > (cur.published_at,cur.id)
          AND NOT COALESCE(p.is_finished, false) AND (NOT $4 OR {label} <> 'ai')
          ORDER BY e.published_at,e.id LIMIT 1",
@@ -823,21 +823,21 @@ pub async fn listening(
         "SELECT {columns} FROM podcast_progress p \
          JOIN podcast_episodes e ON e.id=p.episode_id \
          JOIN podcasts s ON s.id=e.podcast_id \
-         JOIN podcast_subscriptions sub ON sub.podcast_id=s.id AND sub.user_id=$1 \
-         WHERE p.user_id=$1 AND NOT p.is_finished AND p.\"current_time\">0 \
+         JOIN podcast_subscriptions sub ON sub.podcast_id=s.id AND sub.profile_id=$1 \
+         WHERE p.profile_id=$1 AND NOT p.is_finished AND p.\"current_time\">0 \
            AND (NOT $2 OR {label} <> 'ai') \
          ORDER BY p.last_played_at DESC LIMIT 12"
     );
     let new_episodes = format!(
         "WITH newest AS (SELECT DISTINCT ON (e.podcast_id) e.id FROM podcast_episodes e \
          JOIN podcasts s ON s.id=e.podcast_id \
-         JOIN podcast_subscriptions sub ON sub.podcast_id=e.podcast_id AND sub.user_id=$1 \
+         JOIN podcast_subscriptions sub ON sub.podcast_id=e.podcast_id AND sub.profile_id=$1 \
          WHERE NOT $2 OR {label} <> 'ai' \
          ORDER BY e.podcast_id,e.published_at DESC,e.id) \
          SELECT {columns} FROM newest n JOIN podcast_episodes e ON e.id=n.id \
          JOIN podcasts s ON s.id=e.podcast_id \
-         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.user_id=$1 \
-         WHERE p.user_id IS NULL ORDER BY e.published_at DESC LIMIT 20"
+         LEFT JOIN podcast_progress p ON p.episode_id=e.id AND p.profile_id=$1 \
+         WHERE p.profile_id IS NULL ORDER BY e.published_at DESC LIMIT 20"
     );
     async fn run(
         pool: &PgPool,
@@ -873,7 +873,7 @@ pub async fn progress(
     user: Uuid,
     episode: Uuid,
 ) -> sqlx::Result<Option<(f64, f64)>> {
-    sqlx::query_as("SELECT \"current_time\", duration FROM podcast_progress WHERE user_id = $1 AND episode_id = $2")
+    sqlx::query_as("SELECT \"current_time\", duration FROM podcast_progress WHERE profile_id = $1 AND episode_id = $2")
         .bind(user)
         .bind(episode)
         .fetch_optional(pool)
@@ -890,7 +890,7 @@ pub async fn save_progress(
     is_finished: bool,
 ) -> sqlx::Result<()> {
     sqlx::query(
-        "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration, is_finished, last_played_at) VALUES ($1, $2, $3, $4, $5, now()) ON CONFLICT (user_id, episode_id) DO UPDATE SET \"current_time\" = $3, duration = $4, is_finished = $5, last_played_at = now()",
+        "INSERT INTO podcast_progress (profile_id, episode_id, \"current_time\", duration, is_finished, last_played_at) VALUES ($1, $2, $3, $4, $5, now()) ON CONFLICT (profile_id, episode_id) DO UPDATE SET \"current_time\" = $3, duration = $4, is_finished = $5, last_played_at = now()",
     )
     .bind(user)
     .bind(episode)
@@ -904,11 +904,12 @@ pub async fn save_progress(
 
 /// Remove playback progress for one episode of one show.
 pub async fn clear_progress(pool: &PgPool, user: Uuid, episode: Uuid) -> sqlx::Result<u64> {
-    let done = sqlx::query("DELETE FROM podcast_progress WHERE user_id = $1 AND episode_id = $2")
-        .bind(user)
-        .bind(episode)
-        .execute(pool)
-        .await?;
+    let done =
+        sqlx::query("DELETE FROM podcast_progress WHERE profile_id = $1 AND episode_id = $2")
+            .bind(user)
+            .bind(episode)
+            .execute(pool)
+            .await?;
     Ok(done.rows_affected())
 }
 
@@ -975,9 +976,9 @@ pub async fn upsert_download(
     file_size_mb: f64,
 ) -> sqlx::Result<()> {
     sqlx::query!(
-        "INSERT INTO podcast_downloads (user_id, episode_id, local_path, file_size_mb, downloaded_at, last_accessed_at)
+        "INSERT INTO podcast_downloads (profile_id, episode_id, local_path, file_size_mb, downloaded_at, last_accessed_at)
          VALUES ($1, $2, $3, $4, now(), now())
-         ON CONFLICT (user_id, episode_id) DO UPDATE
+         ON CONFLICT (profile_id, episode_id) DO UPDATE
          SET local_path = $3, file_size_mb = $4, downloaded_at = now(), last_accessed_at = now()",
         user,
         episode,
@@ -1016,7 +1017,7 @@ pub async fn delete_downloads_for_episode(pool: &PgPool, episode: Uuid) -> sqlx:
 /// Removes one (user, episode) download record (cleanup, after its file is deleted).
 pub async fn delete_download_row(pool: &PgPool, user: Uuid, episode: Uuid) -> sqlx::Result<()> {
     sqlx::query!(
-        "DELETE FROM podcast_downloads WHERE user_id = $1 AND episode_id = $2",
+        "DELETE FROM podcast_downloads WHERE profile_id = $1 AND episode_id = $2",
         user,
         episode
     )
@@ -1071,7 +1072,7 @@ pub async fn expired_downloads(
 ) -> sqlx::Result<Vec<ExpiredDownload>> {
     sqlx::query_as!(
         ExpiredDownload,
-        "SELECT user_id, episode_id, local_path, file_size_mb FROM podcast_downloads
+        "SELECT profile_id AS user_id, episode_id, local_path, file_size_mb FROM podcast_downloads
          WHERE last_accessed_at < $1",
         cutoff
     )
@@ -1105,7 +1106,7 @@ pub async fn followed_channels(
     let query = format!(
         "SELECT p.id, p.feed_url, p.title, p.description, p.image_url, {label} AS ai_label
          FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id
-         WHERE s.user_id = $1 AND (NOT $2 OR {label} <> 'ai')
+         WHERE s.profile_id = $1 AND (NOT $2 OR {label} <> 'ai')
          ORDER BY s.subscribed_at, p.id"
     );
     sqlx::query_as(&query)
@@ -1174,7 +1175,7 @@ pub async fn newest_episodes(
 ) -> sqlx::Result<Vec<SubsonicEpisode>> {
     let query = format!(
         "SELECT {} \
-         JOIN podcast_subscriptions s ON s.podcast_id = e.podcast_id AND s.user_id = $1 \
+         JOIN podcast_subscriptions s ON s.podcast_id = e.podcast_id AND s.profile_id = $1 \
          WHERE NOT $3 OR {} <> 'ai' \
          ORDER BY e.published_at DESC, e.id DESC LIMIT $2",
         subsonic_episode_cols(),

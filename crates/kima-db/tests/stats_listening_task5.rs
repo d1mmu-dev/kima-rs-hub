@@ -58,7 +58,7 @@ async fn listening_values_isolate_users_and_respect_boundaries(pool: PgPool) {
         (user, tracks[1], "2026-03-31 22:30:00+00", "LIBRARY"),
         (other, tracks[0], "2026-03-31 22:30:00+00", "SUBSONIC"),
     ] {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at,source) VALUES ($1,$2,$3,$4::timestamptz,$5)").bind(Uuid::now_v7()).bind(who).bind(track).bind(timestamp).bind(source).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at,source) VALUES ($1,$2,$3,$4::timestamptz,$5)").bind(Uuid::now_v7()).bind(who).bind(track).bind(timestamp).bind(source).execute(&pool).await.unwrap();
     }
     let stats = listening_stats(&pool, user, "Europe/Warsaw", Period::All)
         .await
@@ -116,7 +116,7 @@ async fn listening_values_isolate_users_and_respect_boundaries(pool: PgPool) {
         1
     );
     for track in &tracks[2..] {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,'2026-03-31 22:30:00+00')").bind(Uuid::now_v7()).bind(user).bind(track).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,'2026-03-31 22:30:00+00')").bind(Uuid::now_v7()).bind(user).bind(track).execute(&pool).await.unwrap();
     }
     let stats = listening_stats(&pool, user, "UTC", Period::All)
         .await
@@ -150,7 +150,7 @@ async fn tied_peak_chooses_earliest_cell(pool: PgPool) {
     sqlx::query("INSERT INTO tracks (id,album_id,artist_name,title,codec,path,size,mtime,fingerprint,duration_secs) VALUES ($1,$2,'a','t','flac','/tie',0,now(),decode('','hex'),180)").bind(track).bind(album).execute(&pool).await.unwrap();
     for date in ["2026-03-01 23:30:00+00", "2026-03-02 00:30:00+00"] {
         sqlx::query(
-            "INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,$4::timestamptz)",
+            "INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,$4::timestamptz)",
         )
         .bind(Uuid::now_v7())
         .bind(user)

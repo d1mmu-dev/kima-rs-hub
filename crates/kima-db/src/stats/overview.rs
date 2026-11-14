@@ -50,10 +50,10 @@ pub async fn overview(pool: &PgPool, user: Uuid, period: Period) -> sqlx::Result
         "{all} SELECT count(t.id) tracks, count(DISTINCT a.id) albums, count(DISTINCT a.artist_id) artists FROM albums a JOIN tracks t ON t.album_id=a.id"
     );
     let heard_sql = format!(
-        "{all} SELECT count(DISTINCT t.id) tracks, count(DISTINCT a.id) albums, count(DISTINCT a.artist_id) artists FROM plays pl JOIN tracks t ON t.id=pl.track_id JOIN albums a ON a.id=t.album_id WHERE pl.user_id=$1"
+        "{all} SELECT count(DISTINCT t.id) tracks, count(DISTINCT a.id) albums, count(DISTINCT a.artist_id) artists FROM plays pl JOIN tracks t ON t.id=pl.track_id JOIN albums a ON a.id=t.album_id WHERE pl.profile_id=$1"
     );
     let decades_sql = format!(
-        "{all} SELECT (coalesce(a.display_year,a.year)/10*10)::int decade, count(DISTINCT a.id) albums, count(DISTINCT a.id) FILTER (WHERE pl.id IS NOT NULL) heard FROM albums a LEFT JOIN tracks t ON t.album_id=a.id LEFT JOIN plays pl ON pl.track_id=t.id AND pl.user_id=$1 WHERE coalesce(a.display_year,a.year) IS NOT NULL GROUP BY 1 HAVING (coalesce(a.display_year,a.year)/10*10)>1900 ORDER BY 1"
+        "{all} SELECT (coalesce(a.display_year,a.year)/10*10)::int decade, count(DISTINCT a.id) albums, count(DISTINCT a.id) FILTER (WHERE pl.id IS NOT NULL) heard FROM albums a LEFT JOIN tracks t ON t.album_id=a.id LEFT JOIN plays pl ON pl.track_id=t.id AND pl.profile_id=$1 WHERE coalesce(a.display_year,a.year) IS NOT NULL GROUP BY 1 HAVING (coalesce(a.display_year,a.year)/10*10)>1900 ORDER BY 1"
     );
     let conc_sql = format!(
         "{prefix}, c AS (SELECT track_id,count(*) n FROM p GROUP BY 1), r AS (SELECT n,sum(n) OVER (ORDER BY n DESC,track_id) running,sum(n) OVER () total,row_number() OVER (ORDER BY n DESC,track_id) rank FROM c) SELECT min(rank) FILTER (WHERE running >= total/2.0) for_half, min(rank) FILTER (WHERE running >= total*0.8) for_eighty, max(rank) distinct FROM r"

@@ -45,9 +45,9 @@ pub struct Patch {
 pub async fn get(pool: &PgPool, user_id: Uuid) -> sqlx::Result<UserSettings> {
     let row = sqlx::query_as!(
         UserSettings,
-        r#"SELECT user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,
+        r#"SELECT profile_id AS user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,
                   share_live_listening, podcast_ai_filter
-           FROM user_settings WHERE user_id = $1"#,
+           FROM user_settings WHERE profile_id = $1"#,
         user_id
     )
     .fetch_optional(pool)
@@ -60,18 +60,18 @@ pub async fn upsert(pool: &PgPool, user_id: Uuid, patch: Patch) -> sqlx::Result<
     sqlx::query_as!(
         UserSettings,
         r#"INSERT INTO user_settings
-               (user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,
+               (profile_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,
                 share_live_listening, podcast_ai_filter)
            VALUES ($1, COALESCE($2, 'original'), COALESCE($3, false), COALESCE($4, false),
                    COALESCE($5, 10240), COALESCE($6, true), COALESCE($7, 'hide'))
-           ON CONFLICT (user_id) DO UPDATE SET
+           ON CONFLICT (profile_id) DO UPDATE SET
                playback_quality = COALESCE($2, user_settings.playback_quality),
                wifi_only = COALESCE($3, user_settings.wifi_only),
                offline_enabled = COALESCE($4, user_settings.offline_enabled),
                max_cache_size_mb = COALESCE($5, user_settings.max_cache_size_mb),
                share_live_listening = COALESCE($6, user_settings.share_live_listening),
                podcast_ai_filter = COALESCE($7, user_settings.podcast_ai_filter)
-           RETURNING user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,
+           RETURNING profile_id AS user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,
                      share_live_listening, podcast_ai_filter"#,
         user_id,
         patch.playback_quality,

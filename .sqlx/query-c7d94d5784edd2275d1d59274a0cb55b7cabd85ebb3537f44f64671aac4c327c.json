@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT user_id, episode_id, local_path, file_size_mb FROM podcast_downloads\n         WHERE last_accessed_at < $1",
+  "query": "SELECT profile_id AS user_id, episode_id, local_path, file_size_mb FROM podcast_downloads\n         WHERE last_accessed_at < $1",
   "describe": {
     "columns": [
       {
@@ -36,5 +36,5 @@
       false
     ]
   },
-  "hash": "23166871f1d2911469f086b08d55e997c2b4a81294a17aea11cad314105fd13c"
+  "hash": "c7d94d5784edd2275d1d59274a0cb55b7cabd85ebb3537f44f64671aac4c327c"
 }

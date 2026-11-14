@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT p.title, p.itunes_id, p.category_ids\n         FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id\n         WHERE s.user_id = $1 ORDER BY s.subscribed_at, p.id",
+  "query": "SELECT p.title, p.itunes_id, p.category_ids\n         FROM podcast_subscriptions s JOIN podcasts p ON p.id = s.podcast_id\n         WHERE s.profile_id = $1 ORDER BY s.subscribed_at, p.id",
   "describe": {
     "columns": [
       {
@@ -30,5 +30,5 @@
       false
     ]
   },
-  "hash": "4f25f668f8d7bd7d7df8172cac17967552b7ce7866c1b62d1aaff2c059b536f4"
+  "hash": "d536b6df3923e1eadb780d5cc48596ce4342086dbd8c08ce20b63c548f2afa15"
 }

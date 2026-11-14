@@ -13,6 +13,8 @@ use crate::browse::TrackRow;
 #[derive(Debug, Clone, FromRow)]
 pub struct Playlist {
     pub id: Uuid,
+    // Column renamed by migration 0060 (M-PROF); the field follows in the per-profile re-key.
+    #[sqlx(rename = "profile_id")]
     pub user_id: Uuid,
     pub name: String,
     pub is_public: bool,
@@ -44,7 +46,7 @@ pub struct ItemRow {
 }
 
 const PLAYLIST_COLS: &str =
-    "p.id, p.user_id, p.name, p.is_public, p.reverse_order, p.created_at, p.updated_at";
+    "p.id, p.profile_id, p.name, p.is_public, p.reverse_order, p.created_at, p.updated_at";
 
 const ITEM_COLS: &str = "pi.playlist_id, pi.id AS item_id, pi.sort,
         t.id, t.title, t.display_title, t.artist_name, t.duration_secs, t.disc, t.track_no,
@@ -73,8 +75,8 @@ pub async fn create(
     is_public: bool,
 ) -> sqlx::Result<Playlist> {
     sqlx::query_as(
-        "INSERT INTO playlists (id, user_id, name, is_public) VALUES ($1, $2, $3, $4)
-         RETURNING id, user_id, name, is_public, reverse_order, created_at, updated_at",
+        "INSERT INTO playlists (id, profile_id, name, is_public) VALUES ($1, $2, $3, $4)
+         RETURNING id, profile_id, name, is_public, reverse_order, created_at, updated_at",
     )
     .bind(id)
     .bind(user)
@@ -95,7 +97,7 @@ pub async fn update(
         "UPDATE playlists SET name = COALESCE($2, name), is_public = COALESCE($3, is_public),
                 reverse_order = COALESCE($4, reverse_order), updated_at = now()
          WHERE id = $1
-         RETURNING id, user_id, name, is_public, reverse_order, created_at, updated_at",
+         RETURNING id, profile_id, name, is_public, reverse_order, created_at, updated_at",
     )
     .bind(id)
     .bind(name)
@@ -146,10 +148,10 @@ async fn summaries(
                JOIN tracks t ON t.id = pi.track_id AND t.missing_since IS NULL
               WHERE pi.playlist_id = p.id) AS track_count,
             EXISTS (SELECT 1 FROM hidden_playlists h
-                     WHERE h.playlist_id = p.id AND h.user_id = $1) AS hidden
+                     WHERE h.playlist_id = p.id AND h.profile_id = $1) AS hidden
          FROM playlists p
-         JOIN users u ON u.id = p.user_id
-         WHERE ($2::uuid IS NULL OR p.id = $2) AND (p.user_id = $1 OR p.is_public)
+         JOIN users u ON u.id = p.profile_id
+         WHERE ($2::uuid IS NULL OR p.id = $2) AND (p.profile_id = $1 OR p.is_public)
          ORDER BY p.created_at DESC, p.id DESC
          LIMIT $3 OFFSET $4"
     ))
@@ -259,12 +261,14 @@ pub async fn subsonic_create(
     if !all_present(&mut tx, tracks).await? {
         return Ok(false);
     }
-    sqlx::query("INSERT INTO playlists (id, user_id, name, is_public) VALUES ($1, $2, $3, false)")
-        .bind(id)
-        .bind(user)
-        .bind(name)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO playlists (id, profile_id, name, is_public) VALUES ($1, $2, $3, false)",
+    )
+    .bind(id)
+    .bind(user)
+    .bind(name)
+    .execute(&mut *tx)
+    .await?;
     if !add_locked(&mut tx, id, tracks).await?.rejected.is_empty() {
         return Ok(false);
     }
@@ -657,7 +661,7 @@ pub async fn move_item(
 /// Hides a playlist from `user`'s view. `true` when it was not hidden before.
 pub async fn hide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<bool> {
     let done = sqlx::query(
-        "INSERT INTO hidden_playlists (user_id, playlist_id) VALUES ($1, $2)
+        "INSERT INTO hidden_playlists (profile_id, playlist_id) VALUES ($1, $2)
          ON CONFLICT DO NOTHING",
     )
     .bind(user)
@@ -669,10 +673,11 @@ pub async fn hide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<boo
 
 /// Shows a hidden playlist to `user` again. `true` when it was hidden.
 pub async fn unhide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<bool> {
-    let done = sqlx::query("DELETE FROM hidden_playlists WHERE user_id = $1 AND playlist_id = $2")
-        .bind(user)
-        .bind(playlist)
-        .execute(pool)
-        .await?;
+    let done =
+        sqlx::query("DELETE FROM hidden_playlists WHERE profile_id = $1 AND playlist_id = $2")
+            .bind(user)
+            .bind(playlist)
+            .execute(pool)
+            .await?;
     Ok(done.rows_affected() > 0)
 }

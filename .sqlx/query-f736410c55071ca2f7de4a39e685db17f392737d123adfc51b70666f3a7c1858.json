@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, secret_enc FROM api_keys WHERE user_id = $1\n         ORDER BY created_at ASC, id ASC LIMIT $2",
+  "query": "SELECT id, secret_enc FROM api_keys WHERE profile_id = $1\n         ORDER BY created_at ASC, id ASC LIMIT $2",
   "describe": {
     "columns": [
       {
@@ -25,5 +25,5 @@
       false
     ]
   },
-  "hash": "e17de28f170cbff6d601ffc15bf299ccf094c7412bdf049528798795ab37ced5"
+  "hash": "f736410c55071ca2f7de4a39e685db17f392737d123adfc51b70666f3a7c1858"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT k.id AS key_id,\n                  u.id, u.username, u.password_hash, u.role, u.onboarding_complete,\n                  u.token_version, u.created_at\n           FROM api_keys k JOIN users u ON u.id = k.user_id\n           WHERE k.key_hash = $1",
+  "query": "SELECT k.id AS key_id,\n                  u.id, u.username, u.password_hash, u.role, u.onboarding_complete,\n                  u.token_version, u.created_at\n           FROM api_keys k JOIN users u ON u.id = k.profile_id\n           WHERE k.key_hash = $1",
   "describe": {
     "columns": [
       {
@@ -60,5 +60,5 @@
       false
     ]
   },
-  "hash": "ab76cf8efb9369124ea2dca1a541e0a1c44b011df3bad9e4cf00ed83993e4e21"
+  "hash": "639e9ba2c399f9a9fcc11245ae1b421b6c1e259f1e5bb3359ad2ca328e0a67c5"
 }

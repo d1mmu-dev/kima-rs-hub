@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,\n                  share_live_listening, podcast_ai_filter\n           FROM user_settings WHERE user_id = $1",
+  "query": "SELECT profile_id AS user_id, playback_quality, wifi_only, offline_enabled, max_cache_size_mb,\n                  share_live_listening, podcast_ai_filter\n           FROM user_settings WHERE profile_id = $1",
   "describe": {
     "columns": [
       {
@@ -54,5 +54,5 @@
       false
     ]
   },
-  "hash": "a2cd639e25f96de32b476899c13f21ee9c6f912be695ff0415296e361e1fa32d"
+  "hash": "edd9524c163c4f30e9fa19dfc87a6c8a7c90023273dbeebf4a21f837cc7f4e49"
 }

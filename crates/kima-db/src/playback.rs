@@ -10,6 +10,8 @@ pub const QUEUE_LIMIT: usize = 10_000;
 
 #[derive(Debug, Clone, FromRow)]
 pub struct PlaybackState {
+    // Column renamed by migration 0060 (M-PROF); the field follows in the per-profile re-key.
+    #[sqlx(rename = "profile_id")]
     pub user_id: Uuid,
     pub playback_type: String,
     pub track_id: Option<String>,
@@ -41,7 +43,7 @@ pub struct Patch {
 }
 
 pub async fn get(pool: &PgPool, user: Uuid) -> sqlx::Result<Option<PlaybackState>> {
-    sqlx::query_as("SELECT * FROM playback_state WHERE user_id = $1")
+    sqlx::query_as("SELECT * FROM playback_state WHERE profile_id = $1")
         .bind(user)
         .fetch_optional(pool)
         .await
@@ -52,9 +54,9 @@ pub async fn upsert(pool: &PgPool, user: Uuid, patch: Patch) -> sqlx::Result<Pla
     let flat = |o: &Option<Option<String>>| o.clone().flatten();
     sqlx::query_as(
         "INSERT INTO playback_state AS s
-             (user_id, playback_type, track_id, audiobook_id, podcast_id, queue, current_index, is_shuffle, position, changed_by)
+             (profile_id, playback_type, track_id, audiobook_id, podcast_id, queue, current_index, is_shuffle, position, changed_by)
          VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 0), COALESCE($8, false), COALESCE($13, 0), $14)
-         ON CONFLICT (user_id) DO UPDATE SET
+         ON CONFLICT (profile_id) DO UPDATE SET
              playback_type = EXCLUDED.playback_type,
              track_id = CASE WHEN $9 THEN EXCLUDED.track_id ELSE s.track_id END,
              audiobook_id = CASE WHEN $10 THEN EXCLUDED.audiobook_id ELSE s.audiobook_id END,
@@ -88,9 +90,11 @@ pub async fn upsert(pool: &PgPool, user: Uuid, patch: Patch) -> sqlx::Result<Pla
 
 /// Clears the user's state; returns how many rows went (0 when there was none).
 pub async fn delete(pool: &PgPool, user: Uuid) -> sqlx::Result<u64> {
-    Ok(sqlx::query("DELETE FROM playback_state WHERE user_id = $1")
-        .bind(user)
-        .execute(pool)
-        .await?
-        .rows_affected())
+    Ok(
+        sqlx::query("DELETE FROM playback_state WHERE profile_id = $1")
+            .bind(user)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+    )
 }

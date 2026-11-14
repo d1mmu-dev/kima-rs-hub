@@ -208,23 +208,24 @@ fixture_test!(starred_and_rating_joined_for_caller_only, |pool| {
 });
 
 fixture_test!(stars_one_target_check, |pool| {
-    let two =
-        sqlx::query("INSERT INTO stars (id, user_id, track_id, album_id) VALUES ($1, $2, $3, $4)")
-            .bind(Uuid::now_v7())
-            .bind(ALICE)
-            .bind(track(5))
-            .bind(album(1))
-            .execute(&pool)
-            .await;
+    let two = sqlx::query(
+        "INSERT INTO stars (id, profile_id, track_id, album_id) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(ALICE)
+    .bind(track(5))
+    .bind(album(1))
+    .execute(&pool)
+    .await;
     assert!(two.is_err());
-    let none = sqlx::query("INSERT INTO stars (id, user_id) VALUES ($1, $2)")
+    let none = sqlx::query("INSERT INTO stars (id, profile_id) VALUES ($1, $2)")
         .bind(Uuid::now_v7())
         .bind(ALICE)
         .execute(&pool)
         .await;
     assert!(none.is_err());
     let two = sqlx::query(
-        "INSERT INTO ratings (id, user_id, track_id, artist_id, rating) VALUES ($1, $2, $3, $4, 3)",
+        "INSERT INTO ratings (id, profile_id, track_id, artist_id, rating) VALUES ($1, $2, $3, $4, 3)",
     )
     .bind(Uuid::now_v7())
     .bind(ALICE)
@@ -262,7 +263,7 @@ fixture_test!(star_set_unknown_target_false, |pool| {
     );
     assert_eq!(count(&pool, "SELECT count(*) FROM stars").await, before + 1);
     let first: time::OffsetDateTime =
-        sqlx::query_scalar("SELECT starred_at FROM stars WHERE user_id = $1 AND track_id = $2")
+        sqlx::query_scalar("SELECT starred_at FROM stars WHERE profile_id = $1 AND track_id = $2")
             .bind(ALICE)
             .bind(track(5))
             .fetch_one(&pool)
@@ -274,7 +275,7 @@ fixture_test!(star_set_unknown_target_false, |pool| {
             .unwrap()
     );
     let again: time::OffsetDateTime =
-        sqlx::query_scalar("SELECT starred_at FROM stars WHERE user_id = $1 AND track_id = $2")
+        sqlx::query_scalar("SELECT starred_at FROM stars WHERE profile_id = $1 AND track_id = $2")
             .bind(ALICE)
             .bind(track(5))
             .fetch_one(&pool)
@@ -869,7 +870,7 @@ fixture_test!(purging_track_cascades_stars_ratings_bookmarks, |pool| {
     assert_eq!(
         count(
             &pool,
-            "SELECT count(*) FROM stars WHERE user_id = '00000000-0000-7000-8000-400000000002'"
+            "SELECT count(*) FROM stars WHERE profile_id = '00000000-0000-7000-8000-400000000002'"
         )
         .await,
         0

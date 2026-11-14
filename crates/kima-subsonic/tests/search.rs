@@ -873,7 +873,7 @@ fixture_test!(get_genres_sorted_by_name, |server, pool| {
 async fn search3_sync_page_timing_10k(pool: PgPool) {
     seed_extra(&pool, 10_000, 0).await;
     sqlx::query(
-        "INSERT INTO stars (id, user_id, track_id, starred_at)
+        "INSERT INTO stars (id, profile_id, track_id, starred_at)
          SELECT gen_random_uuid(), $1, t.id, now()
          FROM (SELECT id, row_number() OVER (ORDER BY id) AS n FROM tracks
                WHERE artist_name = 'Extra Artist') t

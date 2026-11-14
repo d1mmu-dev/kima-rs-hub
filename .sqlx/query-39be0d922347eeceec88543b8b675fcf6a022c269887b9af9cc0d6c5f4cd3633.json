@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*)::bigint AS \"n!\"\n           FROM podcast_subscriptions s\n           JOIN podcast_episodes e ON e.podcast_id = s.podcast_id\n           LEFT JOIN podcast_progress p ON p.episode_id = e.id AND p.profile_id = $1\n           WHERE s.profile_id = $1 AND p.profile_id IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "39be0d922347eeceec88543b8b675fcf6a022c269887b9af9cc0d6c5f4cd3633"
+}

@@ -246,7 +246,7 @@ async fn refresh_all_with_mixed_followed_shows_green(pool: PgPool) {
     let followed: i64 = count(
         env.pool(),
         &format!(
-            "SELECT count(*) FROM podcast_subscriptions WHERE user_id = '{}'",
+            "SELECT count(*) FROM podcast_subscriptions WHERE profile_id = '{}'",
             env.user
         ),
     )
@@ -537,7 +537,7 @@ async fn episode_id(pool: &PgPool, guid: &str) -> Uuid {
 async fn progress(pool: &PgPool, user: Uuid, guid: &str, at: f64, of: f64, finished: bool) {
     let episode = episode_id(pool, guid).await;
     sqlx::query(
-        "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration, is_finished)
+        "INSERT INTO podcast_progress (profile_id, episode_id, \"current_time\", duration, is_finished)
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(user)
@@ -1093,7 +1093,7 @@ async fn saves_a_position_past_the_stored_length(pool: PgPool) {
     assert_eq!(body["progress"]["currentTime"], json!(650));
     assert_eq!(body["progress"]["isFinished"], json!(false));
     let stored: f64 = sqlx::query_scalar(
-        "SELECT \"current_time\" FROM podcast_progress WHERE user_id = $1 AND episode_id = $2",
+        "SELECT \"current_time\" FROM podcast_progress WHERE profile_id = $1 AND episode_id = $2",
     )
     .bind(env.user)
     .bind(episode)
@@ -1156,7 +1156,7 @@ async fn answers_400_without_a_position(pool: PgPool) {
 
 async fn is_finished(pool: &PgPool, user: Uuid, episode: Uuid) -> bool {
     sqlx::query_scalar::<_, bool>(
-        "SELECT is_finished FROM podcast_progress WHERE user_id = $1 AND episode_id = $2",
+        "SELECT is_finished FROM podcast_progress WHERE profile_id = $1 AND episode_id = $2",
     )
     .bind(user)
     .bind(episode)
@@ -1248,7 +1248,7 @@ async fn delete_is_idempotent(pool: PgPool) {
     env.delete(&path).await.assert_status_ok();
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM podcast_progress WHERE user_id = $1 AND episode_id = $2"
+            "SELECT count(*) FROM podcast_progress WHERE profile_id = $1 AND episode_id = $2"
         )
         .bind(env.user)
         .bind(episode)
@@ -1293,7 +1293,7 @@ async fn unfollowing_a_show_forgets_that_it_was_playing_so_no_device_restores_it
     progress(pool, env.user, "nx_other", 10.0, 600.0, false).await;
     let nx_15 = episode_id(pool, "nx_15").await;
     sqlx::query(
-        "INSERT INTO podcast_downloads (user_id, episode_id, local_path, file_size_mb)
+        "INSERT INTO podcast_downloads (profile_id, episode_id, local_path, file_size_mb)
          VALUES ($1, $2, 'podcast-audio/x.audio', 1.5)",
     )
     .bind(env.user)
@@ -1302,7 +1302,7 @@ async fn unfollowing_a_show_forgets_that_it_was_playing_so_no_device_restores_it
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO playback_state (user_id, playback_type, podcast_id) VALUES ($1, 'podcast', $2)",
+        "INSERT INTO playback_state (profile_id, playback_type, podcast_id) VALUES ($1, 'podcast', $2)",
     )
     .bind(env.user)
     .bind(format!("{show}:{nx_15}"))
@@ -1601,7 +1601,7 @@ async fn detail_requires_follow_and_survives_apple_down_with_user_progress_and_d
         .await
         .unwrap();
     progress(env.pool(), env.user, "detail-ep", 30.0, 60.0, false).await;
-    sqlx::query("INSERT INTO podcast_downloads(user_id,episode_id,local_path,file_size_mb) VALUES ($1,$2,'test',1)")
+    sqlx::query("INSERT INTO podcast_downloads(profile_id,episode_id,local_path,file_size_mb) VALUES ($1,$2,'test',1)")
         .bind(env.user).bind(ep).execute(env.pool()).await.unwrap();
     let res = env.get(&format!("/api/podcasts/{show}")).await;
     res.assert_status_ok();

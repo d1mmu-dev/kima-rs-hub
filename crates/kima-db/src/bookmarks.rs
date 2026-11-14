@@ -24,9 +24,9 @@ pub async fn upsert(
     comment: Option<&str>,
 ) -> sqlx::Result<bool> {
     let res = sqlx::query(
-        "INSERT INTO subsonic_bookmarks (user_id, track_id, position_ms, comment)
+        "INSERT INTO subsonic_bookmarks (profile_id, track_id, position_ms, comment)
          SELECT $1, $2, $3, $4 WHERE EXISTS (SELECT 1 FROM tracks WHERE id = $2)
-         ON CONFLICT (user_id, track_id)
+         ON CONFLICT (profile_id, track_id)
          DO UPDATE SET position_ms = EXCLUDED.position_ms, comment = EXCLUDED.comment, changed_at = now()",
     )
     .bind(user)
@@ -43,7 +43,7 @@ pub async fn upsert(
 }
 
 pub async fn delete(pool: &PgPool, user: Uuid, track: Uuid) -> sqlx::Result<()> {
-    sqlx::query("DELETE FROM subsonic_bookmarks WHERE user_id = $1 AND track_id = $2")
+    sqlx::query("DELETE FROM subsonic_bookmarks WHERE profile_id = $1 AND track_id = $2")
         .bind(user)
         .bind(track)
         .execute(pool)
@@ -56,7 +56,7 @@ pub async fn list_for_user(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<Bookma
     sqlx::query_as(
         "SELECT b.track_id, b.position_ms, b.comment, b.created_at, b.changed_at
          FROM subsonic_bookmarks b JOIN tracks t ON t.id = b.track_id
-         WHERE b.user_id = $1 AND t.missing_since IS NULL
+         WHERE b.profile_id = $1 AND t.missing_since IS NULL
          ORDER BY b.changed_at DESC, b.track_id ASC",
     )
     .bind(user)

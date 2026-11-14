@@ -271,7 +271,7 @@ async fn album_id_stable_and_user_state_survives(pool: PgPool) {
     .unwrap();
     drop(conn);
     let u = user(&pool).await;
-    sqlx::query("INSERT INTO stars (id, user_id, album_id) VALUES ($1, $2, $3)")
+    sqlx::query("INSERT INTO stars (id, profile_id, album_id) VALUES ($1, $2, $3)")
         .bind(Uuid::now_v7())
         .bind(u)
         .bind(b)
@@ -279,7 +279,7 @@ async fn album_id_stable_and_user_state_survives(pool: PgPool) {
         .await
         .unwrap();
     let pl = Uuid::now_v7();
-    sqlx::query("INSERT INTO playlists (id, user_id, name) VALUES ($1, $2, 'p')")
+    sqlx::query("INSERT INTO playlists (id, profile_id, name) VALUES ($1, $2, 'p')")
         .bind(pl)
         .bind(u)
         .execute(&pool)

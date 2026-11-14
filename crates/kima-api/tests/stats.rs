@@ -12,7 +12,7 @@ async fn tracks_returns_full_playable_shape(pool: PgPool) {
     let row = seed(&pool, Seed::new("Artist", "Album", Some(1994), "Song")).await;
     let state = common::state(pool.clone());
     let (user, token) = common::user_with_token(&state, "ana").await;
-    sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now())")
+    sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,now())")
         .bind(Uuid::now_v7())
         .bind(user.id)
         .bind(row.track)
@@ -109,7 +109,7 @@ async fn tracks_period_isolation_decade_and_core(pool: PgPool) {
         (ana.id, b.track, -3000000),
         (ben.id, c.track, 0),
     ] {
-        sqlx::query("INSERT INTO plays(id,user_id,track_id,played_at) VALUES ($1,$2,$3,now()+$4 * interval '1 second')").bind(Uuid::now_v7()).bind(user).bind(track).bind(seconds as f64).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO plays(id,profile_id,track_id,played_at) VALUES ($1,$2,$3,now()+$4 * interval '1 second')").bind(Uuid::now_v7()).bind(user).bind(track).bind(seconds as f64).execute(&pool).await.unwrap();
     }
     let server = TestServer::new(kima_api::router(state)).unwrap();
     let get = |query: &str| format!("/api/stats/tracks?{query}");
@@ -166,7 +166,7 @@ async fn hour_buckets_in_the_callers_zone_green(pool: PgPool) {
     let (ana, token) = common::user_with_token(&state, "ana").await;
     let (ben, _) = common::user_with_token(&state, "ben").await;
     for user in [ana.id, ben.id] {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,'2026-03-01T23:30:00Z')")
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,'2026-03-01T23:30:00Z')")
             .bind(Uuid::now_v7()).bind(user).bind(track).execute(&pool).await.unwrap();
     }
     let server = TestServer::new(kima_api::router(state)).unwrap();
@@ -218,7 +218,7 @@ async fn track_plays_counts_listens(pool: PgPool) {
         (ana.id, 230),
         (ben.id, 0),
     ] {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now() + $4 * interval '1 second')")
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,now() + $4 * interval '1 second')")
             .bind(Uuid::now_v7()).bind(user).bind(track).bind(offset as f64).execute(&pool).await.unwrap();
     }
     let server = TestServer::new(kima_api::router(state)).unwrap();
@@ -276,7 +276,7 @@ async fn hour_dst_validation_period_and_boundaries_fixed(pool: PgPool) {
         "2026-10-25T01:30:00Z",
     ] {
         sqlx::query(
-            "INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,$4::timestamptz)",
+            "INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,$4::timestamptz)",
         )
         .bind(Uuid::now_v7())
         .bind(ana.id)
@@ -333,7 +333,7 @@ async fn hour_dst_validation_period_and_boundaries_fixed(pool: PgPool) {
         .get("/api/stats/hour?dow=0&hour=0")
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
-    sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3, date_trunc('hour', now() - interval '40 days'))")
+    sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3, date_trunc('hour', now() - interval '40 days'))")
        .bind(Uuid::now_v7()).bind(ana.id).bind(track).execute(&pool).await.unwrap();
     let (dow,hour): (i32,i32)=sqlx::query_as("SELECT extract(dow from now() - interval '40 days')::int, extract(hour from now() - interval '40 days')::int").fetch_one(&pool).await.unwrap();
     let all = server
@@ -375,7 +375,7 @@ async fn hour_order_limits_and_display_names(pool: PgPool) {
                 .await
                 .unwrap();
         }
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,'2026-03-01T23:30:00Z')").bind(Uuid::now_v7()).bind(user.id).bind(row.track).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,'2026-03-01T23:30:00Z')").bind(Uuid::now_v7()).bind(user.id).bind(row.track).execute(&pool).await.unwrap();
     }
     let server = TestServer::new(kima_api::router(state)).unwrap();
     let r = server
@@ -507,7 +507,7 @@ async fn spoken_podcasts_counts(pool: PgPool) {
     let (show_c, _ep_c) = store_show_with_episode(&pool, "Show C").await;
 
     for show in [show_a, show_b, show_c] {
-        sqlx::query("INSERT INTO podcast_subscriptions (user_id, podcast_id) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO podcast_subscriptions (profile_id, podcast_id) VALUES ($1, $2)")
             .bind(user.id)
             .bind(show)
             .execute(&pool)
@@ -516,7 +516,7 @@ async fn spoken_podcasts_counts(pool: PgPool) {
     }
     // Finished episode A: 300 s heard.
     sqlx::query(
-        "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration, is_finished)
+        "INSERT INTO podcast_progress (profile_id, episode_id, \"current_time\", duration, is_finished)
          VALUES ($1, $2, 300, 1000, true)",
     )
     .bind(user.id)
@@ -526,7 +526,7 @@ async fn spoken_podcasts_counts(pool: PgPool) {
     .unwrap();
     // Unfinished episode B: 150 s heard.
     sqlx::query(
-        "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration, is_finished)
+        "INSERT INTO podcast_progress (profile_id, episode_id, \"current_time\", duration, is_finished)
          VALUES ($1, $2, 150, 1000, false)",
     )
     .bind(user.id)
@@ -585,7 +585,7 @@ async fn stats_shelf_and_listening_are_isolated_per_user(pool: PgPool) {
         (ben.id, second.track, "2026-03-01T12:00:00Z"),
     ] {
         sqlx::query(
-            "INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,$4::timestamptz)",
+            "INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,$4::timestamptz)",
         )
         .bind(Uuid::now_v7())
         .bind(user)
@@ -646,10 +646,10 @@ async fn stats_habit_era_decades_and_period(pool: PgPool) {
     let state = common::state(pool.clone());
     let (user, token) = common::user_with_token(&state, "ana").await;
     for (i, track) in tracks.iter().enumerate() {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now() - interval '2 days' + $4 * interval '200 seconds')")
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,now() - interval '2 days' + $4 * interval '200 seconds')")
             .bind(Uuid::now_v7()).bind(user.id).bind(track).bind(i as f64).execute(&pool).await.unwrap();
     }
-    sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now() - interval '400 days')")
+    sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,now() - interval '400 days')")
         .bind(Uuid::now_v7()).bind(user.id).bind(ancient.track).execute(&pool).await.unwrap();
     let server = TestServer::new(kima_api::router(state)).unwrap();
     let r = server
@@ -694,7 +694,7 @@ async fn stats_habit_excludes_exactly_fifteen_minutes(pool: PgPool) {
     let state = common::state(pool.clone());
     let (user, token) = common::user_with_token(&state, "ana").await;
     for (track, offset) in [(first.track, 0), (second.track, 900)] {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,'2026-01-01T00:00:00Z'::timestamptz+$4*interval '1 second')").bind(Uuid::now_v7()).bind(user.id).bind(track).bind(offset as f64).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,'2026-01-01T00:00:00Z'::timestamptz+$4*interval '1 second')").bind(Uuid::now_v7()).bind(user.id).bind(track).bind(offset as f64).execute(&pool).await.unwrap();
     }
     let server = TestServer::new(kima_api::router(state)).unwrap();
     let r = server.get("/api/stats").authorization_bearer(&token).await;
@@ -788,10 +788,10 @@ async fn false_starts_reports_provable_skips_and_isolates_users(pool: PgPool) {
         (ana.id, b.track, 400),
         (ben.id, b.track, 0),
     ] {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at,heard) VALUES ($1,$2,$3,'2026-03-01T12:00:00Z'::timestamptz + $4 * interval '1 second',false)")
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at,heard) VALUES ($1,$2,$3,'2026-03-01T12:00:00Z'::timestamptz + $4 * interval '1 second',false)")
             .bind(Uuid::now_v7()).bind(u).bind(track).bind(sec as f64).execute(&pool).await.unwrap();
     }
-    sqlx::query("INSERT INTO play_audit_ignore(user_id,track_id,ignored_at) VALUES ($1,$2,'2026-11-11T10:00:00Z')").bind(ana.id).bind(b.track).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO play_audit_ignore(profile_id,track_id,ignored_at) VALUES ($1,$2,'2026-11-11T10:00:00Z')").bind(ana.id).bind(b.track).execute(&pool).await.unwrap();
     let server = TestServer::new(kima_api::router(state)).unwrap();
     server
         .get("/api/stats/false-starts")
@@ -849,7 +849,7 @@ const ACTIONS: [&str; 4] = ["collapse", "remove", "ignore", "restore"];
 /// One `plays` row at 2026-03-01T12:00:00Z + `second`.
 async fn play(pool: &PgPool, user: Uuid, track: Uuid, second: i64, heard: bool) -> Uuid {
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at,heard) VALUES ($1,$2,$3,'2026-03-01T12:00:00Z'::timestamptz + $4 * interval '1 second',$5)")
+    sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at,heard) VALUES ($1,$2,$3,'2026-03-01T12:00:00Z'::timestamptz + $4 * interval '1 second',$5)")
         .bind(id)
         .bind(user)
         .bind(track)
@@ -1180,7 +1180,7 @@ async fn ignore_skips_unknown_ids_and_duplicates_and_restore_counts(pool: PgPool
         assert_eq!(response.json::<Value>(), json!({"restored":expected}));
     }
     let users: Vec<Uuid> =
-        sqlx::query_scalar("SELECT user_id FROM play_audit_ignore WHERE track_id=$1")
+        sqlx::query_scalar("SELECT profile_id FROM play_audit_ignore WHERE track_id=$1")
             .bind(song)
             .fetch_all(&pool)
             .await

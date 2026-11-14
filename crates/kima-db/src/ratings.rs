@@ -22,8 +22,8 @@ pub async fn set(
     let col = kind.column();
     // The conflict target is the partial unique index of this kind.
     let sql = format!(
-        "INSERT INTO ratings (id, user_id, {col}, rating) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (user_id, {col}) WHERE {col} IS NOT NULL
+        "INSERT INTO ratings (id, profile_id, {col}, rating) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (profile_id, {col}) WHERE {col} IS NOT NULL
          DO UPDATE SET rating = EXCLUDED.rating, rated_at = now()"
     );
     match sqlx::query(&sql)
@@ -43,7 +43,7 @@ pub async fn set(
 
 pub async fn clear(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx::Result<()> {
     let sql = format!(
-        "DELETE FROM ratings WHERE user_id = $1 AND {} = $2",
+        "DELETE FROM ratings WHERE profile_id = $1 AND {} = $2",
         kind.column()
     );
     sqlx::query(&sql).bind(user).bind(id).execute(pool).await?;

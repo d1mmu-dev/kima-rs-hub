@@ -20,13 +20,13 @@ pub async fn podcast_spoken(pool: &PgPool, user: Uuid) -> sqlx::Result<PodcastSp
         r#"SELECT coalesce(sum("current_time"), 0)::bigint AS "seconds!",
                   count(*) FILTER (WHERE is_finished)::bigint AS "finished!",
                   count(*) FILTER (WHERE NOT is_finished)::bigint AS "in_progress!"
-           FROM podcast_progress WHERE user_id = $1"#,
+           FROM podcast_progress WHERE profile_id = $1"#,
         user
     )
     .fetch_one(pool)
     .await?;
     let subscriptions = sqlx::query_scalar!(
-        r#"SELECT count(*)::bigint AS "n!" FROM podcast_subscriptions WHERE user_id = $1"#,
+        r#"SELECT count(*)::bigint AS "n!" FROM podcast_subscriptions WHERE profile_id = $1"#,
         user
     )
     .fetch_one(pool)
@@ -35,8 +35,8 @@ pub async fn podcast_spoken(pool: &PgPool, user: Uuid) -> sqlx::Result<PodcastSp
         r#"SELECT count(*)::bigint AS "n!"
            FROM podcast_subscriptions s
            JOIN podcast_episodes e ON e.podcast_id = s.podcast_id
-           LEFT JOIN podcast_progress p ON p.episode_id = e.id AND p.user_id = $1
-           WHERE s.user_id = $1 AND p.user_id IS NULL"#,
+           LEFT JOIN podcast_progress p ON p.episode_id = e.id AND p.profile_id = $1
+           WHERE s.profile_id = $1 AND p.profile_id IS NULL"#,
         user
     )
     .fetch_one(pool)

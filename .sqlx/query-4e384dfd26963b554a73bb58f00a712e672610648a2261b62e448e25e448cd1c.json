@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT count(*) AS \"count!\" FROM api_keys WHERE user_id = $1",
+  "query": "SELECT count(*)::bigint AS \"n!\" FROM podcast_subscriptions WHERE profile_id = $1",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "count!",
+        "name": "n!",
         "type_info": "Int8"
       }
     ],
@@ -18,5 +18,5 @@
       null
     ]
   },
-  "hash": "dfa9897450e6679f39873920f64e1a494a1cb684c6597ee5bd08f97b8f0f5e8f"
+  "hash": "4e384dfd26963b554a73bb58f00a712e672610648a2261b62e448e25e448cd1c"
 }

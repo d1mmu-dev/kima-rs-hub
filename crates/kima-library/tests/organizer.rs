@@ -330,7 +330,7 @@ async fn add_play(pool: &PgPool, track: Uuid) {
     else {
         panic!("registration failed")
     };
-    sqlx::query("INSERT INTO plays (id, user_id, track_id) VALUES ($1, $2, $3)")
+    sqlx::query("INSERT INTO plays (id, profile_id, track_id) VALUES ($1, $2, $3)")
         .bind(Uuid::now_v7())
         .bind(user)
         .bind(track)

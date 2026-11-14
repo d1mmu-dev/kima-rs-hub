@@ -53,7 +53,7 @@ fn ok(res: &Value) {
 async fn subsonic_plays(pool: &PgPool, track: Uuid) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT to_char(played_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
-         FROM plays WHERE user_id = $1 AND track_id = $2 AND source = 'SUBSONIC'
+         FROM plays WHERE profile_id = $1 AND track_id = $2 AND source = 'SUBSONIC'
          ORDER BY played_at",
     )
     .bind(ALICE_ID)
@@ -64,7 +64,7 @@ async fn subsonic_plays(pool: &PgPool, track: Uuid) -> Vec<String> {
 }
 
 async fn play_count(pool: &PgPool, track: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM plays WHERE user_id = $1 AND track_id = $2")
+    sqlx::query_scalar("SELECT count(*) FROM plays WHERE profile_id = $1 AND track_id = $2")
         .bind(ALICE_ID)
         .bind(track)
         .fetch_one(pool)
@@ -189,7 +189,7 @@ fixture_test!(future_time_clamped_to_now, |server, pool| {
     )
     .await);
     let at: time::OffsetDateTime = sqlx::query_scalar(
-        "SELECT played_at FROM plays WHERE user_id = $1 AND track_id = $2 AND source = 'SUBSONIC'",
+        "SELECT played_at FROM plays WHERE profile_id = $1 AND track_id = $2 AND source = 'SUBSONIC'",
     )
     .bind(ALICE_ID)
     .bind(t)
@@ -271,7 +271,7 @@ fixture_test!(
         // Admin's web state is stale and does not count.
         playback::upsert(&pool, ADMIN_ID, web(c)).await.unwrap();
         sqlx::query(
-            "UPDATE playback_state SET updated_at = now() - interval '3 hours' WHERE user_id = $1",
+            "UPDATE playback_state SET updated_at = now() - interval '3 hours' WHERE profile_id = $1",
         )
         .bind(ADMIN_ID)
         .execute(&pool)

@@ -98,7 +98,7 @@ async fn cascade_from_user_and_show(pool: PgPool) {
         }
         // Progress and downloads have no helpers yet (Tasks 10, 12): seeded directly.
         sqlx::query(
-            "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration)
+            "INSERT INTO podcast_progress (profile_id, episode_id, \"current_time\", duration)
              SELECT $1, id, 10, 60 FROM podcast_episodes",
         )
         .bind(u)
@@ -106,7 +106,7 @@ async fn cascade_from_user_and_show(pool: PgPool) {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO podcast_downloads (user_id, episode_id, local_path, file_size_mb)
+            "INSERT INTO podcast_downloads (profile_id, episode_id, local_path, file_size_mb)
              SELECT $1, id, 'podcast-audio/' || id || '.audio', 1.5 FROM podcast_episodes",
         )
         .bind(u)

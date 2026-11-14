@@ -126,10 +126,10 @@ pub fn collapse_candidates(listens: &[Listen]) -> Vec<Uuid> {
 }
 
 pub async fn audit_rows<'e>(conn: impl PgExecutor<'e>, user: Uuid) -> sqlx::Result<Vec<AuditRow>> {
-    sqlx::query_as!(AuditRow, r#"SELECT p.id, p.track_id, p.played_at, p.heard, coalesce(t.display_title,t.title) AS "title!", coalesce(ar.display_name,ar.name) AS "artist!", t.duration_secs AS duration FROM plays p JOIN tracks t ON t.id=p.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE p.user_id=$1 ORDER BY p.played_at,p.id"#, user).fetch_all(conn).await
+    sqlx::query_as!(AuditRow, r#"SELECT p.id, p.track_id, p.played_at, p.heard, coalesce(t.display_title,t.title) AS "title!", coalesce(ar.display_name,ar.name) AS "artist!", t.duration_secs AS duration FROM plays p JOIN tracks t ON t.id=p.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE p.profile_id=$1 ORDER BY p.played_at,p.id"#, user).fetch_all(conn).await
 }
 pub async fn ignored<'e>(conn: impl PgExecutor<'e>, user: Uuid) -> sqlx::Result<Vec<IgnoredRow>> {
-    sqlx::query_as!(IgnoredRow, r#"SELECT i.track_id, coalesce(t.display_title,t.title) AS "title!", coalesce(ar.display_name,ar.name) AS "artist!", i.ignored_at FROM play_audit_ignore i JOIN tracks t ON t.id=i.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE i.user_id=$1 ORDER BY i.ignored_at DESC,i.track_id"#, user).fetch_all(conn).await
+    sqlx::query_as!(IgnoredRow, r#"SELECT i.track_id, coalesce(t.display_title,t.title) AS "title!", coalesce(ar.display_name,ar.name) AS "artist!", i.ignored_at FROM play_audit_ignore i JOIN tracks t ON t.id=i.track_id JOIN albums al ON al.id=t.album_id JOIN artists ar ON ar.id=al.artist_id WHERE i.profile_id=$1 ORDER BY i.ignored_at DESC,i.track_id"#, user).fetch_all(conn).await
 }
 
 #[derive(Debug)]
@@ -232,7 +232,7 @@ async fn delete_plays(
     ids: &[Uuid],
 ) -> sqlx::Result<u64> {
     let done = sqlx::query!(
-        "DELETE FROM plays WHERE user_id = $1 AND id = ANY($2)",
+        "DELETE FROM plays WHERE profile_id = $1 AND id = ANY($2)",
         user,
         ids
     )
@@ -294,7 +294,7 @@ pub async fn remove(
 /// Ids that are no track are skipped; a track already ignored is not counted.
 pub async fn ignore(pool: &sqlx::PgPool, user: Uuid, tracks: &[Uuid]) -> sqlx::Result<u64> {
     let done = sqlx::query!(
-        "INSERT INTO play_audit_ignore (user_id, track_id) \
+        "INSERT INTO play_audit_ignore (profile_id, track_id) \
          SELECT $1, id FROM tracks WHERE id = ANY($2) ON CONFLICT DO NOTHING",
         user,
         tracks
@@ -306,7 +306,7 @@ pub async fn ignore(pool: &sqlx::PgPool, user: Uuid, tracks: &[Uuid]) -> sqlx::R
 
 pub async fn restore(pool: &sqlx::PgPool, user: Uuid, tracks: &[Uuid]) -> sqlx::Result<u64> {
     let done = sqlx::query!(
-        "DELETE FROM play_audit_ignore WHERE user_id = $1 AND track_id = ANY($2)",
+        "DELETE FROM play_audit_ignore WHERE profile_id = $1 AND track_id = ANY($2)",
         user,
         tracks
     )

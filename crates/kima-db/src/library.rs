@@ -636,7 +636,7 @@ pub async fn retire_missing(
     let ids: Vec<Uuid> = gone.iter().map(|g| g.id).collect();
 
     let playlists: Vec<(Uuid, Uuid)> = sqlx::query!(
-        "SELECT DISTINCT p.user_id, p.id FROM playlist_items i JOIN playlists p ON p.id = i.playlist_id
+        "SELECT DISTINCT p.profile_id AS user_id, p.id FROM playlist_items i JOIN playlists p ON p.id = i.playlist_id
          WHERE i.track_id = ANY($1) ORDER BY 1, 2",
         &ids
     )
@@ -760,7 +760,7 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     .await?;
     sqlx::query!(
         "UPDATE stars s SET track_id = $2 WHERE s.track_id = $1
-           AND NOT EXISTS (SELECT 1 FROM stars o WHERE o.user_id = s.user_id AND o.track_id = $2)",
+           AND NOT EXISTS (SELECT 1 FROM stars o WHERE o.profile_id = s.profile_id AND o.track_id = $2)",
         from,
         to
     )
@@ -768,7 +768,7 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     .await?;
     sqlx::query!(
         "UPDATE ratings r SET track_id = $2 WHERE r.track_id = $1
-           AND NOT EXISTS (SELECT 1 FROM ratings o WHERE o.user_id = r.user_id AND o.track_id = $2)",
+           AND NOT EXISTS (SELECT 1 FROM ratings o WHERE o.profile_id = r.profile_id AND o.track_id = $2)",
         from,
         to
     )
@@ -784,7 +784,7 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     .await?;
     sqlx::query!(
         "UPDATE subsonic_bookmarks b SET track_id = $2 WHERE b.track_id = $1
-           AND NOT EXISTS (SELECT 1 FROM subsonic_bookmarks o WHERE o.user_id = b.user_id AND o.track_id = $2)",
+           AND NOT EXISTS (SELECT 1 FROM subsonic_bookmarks o WHERE o.profile_id = b.profile_id AND o.track_id = $2)",
         from,
         to
     )
@@ -793,9 +793,9 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     // Copy in user order so concurrent handovers acquire unique-index locks consistently.
     // A destination row, including one committed after our snapshot, wins unchanged.
     sqlx::query!(
-        "INSERT INTO play_audit_ignore (user_id, track_id, ignored_at)
-         SELECT user_id, $2, ignored_at FROM play_audit_ignore WHERE track_id = $1
-         ORDER BY user_id ON CONFLICT (user_id, track_id) DO NOTHING",
+        "INSERT INTO play_audit_ignore (profile_id, track_id, ignored_at)
+         SELECT profile_id, $2, ignored_at FROM play_audit_ignore WHERE track_id = $1
+         ORDER BY profile_id ON CONFLICT (profile_id, track_id) DO NOTHING",
         from,
         to
     )

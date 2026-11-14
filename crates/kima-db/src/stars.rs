@@ -62,7 +62,7 @@ pub(crate) async fn target_exists(pool: &PgPool, kind: StarKind, id: Uuid) -> sq
 /// the first star (and its time).
 pub async fn set(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx::Result<bool> {
     let sql = format!(
-        "INSERT INTO stars (id, user_id, {col})
+        "INSERT INTO stars (id, profile_id, {col})
          SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM {table} WHERE id = $3)
          ON CONFLICT DO NOTHING",
         col = kind.column(),
@@ -91,7 +91,7 @@ pub async fn set(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx::R
 
 pub async fn clear(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx::Result<()> {
     let sql = format!(
-        "DELETE FROM stars WHERE user_id = $1 AND {} = $2",
+        "DELETE FROM stars WHERE profile_id = $1 AND {} = $2",
         kind.column()
     );
     sqlx::query(&sql).bind(user).bind(id).execute(pool).await?;
@@ -103,7 +103,7 @@ pub async fn clear(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx:
 pub async fn list_for_user(pool: &PgPool, user: Uuid, kind: StarKind) -> sqlx::Result<Vec<Uuid>> {
     let sql = format!(
         "SELECT s.{col} FROM stars s JOIN {table} x ON x.id = s.{col}
-         WHERE s.user_id = $1 AND s.{col} IS NOT NULL AND {present}
+         WHERE s.profile_id = $1 AND s.{col} IS NOT NULL AND {present}
          ORDER BY s.starred_at DESC, s.id DESC",
         col = kind.column(),
         table = kind.table(),

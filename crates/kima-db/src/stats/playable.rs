@@ -38,7 +38,7 @@ pub async fn playable_slice(
         }
         "never" => {
             let sql = format!(
-                "{select} FROM tracks t {joins} WHERE NOT EXISTS (SELECT 1 FROM plays p WHERE p.track_id=t.id AND p.user_id=$1) ORDER BY random() LIMIT $2"
+                "{select} FROM tracks t {joins} WHERE NOT EXISTS (SELECT 1 FROM plays p WHERE p.track_id=t.id AND p.profile_id=$1) ORDER BY random() LIMIT $2"
             );
             sqlx::query_as(&sql)
                 .bind(user)

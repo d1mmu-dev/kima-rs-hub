@@ -516,7 +516,7 @@ async fn purged_track_announces_playlists_holding_it(pool: PgPool) {
     }
     let (holds_both, holds_kept) = (Uuid::now_v7(), Uuid::now_v7());
     for (pl, owner) in [(holds_both, ana), (holds_kept, ben)] {
-        sqlx::query("INSERT INTO playlists (id, user_id, name) VALUES ($1, $2, 'p')")
+        sqlx::query("INSERT INTO playlists (id, profile_id, name) VALUES ($1, $2, 'p')")
             .bind(pl)
             .bind(owner)
             .execute(&pool)

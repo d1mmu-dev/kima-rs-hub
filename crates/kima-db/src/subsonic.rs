@@ -62,8 +62,8 @@ const ARTIST_SELECT: &str =
     FROM artists ar
     JOIN albums al ON al.artist_id = ar.id
     JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL
-    LEFT JOIN stars s ON s.user_id = $1 AND s.artist_id = ar.id
-    LEFT JOIN ratings r ON r.user_id = $1 AND r.artist_id = ar.id";
+    LEFT JOIN stars s ON s.profile_id = $1 AND s.artist_id = ar.id
+    LEFT JOIN ratings r ON r.profile_id = $1 AND r.artist_id = ar.id";
 const ARTIST_GROUP: &str = "GROUP BY ar.id, s.starred_at, r.rating";
 
 const ALBUM_SELECT: &str =
@@ -82,8 +82,8 @@ const ALBUM_SELECT: &str =
     FROM albums al
     JOIN artists ar ON ar.id = al.artist_id
     JOIN tracks t ON t.album_id = al.id AND t.missing_since IS NULL
-    LEFT JOIN stars s ON s.user_id = $1 AND s.album_id = al.id
-    LEFT JOIN ratings r ON r.user_id = $1 AND r.album_id = al.id";
+    LEFT JOIN stars s ON s.profile_id = $1 AND s.album_id = al.id
+    LEFT JOIN ratings r ON r.profile_id = $1 AND r.album_id = al.id";
 const ALBUM_GROUP: &str = "GROUP BY al.id, ar.id, s.starred_at, r.rating";
 
 const SONG_SELECT: &str = "SELECT t.id, COALESCE(NULLIF(t.display_title, ''), t.title) AS title, t.display_title,
@@ -103,8 +103,8 @@ const SONG_SELECT: &str = "SELECT t.id, COALESCE(NULLIF(t.display_title, ''), t.
     FROM tracks t
     JOIN albums al ON al.id = t.album_id
     JOIN artists ar ON ar.id = al.artist_id
-    LEFT JOIN stars s ON s.user_id = $1 AND s.track_id = t.id
-    LEFT JOIN ratings r ON r.user_id = $1 AND r.track_id = t.id";
+    LEFT JOIN stars s ON s.profile_id = $1 AND s.track_id = t.id
+    LEFT JOIN ratings r ON r.profile_id = $1 AND r.track_id = t.id";
 
 /// Artists with a present track, by sort name.
 pub async fn artists_sorted(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<ArtistItem>> {
@@ -234,7 +234,7 @@ pub async fn album_list(
     const PLAYED: &str =
         "JOIN (SELECT pt.album_id, count(*) AS plays, max(p.played_at) AS last_played
             FROM plays p JOIN tracks pt ON pt.id = p.track_id AND pt.missing_since IS NULL
-            WHERE p.user_id = $1 GROUP BY pt.album_id) pc ON pc.album_id = al.id";
+            WHERE p.profile_id = $1 GROUP BY pt.album_id) pc ON pc.album_id = al.id";
     let genre = match &kind {
         AlbumListKind::ByGenre(name) => Some(genres::genre_key(name)),
         _ => None,
@@ -639,14 +639,14 @@ pub async fn web_now_playing(
     since: OffsetDateTime,
 ) -> sqlx::Result<Vec<(Uuid, String, Uuid, OffsetDateTime)>> {
     sqlx::query_as(
-        "SELECT ps.user_id, u.username, t.id, ps.updated_at
+        "SELECT ps.profile_id, u.username, t.id, ps.updated_at
          FROM playback_state ps
-         JOIN users u ON u.id = ps.user_id
+         JOIN users u ON u.id = ps.profile_id
          JOIN tracks t ON t.missing_since IS NULL AND t.id = CASE
              WHEN ps.track_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
              THEN ps.track_id::uuid END
          WHERE ps.playback_type = 'track' AND ps.updated_at >= $1
-         ORDER BY ps.updated_at DESC, ps.user_id LIMIT 50",
+         ORDER BY ps.updated_at DESC, ps.profile_id LIMIT 50",
     )
     .bind(since)
     .fetch_all(pool)

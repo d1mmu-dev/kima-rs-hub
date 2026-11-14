@@ -1535,7 +1535,7 @@ snap!(podcasts, |s| {
     ))
     .await;
     s.sql(&format!(
-        "INSERT INTO podcast_subscriptions (user_id, podcast_id, subscribed_at) \
+        "INSERT INTO podcast_subscriptions (profile_id, podcast_id, subscribed_at) \
          VALUES ('{ALICE_ID}', '{show}', '2026-01-01T00:00:00Z')"
     ))
     .await;

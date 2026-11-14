@@ -52,7 +52,7 @@ pub async fn create(
         return Ok(Err(Refused::StaleSession));
     }
     let held = sqlx::query_scalar!(
-        r#"SELECT count(*) AS "count!" FROM api_keys WHERE user_id = $1"#,
+        r#"SELECT count(*) AS "count!" FROM api_keys WHERE profile_id = $1"#,
         user
     )
     .fetch_one(&mut *tx)
@@ -62,9 +62,9 @@ pub async fn create(
     }
     let key = sqlx::query_as!(
         ApiKey,
-        r#"INSERT INTO api_keys (id, user_id, name, key_hash, secret_enc)
+        r#"INSERT INTO api_keys (id, profile_id, name, key_hash, secret_enc)
            VALUES ($1, $2, $3, $4, $5)
-           RETURNING id, user_id, name, created_at, last_used_at"#,
+           RETURNING id, profile_id AS user_id, name, created_at, last_used_at"#,
         id,
         user,
         name,
@@ -81,8 +81,8 @@ pub async fn create(
 pub async fn list_for_user(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<ApiKey>> {
     sqlx::query_as!(
         ApiKey,
-        r#"SELECT id, user_id, name, created_at, last_used_at
-           FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC, id DESC"#,
+        r#"SELECT id, profile_id AS user_id, name, created_at, last_used_at
+           FROM api_keys WHERE profile_id = $1 ORDER BY created_at DESC, id DESC"#,
         user
     )
     .fetch_all(pool)
@@ -92,7 +92,7 @@ pub async fn list_for_user(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<ApiKey
 /// Revokes one of the user's tokens. False if it does not exist or belongs to someone else.
 pub async fn delete_owned(pool: &PgPool, id: Uuid, user: Uuid) -> sqlx::Result<bool> {
     let done = sqlx::query!(
-        "DELETE FROM api_keys WHERE id = $1 AND user_id = $2",
+        "DELETE FROM api_keys WHERE id = $1 AND profile_id = $2",
         id,
         user
     )
@@ -114,7 +114,7 @@ pub async fn find_by_hash(pool: &PgPool, hash: &[u8; 32]) -> sqlx::Result<Option
         r#"SELECT k.id AS key_id,
                   u.id, u.username, u.password_hash, u.role, u.onboarding_complete,
                   u.token_version, u.created_at
-           FROM api_keys k JOIN users u ON u.id = k.user_id
+           FROM api_keys k JOIN users u ON u.id = k.profile_id
            WHERE k.key_hash = $1"#,
         hash.as_slice()
     )
@@ -137,7 +137,7 @@ pub async fn find_by_hash(pool: &PgPool, hash: &[u8; 32]) -> sqlx::Result<Option
 /// The encrypted secrets of the user's tokens, oldest first (at most [`MAX_PER_USER`]).
 pub async fn secrets_for_user(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<(Uuid, Vec<u8>)>> {
     let rows = sqlx::query!(
-        "SELECT id, secret_enc FROM api_keys WHERE user_id = $1
+        "SELECT id, secret_enc FROM api_keys WHERE profile_id = $1
          ORDER BY created_at ASC, id ASC LIMIT $2",
         user,
         MAX_PER_USER
@@ -159,7 +159,7 @@ pub async fn user_with_secrets(
         r#"SELECT u.id, u.username, u.password_hash, u.role, u.onboarding_complete,
                   u.token_version, u.created_at,
                   k.id AS "key_id?", k.secret_enc AS "secret_enc?"
-           FROM users u LEFT JOIN api_keys k ON k.user_id = u.id
+           FROM users u LEFT JOIN api_keys k ON k.profile_id = u.id
            WHERE lower(u.username) = lower($1)
            ORDER BY k.created_at ASC, k.id ASC
            LIMIT $2"#,
@@ -194,7 +194,7 @@ pub async fn touch(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
 /// Revokes every token of the user. `users::set_password` calls this in its own transaction;
 /// call it directly only alongside another change that must revoke them.
 pub async fn delete_all_for_user(conn: &mut PgConnection, user: Uuid) -> sqlx::Result<u64> {
-    let done = sqlx::query!("DELETE FROM api_keys WHERE user_id = $1", user)
+    let done = sqlx::query!("DELETE FROM api_keys WHERE profile_id = $1", user)
         .execute(conn)
         .await?;
     Ok(done.rows_affected())

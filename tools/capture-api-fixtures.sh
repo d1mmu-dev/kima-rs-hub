@@ -151,7 +151,7 @@ request POST /plays "$(jq -nc --arg id "$first" '{trackId:$id,secondsListened:90
 request POST /plays "$(jq -nc --arg id "$second" '{trackId:$id,secondsListened:6}')" >/dev/null
 user="$(request GET /auth/me '' | jq -er .id)"
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -qX -v u="$user" -v a="$first" -v b="$third" <<'SQL'
-INSERT INTO plays (id, user_id, track_id, played_at, source, heard) VALUES
+INSERT INTO plays (id, profile_id, track_id, played_at, source, heard) VALUES
   (gen_random_uuid(), :'u', :'a', now() - interval '1 day', 'LIBRARY', false),
   (gen_random_uuid(), :'u', :'b', now() - interval '1 day' + interval '60 seconds', 'LIBRARY', false);
 SQL

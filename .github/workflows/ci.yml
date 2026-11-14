@@ -68,6 +68,8 @@ jobs:
           python3 scripts/test-ort-packaging.py
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+      - name: Per-profile keys grep gate (M-PROF, D-240)
+        run: tools/check-profile-keys.sh
       - name: Native soxr linkage checker self-test
         env:
           TMPDIR: ${{ runner.temp }}

@@ -5,20 +5,29 @@
 #   - crates/kima-db/src/users.rs, crates/kima-db/src/profiles.rs (account and profile tables);
 #   - `pr.user_id` / `profiles.user_id`: the account column of `profiles`, which is how a
 #     query reaches the account of a profile (alias `profiles` as `pr` for that).
-# It also fails on a join that treats a profile id as an account id (`u.id = x.profile_id`
-# where `u` is an alias of `users`): only a main profile shares its account's id.
+# It also fails on SQL that treats a profile id as an account id, because only a main profile
+# shares its account's id: a comparison of `users`' id (aliased or not, also split over lines)
+# with a `profile_id` (`JOIN users u ON u.id = x.profile_id`, `JOIN users ON users.id =
+# profile_id`, `FROM users u WHERE ... u.id = profile_id`), and a subquery on `users` feeding a
+# `profile_id` (`profile_id IN (SELECT id FROM users ...)`, `profile_id = (SELECT id FROM users`).
 # `created_by` (organizer/autotag runs) and `ai_override_by` stay account columns under their
 # own names, so they never match. Tests and migrations are not scanned.
 #
 # Second check: the ways around the `AccountId`/`ProfileId` types (`ProfileId::new(..)`,
 # `ProfileId::main_of(..)`, `.main_profile()`) are allowed only where a profile id is ground
-# truth or the main profile is meant by definition (ID_FILES), or on a line marked with an
-# `M-PROF Task N:` comment within the four lines above it (a call site a later task moves to
-# the session's profile). Code after `#[cfg(test)]` is not scanned.
+# truth or the main profile is meant by definition (ID_FILES), when decoding a database row in
+# kima-db (`ProfileId::new(r.<col>)`/`row.`), or on a line marked with an `M-PROF Task N:`
+# comment within the four lines above it (a call site a later task moves to the session's
+# profile). Code after `#[cfg(test)]` is not scanned.
+#
+# `--root DIR` scans DIR instead of the repository (used to try the gate on samples).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 - "$@" <<'PY'
-import pathlib, re, sys
+import os, pathlib, re, sys
+
+if sys.argv[1:2] == ["--root"]:
+    os.chdir(sys.argv[2])
 
 ALLOWED_FILES = {
     "crates/kima-db/src/users.rs",
@@ -27,18 +36,43 @@ ALLOWED_FILES = {
 WORD = re.compile(r"\buser_id\b")
 ALLOWED_REF = re.compile(r"\b(pr|profiles)\.user_id\b")
 USERS_ALIAS = re.compile(r"\busers\s+(?:AS\s+)?(\w+)", re.I)
+# Words that can follow `users` without being its alias.
+NOT_ALIAS = {
+    "on", "where", "join", "left", "right", "inner", "full", "cross", "natural", "using",
+    "set", "order", "group", "limit", "for", "returning", "union", "values", "having",
+}
+USERS_SUBQUERY = re.compile(
+    r"\bprofile_id\s*(?:=|IN|=\s*ANY)\s*\(\s*SELECT\s+(?:\w+\.)?id\s+FROM\s+users\b", re.I
+)
 
 
 def profile_as_account(text):
-    """Rows of a literal that compare an alias of `users` with a `profile_id`."""
-    for alias in set(USERS_ALIAS.findall(text)):
+    """Rows of a literal that compare `users`' id (under any alias, or none) with a
+    `profile_id`, or feed a `profile_id` from a subquery on `users`. Matches may span lines."""
+    if not re.search(r"\busers\b", text, re.I):
+        return
+    # Escaped whitespace (`\n`, `\t`, a `\` line continuation) is whitespace to SQL; same
+    # length, so offsets still map to rows.
+    text = re.sub(r"\\[nrt]", "  ", text).replace("\\\n", " \n")
+    aliases = {"users"}
+    aliases.update(a for a in USERS_ALIAS.findall(text) if a.lower() not in NOT_ALIAS)
+    pats = [USERS_SUBQUERY]
+    for alias in aliases:
         a = re.escape(alias)
-        pat = re.compile(
-            rf"\b{a}\.id\s*=\s*(\w+\.)?profile_id\b|\b(\w+\.)?profile_id\s*=\s*{a}\.id\b"
+        pats.append(
+            re.compile(
+                rf"\b{a}\.id\s*=\s*(\w+\.)?profile_id\b|\b(\w+\.)?profile_id\s*=\s*{a}\.id\b",
+                re.I,
+            )
         )
-        for k, row in enumerate(text.split("\n")):
-            if pat.search(row):
-                yield k
+        pats.append(re.compile(rf"\b{a}\.id\s+IN\s*\(\s*SELECT\s+(\w+\.)?profile_id\b", re.I))
+    # `users` unqualified: `JOIN users ON id = profile_id`, `FROM users WHERE id = p.profile_id`.
+    pats.append(
+        re.compile(r"\busers\s+(?:ON|WHERE)\s+id\s*(?:=|IN\s*\(\s*SELECT)\s*(\w+\.)?profile_id\b", re.I)
+    )
+    for pat in pats:
+        for m in pat.finditer(text):
+            yield text.count("\n", 0, m.start())
 
 
 def literals(src):
@@ -100,12 +134,15 @@ def literals(src):
 ID_FILES = (
     "crates/kima-core/src/profile.rs",
     "crates/kima-core/src/auth.rs",
-    "crates/kima-db/src/",
+    "crates/kima-db/src/users.rs",
+    "crates/kima-db/src/profiles.rs",
     "crates/kima-api/src/auth.rs",
     "crates/kima-api/src/routes/auth.rs",
     "crates/kima-api/src/routes/onboarding.rs",
 )
 ID_ESCAPE = re.compile(r"ProfileId::new\(|\bmain_of\(|\.main_profile\(\)")
+# A row of a kima-db query decoded into the newtype: the column is ground truth.
+ROW_DECODE = re.compile(r"ProfileId::new\((?:r|row)\.\w+\??\)")
 MARKER = re.compile(r"//.*M-PROF Task \d+:")
 
 
@@ -117,6 +154,8 @@ def id_escapes(rel, src):
         if row.strip().startswith("#[cfg(test)]"):
             return
         code = row.split("//", 1)[0]
+        if rel.startswith("crates/kima-db/src/"):
+            code = ROW_DECODE.sub("", code)
         if ID_ESCAPE.search(code) and not any(MARKER.search(r) for r in lines[max(0, k - 4) : k + 1]):
             yield k + 1, row.strip()
 
@@ -133,10 +172,11 @@ for path in sorted(pathlib.Path("crates").glob("*/src/**/*.rs")):
         rows = text.split("\n")
         hits = {k for k, row in enumerate(rows) if WORD.search(ALLOWED_REF.sub("", row))}
         hits.update(profile_as_account(text))
+        hits = {k for k in hits if k < len(rows)}
         for k in sorted(hits):
             bad.append(f"{rel}:{line + k}: {rows[k].strip()}")
 if bad:
-    print("user_id in SQL text outside the allow-list (re-key to profile_id, see tools/check-profile-keys.sh):")
+    print("user_id in SQL text, or a profile id compared with an account id, outside the allow-list (see tools/check-profile-keys.sh):")
     print("\n".join(bad))
 if escapes:
     print("profile id built by hand outside the allow-list (use the session's profile, see tools/check-profile-keys.sh):")

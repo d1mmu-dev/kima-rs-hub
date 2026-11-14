@@ -432,6 +432,23 @@ async fn a_range_on_a_cached_episode_is_answered_from_the_file(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn an_empty_cached_file_is_not_served_and_the_host_answers(pool: PgPool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = bytes(1000);
+    let host = AudioHost::start(data.clone(), AudioMode::Normal).await;
+    let (podcast, episode) = seed(&pool, format!("{}/ep.mp3", host.url()), None).await;
+    let env = env_with_data(pool.clone(), tmp.path()).await;
+    cache_episode(&env, tmp.path(), episode, &[]).await;
+
+    let res = env.stream(podcast, episode).await;
+    res.assert_status_ok();
+    assert_eq!(res.as_bytes().as_ref(), &data[..]);
+    assert_eq!(host.hits().len(), 1);
+    // And it is downloaded again.
+    assert_eq!(download_jobs(&pool, episode).await.len(), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn a_cold_episode_streams_from_its_host_and_queues_one_download(pool: PgPool) {
     let tmp = tempfile::tempdir().unwrap();
     let data = bytes(1000);

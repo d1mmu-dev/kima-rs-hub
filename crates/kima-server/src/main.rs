@@ -228,9 +228,13 @@ async fn main() -> anyhow::Result<()> {
     // Podcast startup work (upstream `index.ts:553-569`), in the background so it never holds
     // up the start: the episode-cache cleanup and then the one-off length measuring, and the
     // category fill-in for shows Apple knows that have none yet.
-    drop(kima_server::jobs::spawn_podcast_startup(
-        podcast_ctx.clone(),
-    ));
+    // A panic in it is logged rather than lost with a dropped handle.
+    let podcast_startup = kima_server::jobs::spawn_podcast_startup(podcast_ctx.clone());
+    tokio::spawn(async move {
+        if let Err(error) = podcast_startup.await {
+            error!(%error, "podcast startup work did not finish");
+        }
+    });
     let workers = kima_server::jobs::spawn_all(&pool, registry, shutdown.clone());
     // Stopped by the shutdown token. With `KIMA_WATCH_MODE=off` this only records the status.
     let watcher = kima_library::watch::spawn(

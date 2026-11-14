@@ -135,7 +135,7 @@ fn podcast_refresh_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
 }
 
 fn podcast_cache_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
-    kima_jobs::worker::handler(move |job: kima_jobs::queue::Job| {
+    kima_jobs::worker::handler_ctx(move |job: kima_jobs::queue::Job, _job_ctx| {
         let ctx = ctx.clone();
         async move {
             let uuid_field = |name: &str| {
@@ -149,9 +149,20 @@ fn podcast_cache_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
             let user = uuid_field("user")?;
             kima_podcast::cache::download(&ctx, episode, user)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(podcast_cache_job_error)
         }
     })
+}
+
+/// A failed episode download under the queue's retry policy: a size-cap breach fails at once
+/// (D-217), everything else is retried.
+fn podcast_cache_job_error(error: kima_podcast::cache::CacheError) -> kima_jobs::worker::JobError {
+    use kima_jobs::worker::JobError;
+    if error.is_permanent() {
+        JobError::Permanent(error.to_string())
+    } else {
+        JobError::Retry(error.to_string())
+    }
 }
 
 /// What the podcast startup work did (for its log line and its test).
@@ -312,6 +323,26 @@ mod tests {
                 .concurrency,
             2
         );
+    }
+
+    #[test]
+    fn podcast_cache_failures_map_to_the_retry_policy() {
+        use kima_jobs::worker::JobError;
+        use kima_podcast::cache::CacheError;
+        // Over the size cap: the host will send just as much again, so never retried.
+        let too_large = podcast_cache_job_error(CacheError::TooLarge {
+            written: 10,
+            limit: 5,
+        });
+        assert!(matches!(too_large, JobError::Permanent(_)), "{too_large:?}");
+        // Past the deadline or cut short: retried under the queue's usual backoff.
+        let timed_out = podcast_cache_job_error(CacheError::TimedOut(Duration::from_secs(1)));
+        assert!(matches!(timed_out, JobError::Retry(_)), "{timed_out:?}");
+        let short = podcast_cache_job_error(CacheError::Incomplete {
+            got: 1,
+            expected: 2,
+        });
+        assert!(matches!(short, JobError::Retry(_)), "{short:?}");
     }
 
     /// A pool that is never actually used by this test (no query runs against it).

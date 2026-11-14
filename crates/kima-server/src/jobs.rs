@@ -135,7 +135,7 @@ fn podcast_refresh_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
 }
 
 fn podcast_cache_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
-    kima_jobs::worker::handler_ctx(move |job: kima_jobs::queue::Job, _job_ctx| {
+    kima_jobs::worker::handler_ctx(move |job: kima_jobs::queue::Job, job_ctx| {
         let ctx = ctx.clone();
         async move {
             let uuid_field = |name: &str| {
@@ -147,9 +147,18 @@ fn podcast_cache_handler(ctx: kima_podcast::ctx::PodcastCtx) -> Handler {
             };
             let episode = uuid_field("episode")?;
             let user = uuid_field("user")?;
-            kima_podcast::cache::download(&ctx, episode, user)
-                .await
-                .map_err(podcast_cache_job_error)
+            // On shutdown or a lost claim the download is dropped (its temp file removed with
+            // it) and the attempt handed back as a retry, which shutdown does not count.
+            tokio::select! {
+                result = kima_podcast::cache::download(&ctx, episode, user) => {
+                    result.map_err(podcast_cache_job_error)
+                }
+                _ = job_ctx.cancel.cancelled() => {
+                    Err(kima_jobs::worker::JobError::Retry(
+                        "podcast download cancelled".into(),
+                    ))
+                }
+            }
         }
     })
 }
@@ -331,7 +340,7 @@ mod tests {
         use kima_podcast::cache::CacheError;
         // Over the size cap: the host will send just as much again, so never retried.
         let too_large = podcast_cache_job_error(CacheError::TooLarge {
-            written: 10,
+            would_write: 10,
             limit: 5,
         });
         assert!(matches!(too_large, JobError::Permanent(_)), "{too_large:?}");

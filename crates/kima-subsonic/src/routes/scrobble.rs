@@ -65,7 +65,7 @@ async fn scrobble(
         let parsed: Vec<Option<Uuid>> = raw_ids.iter().map(|raw| ids::parse(raw, &[])).collect();
         // `plays::record` accepts a track flagged missing; a scrobble of one is skipped.
         let wanted: Vec<Uuid> = parsed.iter().flatten().copied().collect();
-        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+        // M-PROF Task 7: main profile until SubsonicUser carries one.
         let present: HashSet<Uuid> =
             subsonic::tracks_by_ids(pool, ProfileId::main_of(me.account), &wanted)
                 .await?
@@ -80,7 +80,7 @@ async fn scrobble(
             // As upstream, a play that cannot be written is logged, never the client's problem.
             if let Err(error) = plays::record(
                 pool,
-                // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+                // M-PROF Task 7: main profile until SubsonicUser carries one.
                 ProfileId::main_of(me.account),
                 track,
                 Listen::Attested,
@@ -92,7 +92,7 @@ async fn scrobble(
                 tracing::warn!(?error, "scrobble play-log failed");
             }
         }
-        // M-PROF Task 5: main profile until the route reads `profile`.
+        // M-PROF Task 7: main profile until a Subsonic session can be another profile.
         ctx.now_playing
             .finish(ProfileId::main_of(me.account).into_uuid(), &player);
     } else {
@@ -100,10 +100,10 @@ async fn scrobble(
             .iter()
             .filter_map(|raw| ids::parse(raw, &[]))
             .collect();
-        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+        // M-PROF Task 7: main profile until SubsonicUser carries one.
         for song in subsonic::tracks_by_ids(pool, ProfileId::main_of(me.account), &tracks).await? {
             let t = &song.track;
-            // M-PROF Task 5: main profile until the route reads `profile`.
+            // M-PROF Task 7: main profile until a Subsonic session can be another profile.
             ctx.now_playing.report(
                 ProfileId::main_of(me.account).into_uuid(),
                 &me.username,
@@ -154,7 +154,7 @@ async fn get_now_playing(
     for (uid, username, track, updated) in subsonic::web_now_playing(pool, wall - WEB_STALE).await?
     {
         offer(
-            // M-PROF Task 5: now-playing slots are keyed by profile (Task 7).
+            // M-PROF Task 7: now-playing slots are keyed by profile.
             (uid.into_uuid(), WEB_PLAYER.to_owned()),
             Playing {
                 username,
@@ -170,7 +170,7 @@ async fn get_now_playing(
     });
 
     let wanted: Vec<Uuid> = playing.iter().map(|p| p.track).collect();
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let songs: HashMap<Uuid, _> =
         subsonic::tracks_by_ids(pool, ProfileId::main_of(user.user.account), &wanted)
             .await?

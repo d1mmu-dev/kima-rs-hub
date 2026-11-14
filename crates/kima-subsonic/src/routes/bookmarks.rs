@@ -33,7 +33,7 @@ async fn get_bookmarks(
     State(app): State<AppState>,
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let me = ProfileId::main_of(user.user.account);
     let list = bookmarks::list_for_user(&app.pool, me).await?;
     let track_ids: Vec<_> = list.iter().map(|b| b.track_id).collect();
@@ -75,7 +75,7 @@ async fn create_bookmark(
     }
     let track = ids::parse(raw, &[]).ok_or_else(unknown)?;
     let comment = params.get("comment").filter(|c| !c.is_empty());
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     if !bookmarks::upsert(
         &app.pool,
         ProfileId::main_of(user.user.account),
@@ -96,7 +96,7 @@ async fn delete_bookmark(
     params: Params,
 ) -> Result<Answer, SubsonicError> {
     let track = ids::parse(params.required("id")?, &[]).ok_or_else(unknown)?;
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     bookmarks::delete(&app.pool, ProfileId::main_of(user.user.account), track).await?;
     Ok(Answer::ok())
 }

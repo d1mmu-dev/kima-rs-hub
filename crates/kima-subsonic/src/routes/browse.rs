@@ -42,7 +42,7 @@ async fn index(
     user: &SubsonicUser,
     name: &'static str,
 ) -> Result<Node, SubsonicError> {
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let artists =
         subsonic::artists_sorted(&app.pool, ProfileId::main_of(user.user.account)).await?;
     let mut buckets: BTreeMap<String, Vec<Node>> = BTreeMap::new();
@@ -96,7 +96,7 @@ async fn get_artist(
     let raw = params.required("id")?;
     let not_found = || SubsonicError::not_found("Artist not found");
     let id = ids::parse(raw, &[]).ok_or_else(not_found)?;
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let (artist, albums) =
         subsonic::artist_with_albums(&app.pool, ProfileId::main_of(user.user.account), id)
             .await?
@@ -112,7 +112,7 @@ async fn get_music_directory(
 ) -> Result<Answer, SubsonicError> {
     let raw = params.required("id")?;
     let not_found = || SubsonicError::not_found("Directory not found");
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let me = ProfileId::main_of(user.user.account);
     if raw.trim() == "1" {
         let artists = subsonic::artists_sorted(&app.pool, me).await?;
@@ -167,7 +167,7 @@ async fn get_album(
     let raw = params.required("id")?;
     let not_found = || SubsonicError::not_found("Album not found");
     let id = ids::parse(raw, &[]).ok_or_else(not_found)?;
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let (album, songs) =
         subsonic::album_with_tracks(&app.pool, ProfileId::main_of(user.user.account), id)
             .await?
@@ -185,7 +185,7 @@ async fn get_song(
     let raw = params.required("id")?;
     let not_found = || SubsonicError::not_found("Song not found");
     let id: Uuid = ids::parse(raw, &[]).ok_or_else(not_found)?;
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let song = subsonic::track(&app.pool, ProfileId::main_of(user.user.account), id)
         .await?
         .ok_or_else(not_found)?;
@@ -231,7 +231,7 @@ async fn album_list(
         .unwrap_or(DEFAULT_PAGE)
         .clamp(0, MAX_PAGE);
     let offset = params.paging::<i64>("offset").unwrap_or(0).max(0);
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     Ok(subsonic::album_list(
         &app.pool,
         ProfileId::main_of(user.user.account),

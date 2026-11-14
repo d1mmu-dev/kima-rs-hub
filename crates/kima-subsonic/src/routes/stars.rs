@@ -73,7 +73,7 @@ async fn star(
         // `set` answers false for a target that does not exist, so an `albumId` that names a
         // song is skipped just as an unknown id is.
         if let Some(kind) = kind
-            // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+            // M-PROF Task 7: main profile until SubsonicUser carries one.
             && stars::set(&app.pool, ProfileId::main_of(user.user.account), kind, id).await?
         {
             valid += 1;
@@ -92,7 +92,7 @@ async fn unstar(
 ) -> Result<Answer, SubsonicError> {
     for (kind, id) in targets(&app.pool, &params).await? {
         if let Some(kind) = kind {
-            // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+            // M-PROF Task 7: main profile until SubsonicUser carries one.
             stars::clear(&app.pool, ProfileId::main_of(user.user.account), kind, id).await?;
         }
     }
@@ -121,7 +121,7 @@ async fn get_starred(
     State(app): State<AppState>,
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let s = starred(&app.pool, ProfileId::main_of(user.user.account)).await?;
     Ok(Answer::node(
         Node::new("starred")
@@ -136,7 +136,7 @@ async fn get_starred2(
     State(app): State<AppState>,
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let s = starred(&app.pool, ProfileId::main_of(user.user.account)).await?;
     Ok(Answer::node(
         Node::new("starred2")
@@ -163,7 +163,7 @@ async fn set_rating(
         .await?
         .ok_or_else(unknown)?;
     if rating == 0 {
-        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+        // M-PROF Task 7: main profile until SubsonicUser carries one.
         ratings::clear(&app.pool, ProfileId::main_of(user.user.account), kind, id).await?;
     } else if !ratings::set(
         &app.pool,

@@ -123,7 +123,7 @@ async fn search_result(
         song_offset: offset(&params, "songOffset"),
     };
     let query = params.get("query").unwrap_or("");
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let found = find(
         &app.pool,
         ProfileId::main_of(user.user.account),
@@ -181,7 +181,7 @@ async fn legacy_search(
         song_count: wanted + 1,
         song_offset,
     };
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let mut found = find(
         &app.pool,
         ProfileId::main_of(user.user.account),
@@ -225,7 +225,7 @@ async fn get_random_songs(
         (from, to) => Some((from.unwrap_or(i32::MIN), to.unwrap_or(i32::MAX))),
     };
     let genre = params.get("genre").filter(|g| !g.trim().is_empty());
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let songs = subsonic::random_tracks(
         &app.pool,
         ProfileId::main_of(user.user.account),
@@ -253,7 +253,7 @@ async fn get_songs_by_genre(
         .clamp(1, MAX_PAGE);
     let songs = subsonic::songs_by_genre(
         &app.pool,
-        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+        // M-PROF Task 7: main profile until SubsonicUser carries one.
         ProfileId::main_of(user.user.account),
         genre,
         wanted,
@@ -275,7 +275,7 @@ async fn get_top_songs(
         .paging::<i64>("count")
         .unwrap_or(50)
         .clamp(1, MAX_PAGE);
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let songs = subsonic::top_tracks(
         &app.pool,
         ProfileId::main_of(user.user.account),

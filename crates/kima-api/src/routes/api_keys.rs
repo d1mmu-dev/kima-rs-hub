@@ -56,7 +56,7 @@ async fn create(
         &state.pool,
         id,
         auth.account,
-        // M-PROF Task 5: main profile until AuthUser carries one.
+        // M-PROF Task 8: main profile until a non-main profile's token can sign in (Task 7).
         ProfileId::main_of(auth.account),
         auth.token_version,
         name,
@@ -82,7 +82,7 @@ async fn create(
 }
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> Result<Json<Value>, ApiError> {
-    // M-PROF Task 5: main profile until AuthUser carries one.
+    // M-PROF Task 8: main profile until a non-main profile's token can sign in (Task 7).
     let keys = api_keys::list_for_profile(&state.pool, ProfileId::main_of(auth.account)).await?;
     let keys: Vec<Value> = keys
         .into_iter()
@@ -104,7 +104,7 @@ async fn revoke(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let id: Uuid = id.parse().map_err(|_| ApiError::NotFound(NOT_FOUND))?;
-    // M-PROF Task 5: main profile until AuthUser carries one.
+    // M-PROF Task 8: main profile until a non-main profile's token can sign in (Task 7).
     if !api_keys::delete_owned(&state.pool, id, ProfileId::main_of(auth.account)).await? {
         return Err(ApiError::NotFound(NOT_FOUND));
     }

@@ -68,7 +68,6 @@ impl SubsonicUser {
     }
 }
 
-/// The session of a Subsonic sign-in: the account's main profile.
 /// Refuses an app token of any profile but the account's main one, as wrong credentials.
 ///
 /// M-PROF Task 7: a Subsonic session is always the account's main profile until it can act as
@@ -85,6 +84,7 @@ pub(crate) fn main_profile_only(user: &User, profile: ProfileId) -> Result<(), S
     }
 }
 
+/// The session of a Subsonic sign-in: the account's main profile.
 // M-PROF Task 7: an app token signs into its own profile.
 fn auth_user(user: &User) -> AuthUser {
     AuthUser {

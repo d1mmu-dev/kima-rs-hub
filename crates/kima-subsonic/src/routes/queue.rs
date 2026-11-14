@@ -98,7 +98,7 @@ async fn save(
         .take(QUEUE_LIMIT)
         .map(|raw| ids::parse(raw, &[]))
         .collect();
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let (songs, kept) = hydrate(ctx, ProfileId::main_of(user.user.account), &requested).await?;
     let index = if songs.is_empty() {
         0
@@ -117,7 +117,7 @@ async fn save(
         position: Some(position(params)),
         changed_by: Some(Some(client_name(params))),
     };
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     playback::upsert(&ctx.app.pool, ProfileId::main_of(user.user.account), patch).await?;
     Ok(Answer::ok())
 }
@@ -181,7 +181,7 @@ struct Stored {
 }
 
 async fn load(ctx: &SubsonicCtx, user: &SubsonicUser) -> Result<Stored, SubsonicError> {
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let state = playback::get(&ctx.app.pool, ProfileId::main_of(user.user.account)).await?;
     let Some(state) = state else {
         return Ok(Stored {
@@ -204,7 +204,7 @@ async fn load(ctx: &SubsonicCtx, user: &SubsonicUser) -> Result<Stored, Subsonic
                 .collect()
         })
         .unwrap_or_default();
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let (songs, kept) = hydrate(ctx, ProfileId::main_of(user.user.account), &requested).await?;
     let stored = usize::try_from(state.current_index)
         .unwrap_or(0)

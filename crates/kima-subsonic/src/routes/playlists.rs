@@ -46,7 +46,7 @@ async fn owned(
     let playlist = playlists::find(&ctx.app.pool, id)
         .await?
         .ok_or_else(not_found)?;
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     if playlist.profile_id != ProfileId::main_of(user.user.account) {
         return Err(denied());
     }
@@ -56,14 +56,14 @@ async fn owned(
 /// The playlist with its `entry` songs, as `getPlaylist` and `createPlaylist` answer.
 async fn full(ctx: &SubsonicCtx, user: &SubsonicUser, id: Uuid) -> Result<Answer, SubsonicError> {
     let pool = &ctx.app.pool;
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let summary = playlists::summary(pool, id, ProfileId::main_of(user.user.account))
         .await?
         .ok_or_else(not_found)?;
     let items = playlists::items(pool, id).await?;
     let duration = items.iter().map(|i| i64::from(i.track.duration_secs)).sum();
     let track_ids: Vec<Uuid> = items.iter().map(|i| i.track.id).collect();
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let songs =
         subsonic::tracks_by_ids(pool, ProfileId::main_of(user.user.account), &track_ids).await?;
     let entries: Vec<Node> = songs
@@ -85,7 +85,7 @@ async fn get_playlists(
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
     let pool = &ctx.app.pool;
-    // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+    // M-PROF Task 7: main profile until SubsonicUser carries one.
     let all: Vec<PlaylistSummary> =
         playlists::list(pool, ProfileId::main_of(user.user.account), i64::MAX, 0)
             .await?
@@ -149,7 +149,7 @@ async fn create_playlist(
             playlists::subsonic_edit(pool, playlist.id, None, None, Some(&songs), &[], &[]).await?,
         )?;
         if changed {
-            // M-PROF Task 5: main profile until the route reads `profile`.
+            // M-PROF Task 7: main profile until a Subsonic session can be another profile.
             announce(
                 &ctx,
                 ProfileId::main_of(user.user.account).into_uuid(),
@@ -161,7 +161,7 @@ async fn create_playlist(
     } else if let Some(name) = params.get("name").filter(|n| !n.is_empty()) {
         let songs = song_ids(&params, "songId")?;
         let id = Uuid::now_v7();
-        // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
+        // M-PROF Task 7: main profile until SubsonicUser carries one.
         if !playlists::subsonic_create(
             pool,
             id,
@@ -173,7 +173,7 @@ async fn create_playlist(
         {
             return Err(SubsonicError::not_found("Song not found"));
         }
-        // M-PROF Task 5: main profile until the route reads `profile`.
+        // M-PROF Task 7: main profile until a Subsonic session can be another profile.
         announce(
             &ctx,
             ProfileId::main_of(user.user.account).into_uuid(),
@@ -210,7 +210,7 @@ async fn update_playlist(
         playlists::subsonic_edit(pool, playlist.id, name, public, None, &remove, &add).await?,
     )?;
     if changed {
-        // M-PROF Task 5: main profile until the route reads `profile`.
+        // M-PROF Task 7: main profile until a Subsonic session can be another profile.
         announce(
             &ctx,
             ProfileId::main_of(user.user.account).into_uuid(),
@@ -228,7 +228,7 @@ async fn delete_playlist(
 ) -> Result<Answer, SubsonicError> {
     let playlist = owned(&ctx, &user, params.required("id")?).await?;
     if playlists::delete(&ctx.app.pool, playlist.id).await? {
-        // M-PROF Task 5: main profile until the route reads `profile`.
+        // M-PROF Task 7: main profile until a Subsonic session can be another profile.
         announce(
             &ctx,
             ProfileId::main_of(user.user.account).into_uuid(),

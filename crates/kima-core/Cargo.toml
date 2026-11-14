@@ -20,6 +20,11 @@ jsonwebtoken.workspace = true
 time.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+# Only for `#[derive(sqlx::Type)]` on the id newtypes; kima-db turns it on.
+sqlx = { workspace = true, optional = true }
+
+[features]
+sqlx = ["dep:sqlx"]
 
 [dev-dependencies]
 tempfile.workspace = true

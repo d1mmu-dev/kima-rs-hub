@@ -5,7 +5,6 @@ use axum::extract::{Query, RawQuery, State};
 use axum::http::HeaderMap;
 use axum::routing::get;
 use axum::{Json, Router};
-use kima_core::profile::ProfileId;
 use kima_db::search;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -69,26 +68,10 @@ async fn search(
             tracks = search::tracks(&state.pool, &tsq, limit, 0).await?;
         }
         if want("podcasts") {
-            // M-PROF Task 5: main profile until AuthUser carries one.
-            podcasts = search::podcasts(
-                &state.pool,
-                ProfileId::main_of(user.account),
-                &tsq,
-                limit,
-                0,
-            )
-            .await?;
+            podcasts = search::podcasts(&state.pool, user.profile, &tsq, limit, 0).await?;
         }
         if want("episodes") {
-            // M-PROF Task 5: main profile until AuthUser carries one.
-            episodes = search::episodes(
-                &state.pool,
-                ProfileId::main_of(user.account),
-                &tsq,
-                limit,
-                0,
-            )
-            .await?;
+            episodes = search::episodes(&state.pool, user.profile, &tsq, limit, 0).await?;
         }
     }
     // Followed shows and their episodes are filtered like every podcast list (D-207).

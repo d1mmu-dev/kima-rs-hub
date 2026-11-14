@@ -20,6 +20,10 @@
 # comment within the four lines above it (a call site a later task moves to the session's
 # profile). Code after `#[cfg(test)]` is not scanned.
 #
+# Third check: a marker must name a task still to come. `DONE_TASKS` lists the plan's finished
+# tasks; a `// M-PROF Task N:` marker of one of them in crates/*/src fails the gate, so a task
+# cannot be closed with call sites still waiting for it.
+#
 # `--root DIR` scans DIR instead of the repository (used to try the gate on samples).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -144,6 +148,9 @@ ID_ESCAPE = re.compile(r"ProfileId::new\(|\bmain_of\(|\.main_profile\(\)")
 # A row of a kima-db query decoded into the newtype: the column is ground truth.
 ROW_DECODE = re.compile(r"ProfileId::new\((?:r|row)\.\w+\??\)")
 MARKER = re.compile(r"//.*M-PROF Task \d+:")
+# Plan tasks already done (docs/superpowers/plans/2026-11-14-m-prof.md); add each on closing it.
+DONE_TASKS = {0, 1, 2, 3, 4, 5}
+TASK_MARKER = re.compile(r"//.*M-PROF Task (\d+):")
 
 
 def id_escapes(rel, src):
@@ -162,10 +169,16 @@ def id_escapes(rel, src):
 
 bad = []
 escapes = []
+stale = []
 for path in sorted(pathlib.Path("crates").glob("*/src/**/*.rs")):
     rel = path.as_posix()
     src = path.read_text()
     escapes.extend(f"{rel}:{k}: {row}" for k, row in id_escapes(rel, src))
+    stale.extend(
+        f"{rel}:{k}: {row.strip()}"
+        for k, row in enumerate(src.split("\n"), 1)
+        if (m := TASK_MARKER.search(row)) and int(m.group(1)) in DONE_TASKS
+    )
     if rel in ALLOWED_FILES:
         continue
     for line, text in literals(src):
@@ -181,7 +194,10 @@ if bad:
 if escapes:
     print("profile id built by hand outside the allow-list (use the session's profile, see tools/check-profile-keys.sh):")
     print("\n".join(escapes))
-if bad or escapes:
+if stale:
+    print("M-PROF marker of a finished task (move the call site, then drop the marker; see tools/check-profile-keys.sh):")
+    print("\n".join(stale))
+if bad or escapes or stale:
     sys.exit(1)
 print("profile keys ok")
 PY

@@ -11,7 +11,6 @@ use kima_api_types::stats::{
     HourDetail, HourTrack, Ignored, NamedListens, Removed, RemovedFrom, Restored, TrackPlays,
     js_iso,
 };
-use kima_core::profile::ProfileId;
 use kima_db::stats::audit;
 use uuid::Uuid;
 
@@ -108,8 +107,7 @@ async fn collapse(
     request: Request,
 ) -> Result<Json<Removed>, ApiError> {
     express_json(request).await?;
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let removed = audit::collapse(&state.pool, ProfileId::main_of(user.account))
+    let removed = audit::collapse(&state.pool, user.profile)
         .await
         .map_err(action_failed("collapse"))?;
     Ok(Json(Removed { removed }))
@@ -121,8 +119,7 @@ async fn remove(
     request: Request,
 ) -> Result<Json<RemovedFrom>, ApiError> {
     let tracks = track_ids(express_json(request).await?.as_ref())?;
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let (removed, tracks) = audit::remove(&state.pool, ProfileId::main_of(user.account), &tracks)
+    let (removed, tracks) = audit::remove(&state.pool, user.profile, &tracks)
         .await
         .map_err(action_failed("remove"))?;
     Ok(Json(RemovedFrom { removed, tracks }))
@@ -134,8 +131,7 @@ async fn ignore(
     request: Request,
 ) -> Result<Json<Ignored>, ApiError> {
     let tracks = track_ids(express_json(request).await?.as_ref())?;
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let ignored = audit::ignore(&state.pool, ProfileId::main_of(user.account), &tracks)
+    let ignored = audit::ignore(&state.pool, user.profile, &tracks)
         .await
         .map_err(action_failed("ignore"))?;
     Ok(Json(Ignored { ignored }))
@@ -147,8 +143,7 @@ async fn restore(
     request: Request,
 ) -> Result<Json<Restored>, ApiError> {
     let tracks = track_ids(express_json(request).await?.as_ref())?;
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let restored = audit::restore(&state.pool, ProfileId::main_of(user.account), &tracks)
+    let restored = audit::restore(&state.pool, user.profile, &tracks)
         .await
         .map_err(action_failed("restore"))?;
     Ok(Json(Restored { restored }))
@@ -179,8 +174,7 @@ async fn tracks(
     let period = kima_db::stats::listens::Period::parse(args.get("period").string());
     let rows = kima_db::stats::playable::playable_slice(
         &state.pool,
-        // M-PROF Task 5: main profile until AuthUser carries one.
-        ProfileId::main_of(user.account),
+        user.profile,
         &slice,
         decade,
         limit,
@@ -237,10 +231,9 @@ async fn stats(
         let period_arg = args.get("period");
         let period = Period::parse(period_arg.string());
         let (l, o, podcasts) = tokio::try_join!(
-            // M-PROF Task 5: main profile until AuthUser carries one.
-            listening_stats(&state.pool, ProfileId::main_of(user.account), &zone, period),
-            overview(&state.pool, ProfileId::main_of(user.account), period),
-            kima_db::stats::spoken::podcast_spoken(&state.pool, ProfileId::main_of(user.account)),
+            listening_stats(&state.pool, user.profile, &zone, period),
+            overview(&state.pool, user.profile, period),
+            kima_db::stats::spoken::podcast_spoken(&state.pool, user.profile),
         )?;
         let listening = dto::ListeningStats {
             plays: l.plays,
@@ -402,21 +395,16 @@ async fn track_plays(
         return Err(ApiError::BadRequest("Bad request".into()));
     }
     let plays = if let Ok(track) = id.parse::<Uuid>() {
-        // M-PROF Task 5: main profile until AuthUser carries one.
-        kima_db::stats::listening::track_play_count(
-            &state.pool,
-            ProfileId::main_of(user.account),
-            track,
-        )
-        .await
-        .map_err(|error| {
-            if kima_db::is_retryable_conflict(&error) {
-                ApiError::Busy
-            } else {
-                tracing::error!(?error, "track play count failed");
-                ApiError::Failed("Couldn't count that track")
-            }
-        })?
+        kima_db::stats::listening::track_play_count(&state.pool, user.profile, track)
+            .await
+            .map_err(|error| {
+                if kima_db::is_retryable_conflict(&error) {
+                    ApiError::Busy
+                } else {
+                    tracing::error!(?error, "track play count failed");
+                    ApiError::Failed("Couldn't count that track")
+                }
+            })?
     } else {
         0
     };
@@ -480,8 +468,7 @@ async fn hour_detail(
         let period = kima_db::stats::listens::Period::parse(period_arg.string());
         kima_db::stats::listening::hour_detail(
             &state.pool,
-            // M-PROF Task 5: main profile until AuthUser carries one.
-            ProfileId::main_of(user.account),
+            user.profile,
             dow as i32,
             hour as i32,
             &zone,
@@ -525,9 +512,8 @@ async fn false_starts(
 ) -> Result<Json<kima_api_types::stats::FalseStartAudit>, ApiError> {
     use kima_api_types::stats::{FalseStartAudit, FalseStartTrack, IgnoredTrack};
     let (rows, ignored) = tokio::try_join!(
-        // M-PROF Task 5: main profile until AuthUser carries one.
-        audit::audit_rows(&state.pool, ProfileId::main_of(user.account)),
-        audit::ignored(&state.pool, ProfileId::main_of(user.account))
+        audit::audit_rows(&state.pool, user.profile),
+        audit::ignored(&state.pool, user.profile)
     )
     .map_err(|error| {
         tracing::error!(?error, "false-start audit failed");

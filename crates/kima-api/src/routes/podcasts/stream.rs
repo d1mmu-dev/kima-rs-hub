@@ -15,7 +15,6 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
-use kima_core::profile::ProfileId;
 use kima_net::{AudioResponse, Outcome};
 use kima_podcast::ctx::PodcastCtx;
 use std::io::SeekFrom;
@@ -172,13 +171,7 @@ async fn stream(
         // Not cached yet: cache it in the background while this play streams from the host.
         // Deduplicated by the queue (a queued or running download for the episode wins).
         if let Err(error) =
-            // M-PROF Task 5: main profile until AuthUser carries one.
-            kima_podcast::cache::enqueue_download(
-                &state.pool,
-                episode_id,
-                ProfileId::main_of(user.account),
-            )
-            .await
+            kima_podcast::cache::enqueue_download(&state.pool, episode_id, user.profile).await
         {
             tracing::warn!(episode = %episode_id, %error, "could not queue the episode download");
         }

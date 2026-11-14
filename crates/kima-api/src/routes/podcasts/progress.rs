@@ -1,6 +1,5 @@
 use axum::Json;
 use axum::extract::{Path, State};
-use kima_core::profile::ProfileId;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -107,9 +106,7 @@ pub async fn progress(
         None => None,
     };
 
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let stored =
-        kima_db::podcasts::progress(&state.pool, ProfileId::main_of(user.account), episode).await?;
+    let stored = kima_db::podcasts::progress(&state.pool, user.profile, episode).await?;
     let duration = provided_duration.unwrap_or_else(|| stored.map(|s| s.1).unwrap_or(0.0));
     // Finished is decided from THIS request's duration only (upstream: "a save without one is
     // finished only when the client says so"), never a stored length from an earlier save.
@@ -118,8 +115,7 @@ pub async fn progress(
 
     save_progress(
         &state.pool,
-        // M-PROF Task 5: main profile until AuthUser carries one.
-        ProfileId::main_of(user.account),
+        user.profile,
         episode,
         current_time,
         duration,
@@ -140,8 +136,7 @@ pub async fn clear(
     Path((_podcast, episode)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     let episode = Uuid::parse_str(&episode).map_err(|_| ApiError::NotFound("Episode not found"))?;
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    clear_progress(&state.pool, ProfileId::main_of(user.account), episode).await?;
+    clear_progress(&state.pool, user.profile, episode).await?;
     Ok(Json(json!({
         "success": true,
         "message": "Progress removed",

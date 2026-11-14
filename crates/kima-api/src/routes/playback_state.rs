@@ -5,7 +5,6 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kima_core::profile::AccountId;
-use kima_core::profile::ProfileId;
 use kima_db::playback::{self, PlaybackState, QUEUE_LIMIT};
 use serde_json::{Map, Value, json};
 
@@ -25,9 +24,12 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// `userId` is the account (D-242), whichever of its profiles the state belongs to.
+/// `userId` stays the account (upstream's key); `profileId` names the profile whose state it is
+/// (D-242).
 fn state_json(s: &PlaybackState, account: AccountId) -> Value {
     json!({
         "userId": account,
+        "profileId": s.profile_id,
         "playbackType": s.playback_type,
         "trackId": s.track_id,
         "audiobookId": s.audiobook_id,
@@ -47,9 +49,8 @@ async fn limit(_user: AuthUser) -> Json<Value> {
 }
 
 async fn read(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    // M-PROF Task 5: main profile until AuthUser carries one.
     Ok(Json(
-        match playback::get(&state.pool, ProfileId::main_of(user.account)).await? {
+        match playback::get(&state.pool, user.profile).await? {
             Some(s) => state_json(&s, user.account),
             None => Value::Null,
         },
@@ -179,8 +180,7 @@ async fn save(
         position: None,
         changed_by: None,
     };
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let saved = playback::upsert(&state.pool, ProfileId::main_of(user.account), patch).await?;
+    let saved = playback::upsert(&state.pool, user.profile, patch).await?;
     Ok(Json(state_json(&saved, user.account)))
 }
 
@@ -191,7 +191,6 @@ async fn live(_user: AuthUser) -> ApiError {
 }
 
 async fn clear(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let removed = playback::delete(&state.pool, ProfileId::main_of(user.account)).await?;
+    let removed = playback::delete(&state.pool, user.profile).await?;
     Ok(Json(json!({ "success": true, "cleared": removed })))
 }

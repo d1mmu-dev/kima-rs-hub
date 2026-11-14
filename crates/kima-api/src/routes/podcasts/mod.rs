@@ -3,7 +3,6 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::HeaderMap;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use kima_core::profile::ProfileId;
 use serde_json::{Value, json};
 
 use crate::auth::AuthUser;
@@ -81,9 +80,7 @@ async fn refresh_all(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Value>, ApiError> {
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let shows =
-        kima_db::podcasts::followed_shows(&state.pool, ProfileId::main_of(user.account)).await?;
+    let shows = kima_db::podcasts::followed_shows(&state.pool, user.profile).await?;
     if shows.is_empty() {
         return Ok(Json(
             json!({"queued": 0, "message": "No subscribed podcasts"}),
@@ -174,13 +171,8 @@ async fn subscribe(
             kima_db::podcasts::show_by_feed_or_itunes(&state.pool, feed_url, apple.as_deref())
                 .await?
         {
-            // M-PROF Task 5: main profile until AuthUser carries one.
-            let inserted = kima_db::podcasts::subscribe(
-                &state.pool,
-                ProfileId::main_of(user.account),
-                existing.id,
-            )
-            .await?;
+            let inserted =
+                kima_db::podcasts::subscribe(&state.pool, user.profile, existing.id).await?;
             return Ok(Json(
                 json!({"success": true, "podcast": {"id": existing.id, "title": existing.title},
                 "message": if inserted {"Subscribed successfully"} else {"Already subscribed"}}),
@@ -324,10 +316,7 @@ async fn subscribe(
     } else {
         return Err(ApiError::NotFound("Podcast not found in iTunes"));
     };
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let inserted =
-        kima_db::podcasts::subscribe(&state.pool, ProfileId::main_of(user.account), show.id)
-            .await?;
+    let inserted = kima_db::podcasts::subscribe(&state.pool, user.profile, show.id).await?;
     Ok(Json(
         json!({"success": true, "podcast": {"id": show.id, "title": show.title},
         "message": if inserted {"Subscribed successfully"} else {"Already subscribed"}}),
@@ -342,19 +331,12 @@ async fn list(
     use kima_api_types::podcasts::{EpisodeSummary, FollowedShow};
     use kima_api_types::stats::js_iso;
     let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let mut shows =
-        kima_db::podcasts::followed_shows(&state.pool, ProfileId::main_of(user.account)).await?;
+    let mut shows = kima_db::podcasts::followed_shows(&state.pool, user.profile).await?;
     let mut hidden = retain_visible(filter, &mut shows, |s| from_db(&s.ai_label, None).0);
     let mut out = Vec::new();
     for show in shows {
-        // M-PROF Task 5: main profile until AuthUser carries one.
-        let mut rows = kima_db::podcasts::recent_episodes(
-            &state.pool,
-            ProfileId::main_of(user.account),
-            show.id,
-        )
-        .await?;
+        let mut rows =
+            kima_db::podcasts::recent_episodes(&state.pool, user.profile, show.id).await?;
         hidden += retain_visible(filter, &mut rows, |e| from_db(&e.ai_label, None).0);
         let episodes: Vec<_> = rows
             .into_iter()
@@ -405,8 +387,7 @@ async fn unsubscribe(
 ) -> Result<Json<Value>, ApiError> {
     let id = uuid::Uuid::parse_str(&id)
         .map_err(|_| ApiError::NotFound("Not subscribed to this podcast"))?;
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    if !kima_db::podcasts::unsubscribe(&state.pool, ProfileId::main_of(user.account), id).await? {
+    if !kima_db::podcasts::unsubscribe(&state.pool, user.profile, id).await? {
         return Err(ApiError::NotFound("Not subscribed to this podcast"));
     }
     Ok(Json(
@@ -462,8 +443,7 @@ async fn checked_page(
     let missing = || ApiError::NotFound("Podcast not found or not subscribed");
     let filter = AiFilter::from_query(raw.as_deref())?;
     let id = uuid::Uuid::parse_str(id).map_err(|_| missing())?;
-    // M-PROF Task 5: follows and progress move to `user.profile` with subscribe/unsubscribe.
-    let profile = ProfileId::main_of(user.account);
+    let profile = user.profile;
     if !kima_db::podcasts::is_subscribed(&state.pool, profile, id).await? {
         return Err(missing());
     }
@@ -577,16 +557,10 @@ async fn next(
     let missing = || ApiError::NotFound("Episode not found");
     let show = uuid::Uuid::parse_str(&show).map_err(|_| missing())?;
     let episode = uuid::Uuid::parse_str(&episode).map_err(|_| missing())?;
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let next = kima_db::podcasts::next_episode(
-        &state.pool,
-        ProfileId::main_of(user.account),
-        show,
-        episode,
-        filter.hides(),
-    )
-    .await?
-    .ok_or_else(missing)?;
+    let next =
+        kima_db::podcasts::next_episode(&state.pool, user.profile, show, episode, filter.hides())
+            .await?
+            .ok_or_else(missing)?;
     let Some(e) = next else {
         return Ok(Json(json!({"episode": null})));
     };
@@ -619,8 +593,7 @@ async fn listening(
     use kima_api_types::stats::js_iso;
     let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
     // Filtered in the query, before the limits and each show's newest pick (D-207).
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let owner = ProfileId::main_of(user.account);
+    let owner = user.profile;
     let (in_progress, new_episodes, hidden) =
         kima_db::podcasts::listening(&state.pool, owner, filter.hides()).await?;
     let convert = |e: kima_db::podcasts::ListeningRow| {

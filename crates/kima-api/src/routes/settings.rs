@@ -20,9 +20,12 @@ pub fn routes() -> Router<AppState> {
 
 /// `hasListenbrainzToken` and `liveSharingAvailable` are always false in kima-rs (D-103).
 /// `userId` is the account (D-242), whichever of its profiles the settings belong to.
+/// `userId` stays the account (upstream's key); `profileId` names the profile whose settings
+/// they are (D-242).
 fn settings_json(s: &UserSettings, account: AccountId) -> Value {
     json!({
         "userId": account,
+        "profileId": s.profile_id,
         "playbackQuality": s.playback_quality,
         "wifiOnly": s.wifi_only,
         "offlineEnabled": s.offline_enabled,

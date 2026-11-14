@@ -502,7 +502,11 @@ async fn a_download_in_progress_is_not_served_from_the_cache(pool: PgPool) {
     // Only the worker's temp file exists yet: never served.
     let dir = kima_podcast::cache::cache_dir(tmp.path());
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join(format!("{episode}.tmp")), b"partial").unwrap();
+    std::fs::write(
+        dir.join(format!("{episode}.0123456789abcdef.tmp")),
+        b"partial",
+    )
+    .unwrap();
     let res = env.stream(podcast, episode).await;
     res.assert_status_ok();
     assert_eq!(res.as_bytes().as_ref(), &data[..]);

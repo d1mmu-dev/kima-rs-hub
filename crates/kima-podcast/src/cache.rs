@@ -28,10 +28,14 @@ const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(600);
 /// Upstream's 600 s download timeout, here a deadline for the whole body once the headers are
 /// in; kima-net's own per-chunk idle timeout (30 s) also applies (D-204).
 const WHOLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
-/// The most a download whose host sends no `Content-Length` may write before it is abandoned
-/// (2 GiB); upstream has no cap (D-217).
-pub const MAX_UNKNOWN_LENGTH_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// The most any download may write before it is abandoned (2 GiB), whatever `Content-Length`
+/// the host declares; upstream has no cap (D-217).
+pub const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const EXPIRE_AFTER_DAYS: i64 = 30;
+/// A temp file this old whose episode has no queued or running download is a leftover of a
+/// hard kill; [`cleanup`] removes it. Far above the longest download (headers plus body, 20 min).
+const ORPHAN_TEMP_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const TEMP_SUFFIX: &str = ".tmp";
 const MARKER: &str = ".lengths-measured";
 
 /// Where cached episode audio lives, relative to `data_dir`.
@@ -41,6 +45,42 @@ pub fn cache_dir(data_dir: &Path) -> PathBuf {
 
 fn episode_path(data_dir: &Path, episode: Uuid) -> PathBuf {
     cache_dir(data_dir).join(format!("{episode}.audio"))
+}
+
+/// A temp file of its own for one download attempt, `<episode>.<random>.tmp`: two attempts at
+/// the same episode (a redelivered job beside a worker that lost its lease) never write, delete
+/// or rename each other's file.
+fn attempt_temp_path(data_dir: &Path, episode: Uuid) -> PathBuf {
+    cache_dir(data_dir).join(format!(
+        "{episode}.{}{TEMP_SUFFIX}",
+        Uuid::new_v4().simple()
+    ))
+}
+
+/// Removes its file when dropped unless [`TempFile::disarm`]ed: an attempt that fails, times
+/// out, is cancelled (its future dropped) or unwinds never leaves its temp file behind. The
+/// removal is synchronous, so it has happened by the time the future is gone.
+struct TempFile {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempFile {
+    fn new(path: PathBuf) -> Self {
+        TempFile { path, armed: true }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 fn download_key(episode: Uuid) -> String {
@@ -59,8 +99,10 @@ pub enum CacheError {
     Empty,
     #[error("downloaded {got} bytes, expected {expected}")]
     Incomplete { got: u64, expected: u64 },
-    #[error("the download passed its {limit}-byte limit ({written} bytes written)")]
-    TooLarge { written: u64, limit: u64 },
+    #[error(
+        "the download passed its {limit}-byte limit (the next chunk would make it {would_write} bytes)"
+    )]
+    TooLarge { would_write: u64, limit: u64 },
     #[error("the download did not finish within {0:?}")]
     TimedOut(Duration),
     #[error(transparent)]
@@ -84,8 +126,9 @@ pub struct DownloadLimits {
     pub first_byte: Duration,
     /// The deadline for the whole body, from the headers on.
     pub whole: Duration,
-    /// The byte cap when the host sends no `Content-Length`.
-    pub max_unknown_length: u64,
+    /// The byte cap for every body: one without a `Content-Length` and one whose declared
+    /// length (plus the size tolerance) is larger.
+    pub max_bytes: u64,
 }
 
 impl Default for DownloadLimits {
@@ -93,7 +136,7 @@ impl Default for DownloadLimits {
         DownloadLimits {
             first_byte: FIRST_BYTE_TIMEOUT,
             whole: WHOLE_DOWNLOAD_TIMEOUT,
-            max_unknown_length: MAX_UNKNOWN_LENGTH_BYTES,
+            max_bytes: MAX_DOWNLOAD_BYTES,
         }
     }
 }
@@ -142,7 +185,7 @@ async fn discard(path: &Path, pool: &PgPool, episode: Uuid) {
 
 /// Queues `episode`'s download, unless one is already queued or running (upstream's in-process
 /// `Set` behind `isDownloading`, now the job queue itself, D-204): a second job beside a running
-/// one would reuse its temp file. Returns the new job's id, or `None` for a duplicate.
+/// one would download the same file twice. Returns the new job's id, or `None` for a duplicate.
 pub async fn enqueue_download(
     pool: &PgPool,
     episode: Uuid,
@@ -168,8 +211,10 @@ pub async fn download(ctx: &PodcastCtx, episode: Uuid, user: Uuid) -> Result<(),
 
 /// [`download`] under explicit `limits`: abandoned (the temp file deleted, nothing recorded)
 /// once the body passes the host's `Content-Length` by more than the size tolerance, or
-/// [`DownloadLimits::max_unknown_length`] when there is none, or runs past
-/// [`DownloadLimits::whole`] (D-217).
+/// [`DownloadLimits::max_bytes`] (whichever is lower), or runs past [`DownloadLimits::whole`]
+/// (D-217). Each attempt writes its own temp file, removed however the attempt ends unless it
+/// was renamed in (also when the future is dropped midway); only that file, checked against
+/// what this attempt received, is renamed in.
 pub async fn download_with_limits(
     ctx: &PodcastCtx,
     episode: Uuid,
@@ -186,8 +231,6 @@ pub async fn download_with_limits(
     let dir = cache_dir(&ctx.data_dir);
     tokio::fs::create_dir_all(&dir).await?;
     let final_path = episode_path(&ctx.data_dir, episode);
-    let temp_path = dir.join(format!("{episode}.tmp"));
-    let _ = tokio::fs::remove_file(&temp_path).await;
 
     let response = match ctx
         .net
@@ -207,21 +250,17 @@ pub async fn download_with_limits(
         .as_deref()
         .and_then(|s| s.parse().ok());
 
-    let write_result = tokio::time::timeout(
+    let temp = TempFile::new(attempt_temp_path(&ctx.data_dir, episode));
+    let written = tokio::time::timeout(
         limits.whole,
-        write_body(&temp_path, response.body, expected_bytes, limits),
+        write_body(&temp.path, response.body, expected_bytes, limits),
     )
     .await
-    .unwrap_or(Err(CacheError::TimedOut(limits.whole)));
-    let written = match write_result {
-        Ok(n) => n,
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(e);
-        }
-    };
+    .unwrap_or(Err(CacheError::TimedOut(limits.whole)))?;
 
-    tokio::fs::rename(&temp_path, &final_path).await?;
+    // Synchronous, so a cancellation cannot leave the rename running after `temp` has gone.
+    std::fs::rename(&temp.path, &final_path)?;
+    temp.disarm();
     kima_db::podcasts::set_episode_file_size(&ctx.pool, episode, written as i64).await?;
     let _ = record_measured_length(&ctx.pool, episode, &final_path).await;
 
@@ -235,14 +274,14 @@ pub async fn download_with_limits(
     Ok(())
 }
 
-/// The most bytes a body may have: `expected` plus the size tolerance, or the cap for a body
-/// of unknown length.
+/// The most bytes a body may have: `expected` plus the size tolerance, never more than the cap
+/// (the whole cap for a body of unknown length).
 fn byte_limit(expected: Option<u64>, limits: DownloadLimits) -> u64 {
     match expected {
-        Some(expected) if expected > 0 => {
-            expected.saturating_add((expected as f64 * SIZE_TOLERANCE).ceil() as u64)
-        }
-        _ => limits.max_unknown_length,
+        Some(expected) if expected > 0 => expected
+            .saturating_add((expected as f64 * SIZE_TOLERANCE).ceil() as u64)
+            .min(limits.max_bytes),
+        _ => limits.max_bytes,
     }
 }
 
@@ -256,14 +295,16 @@ async fn write_body(
     limits: DownloadLimits,
 ) -> Result<u64, CacheError> {
     let limit = byte_limit(expected, limits);
-    let mut file = tokio::fs::File::create(path).await?;
+    // Created synchronously: a create still running on the blocking pool after a cancellation
+    // could make the file appear after its guard removed it.
+    let mut file = tokio::fs::File::from_std(std::fs::File::create(path)?);
     let mut written: u64 = 0;
     while let Some(chunk) = body.next().await {
         let chunk = chunk?;
         let after = written.saturating_add(chunk.len() as u64);
         if after > limit {
             return Err(CacheError::TooLarge {
-                written: after,
+                would_write: after,
                 limit,
             });
         }
@@ -383,9 +424,14 @@ pub async fn measure_cached_once(ctx: &PodcastCtx) -> usize {
     measured
 }
 
-/// Deletes cached episodes nobody played for 30 days (upstream's `cleanupExpiredCache`).
-/// Returns how many download records were removed and how many megabytes were freed.
+/// Deletes cached episodes nobody played for 30 days (upstream's `cleanupExpiredCache`), and
+/// temp files a hard kill left behind ([`remove_orphaned_temp_files`]). Returns how many
+/// download records were removed and how many megabytes were freed.
 pub async fn cleanup(ctx: &PodcastCtx) -> sqlx::Result<(u64, f64)> {
+    let orphans = remove_orphaned_temp_files(ctx, ORPHAN_TEMP_AGE).await?;
+    if orphans > 0 {
+        tracing::info!(orphans, "removed leftover podcast download temp files");
+    }
     let cutoff = OffsetDateTime::now_utc() - time::Duration::days(EXPIRE_AFTER_DAYS);
     let expired = kima_db::podcasts::expired_downloads(&ctx.pool, cutoff).await?;
     let mut deleted = 0u64;
@@ -400,17 +446,78 @@ pub async fn cleanup(ctx: &PodcastCtx) -> sqlx::Result<(u64, f64)> {
     Ok((deleted, freed_mb))
 }
 
+/// Removes `*.tmp` files in the cache dir last modified more than `older_than` ago whose
+/// episode has no queued or running download: a process killed mid-download (no destructor
+/// ran) leaves its temp file. Returns how many were removed.
+async fn remove_orphaned_temp_files(ctx: &PodcastCtx, older_than: Duration) -> sqlx::Result<u64> {
+    let Ok(mut entries) = tokio::fs::read_dir(cache_dir(&ctx.data_dir)).await else {
+        return Ok(0);
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let Some(name) = name.to_str().filter(|n| n.ends_with(TEMP_SUFFIX)) else {
+            continue;
+        };
+        let old = entry
+            .metadata()
+            .await
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| m.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > older_than);
+        if !old {
+            continue;
+        }
+        let episode = name.split('.').next().and_then(|s| Uuid::parse_str(s).ok());
+        if let Some(episode) = episode {
+            let key = download_key(episode);
+            if kima_jobs::queue::pending_with_key(&ctx.pool, QUEUE, &key)
+                .await?
+                .is_some()
+            {
+                continue;
+            }
+        }
+        if tokio::fs::remove_file(entry.path()).await.is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod probe_tests {
     use super::*;
 
     #[test]
-    fn byte_limit_allows_the_size_tolerance_over_a_known_length_and_caps_an_unknown_one() {
+    fn byte_limit_allows_the_size_tolerance_over_a_known_length_and_caps_every_one() {
         let limits = DownloadLimits::default();
         assert_eq!(byte_limit(Some(1_000_000), limits), 1_010_000);
-        assert_eq!(byte_limit(None, limits), MAX_UNKNOWN_LENGTH_BYTES);
-        assert_eq!(byte_limit(Some(0), limits), MAX_UNKNOWN_LENGTH_BYTES);
-        assert_eq!(byte_limit(Some(u64::MAX), limits), u64::MAX);
+        assert_eq!(byte_limit(None, limits), MAX_DOWNLOAD_BYTES);
+        assert_eq!(byte_limit(Some(0), limits), MAX_DOWNLOAD_BYTES);
+        assert_eq!(byte_limit(Some(u64::MAX), limits), MAX_DOWNLOAD_BYTES);
+        assert_eq!(
+            byte_limit(Some(MAX_DOWNLOAD_BYTES - 1), limits),
+            MAX_DOWNLOAD_BYTES
+        );
+    }
+
+    #[test]
+    fn each_attempt_gets_its_own_temp_file() {
+        let episode = Uuid::now_v7();
+        let (a, b) = (
+            attempt_temp_path(Path::new("/d"), episode),
+            attempt_temp_path(Path::new("/d"), episode),
+        );
+        assert_ne!(a, b);
+        for p in [a, b] {
+            let name = p.file_name().unwrap().to_str().unwrap();
+            assert!(name.starts_with(&format!("{episode}.")), "{name}");
+            assert!(name.ends_with(TEMP_SUFFIX), "{name}");
+        }
     }
 
     /// `probe_duration_seconds` must sniff the format from content, not the `.audio`

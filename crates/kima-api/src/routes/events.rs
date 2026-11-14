@@ -24,7 +24,8 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn issue_ticket(State(state): State<AppState>, user: AuthUser) -> Json<Value> {
-    Json(json!({ "ticket": state.sse.issue_ticket(user.id) }))
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    Json(json!({ "ticket": state.sse.issue_ticket(user.main_profile().into_uuid()) }))
 }
 
 #[derive(Deserialize)]

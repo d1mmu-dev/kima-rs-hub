@@ -94,7 +94,8 @@ async fn discover(
     Query(params): Query<Params>,
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let filter = AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?;
     let q = params.q.as_deref().unwrap_or("").trim().to_string();
     if q.is_empty() {
         return Ok((

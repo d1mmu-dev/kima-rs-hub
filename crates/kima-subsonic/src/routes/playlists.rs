@@ -146,7 +146,13 @@ async fn create_playlist(
             playlists::subsonic_edit(pool, playlist.id, None, None, Some(&songs), &[], &[]).await?,
         )?;
         if changed {
-            announce(&ctx, user.user.id, playlist.id, false);
+            // M-PROF Task 5: main profile until the route reads `profile`.
+            announce(
+                &ctx,
+                user.user.main_profile().into_uuid(),
+                playlist.id,
+                false,
+            );
         }
         playlist.id
     } else if let Some(name) = params.get("name").filter(|n| !n.is_empty()) {
@@ -156,7 +162,8 @@ async fn create_playlist(
         if !playlists::subsonic_create(pool, id, user.user.main_profile(), name, &songs).await? {
             return Err(SubsonicError::not_found("Song not found"));
         }
-        announce(&ctx, user.user.id, id, false);
+        // M-PROF Task 5: main profile until the route reads `profile`.
+        announce(&ctx, user.user.main_profile().into_uuid(), id, false);
         id
     } else {
         return Err(SubsonicError::new(
@@ -187,7 +194,13 @@ async fn update_playlist(
         playlists::subsonic_edit(pool, playlist.id, name, public, None, &remove, &add).await?,
     )?;
     if changed {
-        announce(&ctx, user.user.id, playlist.id, false);
+        // M-PROF Task 5: main profile until the route reads `profile`.
+        announce(
+            &ctx,
+            user.user.main_profile().into_uuid(),
+            playlist.id,
+            false,
+        );
     }
     Ok(Answer::ok())
 }
@@ -199,7 +212,13 @@ async fn delete_playlist(
 ) -> Result<Answer, SubsonicError> {
     let playlist = owned(&ctx, &user, params.required("id")?).await?;
     if playlists::delete(&ctx.app.pool, playlist.id).await? {
-        announce(&ctx, user.user.id, playlist.id, true);
+        // M-PROF Task 5: main profile until the route reads `profile`.
+        announce(
+            &ctx,
+            user.user.main_profile().into_uuid(),
+            playlist.id,
+            true,
+        );
     }
     Ok(Answer::ok())
 }

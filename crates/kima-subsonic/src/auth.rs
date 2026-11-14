@@ -11,7 +11,8 @@ use axum::http::request::Parts;
 use hmac::{Hmac, KeyInit, Mac};
 use kima_api::auth::{AuthUser, ClientIp};
 use kima_core::cipher::Cipher;
-use kima_db::users::{self, MAX_USERNAME_CHARS, ROLE_ADMIN, User};
+use kima_core::profile::ProfileKind;
+use kima_db::users::{self, MAX_USERNAME_CHARS, User};
 use md5::{Digest, Md5};
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -47,8 +48,9 @@ pub struct SubsonicUser {
 }
 
 impl SubsonicUser {
+    /// Admin rights need an admin account acting as its main profile (D-241).
     pub fn require_admin(&self) -> Result<(), SubsonicError> {
-        if self.user.role == ROLE_ADMIN {
+        if self.user.is_admin() {
             Ok(())
         } else {
             Err(SubsonicError::not_authorized("Admin privileges required"))
@@ -66,9 +68,13 @@ impl SubsonicUser {
     }
 }
 
+/// The session of a Subsonic sign-in: the account's main profile.
+// M-PROF Task 7: an app token signs into its own profile.
 fn auth_user(user: &User) -> AuthUser {
     AuthUser {
-        id: user.id,
+        account: user.account(),
+        profile: user.main_profile(),
+        profile_kind: ProfileKind::Main,
         username: user.username.clone(),
         role: user.role.clone(),
         token_version: user.token_version,
@@ -421,6 +427,40 @@ async fn password_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_needs_the_main_profile() {
+        let account = kima_core::profile::AccountId::new(Uuid::now_v7());
+        let session = |profile, profile_kind, role: &str| SubsonicUser {
+            user: AuthUser {
+                account,
+                profile,
+                profile_kind,
+                username: "ana".into(),
+                role: role.into(),
+                token_version: 0,
+            },
+            method: AuthMethod::Password,
+        };
+        let main = kima_core::profile::ProfileId::main_of(account);
+        let kids = kima_core::profile::ProfileId::new(Uuid::now_v7());
+        assert!(
+            session(main, ProfileKind::Main, "admin")
+                .require_admin()
+                .is_ok()
+        );
+        for (profile, kind, role) in [
+            (kids, ProfileKind::Kids, "admin"),
+            (kids, ProfileKind::Standard, "admin"),
+            (main, ProfileKind::Main, "user"),
+        ] {
+            let refused = session(profile, kind, role).require_admin().unwrap_err();
+            assert_eq!(
+                refused,
+                SubsonicError::not_authorized("Admin privileges required")
+            );
+        }
+    }
 
     #[test]
     fn token_matches_subsonic_doc_vector() {

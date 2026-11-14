@@ -90,7 +90,9 @@ async fn scrobble(
                 tracing::warn!(?error, "scrobble play-log failed");
             }
         }
-        ctx.now_playing.finish(me.id, &player);
+        // M-PROF Task 5: main profile until the route reads `profile`.
+        ctx.now_playing
+            .finish(me.main_profile().into_uuid(), &player);
     } else {
         let tracks: Vec<Uuid> = raw_ids
             .iter()
@@ -99,8 +101,9 @@ async fn scrobble(
         // M-PROF Task 5: main profile until SubsonicUser carries one (Task 7).
         for song in subsonic::tracks_by_ids(pool, me.main_profile(), &tracks).await? {
             let t = &song.track;
+            // M-PROF Task 5: main profile until the route reads `profile`.
             ctx.now_playing.report(
-                me.id,
+                me.main_profile().into_uuid(),
                 &me.username,
                 &player,
                 t.id,

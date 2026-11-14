@@ -1055,10 +1055,13 @@ async fn followed_list_is_newest_follow_first_with_five_newest_episodes_and_prog
         })
     );
     // Another user follows nothing.
-    let other_token =
-        env.state
-            .jwt
-            .issue_access(other.id, &other.username, &other.role, other.token_version);
+    let other_token = env.state.jwt.issue_access(
+        other.account(),
+        other.main_profile(),
+        &other.username,
+        &other.role,
+        other.token_version,
+    );
     let theirs = env
         .server
         .get("/api/podcasts")

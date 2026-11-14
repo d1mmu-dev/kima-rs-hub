@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id AS \"account: AccountId\", p.id AS \"profile: ProfileId\", p.kind,\n                  u.username, u.role, u.token_version\n           FROM profiles p JOIN users u ON u.id = p.user_id\n           WHERE p.id = $1 AND u.id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "account: AccountId",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "profile: ProfileId",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "username",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "role",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "token_version",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bba8a993ac9643ba5f251372d2e6abe04e875857792e2a0fe77b2b67d77de24f"
+}

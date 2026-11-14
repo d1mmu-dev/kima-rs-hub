@@ -185,7 +185,15 @@ async fn charts(
 ) -> Result<Labelled, ApiError> {
     let args = parse_args(raw.clone());
     let category_raw = raw_of(args.get("category"));
-    answer_chart(&state, user.id, raw.as_deref(), category_raw, &args).await
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    answer_chart(
+        &state,
+        user.main_profile().into_uuid(),
+        raw.as_deref(),
+        category_raw,
+        &args,
+    )
+    .await
 }
 
 async fn discover_top(
@@ -194,7 +202,15 @@ async fn discover_top(
     RawQuery(raw): RawQuery,
 ) -> Result<Labelled, ApiError> {
     let args = parse_args(raw.clone());
-    answer_chart(&state, user.id, raw.as_deref(), None, &args).await
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    answer_chart(
+        &state,
+        user.main_profile().into_uuid(),
+        raw.as_deref(),
+        None,
+        &args,
+    )
+    .await
 }
 
 async fn discover_genre(
@@ -204,7 +220,15 @@ async fn discover_genre(
     RawQuery(raw): RawQuery,
 ) -> Result<Labelled, ApiError> {
     let args = parse_args(raw.clone());
-    answer_chart(&state, user.id, raw.as_deref(), Some(genre_id), &args).await
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    answer_chart(
+        &state,
+        user.main_profile().into_uuid(),
+        raw.as_deref(),
+        Some(genre_id),
+        &args,
+    )
+    .await
 }
 
 /// `/discover/genres?genres=a,b`: the first ten of each real category's chart, keyed by id;
@@ -215,7 +239,8 @@ async fn discover_genres(
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
     const PER_CATEGORY: usize = 10;
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let filter = AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?;
     let mut hidden = 0;
     let bad_genres =
         || ApiError::BadRequest("genres parameter required (comma-separated genre IDs)".into());
@@ -267,7 +292,8 @@ async fn for_you(
     user: AuthUser,
     RawQuery(raw): RawQuery,
 ) -> Result<Labelled, ApiError> {
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let filter = AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?;
     let rows = state
         .podcast_catalog
         // M-PROF Task 5: main profile until AuthUser carries one.
@@ -292,7 +318,8 @@ async fn similar(
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<Labelled, ApiError> {
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let filter = AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?;
     let missing = || ApiError::NotFound("Podcast not found");
     let id = Uuid::parse_str(&id).map_err(|_| missing())?;
     let show = kima_db::podcasts::show_by_id(&state.pool, id)
@@ -314,7 +341,8 @@ async fn preview_similar(
     Path(itunes_id): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<Labelled, ApiError> {
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let filter = AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?;
     let missing = || ApiError::NotFound("Podcast not found");
     if itunes_id.is_empty() || !itunes_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err(missing());

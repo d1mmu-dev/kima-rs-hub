@@ -150,9 +150,13 @@ async fn podcast_refresh_failure_shows_in_http_counts_and_retries(pool: PgPool) 
     .execute(&pool)
     .await
     .unwrap();
-    let admin = state
-        .jwt
-        .issue_access(user.id, &user.username, &user.role, user.token_version);
+    let admin = state.jwt.issue_access(
+        user.account(),
+        user.main_profile(),
+        &user.username,
+        &user.role,
+        user.token_version,
+    );
 
     let srv = TestServer::new(kima_api::router(state.clone())).unwrap();
 

@@ -828,7 +828,8 @@ fixture_test!(
             .unwrap()
             .unwrap();
         let jwt = state.jwt.issue_access(
-            admin_user.id,
+            admin_user.account(),
+            admin_user.main_profile(),
             &admin_user.username,
             &admin_user.role,
             admin_user.token_version,

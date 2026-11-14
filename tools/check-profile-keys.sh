@@ -9,6 +9,12 @@
 # where `u` is an alias of `users`): only a main profile shares its account's id.
 # `created_by` (organizer/autotag runs) and `ai_override_by` stay account columns under their
 # own names, so they never match. Tests and migrations are not scanned.
+#
+# Second check: the ways around the `AccountId`/`ProfileId` types (`ProfileId::new(..)`,
+# `ProfileId::main_of(..)`, `.main_profile()`) are allowed only where a profile id is ground
+# truth or the main profile is meant by definition (ID_FILES), or on a line marked with an
+# `M-PROF Task N:` comment within the four lines above it (a call site a later task moves to
+# the session's profile). Code after `#[cfg(test)]` is not scanned.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 - "$@" <<'PY'
@@ -89,12 +95,41 @@ def literals(src):
             i += 1
 
 
+# Where a bare profile id is ground truth (database rows, token claims, the newtypes) or the
+# main profile is meant by definition (sign-in and registration land in it).
+ID_FILES = (
+    "crates/kima-core/src/profile.rs",
+    "crates/kima-core/src/auth.rs",
+    "crates/kima-db/src/",
+    "crates/kima-api/src/auth.rs",
+    "crates/kima-api/src/routes/auth.rs",
+    "crates/kima-api/src/routes/onboarding.rs",
+)
+ID_ESCAPE = re.compile(r"ProfileId::new\(|\bmain_of\(|\.main_profile\(\)")
+MARKER = re.compile(r"//.*M-PROF Task \d+:")
+
+
+def id_escapes(rel, src):
+    if rel.startswith(ID_FILES):
+        return
+    lines = src.split("\n")
+    for k, row in enumerate(lines):
+        if row.strip().startswith("#[cfg(test)]"):
+            return
+        code = row.split("//", 1)[0]
+        if ID_ESCAPE.search(code) and not any(MARKER.search(r) for r in lines[max(0, k - 4) : k + 1]):
+            yield k + 1, row.strip()
+
+
 bad = []
+escapes = []
 for path in sorted(pathlib.Path("crates").glob("*/src/**/*.rs")):
     rel = path.as_posix()
+    src = path.read_text()
+    escapes.extend(f"{rel}:{k}: {row}" for k, row in id_escapes(rel, src))
     if rel in ALLOWED_FILES:
         continue
-    for line, text in literals(path.read_text()):
+    for line, text in literals(src):
         rows = text.split("\n")
         hits = {k for k, row in enumerate(rows) if WORD.search(ALLOWED_REF.sub("", row))}
         hits.update(profile_as_account(text))
@@ -103,6 +138,10 @@ for path in sorted(pathlib.Path("crates").glob("*/src/**/*.rs")):
 if bad:
     print("user_id in SQL text outside the allow-list (re-key to profile_id, see tools/check-profile-keys.sh):")
     print("\n".join(bad))
+if escapes:
+    print("profile id built by hand outside the allow-list (use the session's profile, see tools/check-profile-keys.sh):")
+    print("\n".join(escapes))
+if bad or escapes:
     sys.exit(1)
 print("profile keys ok")
 PY

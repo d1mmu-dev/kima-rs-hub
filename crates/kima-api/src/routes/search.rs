@@ -50,7 +50,8 @@ async fn search(
     // Only the podcast groups are filtered (D-207): a music-only search neither reads the
     // setting nor answers `X-Kima-Ai-Hidden`.
     let filter = if want("podcasts") || want("episodes") {
-        Some(AiFilter::resolve(&state, user.id, raw.as_deref()).await?)
+        // M-PROF Task 5: main profile until the route reads `profile`.
+        Some(AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?)
     } else {
         None
     };

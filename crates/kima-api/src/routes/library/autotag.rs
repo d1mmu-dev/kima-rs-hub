@@ -159,7 +159,7 @@ async fn apply(
             target: body.target,
             reorganize: body.reorganize,
             mbids_only: body.mbids_only,
-            created_by: Some(user.id),
+            created_by: Some(user.account.into_uuid()),
         },
     )
     .await

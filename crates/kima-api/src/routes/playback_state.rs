@@ -49,7 +49,7 @@ async fn read(State(state): State<AppState>, user: AuthUser) -> Result<Json<Valu
     // M-PROF Task 5: main profile until AuthUser carries one.
     Ok(Json(
         match playback::get(&state.pool, user.main_profile()).await? {
-            Some(s) => state_json(&s, user.account()),
+            Some(s) => state_json(&s, user.account),
             None => Value::Null,
         },
     ))
@@ -180,7 +180,7 @@ async fn save(
     };
     // M-PROF Task 5: main profile until AuthUser carries one.
     let saved = playback::upsert(&state.pool, user.main_profile(), patch).await?;
-    Ok(Json(state_json(&saved, user.account())))
+    Ok(Json(state_json(&saved, user.account)))
 }
 
 /// Upstream answers 404 for everyone but the public "live trip" user, and the web player stops

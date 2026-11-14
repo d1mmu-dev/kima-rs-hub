@@ -190,9 +190,10 @@ async fn set_show_label(
     let label = parse_label(&body)?;
     let missing = || ApiError::NotFound("Podcast not found");
     let id = Uuid::parse_str(&id).map_err(|_| missing())?;
-    let row = kima_db::podcasts::set_show_override(&state.pool, id, label, admin.id)
-        .await?
-        .ok_or_else(missing)?;
+    let row =
+        kima_db::podcasts::set_show_override(&state.pool, id, label, admin.account.into_uuid())
+            .await?
+            .ok_or_else(missing)?;
     Ok(label_answer(row))
 }
 
@@ -207,10 +208,15 @@ async fn set_episode_label(
     let missing = || ApiError::NotFound("Episode not found");
     let podcast = Uuid::parse_str(&podcast).map_err(|_| missing())?;
     let episode = Uuid::parse_str(&episode).map_err(|_| missing())?;
-    let row =
-        kima_db::podcasts::set_episode_override(&state.pool, podcast, episode, label, admin.id)
-            .await?
-            .ok_or_else(missing)?;
+    let row = kima_db::podcasts::set_episode_override(
+        &state.pool,
+        podcast,
+        episode,
+        label,
+        admin.account.into_uuid(),
+    )
+    .await?
+    .ok_or_else(missing)?;
     Ok(label_answer(row))
 }
 

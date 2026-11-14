@@ -2740,6 +2740,7 @@ dependencies = [
  "http-body-util",
  "httpdate",
  "image",
+ "jsonwebtoken",
  "kima-api-types",
  "kima-core",
  "kima-db",

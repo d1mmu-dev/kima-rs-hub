@@ -54,7 +54,7 @@ async fn create(
     let key = api_keys::create(
         &state.pool,
         id,
-        auth.account(),
+        auth.account,
         // M-PROF Task 5: main profile until AuthUser carries one.
         auth.main_profile(),
         auth.token_version,

@@ -35,9 +35,8 @@ fn settings_json(s: &UserSettings, account: AccountId) -> Value {
 }
 
 async fn read(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let s = user_settings::get(&state.pool, user.main_profile()).await?;
-    Ok(Json(settings_json(&s, user.account())))
+    let s = user_settings::get(&state.pool, user.profile).await?;
+    Ok(Json(settings_json(&s, user.account)))
 }
 
 fn issue(path: &str, message: &str) -> Value {
@@ -134,7 +133,6 @@ async fn save(
         message: "Invalid settings".into(),
         details,
     })?;
-    // M-PROF Task 5: main profile until AuthUser carries one.
-    let s = user_settings::upsert(&state.pool, user.main_profile(), patch).await?;
-    Ok(Json(settings_json(&s, user.account())))
+    let s = user_settings::upsert(&state.pool, user.profile, patch).await?;
+    Ok(Json(settings_json(&s, user.account)))
 }

@@ -334,7 +334,8 @@ async fn list(
 ) -> Result<(HeaderMap, Json<Vec<kima_api_types::podcasts::FollowedShow>>), ApiError> {
     use kima_api_types::podcasts::{EpisodeSummary, FollowedShow};
     use kima_api_types::stats::js_iso;
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let filter = AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?;
     // M-PROF Task 5: main profile until AuthUser carries one.
     let mut shows = kima_db::podcasts::followed_shows(&state.pool, user.main_profile()).await?;
     let mut hidden = retain_visible(filter, &mut shows, |s| from_db(&s.ai_label, None).0);
@@ -513,7 +514,8 @@ async fn episodes(
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
-    let found = checked_page(&state, user.id, &id, raw).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let found = checked_page(&state, user.main_profile().into_uuid(), &id, raw).await?;
     let mut body = json!({"episodes": found.rows, "total": found.total, "offset": found.page.offset, "limit": found.page.limit});
     found.filter.put_hidden(&mut body, found.hidden);
     Ok((found.filter.headers(found.hidden), Json(body)))
@@ -527,7 +529,8 @@ async fn detail(
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
-    let found = checked_page(&state, user.id, &id, raw).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let found = checked_page(&state, user.main_profile().into_uuid(), &id, raw).await?;
     let show = kima_db::podcasts::show_by_id(&state.pool, found.id)
         .await?
         .ok_or(ApiError::NotFound("Podcast not found"))?;
@@ -561,7 +564,8 @@ async fn next(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<Value>, ApiError> {
     use kima_api_types::stats::js_iso;
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let filter = AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?;
     let missing = || ApiError::NotFound("Episode not found");
     let show = uuid::Uuid::parse_str(&show).map_err(|_| missing())?;
     let episode = uuid::Uuid::parse_str(&episode).map_err(|_| missing())?;
@@ -605,7 +609,8 @@ async fn listening(
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
     use kima_api_types::stats::js_iso;
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let filter = AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?;
     // Filtered in the query, before the limits and each show's newest pick (D-207).
     let (in_progress, new_episodes, hidden) =
         // M-PROF Task 5: main profile until AuthUser carries one.

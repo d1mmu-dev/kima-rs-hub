@@ -292,7 +292,10 @@ async fn stream_token_in_query_is_accepted(pool: PgPool) {
     ));
     let state: AppState = common::state(pool.clone()).with_net(net);
     let (user, _) = common::user_with_token(&state, "podder").await;
-    let stream_token = state.jwt.issue_stream(user.id, user.token_version);
+    let stream_token =
+        state
+            .jwt
+            .issue_stream(user.account(), user.main_profile(), user.token_version);
     let (podcast, episode) = seed(&pool, format!("{}/ep.mp3", host.url()), None).await;
     let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
     server

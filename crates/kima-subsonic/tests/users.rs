@@ -812,10 +812,13 @@ async fn password_change_revokes_web_sessions(pool: PgPool) {
         ("updateUser", s.root_password(), "bobnewer1"),
     ] {
         let bob = s.find("bob").await.unwrap();
-        let token = s
-            .state
-            .jwt
-            .issue_access(bob.id, &bob.username, &bob.role, bob.token_version);
+        let token = s.state.jwt.issue_access(
+            bob.account(),
+            bob.main_profile(),
+            &bob.username,
+            &bob.role,
+            bob.token_version,
+        );
         assert_eq!(me(&token).await, axum::http::StatusCode::OK);
         let mut events = s.state.events.subscribe();
 

@@ -38,7 +38,7 @@ async fn status(
         None => None,
     };
     let needs_onboarding = match user {
-        Some(user) => !users::find_by_id(&state.pool, user.id)
+        Some(user) => !users::find_by_id(&state.pool, user.account.into_uuid())
             .await?
             .is_some_and(|u| u.onboarding_complete),
         None => !has_account,
@@ -85,10 +85,16 @@ async fn register(
         Registration::Closed => Err(ApiError::Forbidden("Registration is closed")),
         Registration::UsernameTaken => Err(ApiError::BadRequest("Username already taken".into())),
         Registration::Created(user) => {
-            let token =
-                state
-                    .jwt
-                    .issue_access(user.id, &user.username, &user.role, user.token_version);
+            let token = state.jwt.issue_access(
+                user.account(),
+                user.main_profile(),
+                &user.username,
+                &user.role,
+                user.token_version,
+            );
+            let profile =
+                crate::routes::auth::load_profile(&state, user.account(), user.main_profile())
+                    .await?;
             Ok(Json(RegisterResponse {
                 token,
                 user: UserSummary {
@@ -97,6 +103,7 @@ async fn register(
                     role: user.role,
                     onboarding_complete: false,
                 },
+                profile: Some(profile),
             }))
         }
     }
@@ -141,6 +148,6 @@ async fn soulseek(
 }
 
 async fn complete(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    users::set_onboarding_complete(&state.pool, user.id).await?;
+    users::set_onboarding_complete(&state.pool, user.account.into_uuid()).await?;
     Ok(Json(json!({ "success": true })))
 }

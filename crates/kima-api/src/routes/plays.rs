@@ -93,7 +93,8 @@ async fn recently_listened(
     Query(params): Query<LimitParams>,
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    // M-PROF Task 5: main profile until the route reads `profile`.
+    let filter = AiFilter::resolve(&state, user.main_profile().into_uuid(), raw.as_deref()).await?;
     let limit = limit_of(&params, 10, 100);
     let (artist_rows, (podcast_rows, hidden)) = tokio::try_join!(
         // M-PROF Task 5: main profile until AuthUser carries one.

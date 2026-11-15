@@ -152,19 +152,25 @@ pub struct NamedOwner<'a> {
     pub profile_name: &'a str,
 }
 
+/// Whether a session of `viewer_account` may see the names of `owner_account`'s profiles: only
+/// within the same account (owner decision 2026-11-14, D-242/D-244); every other account sees
+/// the plain account username.
+pub fn shows_profile_names(viewer_account: AccountId, owner_account: AccountId) -> bool {
+    viewer_account == owner_account
+}
+
 /// How a Subsonic answer names `owner` to a session of `viewer` (D-244). Clients compare a
 /// playlist's `owner` with their username (`u`, always the account's) to decide whether they
-/// may edit it, so the session's own profile is the bare username; another account's main
-/// profile is its username, as before profiles existed; every other profile (a sibling, the
-/// main one included, or another account's kids/standard profile) is `username (Profile)`, so
-/// it never reads as the caller's own.
+/// may edit it, so the session's own profile is the bare username; a sibling of the same
+/// account (the main one included) is `username (Profile)`, so it never reads as the caller's
+/// own; any profile of another account is its plain username, because profile names are
+/// shown only within their account.
 pub fn subsonic_owner_name(
     viewer: ProfileId,
     viewer_account: AccountId,
     owner: NamedOwner<'_>,
 ) -> String {
-    let is_main = ProfileId::main_of(owner.account) == owner.profile;
-    if owner.profile == viewer || (is_main && owner.account != viewer_account) {
+    if owner.profile == viewer || !shows_profile_names(viewer_account, owner.account) {
         owner.username.to_owned()
     } else {
         format!("{} ({})", owner.username, owner.profile_name)
@@ -254,12 +260,11 @@ mod tests {
             ),
             (alice_main, alice, owner(bob, bob_main, "Bob"), "bob"),
             (alice_kids, alice, owner(bob, bob_main, "Bob"), "bob"),
-            (
-                alice_main,
-                alice,
-                owner(bob, bob_kids, "Tiny"),
-                "bob (Tiny)",
-            ),
+            // Another account never sees a profile's name (owner 2026-11-14).
+            (alice_main, alice, owner(bob, bob_kids, "Tiny"), "bob"),
+            (alice_kids, alice, owner(bob, bob_kids, "Tiny"), "bob"),
+            (bob_main, bob, owner(alice, alice_kids, "Kids"), "alice"),
+            (bob_kids, bob, owner(alice, alice_kids, "Kids"), "alice"),
         ];
         for (viewer, account, who, expected) in cases {
             assert_eq!(

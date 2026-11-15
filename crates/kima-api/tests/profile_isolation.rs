@@ -523,6 +523,39 @@ async fn isolation_playlists(pool: PgPool) {
     assert_eq!(names, ["Private 0", "Private 1", "Public 0", "Public 1"]);
 }
 
+// ---- profile names (owner 2026-11-14): `profileName` of A-kids' public playlist is `Kids`
+// for A's sessions and null for every session of account B, in the list and the detail ----
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn profile_names_stay_in_the_account(pool: PgPool) {
+    let w = World::new(pool).await;
+    let lists = write_playlists(&w, Who::AKids, 0).await;
+    for who in ALL {
+        let want = match who {
+            Who::AMain | Who::AKids | Who::AStandard => json!("Kids"),
+            Who::BMain | Who::BKids => Value::Null,
+        };
+        let list = w.get(who, "/api/playlists").await;
+        let listed = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == json!(lists.public))
+            .cloned()
+            .expect("a public playlist is listed for every profile");
+        let detail = w
+            .get(who, &format!("/api/playlists/{}", lists.public))
+            .await;
+        for (what, v) in [("list", &listed), ("detail", &detail)] {
+            assert_eq!(v["profileName"], want, "{what} as {who:?}: {v}");
+            assert_eq!(v["user"]["username"], json!(w.accounts.a.user.username));
+        }
+        if matches!(who, Who::BMain | Who::BKids) {
+            assert!(!detail.to_string().contains("Kids"), "{who:?}: {detail}");
+        }
+    }
+}
+
 // ---- hidden playlists: POST /playlists/{id}/hide -> `isHidden`; DELETE (unhide) as others ----
 
 async fn write_hide(w: &World, who: Who, n: usize) -> String {

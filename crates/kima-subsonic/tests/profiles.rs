@@ -644,7 +644,8 @@ fixture_test!(playlist_owner_rule, |env| {
         50,
         "Access denied",
     );
-    // Another account: alice's main profile is `alice`, her kids profile `alice (Kids)`.
+    // Another account: every alice profile is plain `alice`; profile names stay inside the
+    // account (owner 2026-11-14).
     let admin = call(
         &env,
         "getPlaylists",
@@ -656,7 +657,7 @@ fixture_test!(playlist_owner_rule, |env| {
         owners(&admin),
         vec![
             pair("Admin Picks", "admin"),
-            pair("Kids Mix", "alice (Kids)"),
+            pair("Kids Mix", "alice"),
             pair("Road Trip", "alice"),
         ],
         "{admin}"
@@ -668,7 +669,8 @@ fixture_test!(playlist_owner_rule, |env| {
         &[("id", &kids_mix)],
     )
     .await;
-    assert_eq!(one["playlist"]["owner"], "alice (Kids)", "{one}");
+    assert_eq!(one["playlist"]["owner"], "alice", "{one}");
+    assert!(!one.to_string().contains("(Kids)"), "{one}");
 });
 
 fixture_test!(kids_playlist_change_is_announced_to_kids, |env| {
@@ -755,9 +757,9 @@ fixture_test!(now_playing_per_profile, |env| {
     assert_eq!(
         playing(&call(&env, "getNowPlaying", &admin, &[]).await),
         vec![
+            entry("alice", "Kima", t7),
+            entry("alice", "Symfonium", t3),
             entry("alice", "Symfonium", t5),
-            entry("alice (Kids)", "Kima", t7),
-            entry("alice (Kids)", "Symfonium", t3),
         ]
     );
     assert_eq!(
@@ -786,10 +788,7 @@ fixture_test!(now_playing_per_profile, |env| {
     .await);
     assert_eq!(
         playing(&call(&env, "getNowPlaying", &admin, &[]).await),
-        vec![
-            entry("alice", "Symfonium", t5),
-            entry("alice (Kids)", "Kima", t7),
-        ]
+        vec![entry("alice", "Kima", t7), entry("alice", "Symfonium", t5),]
     );
 });
 

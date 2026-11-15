@@ -282,6 +282,66 @@ async fn isolation_playlists(pool: PgPool) {
     matrix!(w, write_playlist, sees_playlist, tamper_playlist);
 }
 
+// ---- profile names (owner 2026-11-14): a public playlist's `owner` and a now-playing
+// `username` name A-kids `ana (Kids)` to its siblings, plain `ana` to itself and to every
+// session of account B ----
+
+/// How `who` is told that A's kids profile owns something: only A's other profiles see its name.
+fn kids_label(who: Who) -> &'static str {
+    match who {
+        Who::AMain | Who::AStandard => "ana (Kids)",
+        Who::AKids | Who::BMain | Who::BKids => "ana",
+    }
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn profile_names_stay_in_the_account(pool: PgPool) {
+    let w = World::new(pool).await;
+    let id = write_playlist(&w, Who::AKids, 0).await;
+    w.ok(
+        Who::AKids,
+        "updatePlaylist",
+        &[("playlistId", &id), ("public", "true")],
+    )
+    .await;
+    let (track, _) = pick(0);
+    w.ok(
+        Who::AKids,
+        "scrobble",
+        &[("id", &track), ("submission", "false"), ("c", "Matrix")],
+    )
+    .await;
+    for who in ALL {
+        let want = kids_label(who);
+        let all = w.ok(who, "getPlaylists", &[]).await;
+        let listed = all["playlists"]["playlist"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == json!(id))
+            .unwrap_or_else(|| panic!("public playlist listed for {who:?}: {all}"));
+        assert_eq!(listed["owner"], want, "getPlaylists as {who:?}");
+        let one = w.ok(who, "getPlaylist", &[("id", &id)]).await;
+        assert_eq!(one["playlist"]["owner"], want, "getPlaylist as {who:?}");
+        let np = w.ok(who, "getNowPlaying", &[]).await;
+        let users: Vec<&str> = np["nowPlaying"]["entry"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["username"].as_str().unwrap())
+            .collect();
+        assert_eq!(users, [want], "getNowPlaying as {who:?}");
+        if matches!(who, Who::BMain | Who::BKids) {
+            for res in [&all, &one, &np] {
+                assert!(!res.to_string().contains("Kids"), "{who:?}: {res}");
+            }
+        }
+    }
+}
+
 // ---- stars and ratings: star / setRating -> getStarred2, getSong, getAlbum; unstar as others ----
 
 async fn write_star(w: &World, who: Who, n: usize) -> (String, String) {

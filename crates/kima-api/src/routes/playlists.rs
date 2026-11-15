@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use kima_core::events::Event;
-use kima_core::profile::ProfileId;
+use kima_core::profile::{ProfileId, shows_profile_names};
 use kima_db::playlists::{self, ItemRow, MoveError, Playlist, PlaylistSummary};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -118,14 +118,20 @@ fn tagged_item_json(i: &ItemRow) -> Value {
     v
 }
 
-fn summary_json(s: &PlaylistSummary, viewer: ProfileId) -> Value {
+fn summary_json(s: &PlaylistSummary, viewer: &AuthUser) -> Value {
     let mut v = playlist_json(&s.playlist);
     v["user"] = json!({ "username": s.username });
-    v["profileName"] = json!(s.profile_name);
+    // Profile names stay inside the account: another account's session gets the key as null
+    // and only the account username above (D-242, owner 2026-11-14).
+    v["profileName"] = if shows_profile_names(viewer.account, s.playlist.account_id) {
+        json!(s.profile_name)
+    } else {
+        Value::Null
+    };
     v["trackCount"] = json!(s.track_count);
     v["_count"] = json!({ "items": s.track_count });
     // The viewer's own playlist: same profile, not merely the same account (D-242).
-    v["isOwner"] = json!(s.playlist.profile_id == viewer);
+    v["isOwner"] = json!(s.playlist.profile_id == viewer.profile);
     v["isHidden"] = json!(s.hidden);
     v
 }
@@ -167,7 +173,7 @@ async fn list(
     let out: Vec<Value> = rows
         .iter()
         .map(|s| {
-            let mut v = summary_json(s, user.profile);
+            let mut v = summary_json(s, &user);
             v["items"] = Value::Array(
                 firsts
                     .iter()
@@ -261,7 +267,7 @@ async fn detail(
     if reversed {
         items.reverse();
     }
-    let mut v = summary_json(&summary, user.profile);
+    let mut v = summary_json(&summary, &user);
     v["pendingCount"] = json!(0);
     v["pendingTracks"] = json!([]);
     v["mergedItems"] = Value::Array(items.clone());

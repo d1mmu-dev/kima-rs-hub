@@ -148,11 +148,13 @@ ID_FILES = (
     "crates/kima-test-support/src/profiles.rs",
 )
 # Files where only the named functions may name the main profile: a Subsonic password sign-in
-# lands in the main profile (answer Q7); anything else in that file goes through the gate.
+# lands in the main profile (answer Q7); anything else in that file goes through the gate,
+# including items after the function's closing brace (methods, `impl` blocks, nested fns).
 ID_FUNCS = {
     "crates/kima-subsonic/src/auth.rs": {"main_session"},
 }
-FN_START = re.compile(r"^(?:pub(?:\([^)]*\))? )?(?:const )?(?:async )?fn (\w+)")
+# A function header at any indentation (free functions, methods, nested functions).
+FN_START = re.compile(r"^\s*(?:pub(?:\([^)]*\))? )?(?:const )?(?:async )?(?:unsafe )?fn (\w+)")
 ID_ESCAPE = re.compile(r"ProfileId::new\(|\bmain_of\(|\.main_profile\(\)")
 # A row of a kima-db query decoded into the newtype: the column is ground truth.
 ROW_DECODE = re.compile(r"ProfileId::new\((?:r|row)\.\w+\??\)")
@@ -167,15 +169,21 @@ def id_escapes(rel, src):
         return
     lines = src.split("\n")
     allowed_fns = ID_FUNCS.get(rel, set())
-    current_fn = None
+    # Brace depth inside an allowed function; None outside. The allowance ends where that
+    # function's body closes (braces counted outside comments), not at the next `fn`.
+    depth, opened = None, False
     for k, row in enumerate(lines):
         if row.strip().startswith("#[cfg(test)]"):
             return
-        if m := FN_START.match(row):
-            current_fn = m.group(1)
-        if current_fn in allowed_fns:
-            continue
         code = row.split("//", 1)[0]
+        if depth is None and (m := FN_START.match(row)) and m.group(1) in allowed_fns:
+            depth, opened = 0, False
+        if depth is not None:
+            depth += code.count("{") - code.count("}")
+            opened = opened or "{" in code
+            if (opened and depth <= 0) or (not opened and ";" in code):
+                depth = None
+            continue
         if rel.startswith("crates/kima-db/src/"):
             code = ROW_DECODE.sub("", code)
         if ID_ESCAPE.search(code) and not any(MARKER.search(r) for r in lines[max(0, k - 4) : k + 1]):

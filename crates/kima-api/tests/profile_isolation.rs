@@ -381,6 +381,88 @@ async fn isolation_play_audit_ignore(pool: PgPool) {
     matrix!(w, WRITERS, write_audit, sees_audit, tamper_audit);
 }
 
+// ---- the audit's actions as its owner: remove, restore and collapse change the caller's own
+// history and ignore list, never the main profile's (which holds the same history) ----
+
+async fn audit_play(w: &World, who: Who, track: Uuid, second: i64, heard: bool) {
+    sqlx::query(
+        "INSERT INTO plays (id, profile_id, track_id, played_at, heard)
+         VALUES ($1, $2, $3, '2026-03-01T12:00:00Z'::timestamptz + $4 * interval '1 second', $5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(w.id(who))
+    .bind(track)
+    .bind(second as f64)
+    .bind(heard)
+    .execute(&w.pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn false_start_actions_land_on_the_callers_profile(pool: PgPool) {
+    let w = World::new(pool).await;
+    let (skip, dup, ignored) = (
+        track(&w, 0).await.track,
+        track(&w, 1).await.track,
+        track(&w, 2).await.track,
+    );
+    // The same history for A-kids and A-main: a provable skip, a listen of three rows (the
+    // middle one collapsible) and an ignored, heard track.
+    for who in [Who::AKids, Who::AMain] {
+        for (t, second, heard) in [
+            (skip, 0, false),
+            (skip, 10, false),
+            (dup, 20, false),
+            (dup, 25, false),
+            (dup, 30, false),
+            (ignored, 100, true),
+        ] {
+            audit_play(&w, who, t, second, heard).await;
+        }
+        let res = w
+            .post(
+                who,
+                "/api/stats/false-starts/ignore",
+                json!({ "trackIds": [ignored] }),
+            )
+            .await;
+        assert_eq!(res, json!({ "ignored": 1 }));
+    }
+    let kids = Who::AKids;
+    let removed = w
+        .post(
+            kids,
+            "/api/stats/false-starts/remove",
+            json!({ "trackIds": [skip] }),
+        )
+        .await;
+    assert_eq!(removed, json!({ "removed": 2, "tracks": 1 }));
+    let restored = w
+        .post(
+            kids,
+            "/api/stats/false-starts/restore",
+            json!({ "trackIds": [ignored] }),
+        )
+        .await;
+    assert_eq!(restored, json!({ "restored": 1 }));
+    let collapsed = w
+        .post(kids, "/api/stats/false-starts/collapse", json!({}))
+        .await;
+    assert_eq!(collapsed, json!({ "removed": 1 }));
+    for (who, skips, dups, still_ignored) in [(kids, 0, 2, false), (Who::AMain, 2, 3, true)] {
+        assert_eq!(plays_of(&w, who, skip).await, skips, "{who:?} skip rows");
+        assert_eq!(plays_of(&w, who, dup).await, dups, "{who:?} listen rows");
+        assert_eq!(plays_of(&w, who, ignored).await, 1, "{who:?} heard row");
+        let audit = w.get(who, "/api/stats/false-starts").await;
+        assert_eq!(
+            has(&audit["ignored"], "/trackId", &json!(ignored)),
+            still_ignored,
+            "{who:?}: {audit}"
+        );
+    }
+}
+
 // ---- playback state: POST /playback-state -> GET; DELETE as others ----
 
 async fn write_playback(w: &World, who: Who, n: usize) -> String {
@@ -880,10 +962,130 @@ async fn sees_download(w: &World, who: Who, (episode, _): &(Uuid, AudioHost)) ->
     owners[0] == w.id(who).to_string()
 }
 
+/// The job's `profile` is what the API controls; that the download worker then writes the
+/// `podcast_downloads` row under it is `kima-server/tests/podcast_cache.rs` (plan Task 5).
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn isolation_podcast_downloads(pool: PgPool) {
     let w = World::new(pool).await;
     matrix!(w, WRITERS, write_download, sees_download);
+}
+
+// ---- the AI filter is the profile's setting: A-kids shows AI-labelled podcasts, every other
+// session keeps the default (hide), on a show's episodes, a chart and the podcast search ----
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn podcast_ai_filter_is_the_profiles_own(pool: PgPool) {
+    let w = World::new(pool).await;
+    // A followed show labelled AI by an admin (its episodes inherit the label).
+    let (id, episodes) = show(&w, 0, None).await;
+    sqlx::query("UPDATE podcasts SET ai_override = 'ai' WHERE id = $1")
+        .bind(id)
+        .execute(&w.pool)
+        .await
+        .unwrap();
+    for who in ALL {
+        assert!(
+            podcasts::subscribe(&w.pool, w.profile(who).id, id)
+                .await
+                .unwrap()
+        );
+    }
+    // A chart entry whose stored show is labelled AI.
+    let chart = "/api/podcasts/charts?category=1495&limit=5";
+    let top = w.get(Who::AMain, &format!("{chart}&ai=show")).await;
+    let top_id = top[0]["itunesId"].clone();
+    let top_itunes = match &top_id {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let feed = "http://127.0.0.1:9/matrix-chart.xml";
+    let charted = podcasts::insert_show(
+        &w.pool,
+        Uuid::now_v7(),
+        &NewShow {
+            feed_url: feed,
+            title: "Charted",
+            author: None,
+            description: None,
+            image_url: None,
+            itunes_id: Some(&top_itunes),
+            category_ids: &[1495],
+            language: None,
+            explicit: false,
+            episode_count: 0,
+            feed_etag: None,
+            feed_last_modified: None,
+        },
+    )
+    .await
+    .unwrap()
+    .id;
+    sqlx::query("UPDATE podcasts SET ai_override = 'ai' WHERE id = $1")
+        .bind(charted)
+        .execute(&w.pool)
+        .await
+        .unwrap();
+    let saved = w
+        .post(
+            Who::AKids,
+            "/api/settings",
+            json!({ "podcastAiContent": "show" }),
+        )
+        .await;
+    assert_eq!(saved["podcastAiContent"], "show");
+    for who in ALL {
+        let settings = w.get(who, "/api/settings").await;
+        let want = if who == Who::AKids { "show" } else { "hide" };
+        assert_eq!(settings["podcastAiContent"], want, "{who:?}");
+        let listed = w.get(who, &format!("/api/podcasts/{id}/episodes")).await;
+        let found = w.get(who, "/api/search?q=Owl&type=podcasts").await;
+        let charts = w.get(who, chart).await;
+        let shown = agree(
+            who,
+            &[
+                (
+                    "episodes",
+                    listed.to_string().contains(&episodes[0].to_string()),
+                ),
+                (
+                    "search podcasts",
+                    has(&found["podcasts"], "/id", &json!(id)),
+                ),
+                ("charts", has(&charts, "/itunesId", &top_id)),
+            ],
+        );
+        assert_eq!(shown, who == Who::AKids, "AI podcasts as {who:?}");
+    }
+}
+
+// ---- routes with no per-profile state: every profile gets the same answer, without error ----
+
+async fn stateless(w: &World, who: Who) -> Value {
+    json!([
+        w.answer(who, "GET", "/api/playback-state/limit", None)
+            .await,
+        w.answer(who, "POST", "/api/playback-state/live", Some(json!({})))
+            .await,
+        w.answer(who, "GET", "/api/stats/region?x=1&y=1", None)
+            .await,
+    ])
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn stateless_profile_routes_answer_every_profile(pool: PgPool) {
+    let w = World::new(pool).await;
+    // Personal data in the way: a kids play and queue.
+    write_play(&w, Who::AKids, 0).await;
+    write_playback(&w, Who::AKids, 0).await;
+    let main = stateless(&w, Who::AMain).await;
+    assert_eq!(main[0][0], 200, "{main}");
+    assert_eq!(main[1][0], 404, "{main}");
+    assert_eq!(main[2][0], 200, "{main}");
+    let region: Value = serde_json::from_str(main[2][1].as_str().unwrap()).unwrap();
+    assert_eq!(region["listens"], 0);
+    for who in ALL {
+        assert_eq!(stateless(&w, who).await, main, "as {who:?}");
+    }
 }
 
 // ---- app tokens: POST /api-keys -> GET /api-keys; DELETE /api-keys/{id} as others ----

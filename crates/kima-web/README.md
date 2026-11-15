@@ -36,10 +36,21 @@ Set `VERTIGO=/path/to/vertigo` to pick a CLI that is not first on `PATH`; keep i
 - Both headers show the current avatar and name, sibling switch buttons, a picker link and Sign out.
   Main profiles also get Manage profiles (Settings; editing and app-token UI are Task 13).
 - A successful switch pauses audio, retires outstanding API work, replaces both stored credentials
-  (`kima-web.token`, `kima-web.refresh`) and replaces the document at `/`. This deliberately discards the
+  in one serialized `kima-web.session` record (`token`, `refresh`, `generation`) and replaces the document at `/`. This deliberately discards the
   old queue, podcast marks, search/form state, Resources and timers rather than reusing profile caches.
   A late response, including 401, cannot mutate the replacement session. A failed switch keeps the old
   session and shows the server's error. No token refresh loop is added in this slice.
+- The session record is authoritative; the old `kima-web.token` / `kima-web.refresh` pair migrates
+  once and is removed. Token-only replacements drop the old refresh credential. A tab keeps its
+  own record generation: a deleted profile's 401 invalidates that tab but cannot clear a newer
+  record already published by another tab (including one with identical token strings).
+  Publishing the pair is one `setItem`, so observers see a complete old or new pair, never half of
+  each. Concurrent publications are last-writer-wins. Ownership comparison and removal are synchronous
+  with no await, **not** a cross-tab compare-and-swap: a truly simultaneous publication can still race
+  removal. Tabs running the pre-migration code are not coordinated; reload them after upgrading.
+- DB-free driver regression: `CHROME=/path/to/chrome node tools/verify-kima-web-e2e.mjs --self-test-sign-out`
+  checks closed-menu sign-out in desktop/mobile DOM fixtures. This is not the full application E2E;
+  default and `--ssr` acceptance still need an authorized migrated demo stack.
 - Library-track resume positions use `kima-web.position.<profileId>`. The old unscoped key is consumed
   once by main and removed; an existing scoped point wins. Podcast progress stays server-side.
 - Avatars use the shared preset keys with emoji glyphs on an id-derived colour, falling back to an
@@ -125,7 +136,7 @@ GPL-3.0-only binary (Apache-2.0 is GPLv3-compatible). `actix-proxy`/`actix-tls` 
 
 Routes: `/login`, `/setup`, `/collection` (artists), `/collection/albums[?artist=]`,
 `/collection/tracks[?album=]`, `/search`, `/playlists`, `/playlists/<uuid>`, `/settings`, `NotFound`. Session
-token: `localStorage` key `kima-web.token` (the legacy Next.js app uses `auth_token`). Player: persistent bar,
+token: `localStorage` record `kima-web.session` (the legacy Next.js app uses `auth_token`). Player: persistent bar,
 `<audio>` on the existing stream endpoint (`?token=`), queue persisted through `/api/playback-state`.
 
 - **Search** (`pages/search.rs`): query box (300 ms debounce, Enter searches at once) over `GET /api/search`,

@@ -14,8 +14,40 @@ use vertigo::{Computed, JsJson, Value, get_driver, js};
 
 use crate::route::Route;
 
-pub const STORAGE_KEY: &str = "kima-web.token";
-pub const REFRESH_KEY: &str = "kima-web.refresh";
+pub const STORAGE_KEY: &str = "kima-web.session";
+const LEGACY_TOKEN_KEY: &str = "kima-web.token";
+const LEGACY_REFRESH_KEY: &str = "kima-web.refresh";
+
+#[derive(serde::Deserialize)]
+struct StoredSession {
+    token: String,
+    #[serde(rename = "refresh")]
+    _refresh: Option<String>,
+    generation: String,
+}
+
+fn generation() -> String {
+    // Ownership nonce, not an authentication secret. Use Vertigo's browser RNG so this
+    // also works on self-hosted HTTP origins without secure-context crypto.randomUUID.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let driver = get_driver();
+        format!(
+            "{:08x}{:08x}{:08x}{:08x}",
+            driver.get_random(0, u32::MAX),
+            driver.get_random(0, u32::MAX),
+            driver.get_random(0, u32::MAX),
+            driver.get_random(0, u32::MAX)
+        )
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // Native tests / SSR (which never persists credentials).
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_string()
+    }
+}
 
 pub fn login_destination(profile_count: usize) -> &'static str {
     if profile_count > 1 {
@@ -90,6 +122,7 @@ impl Storage for MemoryStorage {
 #[derive(Clone)]
 pub struct Session {
     token: Value<Option<String>>,
+    owned_record: Rc<RefCell<Option<String>>>,
     storage: Rc<dyn Storage>,
     switching: Rc<Cell<bool>>,
     profile: Rc<RefCell<Option<kima_api_types::profiles::Profile>>>,
@@ -97,12 +130,31 @@ pub struct Session {
 
 impl Session {
     pub fn new(storage: Rc<dyn Storage>) -> Self {
-        Self {
-            token: Value::new(storage.get(STORAGE_KEY)),
+        let record = storage.get(STORAGE_KEY);
+        let token = record.as_deref().and_then(|raw| {
+            let parsed: StoredSession = serde_json::from_str(raw).ok()?;
+            (!parsed.token.is_empty() && !parsed.generation.is_empty()).then_some(parsed.token)
+        });
+        let session = Self {
+            token: Value::new(token),
+            owned_record: Rc::new(RefCell::new(record.clone())),
             storage,
             switching: Rc::new(Cell::new(false)),
             profile: Rc::new(RefCell::new(None)),
+        };
+        // One-way migration. An existing record is authoritative even when corrupt: never
+        // resurrect stale legacy credentials. Old tabs running old code are not coordinated.
+        if record.is_none()
+            && let Some(token) = session.storage.get(LEGACY_TOKEN_KEY)
+        {
+            let refresh = session.storage.get(LEGACY_REFRESH_KEY);
+            session.persist(&token, refresh.as_deref());
         }
+        // Also discard leftovers when the authoritative record already exists, otherwise
+        // clearing it could resurrect an older credential pair on the following reload.
+        session.storage.remove(LEGACY_TOKEN_KEY);
+        session.storage.remove(LEGACY_REFRESH_KEY);
+        session
     }
 
     /// The backing storage, for other kima-web-owned keys (the player's resume position).
@@ -127,14 +179,25 @@ impl Session {
     }
 
     pub fn sign_in(&self, token: &str) {
-        self.storage.set(STORAGE_KEY, token);
+        // Password replacement / onboarding may issue only an access token. Never attach
+        // a refresh credential belonging to a different tab or an earlier token version.
+        self.persist(token, None);
+    }
+
+    fn persist(&self, token: &str, refresh: Option<&str>) {
+        let record = serde_json::json!({
+            "token": token, "refresh": refresh, "generation": generation()
+        })
+        .to_string();
+        // setItem publishes one complete pair; concurrent publishers are last-writer-wins.
+        self.storage.set(STORAGE_KEY, &record);
+        *self.owned_record.borrow_mut() = Some(record);
         self.token.set(Some(token.to_owned()));
     }
 
     /// Persist both credentials; the switch caller replaces the document at the returned URL.
     pub fn replace_pair(&self, token: &str, refresh: &str) -> &'static str {
-        self.storage.set(REFRESH_KEY, refresh);
-        self.sign_in(token);
+        self.persist(token, Some(refresh));
         "/"
     }
 
@@ -155,10 +218,20 @@ impl Session {
             .map(|profile| crate::position::profile_key(&profile.id.to_string()))
     }
 
-    /// Sign out locally (explicit sign-out, or the server answered 401).
+    /// Invalidate this tab; remove shared credentials only if they still belong to it.
+    /// This synchronous comparison/removal has no await, but localStorage has no cross-tab CAS:
+    /// a simultaneous writer can still race it. Already-published newer sessions are preserved.
     pub fn clear(&self) {
-        self.storage.remove(STORAGE_KEY);
-        self.storage.remove(REFRESH_KEY);
+        if self.owned_record.borrow().is_some()
+            && self.storage.get(STORAGE_KEY) == *self.owned_record.borrow()
+        {
+            self.storage.remove(STORAGE_KEY);
+        }
+        self.invalidate_tab();
+    }
+
+    fn invalidate_tab(&self) {
+        *self.owned_record.borrow_mut() = None;
         *self.profile.borrow_mut() = None;
         self.token.set(None);
     }
@@ -187,9 +260,115 @@ mod tests {
         session.sign_in("old");
         assert_eq!(session.replace_pair("new", "refresh"), "/");
         assert_eq!(session.current_token().as_deref(), Some("new"));
-        assert_eq!(storage.get(REFRESH_KEY).as_deref(), Some("refresh"));
+        let record: StoredSession =
+            serde_json::from_str(&storage.get(STORAGE_KEY).unwrap()).unwrap();
+        assert_eq!(record._refresh.as_deref(), Some("refresh"));
         session.clear();
-        assert_eq!(storage.get(REFRESH_KEY), None);
+        assert_eq!(storage.get(STORAGE_KEY), None);
+    }
+
+    #[test]
+    fn stale_401_cannot_erase_another_tabs_newer_session() {
+        let storage = Rc::new(MemoryStorage::default());
+        let kids = Session::new(storage.clone());
+        kids.replace_pair("kids", "kids-refresh");
+        let main = Session::new(storage.clone());
+        main.replace_pair("main", "main-refresh");
+        kids.clear(); // Deleted Kids gets 401 after main has switched.
+        assert_eq!(kids.current_token(), None);
+        assert_eq!(main.current_token().as_deref(), Some("main"));
+        assert_eq!(
+            Session::new(storage).current_token().as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn pair_is_published_in_one_complete_storage_write() {
+        #[derive(Default)]
+        struct ObservedStorage {
+            memory: MemoryStorage,
+            writes: RefCell<Vec<(String, String)>>,
+        }
+        impl Storage for ObservedStorage {
+            fn get(&self, key: &str) -> Option<String> {
+                self.memory.get(key)
+            }
+            fn set(&self, key: &str, value: &str) {
+                self.memory.set(key, value);
+                self.writes.borrow_mut().push((key.into(), value.into()));
+            }
+            fn remove(&self, key: &str) {
+                self.memory.remove(key);
+            }
+        }
+        let storage = Rc::new(ObservedStorage::default());
+        let session = Session::new(storage.clone());
+        session.replace_pair("kids", "kids-refresh");
+        storage.writes.borrow_mut().clear();
+        session.replace_pair("main", "main-refresh");
+        let writes = storage.writes.borrow();
+        assert_eq!(
+            writes.len(),
+            1,
+            "observers must never see a split credential pair"
+        );
+        let record: serde_json::Value = serde_json::from_str(&writes[0].1).unwrap();
+        assert_eq!(record["token"], "main");
+        assert_eq!(record["refresh"], "main-refresh");
+        assert!(record["generation"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+
+    #[test]
+    fn identical_tokens_in_a_new_generation_are_not_owned_by_the_old_tab() {
+        let storage = Rc::new(MemoryStorage::default());
+        let old = Session::new(storage.clone());
+        old.replace_pair("same-access", "same-refresh");
+        let newer = Session::new(storage.clone());
+        newer.replace_pair("same-access", "same-refresh");
+        let record = storage.get(STORAGE_KEY);
+        old.clear();
+        old.clear(); // Repeated callbacks from the invalidated tab are harmless too.
+        assert_eq!(storage.get(STORAGE_KEY), record);
+        assert_eq!(
+            Session::new(storage).current_token().as_deref(),
+            Some("same-access")
+        );
+    }
+
+    #[test]
+    fn legacy_pair_migrates_once_and_cannot_resurrect_after_sign_out() {
+        let storage = Rc::new(MemoryStorage::default());
+        storage.set(LEGACY_TOKEN_KEY, "legacy");
+        storage.set(LEGACY_REFRESH_KEY, "legacy-refresh");
+        let session = Session::new(storage.clone());
+        assert_eq!(session.current_token().as_deref(), Some("legacy"));
+        let record: StoredSession =
+            serde_json::from_str(&storage.get(STORAGE_KEY).unwrap()).unwrap();
+        assert_eq!(record._refresh.as_deref(), Some("legacy-refresh"));
+        assert_eq!(storage.get(LEGACY_TOKEN_KEY), None);
+        assert_eq!(storage.get(LEGACY_REFRESH_KEY), None);
+        session.clear();
+        assert_eq!(Session::new(storage).current_token(), None);
+    }
+
+    #[test]
+    fn authoritative_record_ignores_stale_legacy_pair_and_token_only_write_drops_refresh() {
+        let storage = Rc::new(MemoryStorage::default());
+        let session = Session::new(storage.clone());
+        session.replace_pair("new", "new-refresh");
+        storage.set(LEGACY_TOKEN_KEY, "stale");
+        storage.set(LEGACY_REFRESH_KEY, "stale-refresh");
+        let loaded = Session::new(storage.clone());
+        assert_eq!(loaded.current_token().as_deref(), Some("new"));
+        loaded.clear();
+        assert_eq!(Session::new(storage.clone()).current_token(), None);
+        session.sign_in("password-changed");
+        let record: StoredSession =
+            serde_json::from_str(&storage.get(STORAGE_KEY).unwrap()).unwrap();
+        assert_eq!(record._refresh, None);
+        storage.set(STORAGE_KEY, "corrupt");
+        assert_eq!(Session::new(storage).current_token(), None);
     }
 
     #[test]
@@ -279,7 +458,7 @@ mod tests {
         let session = Session::new(storage.clone());
         assert_eq!(session.current_token(), None);
         session.sign_in("abc");
-        assert_eq!(storage.get(STORAGE_KEY).as_deref(), Some("abc"));
+        assert!(storage.get(STORAGE_KEY).is_some());
         // A fresh Session (page reload) picks the stored token up.
         assert_eq!(
             Session::new(storage.clone()).current_token().as_deref(),

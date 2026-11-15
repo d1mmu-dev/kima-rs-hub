@@ -62,6 +62,28 @@ const audio = () => ev(`(()=>{const a=document.querySelector('audio');return a?{
 const ctl = (label) => ev(`(()=>{const b=[...document.querySelectorAll('[role=group][aria-label="Playback controls"] button[aria-label=${JSON.stringify(label)}]')].find((b)=>b.offsetParent!==null);if(!b)return false;b.click();return true})()`);
 const results = []; const check = (name, ok, detail = '') => { results.push([ok, name, detail]); console.log(ok ? 'PASS' : 'FAIL', name, detail); };
 
+const signOut = () => ev(`(()=>{
+  const summary = [...document.querySelectorAll('summary[aria-label="Switch profile"]')].find(e => e.getClientRects().length > 0);
+  if (!summary) return false;
+  const menu = summary.closest('details');
+  if (!menu.open) summary.click();
+  const button = [...menu.querySelectorAll('button')].find(e => e.getClientRects().length > 0 && e.textContent.trim() === 'Sign out');
+  if (!menu.open || !button) return false;
+  button.click(); return true;
+})()`);
+
+// DB-free regression for the harness: two responsive headers and closed native menus.
+// This checks the driver helper, not the application's authentication or CSS acceptance.
+if (process.argv.includes('--self-test-sign-out')) {
+  for (const [label, width] of [['desktop', 1440], ['mobile', 390]]) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: width < 1025 });
+    await ev(`document.body.innerHTML = ${JSON.stringify(`<style>.mobile{display:none}@media(max-width:1024px){.desktop{display:none}.mobile{display:block}}</style>` + ['desktop', 'mobile'].map((name) => `<header class="${name}"><details><summary aria-label="Switch profile">Main</summary><button onclick="window.clicked='${name}'">Sign out</button></details></header>`).join(''))}; window.clicked = null`);
+    check(`${label}: closed menu opens and visible Sign out is clicked`, await signOut() && await ev('window.clicked') === label);
+  }
+  ws.close(); chrome.kill();
+  process.exit(results.every((r) => r[0]) ? 0 : 1);
+}
+
 // A stale checked-in Tailwind sheet once shipped a page without any utility class. Fail loudly, before anything else.
 {
   const gen = spawnSync(process.execPath, [new URL('./gen-kima-web-css.mjs', import.meta.url).pathname, '--check'], { encoding: 'utf8' });
@@ -104,7 +126,7 @@ check('wrong password shows the backend error verbatim, stays on /login', bad.in
 
 await setInput('password', PASS);
 await ev(`document.querySelector('button[type=submit]').click()`); await sleep(2500);
-check('login lands on /collection with a stored token', (await ev('location.pathname')) === '/collection' && (await ev(`(localStorage.getItem('kima-web.token')||'').length`)) > 20);
+check('login lands on /collection with a stored token', (await ev('location.pathname')) === '/collection' && (await ev(`(JSON.parse(localStorage.getItem('kima-web.session') || 'null')?.token ?? '').length`)) > 20);
 check('legacy storage key untouched', (await ev(`localStorage.getItem('auth_token')`)) === null);
 check('artists listed', (await text()).includes('Disc Band'));
 
@@ -139,10 +161,15 @@ check('seek slider moves currentTime (served by HTTP range)', seeked.t >= 9.5, J
 check('next control exists', await ctl('Next track')); await sleep(2500);
 check('next plays the following track', /Song 1-3/.test(await text()) && (await audio()).t < 5);
 
-// the backend keeps no in-track position for web saves: it is stored client-side (kima-web.position)
+// The backend keeps no in-track position for web saves: resume is scoped to the active profile.
+const positionKey = await ev(`(async()=>{
+  const token = JSON.parse(localStorage.getItem('kima-web.session')).token;
+  const me = await (await fetch('/api/auth/me', {headers:{Authorization:'Bearer ' + token}})).json();
+  return 'kima-web.position.' + me.profile.id;
+})()`);
 await ev(`(()=>{const s=document.querySelector('input[aria-label=Seek]');s.value='8';s.dispatchEvent(new Event('input',{bubbles:true}))})()`); await sleep(2000);
-const savedPos = await ev(`localStorage.getItem('kima-web.position')`);
-check('position is stored client-side under kima-web.position, scoped to the track id', /"id":"[0-9a-f-]+"/.test(savedPos || '') && /"t":(7|8|9)\./.test(savedPos || ''), savedPos);
+const savedPos = await ev(`localStorage.getItem(${JSON.stringify(positionKey)})`);
+check('position is stored client-side under the active profile key, scoped to the track id', /"id":"[0-9a-f-]+"/.test(savedPos || '') && /"t":(7|8|9)\./.test(savedPos || ''), savedPos);
 
 // reload restores the saved queue (paused)
 await goto(BASE + '/collection'); await sleep(1500);
@@ -222,7 +249,7 @@ await button('confirm-delete'); await sleep(1500);
 check('delete returns to the list without the playlist', (await ev('location.pathname')) === '/playlists' && !(await text()).includes('E2E Renamed'));
 
 // ---- settings: account slice ----
-const tokenBefore = await ev(`localStorage.getItem('kima-web.token')`);
+const tokenBefore = await ev(`JSON.parse(localStorage.getItem('kima-web.session') || 'null')?.token ?? null`);
 await clickText('a', 'Settings'); await sleep(1500);
 check('Settings shows the signed-in username', (await ev('location.pathname')) === '/settings' && (await ev(`document.getElementById('account-username')?.innerText`)) === USER);
 await clickText('button', 'Change'); await sleep(300);
@@ -231,10 +258,10 @@ check('a mismatching confirmation is refused before any request', (await text())
 await typeInto('confirm', NEW_PASS); await clickText('button', 'Change Password'); await sleep(2000);
 check('a wrong current password shows the backend message verbatim', (await text()).includes('Current password is incorrect'));
 await typeInto('current', PASS); await clickText('button', 'Change Password'); await sleep(2500);
-check('password change succeeds and the session token is replaced', (await text()).includes('Password changed successfully') && (await ev(`localStorage.getItem('kima-web.token')`)) !== tokenBefore);
+check('password change succeeds and the session token is replaced', (await text()).includes('Password changed successfully') && (await ev(`JSON.parse(localStorage.getItem('kima-web.session') || 'null')?.token ?? null`)) !== tokenBefore);
 await goto(BASE + '/collection'); await sleep(1500);
 check('the replaced token keeps the session across a reload', (await ev('location.pathname')) === '/collection');
-await clickText('button', 'Logout'); await sleep(1000);
+check('desktop profile menu opens and signs out', await signOut()); await sleep(1000);
 await login(PASS);
 check('the old password no longer signs in', (await ev('location.pathname')) === '/login');
 await login(NEW_PASS);
@@ -244,13 +271,14 @@ await clickText('a', 'Settings'); await sleep(1200); await clickText('button', '
 await typeInto('current', NEW_PASS); await typeInto('new', PASS); await typeInto('confirm', PASS); await clickText('button', 'Change Password'); await sleep(2500);
 check('password restored to the original', (await text()).includes('Password changed successfully'));
 
-await clickText('button', 'Logout'); await sleep(1500);
-check('sign out clears the token and shows login', (await ev('location.pathname')) === '/login' && (await ev(`localStorage.getItem('kima-web.token')`)) === null);
+await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+check('mobile profile menu opens and signs out', await signOut()); await sleep(1500);
+check('sign out clears the token and shows login', (await ev('location.pathname')) === '/login' && (await ev(`JSON.parse(localStorage.getItem('kima-web.session') || 'null')?.token ?? null`)) === null);
 
 // 401 handling: plant a bogus token
-await ev(`localStorage.setItem('kima-web.token','garbage')`); await goto(BASE + '/collection');
+await ev(`localStorage.setItem('kima-web.session', JSON.stringify({token:'garbage', refresh:null, generation:'e2e-invalid'}))`); await goto(BASE + '/collection');
 await sleep(1500);
-check('a 401 clears the stored token and redirects to login', (await ev('location.pathname')) === '/login' && (await ev(`localStorage.getItem('kima-web.token')`)) === null);
+check('a 401 clears the stored token and redirects to login', (await ev('location.pathname')) === '/login' && (await ev(`JSON.parse(localStorage.getItem('kima-web.session') || 'null')?.token ?? null`)) === null);
 
 console.log('browser errors:', JSON.stringify(errors.slice(0, 8)));
 console.log(`${results.filter((r) => r[0]).length}/${results.length} passed`);

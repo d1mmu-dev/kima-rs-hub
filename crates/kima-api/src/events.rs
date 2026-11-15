@@ -62,6 +62,14 @@ impl SseRegistry {
             .retain(|_, (owner, _)| owner.account != account);
     }
 
+    /// Forgets every outstanding ticket of one profile (it was deleted).
+    pub fn revoke_profile(&self, profile: ProfileId) {
+        self.tickets
+            .lock()
+            .unwrap()
+            .retain(|_, (owner, _)| owner.profile != profile);
+    }
+
     pub fn redeem_ticket(&self, ticket: &str) -> Option<StreamOwner> {
         let (owner, issued) = self.tickets.lock().unwrap().remove(ticket)?;
         (issued.elapsed() < self.ttl).then_some(owner)

@@ -56,6 +56,15 @@ impl Event {
         }
     }
 
+    /// Tells one profile's open event streams that their sessions ended (the profile was
+    /// deleted); its siblings' streams stay open.
+    pub fn revoke_profile(profile: ProfileId) -> Self {
+        Self {
+            audience: Audience::Profile(profile),
+            data: serde_json::json!({ "type": "session:revoked" }),
+        }
+    }
+
     /// A revocation ends the streams it is for; a broadcast never revokes anything.
     pub fn is_revocation(&self) -> bool {
         self.audience != Audience::All
@@ -129,6 +138,15 @@ mod tests {
         assert!(!event.is_for(ben, ben_kids));
         assert!(!Event::broadcast(json!({ "type": "session:revoked" })).is_revocation());
         assert!(!Event::for_profile(ana_kids, json!({ "type": "x" })).is_revocation());
+    }
+
+    #[test]
+    fn profile_revocation_spares_siblings() {
+        let (ana, ana_kids) = kids();
+        let event = Event::revoke_profile(ana_kids);
+        assert!(event.is_revocation());
+        assert!(event.is_for(ana, ana_kids));
+        assert!(!event.is_for(ana, ProfileId::main_of(ana)));
     }
 
     #[tokio::test]

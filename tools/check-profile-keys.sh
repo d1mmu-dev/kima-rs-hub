@@ -149,7 +149,7 @@ ID_ESCAPE = re.compile(r"ProfileId::new\(|\bmain_of\(|\.main_profile\(\)")
 ROW_DECODE = re.compile(r"ProfileId::new\((?:r|row)\.\w+\??\)")
 MARKER = re.compile(r"//.*M-PROF Task \d+:")
 # Plan tasks already done (docs/superpowers/plans/2026-11-14-m-prof.md); add each on closing it.
-DONE_TASKS = {0, 1, 2, 3, 4, 5}
+DONE_TASKS = {0, 1, 2, 3, 4, 5, 6}
 TASK_MARKER = re.compile(r"//.*M-PROF Task (\d+):")
 
 

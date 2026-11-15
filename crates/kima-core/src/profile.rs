@@ -10,7 +10,11 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Most profiles one account can hold, the main one included (owner decision 1).
+/// Most profiles one account can hold, the main one included (owner decision 1). The database
+/// enforces the same number in the `profiles_limit` trigger (migration 0060); a change here
+/// needs a migration that changes the trigger. Tests tie the two: `kima-db`
+/// `create_until_limit_then_limit_error` and `kima-api` `advertised_max_is_the_database_limit`
+/// (the `max` of `GET /api/profiles` is where the first create is refused).
 pub const MAX_PROFILES: usize = 5;
 /// Longest profile name, in characters (the database checks the same bound).
 pub const MAX_PROFILE_NAME_CHARS: usize = 50;

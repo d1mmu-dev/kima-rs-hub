@@ -73,6 +73,10 @@ fn update_tells_absent_avatar_from_null() {
         serde_json::from_value(json!({ "avatar": "cat", "kind": "kids" })).unwrap();
     assert_eq!(set.avatar, Some(Some("cat".to_owned())));
     assert_eq!(set.kind, Some(ProfileKind::Kids));
+    // `null` name or kind cannot clear anything: it reads as absent.
+    let nulls: UpdateProfile =
+        serde_json::from_value(json!({ "name": null, "kind": null })).unwrap();
+    assert_eq!(nulls, UpdateProfile::default());
     // And back: only the fields that are set go on the wire.
     assert_eq!(
         serde_json::to_value(&keep).unwrap(),

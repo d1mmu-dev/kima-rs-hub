@@ -285,6 +285,40 @@ async fn sixth_profile_is_409(pool: PgPool) {
     assert_eq!(profile_count(&state.pool, &user).await, 5);
 }
 
+/// The `max` that `GET /api/profiles` advertises (`MAX_PROFILES`) is the limit the database
+/// trigger enforces: creating until the first refusal ends at exactly `max` profiles.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn advertised_max_is_the_database_limit(pool: PgPool) {
+    let state = common::state(pool);
+    let (user, main_token) = common::user_with_token(&state, "ana").await;
+    let server = TestServer::new(kima_api::router(state.clone())).unwrap();
+    let max = server
+        .get("/api/profiles")
+        .authorization_bearer(&main_token)
+        .await
+        .json::<Value>()["max"]
+        .as_i64()
+        .unwrap();
+    assert_eq!(max, kima_core::profile::MAX_PROFILES as i64);
+
+    let mut created = 1; // the main profile
+    loop {
+        assert!(created <= 20, "no limit within 20 profiles");
+        let res = server
+            .post("/api/profiles")
+            .authorization_bearer(&main_token)
+            .json(&json!({ "name": format!("P{created}"), "kind": "kids" }))
+            .await;
+        if res.status_code() == StatusCode::CONFLICT {
+            break;
+        }
+        res.assert_status(StatusCode::CREATED);
+        created += 1;
+    }
+    assert_eq!(created, max);
+    assert_eq!(profile_count(&state.pool, &user).await, max);
+}
+
 /// The limit holds for requests racing each other: the database decides under a lock on the
 /// account row, so however the requests interleave, the account ends with five profiles.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -459,6 +493,17 @@ async fn main_updates_name_kind_and_avatar(pool: PgPool) {
         (&body["name"], &body["avatar"]),
         (&json!("Ola"), &Value::Null)
     );
+    assert_eq!(
+        stored(&state.pool, f.kids.id).await,
+        Some(("Ola".into(), "standard".into(), None))
+    );
+    // `null` name and kind read as absent: 200, nothing changes.
+    server
+        .put(&path)
+        .authorization_bearer(&f.main_token)
+        .json(&json!({ "name": null, "kind": null }))
+        .await
+        .assert_status_ok();
     assert_eq!(
         stored(&state.pool, f.kids.id).await,
         Some(("Ola".into(), "standard".into(), None))

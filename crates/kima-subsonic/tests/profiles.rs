@@ -53,8 +53,9 @@ macro_rules! fixture_test {
     };
 }
 
-/// A profile of `account` named `name`, and an app token of that profile (created directly in
-/// the database: `/api/api-keys` mints tokens for the main profile only until Task 8).
+/// A profile of `account` named `name`, and an app token of that profile, both created directly
+/// in the database (the REST path, `/api/api-keys` from the profile's session, is
+/// `kids_token_from_api_keys_signs_into_kids_until_deleted`).
 async fn profile_with_token(
     env: &Env,
     account: Uuid,
@@ -259,6 +260,81 @@ fixture_test!(deleted_profiles_token_signs_in_nowhere, |env| {
         "Invalid API key",
     );
 });
+
+/// The REST side of the same server (`/api/profiles`, `/api/api-keys`) and an access token of
+/// Alice's main profile.
+async fn rest_api(env: &Env) -> (TestServer, String) {
+    let alice = kima_db::users::find_by_id(&env.pool, ALICE_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    let token = env.state.jwt.issue_access(
+        alice.account(),
+        alice.main_profile(),
+        &alice.username,
+        &alice.role,
+        alice.token_version,
+    );
+    let server = TestServer::new(kima_api::router(env.state.clone())).unwrap();
+    (server, token)
+}
+
+// Task 8 (D-244), end to end: a token minted by a kids session over `/api/api-keys` signs into kids, and
+// deleting the profile over `DELETE /api/profiles/{id}` leaves it signing in nowhere (44).
+fixture_test!(
+    kids_token_from_api_keys_signs_into_kids_until_deleted,
+    |env| {
+        let (api, main) = rest_api(&env).await;
+        let res = api
+            .post("/api/profiles")
+            .authorization_bearer(&main)
+            .json(&serde_json::json!({ "name": "Kids", "kind": "kids" }))
+            .await;
+        res.assert_status(axum::http::StatusCode::CREATED);
+        let kids: Uuid = res.json::<Value>()["id"].as_str().unwrap().parse().unwrap();
+        let res = api
+            .post(&format!("/api/profiles/{kids}/switch"))
+            .authorization_bearer(&main)
+            .await;
+        res.assert_status_ok();
+        let kids_jwt = res.json::<Value>()["token"].as_str().unwrap().to_owned();
+        let res = api
+            .post("/api/api-keys")
+            .authorization_bearer(&kids_jwt)
+            .json(&serde_json::json!({ "deviceName": "tablet" }))
+            .await;
+        res.assert_status(axum::http::StatusCode::CREATED);
+        let token = res.json::<Value>()["apiKey"].as_str().unwrap().to_owned();
+
+        assert_eq!(
+            star_lands_in(&env, &[("apiKey", &token)], track_id(3)).await,
+            vec![kids]
+        );
+        assert_eq!(
+            star_lands_in(&env, &refs(&ts_auth("alice", &token)), track_id(4)).await,
+            vec![kids]
+        );
+
+        api.delete(&format!("/api/profiles/{kids}"))
+            .authorization_bearer(&main)
+            .await
+            .assert_status_ok();
+        for endpoint in ["ping", "tokenInfo"] {
+            failed(
+                &call(&env, endpoint, &[("apiKey", &token)], &[]).await,
+                44,
+                "Invalid API key",
+            );
+        }
+        failed(
+            &call(&env, "ping", &refs(&ts_auth("alice", &token)), &[]).await,
+            40,
+            HINT,
+        );
+        // The main profile's own token is untouched.
+        ok(&call(&env, "ping", &alice_key(), &[]).await);
+    }
+);
 
 /// Alice's SUBSONIC plays, per profile.
 async fn plays_of(pool: &PgPool, profile: Uuid) -> i64 {

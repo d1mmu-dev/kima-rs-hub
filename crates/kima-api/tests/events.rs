@@ -89,6 +89,36 @@ fn account_revoke_forgets_the_tickets_of_all_its_profiles() {
     assert_eq!(registry.redeem_ticket(&c), Some(other));
 }
 
+/// Deleting a profile forgets its pending tickets only: a sibling's (main's included) and
+/// another account's survive.
+#[test]
+fn profile_revoke_forgets_only_that_profiles_tickets() {
+    let registry = SseRegistry::new();
+    let gone = kids();
+    let sibling = StreamOwner {
+        account: gone.account,
+        profile: ProfileId::new(Uuid::now_v7()),
+    };
+    let main = StreamOwner {
+        account: gone.account,
+        profile: ProfileId::main_of(gone.account),
+    };
+    let other = kids();
+    let (a, a2, b, c, d) = (
+        registry.issue_ticket(gone),
+        registry.issue_ticket(gone),
+        registry.issue_ticket(sibling),
+        registry.issue_ticket(main),
+        registry.issue_ticket(other),
+    );
+    registry.revoke_profile(gone.profile);
+    assert_eq!(registry.redeem_ticket(&a), None);
+    assert_eq!(registry.redeem_ticket(&a2), None);
+    assert_eq!(registry.redeem_ticket(&b), Some(sibling));
+    assert_eq!(registry.redeem_ticket(&c), Some(main));
+    assert_eq!(registry.redeem_ticket(&d), Some(other));
+}
+
 #[test]
 fn slots_are_capped_and_freed_on_drop() {
     let registry = Arc::new(SseRegistry::new());

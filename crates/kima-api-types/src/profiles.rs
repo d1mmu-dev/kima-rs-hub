@@ -63,7 +63,8 @@ pub struct CreateProfile {
 }
 
 /// `PUT /api/profiles/{id}` (main profile only). An absent field keeps the stored value;
-/// `"avatar": null` clears the avatar.
+/// `"avatar": null` clears the avatar. `"name": null` and `"kind": null` read as absent (keep
+/// the stored value): a name or kind cannot be cleared, so `null` has nothing else to mean.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateProfile {

@@ -5,6 +5,7 @@
 //! mock (`ApiFetch::set_mock_handler`) is `#[cfg(test)]` inside the vertigo crate and not reachable from
 //! here. The async `send` path is exercised for real against kima-server (README, "Verified").
 
+use std::cell::Cell;
 use std::future::Future;
 use std::rc::Rc;
 
@@ -67,6 +68,7 @@ pub fn build_request<B: Serialize>(
 pub struct ApiClient {
     token: Computed<Option<String>>,
     on_unauthorized: Rc<dyn Fn()>,
+    active: Rc<Cell<bool>>,
 }
 
 impl ApiClient {
@@ -74,7 +76,18 @@ impl ApiClient {
         Self {
             token,
             on_unauthorized: Rc::new(on_unauthorized),
+            active: Rc::new(Cell::new(true)),
         }
+    }
+
+    /// Freeze every clone before a document replacement. Obsolete futures never return to
+    /// their callers (including error handlers), so old responses cannot change the new session.
+    pub fn retire(&self) {
+        self.active.set(false);
+    }
+
+    fn accepts_response(&self, token: &Option<String>) -> bool {
+        self.active.get() && vertigo::transaction(|c| self.token.get(c)) == *token
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
@@ -112,7 +125,13 @@ impl ApiClient {
         path: &str,
         body: Option<&B>,
     ) -> Result<T, ApiError> {
-        let mut builder = RequestBuilder::new(method, path).bearer_auth(self.token.clone());
+        let token = vertigo::transaction(|c| self.token.get(c));
+        if !self.accepts_response(&token) {
+            return std::future::pending().await;
+        }
+        // Bind credentials at dispatch, not when a delayed fetch is eventually polled.
+        let mut builder =
+            RequestBuilder::new(method, path).bearer_auth(Value::new(token.clone()).to_computed());
         if let Some(body) = body {
             builder = builder.body_json(codec::encode(body).map_err(|message| ApiError {
                 status: None,
@@ -120,6 +139,9 @@ impl ApiClient {
             })?);
         }
         let response = builder.call().await;
+        if !self.accepts_response(&token) {
+            return std::future::pending().await;
+        }
         let (status, json) = response
             .into(|status, body| match body {
                 vertigo::RequestBody::Json(json) => Some(Ok((status, json))),
@@ -164,6 +186,18 @@ mod tests {
     use kima_api_types::auth::Credentials;
     use kima_api_types::library::ArtistsResponse;
     use vertigo::dev::SsrFetchRequestBody;
+
+    #[test]
+    fn retired_client_rejects_old_responses_and_new_requests() {
+        let token = Value::new(Some("old".to_string()));
+        let client = ApiClient::new(token.to_computed(), || panic!("stale 401"));
+        let captured = Some("old".to_string());
+        assert!(client.accepts_response(&captured));
+        token.set(Some("new".to_string()));
+        assert!(!client.accepts_response(&captured));
+        client.retire();
+        assert!(!client.accepts_response(&Some("new".to_string())));
+    }
 
     fn json(text: &str) -> JsJson {
         codec::value_to_js(serde_json::from_str(text).unwrap())

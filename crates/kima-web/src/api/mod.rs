@@ -3,3 +3,4 @@
 pub mod client;
 pub mod codec;
 pub mod podcasts;
+pub mod profiles;

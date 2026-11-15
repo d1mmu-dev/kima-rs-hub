@@ -468,6 +468,17 @@ impl Player {
         }
         let me = self.clone();
         get_driver().spawn(async move {
+            // Resolve even pre-profile sessions before touching any local resume key.
+            let Ok(account) =
+                me.0.client
+                    .get::<kima_api_types::auth::MeResponse>("/api/auth/me")
+                    .await
+            else {
+                return;
+            };
+            if let Some(profile) = account.profile.as_ref() {
+                me.0.session.remember_profile(profile);
+            }
             let saved =
                 me.0.client
                     .get::<Option<PlaybackState>>("/api/playback-state")
@@ -483,7 +494,10 @@ impl Player {
                 let index = (state.current_index.max(0) as usize).min(queue.len() - 1);
                 // The backend has no in-track position for web saves; ours is stored client-side.
                 let resume = position::restore_point(
-                    me.0.session.storage().get(position::STORAGE_KEY).as_deref(),
+                    me.0.session
+                        .position_key()
+                        .and_then(|key| me.0.session.storage().get(&key))
+                        .as_deref(),
                     &queue[index].id,
                     queue[index].duration,
                 );
@@ -505,6 +519,13 @@ impl Player {
     /// callback, where vertigo forbids `Value::set`, so the reset is deferred.
     pub fn stop(&self) {
         self.0.restored.set(false);
+        if let Some(audio) = self.0.audio.borrow().as_ref() {
+            js! { #audio.pause() };
+        }
+        self.0.autoplay.set(false);
+        self.0.pending_seek.set(None);
+        self.0.episode_marks.borrow_mut().clear();
+        self.0.sleep_deadline.set(None);
         *self.0.audio.borrow_mut() = None;
         *self.0.ticker.borrow_mut() = None;
         let me = self.clone();
@@ -578,12 +599,14 @@ impl Player {
         if episode_ids(&id).is_some() {
             return;
         }
-        if position::should_write(self.0.last_saved.get(), position) {
+        if position::should_write(self.0.last_saved.get(), position)
+            && let Some(key) = self.0.session.position_key()
+        {
             self.0.last_saved.set(position);
             self.0
                 .session
                 .storage()
-                .set(position::STORAGE_KEY, &position::encode(&id, position));
+                .set(&key, &position::encode(&id, position));
         }
     }
 

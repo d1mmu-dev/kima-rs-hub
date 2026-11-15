@@ -33,7 +33,7 @@ pub fn render(ctx: &Ctx) -> DomNode {
     let show_form = Value::new(false);
     let signed_in = resource_view(me, |me: std::rc::Rc<MeResponse>| {
         let username = me.username.clone();
-        let role = if me.role == "admin" {
+        let role = if crate::auth::is_admin(&me) {
             "Administrator"
         } else {
             "Member"
@@ -218,7 +218,8 @@ fn password_form(ctx: &Ctx) -> DomNode {
                 {
                     Ok(answer) => {
                         // The backend revokes the old tokens; the reply carries the replacement.
-                        ctx.session.sign_in(&answer.token);
+                        ctx.session
+                            .replace_pair(&answer.token, &answer.refresh_token);
                         current.set(String::new());
                         new.set(String::new());
                         confirm.set(String::new());

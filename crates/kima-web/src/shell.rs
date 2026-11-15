@@ -104,6 +104,12 @@ fn siblings(
 }
 
 fn profile_switcher(ctx: &Ctx) -> DomNode {
+    ctx.profiles_rev
+        .to_computed()
+        .render_value(bind!(ctx, |_rev: u32| { profile_switcher_data(&ctx) }))
+}
+
+fn profile_switcher_data(ctx: &Ctx) -> DomNode {
     let busy = Value::new(false);
     let error = Value::new(None);
     let data = load(bind!(ctx, async move {

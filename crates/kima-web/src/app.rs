@@ -37,6 +37,7 @@ pub fn render() -> DomNode {
         player: player.clone(),
         refresh: Value::new(0),
         playlists_rev: Value::new(0),
+        profiles_rev: Value::new(0),
         query: Value::new(String::new()),
         refine: Value::new(Refine::default()),
         refine_open: Value::new(false),

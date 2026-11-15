@@ -127,6 +127,7 @@ fn editor(
             };
             match result {
                 Ok(_) => {
+                    api::invalidate(&ctx.profiles_rev);
                     ctx.notify("Profile saved");
                     refresh(&ctx, data, error, busy);
                 }
@@ -193,6 +194,7 @@ fn deletion(
         get_driver().spawn(bind!(ctx, profile, data, error, busy, async move {
             match api::delete(&ctx.client, profile.id).await {
                 Ok(_) => {
+                    api::invalidate(&ctx.profiles_rev);
                     ctx.notify("Profile and personal data deleted");
                     refresh(&ctx, data, error, busy);
                 }

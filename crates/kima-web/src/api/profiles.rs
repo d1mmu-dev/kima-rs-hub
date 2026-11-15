@@ -5,6 +5,11 @@ use kima_api_types::profiles::{Profile, ProfilesResponse, SwitchProfile, SwitchR
 
 pub const LIST_PATH: &str = "/api/profiles";
 
+/// Notify persistent header subscribers after a successful, session-fenced mutation.
+pub fn invalidate(revision: &vertigo::Value<u32>) {
+    revision.change(|n| *n = n.wrapping_add(1));
+}
+
 fn switch_path(id: &str) -> String {
     format!("{LIST_PATH}/{id}/switch")
 }
@@ -51,6 +56,18 @@ mod tests {
     use crate::api::client::build_request;
     use kima_api_types::profiles::SwitchProfile;
     use vertigo::FetchMethod;
+
+    #[test]
+    fn invalidation_reaches_both_header_subscribers() {
+        let revision = vertigo::Value::new(0u32);
+        let desktop = revision.to_computed();
+        let mobile = revision.to_computed();
+        for expected in 1..=3 {
+            invalidate(&revision);
+            assert_eq!(vertigo::transaction(|c| desktop.get(c)), expected);
+            assert_eq!(vertigo::transaction(|c| mobile.get(c)), expected);
+        }
+    }
 
     #[test]
     fn management_paths_use_typed_ids_without_switch_suffix() {

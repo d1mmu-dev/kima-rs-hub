@@ -18,6 +18,10 @@ pub const STORAGE_KEY: &str = "kima-web.session";
 const LEGACY_TOKEN_KEY: &str = "kima-web.token";
 const LEGACY_REFRESH_KEY: &str = "kima-web.refresh";
 
+fn invalidation_key(generation: &str) -> String {
+    format!("{STORAGE_KEY}.invalid.{generation}")
+}
+
 #[derive(serde::Deserialize)]
 struct StoredSession {
     token: String,
@@ -133,7 +137,10 @@ impl Session {
         let record = storage.get(STORAGE_KEY);
         let token = record.as_deref().and_then(|raw| {
             let parsed: StoredSession = serde_json::from_str(raw).ok()?;
-            (!parsed.token.is_empty() && !parsed.generation.is_empty()).then_some(parsed.token)
+            (!parsed.token.is_empty()
+                && !parsed.generation.is_empty()
+                && storage.get(&invalidation_key(&parsed.generation)).is_none())
+            .then_some(parsed.token)
         });
         let session = Self {
             token: Value::new(token),
@@ -218,15 +225,22 @@ impl Session {
             .map(|profile| crate::position::profile_key(&profile.id.to_string()))
     }
 
-    /// Invalidate this tab; remove shared credentials only if they still belong to it.
-    /// This synchronous comparison/removal has no await, but localStorage has no cross-tab CAS:
-    /// a simultaneous writer can still race it. Already-published newer sessions are preserved.
+    /// Invalidate only this generation, without ever mutating the shared current pointer.
+    /// A concurrent publisher uses a distinct generation, so no cross-tab CAS is needed.
+    /// Keep tombstones: another loaded tab may still invalidate the same generation later.
     pub fn clear(&self) {
-        if self.owned_record.borrow().is_some()
-            && self.storage.get(STORAGE_KEY) == *self.owned_record.borrow()
+        if let Some(record) = self.owned_record.borrow().as_deref()
+            && let Ok(parsed) = serde_json::from_str::<StoredSession>(record)
         {
-            self.storage.remove(STORAGE_KEY);
+            self.storage.set(&invalidation_key(&parsed.generation), "1");
         }
+        self.invalidate_tab();
+    }
+
+    /// Intentional user logout clears shared persistence, unlike an automatic 401.
+    /// Concurrent login/logout is last-writer-wins; already loaded tabs stay tab-bound.
+    pub fn sign_out(&self) {
+        self.storage.remove(STORAGE_KEY);
         self.invalidate_tab();
     }
 
@@ -263,7 +277,7 @@ mod tests {
         let record: StoredSession =
             serde_json::from_str(&storage.get(STORAGE_KEY).unwrap()).unwrap();
         assert_eq!(record._refresh.as_deref(), Some("refresh"));
-        session.clear();
+        session.sign_out();
         assert_eq!(storage.get(STORAGE_KEY), None);
     }
 
@@ -277,6 +291,60 @@ mod tests {
         kids.clear(); // Deleted Kids gets 401 after main has switched.
         assert_eq!(kids.current_token(), None);
         assert_eq!(main.current_token().as_deref(), Some("main"));
+        assert_eq!(
+            Session::new(storage).current_token().as_deref(),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn publication_between_validation_and_invalidation_survives() {
+        // Model another tab publishing after A's validation, just before its storage mutation.
+        // The hook applies to both the old remove and the generation-specific invalidation write.
+        #[derive(Default)]
+        struct InterleavedStorage {
+            memory: MemoryStorage,
+            before_mutation: RefCell<Option<Box<dyn FnOnce()>>>,
+        }
+        impl InterleavedStorage {
+            fn interleave(&self) {
+                let hook = self.before_mutation.borrow_mut().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            }
+        }
+        impl Storage for InterleavedStorage {
+            fn get(&self, key: &str) -> Option<String> {
+                self.memory.get(key)
+            }
+            fn set(&self, key: &str, value: &str) {
+                self.interleave();
+                self.memory.set(key, value);
+            }
+            fn remove(&self, key: &str) {
+                self.interleave();
+                self.memory.remove(key);
+            }
+        }
+        let storage = Rc::new(InterleavedStorage::default());
+        let old = Session::new(storage.clone());
+        old.replace_pair("kids", "kids-refresh");
+        let newer = Session::new(storage.clone());
+        let published = Rc::new(Cell::new(false));
+        let observed = published.clone();
+        *storage.before_mutation.borrow_mut() = Some(Box::new(move || {
+            newer.replace_pair("main", "main-refresh");
+            observed.set(true);
+        }));
+        old.clear();
+        assert!(published.get(), "the interleaving must actually execute");
+        assert_eq!(old.current_token(), None);
+        assert_eq!(old.position_key(), None);
+        let record: StoredSession =
+            serde_json::from_str(&storage.get(STORAGE_KEY).expect("B must survive")).unwrap();
+        assert_eq!(record.token, "main");
+        assert_eq!(record._refresh.as_deref(), Some("main-refresh"));
         assert_eq!(
             Session::new(storage).current_token().as_deref(),
             Some("main")
@@ -464,10 +532,12 @@ mod tests {
             Session::new(storage.clone()).current_token().as_deref(),
             Some("abc")
         );
-        // A 401 handler calls clear(): token gone from memory and storage.
+        // A 401 invalidates the generation on reload without deleting the shared pointer.
+        let record = storage.get(STORAGE_KEY);
         session.clear();
         assert_eq!(session.current_token(), None);
-        assert_eq!(storage.get(STORAGE_KEY), None);
+        assert_eq!(storage.get(STORAGE_KEY), record);
+        assert_eq!(Session::new(storage).current_token(), None);
     }
 
     #[test]

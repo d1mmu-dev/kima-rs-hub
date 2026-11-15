@@ -42,12 +42,16 @@ Set `VERTIGO=/path/to/vertigo` to pick a CLI that is not first on `PATH`; keep i
   session and shows the server's error. No token refresh loop is added in this slice.
 - The session record is authoritative; the old `kima-web.token` / `kima-web.refresh` pair migrates
   once and is removed. Token-only replacements drop the old refresh credential. A tab keeps its
-  own record generation: a deleted profile's 401 invalidates that tab but cannot clear a newer
-  record already published by another tab (including one with identical token strings).
+  own record generation: a deleted profile's 401 invalidates that tab and writes only a
+  `kima-web.session.invalid.<generation>` tombstone. It never removes or rewrites the shared
+  current record, so even a publication interleaved with invalidation survives (including one
+  with identical token strings). Reload rejects a tombstoned generation, not a newer record.
   Publishing the pair is one `setItem`, so observers see a complete old or new pair, never half of
-  each. Concurrent publications are last-writer-wins. Ownership comparison and removal are synchronous
-  with no await, **not** a cross-tab compare-and-swap: a truly simultaneous publication can still race
-  removal. Tabs running the pre-migration code are not coordinated; reload them after upgrading.
+  each. Concurrent publications are last-writer-wins. Explicit Sign out intentionally removes the
+  shared current record; concurrent login/logout is last-writer-wins, while loaded tabs keep their
+  tab-bound credentials until their next rejection/reload. Tombstones contain no credentials and
+  are retained (one per invalidated generation); no cross-tab garbage collection is attempted.
+  Tabs running an older invalidation implementation are not coordinated; reload them after upgrading.
 - DB-free driver regression: `CHROME=/path/to/chrome node tools/verify-kima-web-e2e.mjs --self-test-sign-out`
   checks closed-menu sign-out in desktop/mobile DOM fixtures. This is not the full application E2E;
   default and `--ssr` acceptance still need an authorized migrated demo stack.

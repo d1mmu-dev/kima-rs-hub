@@ -59,7 +59,7 @@ impl Ctx {
     pub fn sign_out(&self) {
         self.client.retire();
         self.player.stop();
-        self.session.clear();
+        self.session.sign_out();
         get_driver().history_replace("/login");
         vertigo::js! { window.location.replace("/login") };
     }

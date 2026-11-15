@@ -105,6 +105,10 @@ pub async fn authenticate(
     if session.token_version != claims.token_version {
         return Ok(None);
     }
+    debug_assert!(
+        session.profile_kind.fits(session.account, session.profile),
+        "a session's profile kind contradicts its id"
+    );
     Ok(Some(AuthUser {
         account: session.account,
         profile: session.profile,

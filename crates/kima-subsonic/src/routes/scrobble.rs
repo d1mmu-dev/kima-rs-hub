@@ -139,7 +139,7 @@ async fn get_now_playing(
             age_secs: instant.saturating_duration_since(e.started).as_secs(),
         });
     }
-    for (profile, _, track, updated) in subsonic::web_now_playing(pool, wall - WEB_STALE).await? {
+    for (profile, track, updated) in subsonic::web_now_playing(pool, wall - WEB_STALE).await? {
         offer(Playing {
             profile,
             player: WEB_PLAYER.to_owned(),

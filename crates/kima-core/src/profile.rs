@@ -92,6 +92,13 @@ impl ProfileKind {
             ProfileKind::Standard => "standard",
         }
     }
+
+    /// The rule the database enforces (`profiles_main_is_account`): a profile is of kind main
+    /// exactly when its id is its account's id. A session that breaks it is a bug; sessions
+    /// check it with `debug_assert!`.
+    pub fn fits(self, account: AccountId, profile: ProfileId) -> bool {
+        (self == ProfileKind::Main) == (profile == ProfileId::main_of(account))
+    }
 }
 
 impl fmt::Display for ProfileKind {
@@ -172,6 +179,19 @@ mod tests {
     fn content_policy_is_unrestricted_for_every_kind() {
         for kind in ProfileKind::ALL {
             assert_eq!(ContentPolicy::for_kind(kind), ContentPolicy::Unrestricted);
+        }
+    }
+
+    #[test]
+    fn kind_is_main_exactly_on_the_accounts_own_id() {
+        let account = AccountId::new(Uuid::now_v7());
+        let main = ProfileId::main_of(account);
+        let other = ProfileId::new(Uuid::now_v7());
+        assert!(ProfileKind::Main.fits(account, main));
+        assert!(!ProfileKind::Main.fits(account, other));
+        for kind in [ProfileKind::Kids, ProfileKind::Standard] {
+            assert!(kind.fits(account, other), "{kind}");
+            assert!(!kind.fits(account, main), "{kind}");
         }
     }
 

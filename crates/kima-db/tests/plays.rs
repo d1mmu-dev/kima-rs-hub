@@ -156,10 +156,7 @@ fixture_test!(web_now_playing_reads_fresh_present_track_states, |pool| {
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(
-        (rows[0].0, rows[0].1.as_str(), rows[0].2),
-        (ProfileId::new(ALICE), "alice", TRACK)
-    );
+    assert_eq!((rows[0].0, rows[0].1), (ProfileId::new(ALICE), TRACK));
     // Not parsable, stale, or a missing track: none count.
     playback::upsert(&pool, ProfileId::new(ALICE), state("not-a-uuid"))
         .await
@@ -193,7 +190,7 @@ fixture_test!(web_now_playing_reads_fresh_present_track_states, |pool| {
     );
 });
 
-// M-PROF Task 3: a non-main profile's web player is listed under its account's username.
+// M-PROF Task 3: a non-main profile's web player is listed under its own profile.
 fixture_test!(web_now_playing_lists_non_main_profiles, |pool| {
     use kima_db::playback::{self, Patch};
     let kids: Uuid = sqlx::query_scalar(
@@ -217,9 +214,7 @@ fixture_test!(web_now_playing_lists_non_main_profiles, |pool| {
         .await
         .unwrap();
     assert_eq!(
-        rows.iter()
-            .map(|r| (r.0, r.1.as_str(), r.2))
-            .collect::<Vec<_>>(),
-        vec![(ProfileId::new(kids), "alice", TRACK)]
+        rows.iter().map(|r| (r.0, r.1)).collect::<Vec<_>>(),
+        vec![(ProfileId::new(kids), TRACK)]
     );
 });

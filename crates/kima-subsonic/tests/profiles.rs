@@ -812,4 +812,16 @@ fixture_test!(deleted_profiles_now_playing_slots_are_dropped, |env| {
         .unwrap()
         .unwrap();
     assert!(playing(&call(&env, "getNowPlaying", &alice_key(), &[]).await).is_empty());
+    // The answer alone would hide a slot that was never dropped (an entry whose profile is gone
+    // has no owner to name). Bring a profile with the same id back: a slot still held in memory
+    // would show again under it, a dropped one cannot.
+    sqlx::query(
+        "INSERT INTO profiles (id, user_id, name, kind) VALUES ($1, $2, 'Kids again', 'kids')",
+    )
+    .bind(kids.into_uuid())
+    .bind(ALICE_ID)
+    .execute(&env.pool)
+    .await
+    .unwrap();
+    assert!(playing(&call(&env, "getNowPlaying", &alice_key(), &[]).await).is_empty());
 });

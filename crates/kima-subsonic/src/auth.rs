@@ -72,6 +72,10 @@ impl SubsonicUser {
 /// The session of a sign-in as `profile` of `user`'s account (D-244): an app token signs into
 /// its own profile, the password into the main one.
 fn session(user: &User, profile: ProfileId, profile_kind: ProfileKind) -> AuthUser {
+    debug_assert!(
+        profile_kind.fits(user.account(), profile),
+        "a session's profile kind contradicts its id"
+    );
     AuthUser {
         account: user.account(),
         profile,

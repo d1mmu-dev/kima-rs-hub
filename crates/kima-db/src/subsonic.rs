@@ -638,16 +638,14 @@ pub async fn artist_exists(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
 
 /// What the web players are playing: profiles whose `playback_state` is of type `track`, was
 /// updated since `since`, and names a track that is still present. Newest first, at most 50.
-/// Returns profile, the account's username, track and `updated_at`.
+/// Returns profile, track and `updated_at`; who the profile is, is the caller's to look up.
 pub async fn web_now_playing(
     pool: &PgPool,
     since: OffsetDateTime,
-) -> sqlx::Result<Vec<(ProfileId, String, Uuid, OffsetDateTime)>> {
+) -> sqlx::Result<Vec<(ProfileId, Uuid, OffsetDateTime)>> {
     sqlx::query_as(
-        "SELECT ps.profile_id, u.username, t.id, ps.updated_at
+        "SELECT ps.profile_id, t.id, ps.updated_at
          FROM playback_state ps
-         JOIN profiles pr ON pr.id = ps.profile_id
-         JOIN users u ON u.id = pr.user_id
          JOIN tracks t ON t.missing_since IS NULL AND t.id = CASE
              WHEN ps.track_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
              THEN ps.track_id::uuid END

@@ -144,14 +144,21 @@ ID_FILES = (
     "crates/kima-api/src/auth.rs",
     "crates/kima-api/src/routes/auth.rs",
     "crates/kima-api/src/routes/onboarding.rs",
-    "crates/kima-subsonic/src/auth.rs",
+    # Test seeds: an account's main profile is what they set up.
+    "crates/kima-test-support/src/profiles.rs",
 )
+# Files where only the named functions may name the main profile: a Subsonic password sign-in
+# lands in the main profile (answer Q7); anything else in that file goes through the gate.
+ID_FUNCS = {
+    "crates/kima-subsonic/src/auth.rs": {"main_session"},
+}
+FN_START = re.compile(r"^(?:pub(?:\([^)]*\))? )?(?:const )?(?:async )?fn (\w+)")
 ID_ESCAPE = re.compile(r"ProfileId::new\(|\bmain_of\(|\.main_profile\(\)")
 # A row of a kima-db query decoded into the newtype: the column is ground truth.
 ROW_DECODE = re.compile(r"ProfileId::new\((?:r|row)\.\w+\??\)")
 MARKER = re.compile(r"//.*M-PROF Task \d+:")
 # Plan tasks already done (docs/superpowers/plans/2026-11-14-m-prof.md); add each on closing it.
-DONE_TASKS = {0, 1, 2, 3, 4, 5, 6, 7, 8}
+DONE_TASKS = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 TASK_MARKER = re.compile(r"//.*M-PROF Task (\d+):")
 
 
@@ -159,9 +166,15 @@ def id_escapes(rel, src):
     if rel.startswith(ID_FILES):
         return
     lines = src.split("\n")
+    allowed_fns = ID_FUNCS.get(rel, set())
+    current_fn = None
     for k, row in enumerate(lines):
         if row.strip().startswith("#[cfg(test)]"):
             return
+        if m := FN_START.match(row):
+            current_fn = m.group(1)
+        if current_fn in allowed_fns:
+            continue
         code = row.split("//", 1)[0]
         if rel.startswith("crates/kima-db/src/"):
             code = ROW_DECODE.sub("", code)

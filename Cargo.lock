@@ -3042,7 +3042,10 @@ dependencies = [
 name = "kima-test-support"
 version = "0.1.0"
 dependencies = [
+ "kima-core",
+ "kima-db",
  "lofty",
+ "uuid",
 ]
 
 [[package]]

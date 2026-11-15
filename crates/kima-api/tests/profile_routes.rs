@@ -451,12 +451,13 @@ async fn plays_and_stats_are_per_profile(pool: PgPool) {
             .unwrap();
     assert_eq!(rows, 1);
 
+    // The kids' play shows only in kids' stats.
     let stats = get(&server, &f.kids_token, "/api/stats?period=all").await;
+    assert_eq!(stats["listening"]["plays"], 1, "{stats}");
+    assert_eq!(stats["listening"]["distinctTracks"], 1, "{stats}");
     let main_stats = get(&server, &f.main_token, "/api/stats?period=all").await;
-    assert_ne!(
-        stats, main_stats,
-        "the kids' play shows only in kids' stats"
-    );
+    assert_eq!(main_stats["listening"]["plays"], 0, "{main_stats}");
+    assert_eq!(main_stats["listening"]["distinctTracks"], 0, "{main_stats}");
 }
 
 // ---- podcasts: follows and progress (design (h)) ----

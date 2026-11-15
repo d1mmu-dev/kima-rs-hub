@@ -1,5 +1,8 @@
 //! Helpers shared by the workspace's tests. Only ever a dev-dependency.
 
+#[cfg(feature = "profiles")]
+pub mod profiles;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 

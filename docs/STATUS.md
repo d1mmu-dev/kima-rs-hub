@@ -1,6 +1,6 @@
 # kima-rs-hub — stan prac
 
-_Ostatnia aktualizacja: 2026-11-14 21:00 · `main` = `d935036`_
+_Ostatnia aktualizacja: 2026-11-15 03:15 · `main` = `d935036`_
 
 <!-- private -->
 > Podsumowanie stanu projektu (aktualizowane po każdym etapie, publikowane razem z kolejnym merge'em do `main`). Źródłem prawdy jest historia gita; szczegóły różnic od upstreamu są w `docs/DIVERGENCES.md`, plan w `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md`.
@@ -23,7 +23,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M-STATS S1 | Statystyki odsłuchów | ✅ (S2 po analizie audio) |
 | M9 | kima-web część 1 (logowanie, biblioteka, player, playlisty, ustawienia, SSR) | ✅ (wygląd 1:1 otwarty) |
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
-| **M-PROF** | **Profile w koncie (Netflix)** | 🟡 **w toku: baza i logowanie gotowe (Task 1–4), dalej trasy API, Subsonic, kima-web** |
+| **M-PROF** | **Profile w koncie (Netflix)** | 🟡 **backend gotowy (Task 1–9), dalej kima-web (Task 10–14) i domknięcie** |
 | M5 | Vibe (podobne utwory, nastrój) | ⏳ gałąź istnieje, ~1 tydz. |
 | M5b | Mixy, radio, „co nowego” | ⏳ ~1 tydz. |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
@@ -44,11 +44,11 @@ Odłożone (nieblokujące): porównanie wizualne stron podcastów (M10); `/searc
 
 ## M-PROF — w toku
 
-Gałąź `feature/m-prof` (lokalnie): migracja 0060 (tabela profili, limit 5, ochrona profilu głównego i przypisania do konta w bazie), osobne typy id konta/profilu, wszystkie osobiste zapytania kluczowane profilem (Task 3), logowanie z profilem w tokenach i sesjach, admin = rola admin + profil główny (Task 4). Przeglądy: faza A i Task 3 zatwierdzone (0 Critical); poprawki do Task 3 i przegląd Task 4 w toku.
+Gałąź `feature/m-prof` (lokalnie). Backend gotowy: migracja 0060 (profile, limit 5, ochrony w bazie), wszystkie osobiste dane i trasy na profilu (REST, zdarzenia na żywo, zadania), logowanie z profilem w tokenach, API profili (lista, tworzenie, edycja, usuwanie, przełączanie; miejsce na przyszły PIN), Subsonic i tokeny aplikacji per profil, macierz izolacji (19 testów, sprawdzone mutacjami). Przeglądy Task 1–7 zatwierdzone (0 Critical/Important).
 
-Decyzje właściciela (2026-11-14): awatary z gotowych presetów; kilka profili dziecięcych dozwolone; profilami zarządza tylko profil główny; usunięcie profilu kasuje jego dane; Subsonic hasłem loguje do profilu głównego, inne profile przez swoje tokeny aplikacji; publiczne playlisty innych profili widoczne. Nazwa profilu głównego startuje od nazwy użytkownika, potem niezależna.
+Decyzje właściciela (2026-11-14): awatary z 12 presetów; kilka profili dziecięcych; profilami zarządza tylko profil główny; usunięcie profilu kasuje jego dane; Subsonic hasłem → profil główny, inne profile przez swoje tokeny; publiczne playlisty innych profili konta widoczne; **nazwa profilu widoczna tylko w obrębie konta** (inne konta widzą sam login).
 
-Zostało: Task 5 (wszystkie trasy API na profil), Task 6 (API profili, przełączanie), Task 7–8 (Subsonic, tokeny aplikacji), Task 9 (macierz izolacji), Task 10–14 (kima-web: „Kto słucha?”, przełącznik, zarządzanie), Task 15–16 (zgodność, test aktualizacji, zamknięcie).
+Zostało: reguła prywatności nazw profili (do wdrożenia), przegląd Task 8–9, kima-web (Task 10–14: „Kto słucha?”, przełącznik, zarządzanie profilami i tokenami), zgodność i test aktualizacji na kopii bazy (Task 15–16), CI, merge.
 
 ## Decyzje właściciela (wiążące, nie pytać ponownie)
 
@@ -74,6 +74,7 @@ Zostało: Task 5 (wszystkie trasy API na profil), Task 6 (API profili, przełąc
 
 ## Historia etapów (najnowsze na górze)
 
+- 2026-11-15: M-PROF backend gotowy na gałęzi (Task 1–9); decyzja o prywatności nazw profili.
 - 2026-11-14: **M6a na `main`** (CI zielone): fixtures, flaga `podcasts`, cache odcinków z limitami, naprawa cache okładek.
 - 2026-11-14: M6a gotowe na `feature/m6-fixtures` (`4ef8f97`): fixtures, flaga, dokumentacja, J3/J6, limity pobierania; przegląd czysty, 2884 testów zielonych.
 - 2026-11-14: `feature/m6-fixtures`: `cf90efe` fixtures, `81ccae0` poprawki po przeglądzie, `02247f6` domknięcie dokumentacji + smoke; naprawa J3/J6 w toku.

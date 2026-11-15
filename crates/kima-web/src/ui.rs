@@ -56,6 +56,14 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    pub fn sign_out(&self) {
+        self.client.retire();
+        self.player.stop();
+        self.session.clear();
+        get_driver().history_replace("/login");
+        vertigo::js! { window.location.replace("/login") };
+    }
+
     /// Shows `message` in the toast for four seconds (a newer message replaces it and restarts the clock).
     pub fn notify(&self, message: impl Into<String>) {
         let id =

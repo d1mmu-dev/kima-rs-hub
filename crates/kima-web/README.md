@@ -27,6 +27,25 @@ and a hashed `wasm_run.<hash>.js`. vertigo 0.13 writes no static `index.html` an
 Set `VERTIGO=/path/to/vertigo` to pick a CLI that is not first on `PATH`; keep it at the same version as the
 `vertigo` crate (`=0.13.4` in `Cargo.toml`).
 
+## Account profiles (M-PROF, D-248)
+
+- Login fetches the account-local profile list before entering the app: more than one profile opens
+  `/profiles` ("Who's listening?"), one goes directly to the library. The picker is a public SSR shell;
+  names and avatars load only in an authenticated browser. Kids badges describe the profile type, not
+  content suitability: no kids content filter or PIN is implemented yet.
+- Both headers show the current avatar and name, sibling switch buttons, a picker link and Sign out.
+  Main profiles also get Manage profiles (Settings; editing and app-token UI are Task 13).
+- A successful switch pauses audio, retires outstanding API work, replaces both stored credentials
+  (`kima-web.token`, `kima-web.refresh`) and replaces the document at `/`. This deliberately discards the
+  old queue, podcast marks, search/form state, Resources and timers rather than reusing profile caches.
+  A late response, including 401, cannot mutate the replacement session. A failed switch keeps the old
+  session and shows the server's error. No token refresh loop is added in this slice.
+- Library-track resume positions use `kima-web.position.<profileId>`. The old unscoped key is consumed
+  once by main and removed; an existing scoped point wins. Podcast progress stays server-side.
+- Avatars use the shared preset keys with emoji glyphs on an id-derived colour, falling back to an
+  initial for absent/unknown presets. This is kima-only (upstream has no profile picker), not an upstream
+  visual-parity claim. Profiles are convenience partitions, **not a security boundary until PINs**.
+
 ## Run it locally (dev)
 
 `vertigo build` shells out to `rustup` and `wasm-opt`, so both must be on `PATH`.

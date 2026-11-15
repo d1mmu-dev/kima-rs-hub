@@ -17,7 +17,6 @@
 use axum::Router;
 use axum::extract::State;
 use kima_api::AppState;
-use kima_core::profile::ProfileId;
 use kima_db::podcasts::SubsonicEpisode;
 
 use super::add;
@@ -93,8 +92,7 @@ async fn podcasts(
     let include_episodes = params.get("includeEpisodes") != Some("false");
     let raw_id = params.get("id");
     let hide_ai = kima_db::user_settings::hides_podcast_ai(&app.pool, user.user.profile).await?;
-    // M-PROF Task 7: main profile until SubsonicUser carries one.
-    let owner = ProfileId::main_of(user.user.account);
+    let owner = user.user.profile;
     let mut channels = kima_db::podcasts::followed_channels(&app.pool, owner, hide_ai).await?;
     if let Some(raw) = raw_id {
         let wanted = ids::parse(raw, &[]);
@@ -127,8 +125,7 @@ async fn newest_podcasts(
         .unwrap_or(DEFAULT_NEWEST)
         .clamp(1, MAX_NEWEST);
     let hide_ai = kima_db::user_settings::hides_podcast_ai(&app.pool, user.user.profile).await?;
-    // M-PROF Task 7: main profile until SubsonicUser carries one.
-    let owner = ProfileId::main_of(user.user.account);
+    let owner = user.user.profile;
     let episodes = kima_db::podcasts::newest_episodes(&app.pool, owner, count, hide_ai).await?;
     Ok(Answer::node(Node::new("newestPodcasts").list(
         "episode",
@@ -151,14 +148,7 @@ async fn podcast_episode(
     let episode = kima_db::podcasts::subsonic_episode_by_id(&app.pool, id)
         .await?
         .ok_or_else(not_found)?;
-    // M-PROF Task 7: main profile until SubsonicUser carries one.
-    if !kima_db::podcasts::is_subscribed(
-        &app.pool,
-        ProfileId::main_of(user.user.account),
-        episode.podcast_id,
-    )
-    .await?
-    {
+    if !kima_db::podcasts::is_subscribed(&app.pool, user.user.profile, episode.podcast_id).await? {
         return Err(not_found());
     }
     Ok(Answer::node(episode_node(&episode)))
@@ -168,9 +158,7 @@ async fn refresh_podcasts(
     user: SubsonicUser,
     State(app): State<AppState>,
 ) -> Result<Answer, SubsonicError> {
-    // M-PROF Task 7: main profile until SubsonicUser carries one.
-    let shows =
-        kima_db::podcasts::followed_shows(&app.pool, ProfileId::main_of(user.user.account)).await?;
+    let shows = kima_db::podcasts::followed_shows(&app.pool, user.user.profile).await?;
     for row in shows {
         let _ = kima_podcast::refresh::refresh(&app.podcast_catalog, row.id).await;
     }

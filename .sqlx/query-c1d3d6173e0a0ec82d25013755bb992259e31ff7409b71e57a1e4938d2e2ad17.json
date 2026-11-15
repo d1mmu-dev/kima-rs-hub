@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.username, u.password_hash, u.role, u.onboarding_complete,\n                  u.token_version, u.created_at,\n                  k.id AS \"key_id?\", k.profile_id AS \"profile_id?\", k.secret_enc AS \"secret_enc?\"\n           FROM users u\n           LEFT JOIN (api_keys k JOIN profiles pr ON pr.id = k.profile_id) ON pr.user_id = u.id\n           WHERE lower(u.username) = lower($1)\n           ORDER BY k.created_at ASC, k.id ASC\n           LIMIT $2",
+  "query": "SELECT u.id, u.username, u.password_hash, u.role, u.onboarding_complete,\n                  u.token_version, u.created_at,\n                  k.id AS \"key_id?\", k.profile_id AS \"profile_id?\", pr.kind AS \"profile_kind?\",\n                  k.secret_enc AS \"secret_enc?\"\n           FROM users u\n           LEFT JOIN (api_keys k JOIN profiles pr ON pr.id = k.profile_id) ON pr.user_id = u.id\n           WHERE lower(u.username) = lower($1)\n           ORDER BY k.created_at ASC, k.id ASC\n           LIMIT $2",
   "describe": {
     "columns": [
       {
@@ -50,6 +50,11 @@
       },
       {
         "ordinal": 9,
+        "name": "profile_kind?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
         "name": "secret_enc?",
         "type_info": "Bytea"
       }
@@ -70,8 +75,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "1a1e5f45fddd83b4baa1dc5f589cb1c86cf15cb9307dedfff6560b9de1716bc9"
+  "hash": "c1d3d6173e0a0ec82d25013755bb992259e31ff7409b71e57a1e4938d2e2ad17"
 }

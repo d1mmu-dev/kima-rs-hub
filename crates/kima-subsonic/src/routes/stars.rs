@@ -73,8 +73,7 @@ async fn star(
         // `set` answers false for a target that does not exist, so an `albumId` that names a
         // song is skipped just as an unknown id is.
         if let Some(kind) = kind
-            // M-PROF Task 7: main profile until SubsonicUser carries one.
-            && stars::set(&app.pool, ProfileId::main_of(user.user.account), kind, id).await?
+            && stars::set(&app.pool, user.user.profile, kind, id).await?
         {
             valid += 1;
         }
@@ -92,8 +91,7 @@ async fn unstar(
 ) -> Result<Answer, SubsonicError> {
     for (kind, id) in targets(&app.pool, &params).await? {
         if let Some(kind) = kind {
-            // M-PROF Task 7: main profile until SubsonicUser carries one.
-            stars::clear(&app.pool, ProfileId::main_of(user.user.account), kind, id).await?;
+            stars::clear(&app.pool, user.user.profile, kind, id).await?;
         }
     }
     Ok(Answer::ok())
@@ -121,8 +119,7 @@ async fn get_starred(
     State(app): State<AppState>,
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
-    // M-PROF Task 7: main profile until SubsonicUser carries one.
-    let s = starred(&app.pool, ProfileId::main_of(user.user.account)).await?;
+    let s = starred(&app.pool, user.user.profile).await?;
     Ok(Answer::node(
         Node::new("starred")
             .list("artist", s.artists.iter().map(map::artist_id3).collect())
@@ -136,8 +133,7 @@ async fn get_starred2(
     State(app): State<AppState>,
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
-    // M-PROF Task 7: main profile until SubsonicUser carries one.
-    let s = starred(&app.pool, ProfileId::main_of(user.user.account)).await?;
+    let s = starred(&app.pool, user.user.profile).await?;
     Ok(Answer::node(
         Node::new("starred2")
             .list("artist", s.artists.iter().map(map::artist_id3).collect())
@@ -163,17 +159,8 @@ async fn set_rating(
         .await?
         .ok_or_else(unknown)?;
     if rating == 0 {
-        // M-PROF Task 7: main profile until SubsonicUser carries one.
-        ratings::clear(&app.pool, ProfileId::main_of(user.user.account), kind, id).await?;
-    } else if !ratings::set(
-        &app.pool,
-        ProfileId::main_of(user.user.account),
-        kind,
-        id,
-        rating as i16,
-    )
-    .await?
-    {
+        ratings::clear(&app.pool, user.user.profile, kind, id).await?;
+    } else if !ratings::set(&app.pool, user.user.profile, kind, id, rating as i16).await? {
         return Err(unknown());
     }
     Ok(Answer::ok())

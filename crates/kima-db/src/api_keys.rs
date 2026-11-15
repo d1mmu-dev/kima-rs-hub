@@ -2,7 +2,7 @@
 //! encrypted copy of each token, never the token itself. A token belongs to a profile (D-244);
 //! the cap and the token+salt scan span the whole account.
 
-use kima_core::profile::{AccountId, ProfileId};
+use kima_core::profile::{AccountId, ProfileId, ProfileKind};
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -125,18 +125,23 @@ pub async fn delete_owned(pool: &PgPool, id: Uuid, profile: ProfileId) -> sqlx::
     Ok(done.rows_affected() > 0)
 }
 
-/// A token's id, its profile and that profile's account.
+/// A token's id, its profile (and that profile's kind) and that profile's account.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyOwner {
     pub key_id: Uuid,
     pub profile: ProfileId,
+    pub profile_kind: ProfileKind,
     pub user: User,
+}
+
+fn kind(stored: &str) -> sqlx::Result<ProfileKind> {
+    stored.parse().map_err(|e| sqlx::Error::Decode(Box::new(e)))
 }
 
 /// Finds the token with this SHA-256, its profile and the account that profile belongs to.
 pub async fn find_by_hash(pool: &PgPool, hash: &[u8; 32]) -> sqlx::Result<Option<KeyOwner>> {
     let row = sqlx::query!(
-        r#"SELECT k.id AS key_id, k.profile_id,
+        r#"SELECT k.id AS key_id, k.profile_id, pr.kind,
                   u.id, u.username, u.password_hash, u.role, u.onboarding_complete,
                   u.token_version, u.created_at
            FROM api_keys k
@@ -147,19 +152,23 @@ pub async fn find_by_hash(pool: &PgPool, hash: &[u8; 32]) -> sqlx::Result<Option
     )
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|r| KeyOwner {
-        key_id: r.key_id,
-        profile: ProfileId::new(r.profile_id),
-        user: User {
-            id: r.id,
-            username: r.username,
-            password_hash: r.password_hash,
-            role: r.role,
-            onboarding_complete: r.onboarding_complete,
-            token_version: r.token_version,
-            created_at: r.created_at,
-        },
-    }))
+    row.map(|r| {
+        Ok(KeyOwner {
+            key_id: r.key_id,
+            profile: ProfileId::new(r.profile_id),
+            profile_kind: kind(&r.kind)?,
+            user: User {
+                id: r.id,
+                username: r.username,
+                password_hash: r.password_hash,
+                role: r.role,
+                onboarding_complete: r.onboarding_complete,
+                token_version: r.token_version,
+                created_at: r.created_at,
+            },
+        })
+    })
+    .transpose()
 }
 
 /// The encrypted secrets of the profile's tokens, oldest first (at most [`MAX_PER_USER`]).
@@ -183,6 +192,7 @@ pub async fn secrets_for_profile(
 pub struct KeySecret {
     pub id: Uuid,
     pub profile: ProfileId,
+    pub profile_kind: ProfileKind,
     pub secret_enc: Vec<u8>,
 }
 
@@ -198,7 +208,8 @@ pub async fn user_with_secrets(
     let rows = sqlx::query!(
         r#"SELECT u.id, u.username, u.password_hash, u.role, u.onboarding_complete,
                   u.token_version, u.created_at,
-                  k.id AS "key_id?", k.profile_id AS "profile_id?", k.secret_enc AS "secret_enc?"
+                  k.id AS "key_id?", k.profile_id AS "profile_id?", pr.kind AS "profile_kind?",
+                  k.secret_enc AS "secret_enc?"
            FROM users u
            LEFT JOIN (api_keys k JOIN profiles pr ON pr.id = k.profile_id) ON pr.user_id = u.id
            WHERE lower(u.username) = lower($1)
@@ -221,13 +232,22 @@ pub async fn user_with_secrets(
     let secrets = rows
         .into_iter()
         .filter_map(|r| {
-            Some(KeySecret {
-                id: r.key_id?,
-                profile: ProfileId::new(r.profile_id?),
-                secret_enc: r.secret_enc?,
+            Some((
+                r.key_id?,
+                ProfileId::new(r.profile_id?),
+                r.profile_kind?,
+                r.secret_enc?,
+            ))
+        })
+        .map(|(id, profile, stored, secret_enc)| {
+            Ok(KeySecret {
+                id,
+                profile,
+                profile_kind: kind(&stored)?,
+                secret_enc,
             })
         })
-        .collect();
+        .collect::<sqlx::Result<Vec<_>>>()?;
     Ok((user, secrets))
 }
 

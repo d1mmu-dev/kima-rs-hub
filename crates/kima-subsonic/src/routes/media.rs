@@ -10,7 +10,6 @@ use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use kima_api::AppState;
 use kima_api::media::{self, MediaError};
-use kima_core::profile::ProfileId;
 use kima_db::subsonic;
 use kima_library::transcode::Quality;
 use uuid::Uuid;
@@ -88,8 +87,7 @@ async fn source_of(
     id: Uuid,
     not_found: impl FnOnce() -> SubsonicError,
 ) -> Result<Source, SubsonicError> {
-    // M-PROF Task 7: main profile until SubsonicUser carries one.
-    let song = subsonic::track(&app.pool, ProfileId::main_of(user.user.account), id)
+    let song = subsonic::track(&app.pool, user.user.profile, id)
         .await?
         .ok_or_else(not_found)?;
     Ok(Source {
@@ -278,8 +276,7 @@ async fn get_transcode_decision(
         return Err(not_found());
     }
     let id = ids::parse(media_id, &[]).ok_or_else(not_found)?;
-    // M-PROF Task 7: main profile until SubsonicUser carries one.
-    let song = subsonic::track(&app.pool, ProfileId::main_of(user.user.account), id)
+    let song = subsonic::track(&app.pool, user.user.profile, id)
         .await?
         .ok_or_else(not_found)?;
     let format = params.get("format");
@@ -416,9 +413,7 @@ async fn get_cover_art(
     }
     if image.is_none()
         && let Some(track) = track
-        // M-PROF Task 7: main profile until SubsonicUser carries one.
-        && let Some(song) =
-            subsonic::track(&app.pool, ProfileId::main_of(user.user.account), track).await?
+        && let Some(song) = subsonic::track(&app.pool, user.user.profile, track).await?
     {
         image = media::cover(&app, song.track.album_id, size).await?;
     }

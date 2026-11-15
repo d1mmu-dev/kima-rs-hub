@@ -262,3 +262,28 @@ pub async fn delete(
         Err(refused) => Ok(Err(refused)),
     }
 }
+
+/// A profile with its account's username, as a Subsonic display name needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileOwner {
+    pub profile: ProfileId,
+    pub account: AccountId,
+    pub username: String,
+    pub name: String,
+}
+
+/// The owners of `profiles` that still exist (a deleted profile is simply absent), in no
+/// particular order.
+pub async fn owners(pool: &PgPool, profiles: &[ProfileId]) -> sqlx::Result<Vec<ProfileOwner>> {
+    let ids: Vec<Uuid> = profiles.iter().map(|p| p.into_uuid()).collect();
+    sqlx::query_as!(
+        ProfileOwner,
+        r#"SELECT pr.id AS "profile: ProfileId", pr.user_id AS "account: AccountId",
+                  u.username, pr.name
+           FROM profiles pr JOIN users u ON u.id = pr.user_id
+           WHERE pr.id = ANY($1)"#,
+        &ids
+    )
+    .fetch_all(pool)
+    .await
+}

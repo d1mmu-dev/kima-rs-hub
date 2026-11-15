@@ -134,7 +134,8 @@ def literals(src):
 
 
 # Where a bare profile id is ground truth (database rows, token claims, the newtypes) or the
-# main profile is meant by definition (sign-in and registration land in it).
+# main profile is meant by definition (sign-in and registration land in it; a Subsonic password
+# sign-in lands in it, answer Q7).
 ID_FILES = (
     "crates/kima-core/src/profile.rs",
     "crates/kima-core/src/auth.rs",
@@ -143,13 +144,14 @@ ID_FILES = (
     "crates/kima-api/src/auth.rs",
     "crates/kima-api/src/routes/auth.rs",
     "crates/kima-api/src/routes/onboarding.rs",
+    "crates/kima-subsonic/src/auth.rs",
 )
 ID_ESCAPE = re.compile(r"ProfileId::new\(|\bmain_of\(|\.main_profile\(\)")
 # A row of a kima-db query decoded into the newtype: the column is ground truth.
 ROW_DECODE = re.compile(r"ProfileId::new\((?:r|row)\.\w+\??\)")
 MARKER = re.compile(r"//.*M-PROF Task \d+:")
 # Plan tasks already done (docs/superpowers/plans/2026-11-14-m-prof.md); add each on closing it.
-DONE_TASKS = {0, 1, 2, 3, 4, 5, 6}
+DONE_TASKS = {0, 1, 2, 3, 4, 5, 6, 7}
 TASK_MARKER = re.compile(r"//.*M-PROF Task (\d+):")
 
 

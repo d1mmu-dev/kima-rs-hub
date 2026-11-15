@@ -12,6 +12,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use kima_api::auth::{AuthUser, ClientIp};
 use kima_core::cipher::Cipher;
 use kima_core::profile::{ProfileId, ProfileKind};
+use kima_db::api_keys::KeySecret;
 use kima_db::users::{self, MAX_USERNAME_CHARS, User};
 use md5::{Digest, Md5};
 use rand::RngCore;
@@ -68,33 +69,29 @@ impl SubsonicUser {
     }
 }
 
-/// Refuses an app token of any profile but the account's main one, as wrong credentials.
-///
-/// M-PROF Task 7: a Subsonic session is always the account's main profile until it can act as
-/// the token's own profile; until then a token of a kids or standard profile signs in nowhere.
-/// Landing it in main would hand that profile main's data and, on an admin account, admin
-/// rights. Task 7 replaces this with a session in the token's profile, and it must land before
-/// `/api/api-keys` lets a non-main profile mint tokens (Task 8).
-pub(crate) fn main_profile_only(user: &User, profile: ProfileId) -> Result<(), SubsonicError> {
-    // M-PROF Task 7: the account's main profile is the only one a session can be yet.
-    if profile == user.main_profile() {
-        Ok(())
-    } else {
-        Err(SubsonicError::wrong_credentials())
-    }
-}
-
-/// The session of a Subsonic sign-in: the account's main profile.
-// M-PROF Task 7: an app token signs into its own profile.
-fn auth_user(user: &User) -> AuthUser {
+/// The session of a sign-in as `profile` of `user`'s account (D-244): an app token signs into
+/// its own profile, the password into the main one.
+fn session(user: &User, profile: ProfileId, profile_kind: ProfileKind) -> AuthUser {
     AuthUser {
         account: user.account(),
-        profile: user.main_profile(),
-        profile_kind: ProfileKind::Main,
+        profile,
+        profile_kind,
         username: user.username.clone(),
         role: user.role.clone(),
         token_version: user.token_version,
     }
+}
+
+/// The session of a password sign-in: always the account's main profile (answer Q7).
+fn main_session(user: &User) -> AuthUser {
+    session(user, user.main_profile(), ProfileKind::Main)
+}
+
+/// The profile of the token `matched` names, among the account's `keys`.
+pub fn matched_profile(keys: &[KeySecret], matched: Uuid) -> Option<(ProfileId, ProfileKind)> {
+    keys.iter()
+        .find(|k| k.id == matched)
+        .map(|k| (k.profile, k.profile_kind))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -312,10 +309,9 @@ impl FromRequestParts<SubsonicCtx> for SubsonicUser {
             {
                 return Err(SubsonicError::wrong_credentials());
             }
-            main_profile_only(&owner.user, owner.profile)?;
             ctx.token_used(owner.key_id, now);
             return Ok(Self {
-                user: auth_user(&owner.user),
+                user: session(&owner.user, owner.profile, owner.profile_kind),
                 method: AuthMethod::AppToken(owner.key_id),
             });
         }
@@ -331,29 +327,24 @@ impl FromRequestParts<SubsonicCtx> for SubsonicUser {
             }
             // One query whatever the user: no extra round trip for an existing user, so the
             // timing does not reveal which usernames exist (spec §5.3 step 3). Keep it so.
+            // The secrets of every profile's tokens: the matched one names the profile.
             let (found, keys) = kima_db::api_keys::user_with_secrets(pool, u).await?;
-            let (secrets, profiles): (Vec<_>, Vec<_>) = keys
-                .into_iter()
-                .map(|k| ((k.id, k.secret_enc), (k.id, k.profile)))
-                .unzip();
+            let secrets: Vec<(Uuid, Vec<u8>)> =
+                keys.iter().map(|k| (k.id, k.secret_enc.clone())).collect();
             let outcome = ts_rounds(&ctx.app.cipher, &secrets, &ctx.dummy_secret, salt, t);
             for id in &outcome.undecryptable {
                 if ctx.decrypt_warn.allow(*id, now) {
                     tracing::warn!(key_id = %id, "app token secret cannot be decrypted");
                 }
             }
-            return match (found, outcome.matched) {
-                (Some(user), Some(key_id)) => {
-                    let profile = profiles
-                        .iter()
-                        .find_map(|(id, profile)| (*id == key_id).then_some(*profile));
-                    // M-PROF Task 7: see `main_profile_only`.
-                    if profile != Some(user.main_profile()) {
-                        return Err(SubsonicError::new(40, TS_HINT));
-                    }
+            let matched = outcome
+                .matched
+                .and_then(|key_id| Some((key_id, matched_profile(&keys, key_id)?)));
+            return match (found, matched) {
+                (Some(user), Some((key_id, (profile, kind)))) => {
                     ctx.token_used(key_id, now);
                     Ok(Self {
-                        user: auth_user(&user),
+                        user: session(&user, profile, kind),
                         method: AuthMethod::AppToken(key_id),
                     })
                 }
@@ -369,10 +360,9 @@ impl FromRequestParts<SubsonicCtx> for SubsonicUser {
                     .await?
                 && owner.user.username.to_lowercase() == u.to_lowercase()
             {
-                main_profile_only(&owner.user, owner.profile)?;
                 ctx.token_used(owner.key_id, now);
                 return Ok(Self {
-                    user: auth_user(&owner.user),
+                    user: session(&owner.user, owner.profile, owner.profile_kind),
                     method: AuthMethod::AppToken(owner.key_id),
                 });
             }
@@ -448,7 +438,7 @@ async fn password_auth(
             .store(user.id, &password, user.token_version, Instant::now());
     }
     Ok(SubsonicUser {
-        user: auth_user(&user),
+        user: main_session(&user),
         method: AuthMethod::Password,
     })
 }
@@ -538,6 +528,50 @@ mod tests {
         let out = ts_rounds(&cipher, std::slice::from_ref(&foreign), &dummy, "salt", &t);
         assert_eq!(out.undecryptable, vec![foreign.0]);
         assert_eq!((out.matched, out.rounds), (None, 50));
+    }
+
+    /// The 50 rounds run over the tokens of every profile of the account together, whatever
+    /// their split, and the matched token names its profile.
+    #[test]
+    fn ts_rounds_constant_over_account_tokens() {
+        let cipher = Cipher::random();
+        let dummy = make_dummy(&cipher);
+        let main = ProfileId::new(Uuid::now_v7());
+        let kids = ProfileId::new(Uuid::now_v7());
+        for n in [0usize, 1, 50] {
+            let keys: Vec<KeySecret> = (0..n)
+                .map(|i| {
+                    let (id, secret_enc) = sealed(&cipher, &format!("tok-{i}"));
+                    let (profile, profile_kind) = if i % 2 == 0 {
+                        (main, ProfileKind::Main)
+                    } else {
+                        (kids, ProfileKind::Kids)
+                    };
+                    KeySecret {
+                        id,
+                        profile,
+                        profile_kind,
+                        secret_enc,
+                    }
+                })
+                .collect();
+            let secrets: Vec<_> = keys.iter().map(|k| (k.id, k.secret_enc.clone())).collect();
+            for (i, expected) in [
+                (0, Some((main, ProfileKind::Main))),
+                (1, Some((kids, ProfileKind::Kids))),
+            ] {
+                let out = ts_rounds(
+                    &cipher,
+                    &secrets,
+                    &dummy,
+                    "salt",
+                    &t_for(&format!("tok-{i}"), "salt"),
+                );
+                assert_eq!(out.rounds, TS_ROUNDS, "n={n}");
+                let profile = out.matched.and_then(|id| matched_profile(&keys, id));
+                assert_eq!(profile, expected.filter(|_| i < n), "n={n} i={i}");
+            }
+        }
     }
 
     #[test]

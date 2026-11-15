@@ -131,6 +131,35 @@ impl ContentPolicy {
     }
 }
 
+/// The profile that owns something a Subsonic client lists by name (a playlist, a now-playing
+/// entry): its account, its id, the account's username and the profile's own name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamedOwner<'a> {
+    pub account: AccountId,
+    pub profile: ProfileId,
+    pub username: &'a str,
+    pub profile_name: &'a str,
+}
+
+/// How a Subsonic answer names `owner` to a session of `viewer` (D-244). Clients compare a
+/// playlist's `owner` with their username (`u`, always the account's) to decide whether they
+/// may edit it, so the session's own profile is the bare username; another account's main
+/// profile is its username, as before profiles existed; every other profile (a sibling, the
+/// main one included, or another account's kids/standard profile) is `username (Profile)`, so
+/// it never reads as the caller's own.
+pub fn subsonic_owner_name(
+    viewer: ProfileId,
+    viewer_account: AccountId,
+    owner: NamedOwner<'_>,
+) -> String {
+    let is_main = ProfileId::main_of(owner.account) == owner.profile;
+    if owner.profile == viewer || (is_main && owner.account != viewer_account) {
+        owner.username.to_owned()
+    } else {
+        format!("{} ({})", owner.username, owner.profile_name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +191,59 @@ mod tests {
         assert!("Main".parse::<ProfileKind>().is_err());
         assert!("admin".parse::<ProfileKind>().is_err());
         assert!(serde_json::from_value::<ProfileKind>("teen".into()).is_err());
+    }
+
+    #[test]
+    fn subsonic_owner_name_rule() {
+        let alice = AccountId::new(uuid::Uuid::now_v7());
+        let bob = AccountId::new(uuid::Uuid::now_v7());
+        let alice_main = ProfileId::main_of(alice);
+        let alice_kids = ProfileId::new(uuid::Uuid::now_v7());
+        let bob_main = ProfileId::main_of(bob);
+        let bob_kids = ProfileId::new(uuid::Uuid::now_v7());
+        let owner = |account, profile, name| NamedOwner {
+            account,
+            profile,
+            username: if account == alice { "alice" } else { "bob" },
+            profile_name: name,
+        };
+        let cases = [
+            // (viewer, viewer account, owner, expected)
+            (
+                alice_main,
+                alice,
+                owner(alice, alice_main, "Alice"),
+                "alice",
+            ),
+            (
+                alice_main,
+                alice,
+                owner(alice, alice_kids, "Kids"),
+                "alice (Kids)",
+            ),
+            (alice_kids, alice, owner(alice, alice_kids, "Kids"), "alice"),
+            (
+                alice_kids,
+                alice,
+                owner(alice, alice_main, "Alice"),
+                "alice (Alice)",
+            ),
+            (alice_main, alice, owner(bob, bob_main, "Bob"), "bob"),
+            (alice_kids, alice, owner(bob, bob_main, "Bob"), "bob"),
+            (
+                alice_main,
+                alice,
+                owner(bob, bob_kids, "Tiny"),
+                "bob (Tiny)",
+            ),
+        ];
+        for (viewer, account, who, expected) in cases {
+            assert_eq!(
+                subsonic_owner_name(viewer, account, who),
+                expected,
+                "{who:?}"
+            );
+        }
     }
 
     #[test]

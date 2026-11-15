@@ -313,40 +313,25 @@ fixture_test!(
 #[test]
 fn now_playing_expires() {
     let np = NowPlaying::new();
-    let (user, track) = (Uuid::now_v7(), Uuid::now_v7());
+    let (user, track) = (ProfileId::new(Uuid::now_v7()), Uuid::now_v7());
     let t0 = Instant::now();
-    np.report(user, "alice", "Symfonium", track, 200, t0);
-    np.report(
-        user,
-        "alice",
-        "Feishin",
-        track,
-        200,
-        t0 + Duration::from_secs(10),
-    );
+    np.report(user, "Symfonium", track, 200, t0);
+    np.report(user, "Feishin", track, 200, t0 + Duration::from_secs(10));
     assert_eq!(np.entries(t0 + Duration::from_secs(259)).len(), 2);
     // 200 s + 60 s after the start: gone. The later start lives 10 s longer.
     let live = np.entries(t0 + Duration::from_secs(261));
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].player, "Feishin");
     assert!(np.entries(t0 + Duration::from_secs(271)).is_empty());
-    // One slot per (user, player): reporting again replaces.
+    // One slot per (profile, player): reporting again replaces.
     np.report(
         user,
-        "alice",
         "Feishin",
         Uuid::now_v7(),
         200,
         t0 + Duration::from_secs(300),
     );
-    np.report(
-        user,
-        "alice",
-        "Feishin",
-        track,
-        200,
-        t0 + Duration::from_secs(301),
-    );
+    np.report(user, "Feishin", track, 200, t0 + Duration::from_secs(301));
     let live = np.entries(t0 + Duration::from_secs(302));
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].track, track);

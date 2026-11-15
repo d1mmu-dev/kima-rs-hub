@@ -261,6 +261,7 @@ async fn api_keys_belong_to_their_profile(pool: PgPool) {
         (owner.key_id, owner.profile, owner.user.id),
         (key.id, kid, a.into_uuid())
     );
+    assert_eq!(owner.profile_kind, ProfileKind::Kids);
     assert!(
         !api_keys::delete_owned(&pool, key.id, main).await.unwrap(),
         "sibling's key"
@@ -309,6 +310,39 @@ async fn user_with_secrets_spans_all_profiles(pool: PgPool) {
         owners,
         vec![main, kid, kid],
         "each secret names its profile"
+    );
+    let kinds: Vec<ProfileKind> = secrets.iter().map(|k| k.profile_kind).collect();
+    assert_eq!(
+        kinds,
+        vec![ProfileKind::Main, ProfileKind::Kids, ProfileKind::Kids]
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn owners_name_existing_profiles_only(pool: PgPool) {
+    let a = account(&pool, "ana").await;
+    let kid = kids(&pool, a, "Kids").await;
+    let gone = ProfileId::new(Uuid::now_v7());
+    let mut found = kima_db::profiles::owners(&pool, &[kid, ProfileId::main_of(a), gone])
+        .await
+        .unwrap();
+    found.sort_by_key(|o| o.name.clone());
+    let got: Vec<(ProfileId, AccountId, &str, &str)> = found
+        .iter()
+        .map(|o| (o.profile, o.account, o.username.as_str(), o.name.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (kid, a, "ana", "Kids"),
+            (ProfileId::main_of(a), a, "ana", "ana"),
+        ]
+    );
+    assert!(
+        kima_db::profiles::owners(&pool, &[])
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
 

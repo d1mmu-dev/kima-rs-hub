@@ -34,7 +34,19 @@ Set `VERTIGO=/path/to/vertigo` to pick a CLI that is not first on `PATH`; keep i
   names and avatars load only in an authenticated browser. Kids badges describe the profile type, not
   content suitability: no kids content filter or PIN is implemented yet.
 - Both headers show the current avatar and name, sibling switch buttons, a picker link and Sign out.
-  Main profiles also get Manage profiles (Settings; editing and app-token UI are Task 13).
+  Main profiles also get Manage profiles in Settings.
+- Settings › Profiles lists the account's profiles for every profile; only main sees add/edit/delete
+  controls or the password-change control (main is independent of the account's admin role).
+  Add/edit supports names, any mix of kids/standard up to the server's five-profile limit, all 12 shared
+  avatar presets and the initial fallback; main's kind is immutable and main has no delete action.
+  Deleting requires the exact stored name and explicitly warns about irreversible personal-data,
+  session and app-token deletion. Lists refetch after successful changes; backend errors remain visible.
+- Settings › Apps lists/creates/revokes only the active profile's Subsonic app tokens, including on
+  kids/standard profiles. The 50-token cap is account-wide and server-authoritative, never inferred
+  from the active profile's list. A new secret is kept only in page-local state with Copy token and
+  explicit dismissal; lists never contain it and it is never persisted. Copy selects the read-only
+  field and uses the browser's copy command (also on HTTP); a denied copy offers manual selection.
+  This is a kima-only Settings extension, not a claim of upstream visual parity.
 - A successful switch pauses audio, retires outstanding API work, replaces both stored credentials
   in one serialized `kima-web.session` record (`token`, `refresh`, `generation`) and replaces the document at `/`. This deliberately discards the
   old queue, podcast marks, search/form state, Resources and timers rather than reusing profile caches.
@@ -152,9 +164,10 @@ token: `localStorage` record `kima-web.session` (the legacy Next.js app uses `au
   edits). Every track list (tracks, search, playlist) has a "＋ Playlist" picker (`tracklist.rs`); adding a
   track that is already there answers 200 with `duplicated`, shown as "Already in <name>". Reordering and
   hidden playlists are not in the UI (the detail page can toggle public/private).
-- **Settings** (`pages/settings.rs`, spec §5.7 account slice only): username and role from `GET /auth/me`, and
-  a password change (`POST /auth/change-password`). The backend revokes the old tokens on a change and returns
-  a new access token, which replaces the stored session; the audio element of a track that is already playing
+- **Settings** (`pages/settings.rs`, `pages/settings/{profiles,apps}.rs`): username and role from
+  `GET /auth/me`, main-only password/profile management, the per-profile podcast AI preference and
+  current-profile app tokens (M-PROF, described above). Password changes revoke old tokens and return
+  a new pair, which replaces the stored session; the audio element of a track that is already playing
   keeps the old `?token=` until the next track loads.
 - **Resume position** (`position.rs`): `POST /api/playback-state` stores the queue, index, track id and
   shuffle, but never the in-track position for web saves (`position` is written only by the Subsonic queue, as

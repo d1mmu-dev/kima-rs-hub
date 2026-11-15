@@ -9,6 +9,29 @@ fn switch_path(id: &str) -> String {
     format!("{LIST_PATH}/{id}/switch")
 }
 
+pub fn profile_path(id: uuid::Uuid) -> String {
+    format!("{LIST_PATH}/{id}")
+}
+
+pub async fn create(
+    client: &ApiClient,
+    body: &kima_api_types::profiles::CreateProfile,
+) -> Result<Profile, ApiError> {
+    client.post(LIST_PATH, body).await
+}
+
+pub async fn update(
+    client: &ApiClient,
+    id: uuid::Uuid,
+    body: &kima_api_types::profiles::UpdateProfile,
+) -> Result<Profile, ApiError> {
+    client.put(&profile_path(id), body).await
+}
+
+pub async fn delete(client: &ApiClient, id: uuid::Uuid) -> Result<serde_json::Value, ApiError> {
+    client.delete(&profile_path(id)).await
+}
+
 pub async fn list(client: &ApiClient) -> Result<ProfilesResponse, ApiError> {
     client.get(LIST_PATH).await
 }
@@ -28,6 +51,15 @@ mod tests {
     use crate::api::client::build_request;
     use kima_api_types::profiles::SwitchProfile;
     use vertigo::FetchMethod;
+
+    #[test]
+    fn management_paths_use_typed_ids_without_switch_suffix() {
+        let id = uuid::Uuid::nil();
+        assert_eq!(
+            profile_path(id),
+            "/api/profiles/00000000-0000-0000-0000-000000000000"
+        );
+    }
 
     #[test]
     fn typed_switch_has_the_profile_path_and_pin_ready_body() {

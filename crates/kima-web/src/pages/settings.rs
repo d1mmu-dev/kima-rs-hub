@@ -1,5 +1,17 @@
-//! `/settings`: the account slice — who you are and a password change. Everything else on the legacy
-//! Settings page is M10.
+//! `/settings`: account password, per-profile settings, profile management and app tokens.
+
+mod apps;
+mod profiles;
+
+const FIELD: &str = "w-full bg-white/5 text-white text-sm px-3 py-2 rounded-lg border border-white/10 outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-50";
+const BUTTON: &str = "inline-flex items-center justify-center rounded-lg border border-white/20 px-3 py-2 text-sm text-white hover:bg-white/10 aria-pressed:bg-brand/20 aria-pressed:border-brand disabled:opacity-50 disabled:cursor-not-allowed";
+
+fn message_view(message: Value<Option<String>>) -> DomNode {
+    message.render_value(|value| match value {
+        Some(text) => dom! { <p role="alert" class="text-sm text-danger-light">{text}</p> },
+        None => dom! { <span /> },
+    })
+}
 
 use kima_api_types::auth::{ChangePassword, ChangePasswordResponse, MeResponse};
 use vertigo::{DomNode, Value, bind, dom, get_driver};
@@ -31,7 +43,7 @@ pub fn render(ctx: &Ctx) -> DomNode {
         ctx.client.get::<MeResponse>("/api/auth/me").await
     }));
     let show_form = Value::new(false);
-    let signed_in = resource_view(me, |me: std::rc::Rc<MeResponse>| {
+    let signed_in = resource_view(me.clone(), |me: std::rc::Rc<MeResponse>| {
         let username = me.username.clone();
         let role = if crate::auth::is_admin(&me) {
             "Administrator"
@@ -44,7 +56,17 @@ pub fn render(ctx: &Ctx) -> DomNode {
             dom! { <span id="account-username" class="text-sm text-white">{username}</span> },
         )
     });
-    let password_row = show_form.render_value(bind!(ctx, show_form, |open: bool| {
+    let password_row = resource_view(
+        me,
+        bind!(ctx, show_form, |me: std::rc::Rc<MeResponse>| {
+            if !me
+                .profile
+                .as_ref()
+                .is_some_and(|p| p.is_main && profiles::can_manage(p.kind))
+            {
+                return dom! { <span /> };
+            }
+            show_form.render_value(bind!(ctx, show_form, |open: bool| {
         let (class, label) = if open {
             ("text-xs text-[var(--text-muted)] hover:text-white/70 transition-colors", "Cancel")
         } else {
@@ -69,8 +91,12 @@ pub fn render(ctx: &Ctx) -> DomNode {
                 {form}
             </div>
         }
-    }));
+        }))
+        }),
+    );
     let ai_row = podcast_ai_row(ctx);
+    let profile_section = profiles::render(ctx);
+    let apps_section = apps::render(ctx);
     dom! {
         <div class="min-h-screen bg-[var(--bg-primary)]">
             <header class="page-shell pt-8 pb-6">
@@ -104,6 +130,8 @@ pub fn render(ctx: &Ctx) -> DomNode {
                             </div>
                             <div class="border-t border-white/5 mt-8 mb-8"></div>
                         </section>
+                        {profile_section}
+                        {apps_section}
                     </div>
                 </div>
             </div>

@@ -3055,6 +3055,7 @@ dependencies = [
  "kima-api-types",
  "serde",
  "serde_json",
+ "uuid",
  "vertigo",
 ]
 

@@ -12,6 +12,9 @@ use crate::library::Track;
 pub struct Playlist {
     pub id: Uuid,
     pub user_id: Uuid,
+    /// Owner profile (D-242), absent on older servers; `userId` remains the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<Uuid>,
     pub mix_id: Option<Value>,
     pub name: String,
     pub is_public: bool,
@@ -42,6 +45,13 @@ pub struct ItemCount {
 pub struct PlaylistSummary {
     #[serde(flatten)]
     pub playlist: Playlist,
+    /// Same-account name, null for another account (D-242); absent before M-PROF.
+    #[serde(
+        default,
+        deserialize_with = "crate::profiles::present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub profile_name: Option<Option<String>>,
     pub user: PlaylistUser,
     pub track_count: i64,
     #[serde(rename = "_count")]

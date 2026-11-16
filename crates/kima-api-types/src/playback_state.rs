@@ -46,6 +46,9 @@ pub struct QueueItem {
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackState {
     pub user_id: Uuid,
+    /// Owner profile (D-242), absent before M-PROF; `userId` remains the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<Uuid>,
     pub playback_type: String,
     pub track_id: Option<String>,
     pub audiobook_id: Option<String>,

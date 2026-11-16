@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
-# Capture M-SYNC, M-STATS and M6 podcast wire fixtures from THIS checkout's server and a fresh
+# Capture M-SYNC, M-STATS, M6 and profiles wire fixtures from THIS checkout's server and a fresh
 # run-owned pgvector cluster. No caller database is accepted. Requires docker, ffmpeg, jq, curl,
 # psql, python3, git and cargo.
 # KIMA_CAPTURE_SET (required) names the fixture sets copied into the tree: a comma list of
-# msync, mstats, m6. Every capture runs (later ones depend on earlier state), but only the named
+# msync, mstats, m6, profiles. Profiles-only skips unrelated captures; other sets retain their
+# existing dependency chain. Only the named
 # sets are copied, so a run for one milestone never rewrites another's fixtures with new ids.
 set -euo pipefail
 if [[ -n "${DATABASE_URL:-}" || -n "${PGDATABASE:-}" ]]; then
   echo 'No external DATABASE_URL or PGDATABASE allowed; this script owns a fresh database.' >&2; exit 2
 fi
 if [[ "${1:-}" == --help ]]; then
-  echo 'KIMA_CAPTURE_SET=msync,mstats,m6 (any subset). No external DATABASE_URL or PGDATABASE allowed.'; exit 0
+  echo 'KIMA_CAPTURE_SET=msync,mstats,m6,profiles (any subset); --list prints targets without running. No external DATABASE_URL or PGDATABASE allowed.'; exit 0
 fi
-[[ $# == 0 ]] || { echo 'No arguments accepted' >&2; exit 2; }
+[[ $# == 0 || ( $# == 1 && "$1" == --list ) ]] || { echo 'Only --help or --list accepted' >&2; exit 2; }
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-for cmd in docker ffmpeg jq curl psql python3 git cargo; do command -v "$cmd" >/dev/null || { echo "Missing $cmd" >&2; exit 1; }; done
+
 msync_names=(me settings public_config library_removals playlist_create playlist_update playlists_list playlist_detail enrichment_rerun)
 mstats_names=(stats_response_s1 stats_hour stats_tracks stats_track_plays stats_region stats_false_starts stats_collapse stats_remove stats_ignore stats_restore)
 m6_names=(categories subscribe list list_ai_show detail episodes progress next next_end listening listening_ai_show
   charts discover_top discover_genre discover_genres for_you similar preview preview_followed preview_similar
   search search_discover recently_listened stats_spoken refresh refresh_all progress_clear ai_label_show
   ai_label_episode unsubscribe)
+profiles_names=(login me list create update switch me_switched settings settings_switched
+  playlist playlist_switched delete list_after_delete)
 copy=()
 IFS=',' read -r -a sets <<< "${KIMA_CAPTURE_SET:-}"
 for set in "${sets[@]}"; do
@@ -30,10 +33,14 @@ for set in "${sets[@]}"; do
     mstats) for n in "${mstats_names[@]}"; do copy+=("${n}_response.json"); done ;;
     m6) for n in "${m6_names[@]}"; do copy+=("podcasts_${n}_response.json"); done
         copy+=(podcasts_capture_manifest.json) ;;
-    *) echo "KIMA_CAPTURE_SET: unknown set '$set' (msync, mstats, m6)" >&2; exit 2 ;;
+    profiles) for n in "${profiles_names[@]}"; do copy+=("profiles_${n}_response.json"); done
+        copy+=(profiles_capture_manifest.json) ;;
+    *) echo "KIMA_CAPTURE_SET: unknown set '$set' (msync, mstats, m6, profiles)" >&2; exit 2 ;;
   esac
 done
-[[ ${#copy[@]} -gt 0 ]] || { echo 'Set KIMA_CAPTURE_SET (msync, mstats, m6; comma-separated)' >&2; exit 2; }
+[[ ${#copy[@]} -gt 0 ]] || { echo 'Set KIMA_CAPTURE_SET (msync, mstats, m6, profiles; comma-separated)' >&2; exit 2; }
+if [[ "${1:-}" == --list ]]; then printf '%s\n' "${copy[@]}"; exit 0; fi
+for cmd in docker ffmpeg jq curl psql python3 git cargo; do command -v "$cmd" >/dev/null || { echo "Missing $cmd" >&2; exit 1; }; done
 # Refuse before anything expensive when a fixture this run would overwrite has uncommitted
 # changes or exists untracked: either would be lost. A file absent from disk is not flagged.
 dirty=()
@@ -47,6 +54,7 @@ if [[ ${#dirty[@]} -gt 0 ]]; then
   printf '  %s\n' "${dirty[@]}" >&2
   exit 1
 fi
+umask 077
 run="$(date +%s)-$$"
 container_name="msync18-capture-${run}"
 tmp="$(mktemp -d "${TMPDIR:-$HOME/.hermes/cache/scratch}/msync18-capture.XXXXXXXX")"
@@ -118,6 +126,11 @@ register="$(curl --fail-with-body -sS -X POST -H 'Content-Type: application/json
 token="$(curl --fail-with-body -sS -X POST -H 'Content-Type: application/json' -d '{"username":"fixtureadmin","password":"fixture-pass-18"}' "$base/auth/login" | jq -er '.token')"
 request POST /onboarding/complete '{}' >/dev/null
 stage="$tmp/fixtures"; mkdir -p "$stage"
+if [[ ",${KIMA_CAPTURE_SET}," == *,profiles,* ]]; then
+  # Captures only real 2xx bodies. Tokens stay private; only documented secret fields redact.
+  source "$root/tools/capture-profile-fixtures.inc.sh"
+fi
+if [[ "$KIMA_CAPTURE_SET" != profiles ]]; then
 capture() { local name="$1" method="$2" path="$3" payload="${4:-}"; request "$method" "$path" "$payload" | jq -eS . > "$stage/${name}_response.json"; echo "$name $method $path" >&2; }
 capture me GET /auth/me
 capture settings GET /settings
@@ -169,6 +182,12 @@ capture stats_restore POST /stats/false-starts/restore "$(jq -nc --arg id "$seco
 # M6 podcasts (Task 19): real subscribe/refresh/preview flow against the loopback mock.
 # shellcheck source=tools/capture-podcast-fixtures.inc.sh
 source "$root/tools/capture-podcast-fixtures.inc.sh"
+fi
+# Validate the entire staged set before copying any file into the worktree.
+for f in "${copy[@]}"; do
+  [[ -s "$stage/$f" ]] || { echo "Missing staged fixture: $f" >&2; exit 1; }
+  jq -e . "$stage/$f" >/dev/null
+done
 for f in "${copy[@]}"; do
   cp "$stage/$f" "crates/kima-api-types/tests/fixtures/$f"
 done

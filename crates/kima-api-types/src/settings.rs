@@ -8,6 +8,9 @@ use uuid::Uuid;
 #[serde(rename_all = "camelCase")]
 pub struct UserSettings {
     pub user_id: Uuid,
+    /// Owner profile on M-PROF servers (D-242); `userId` remains the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<Uuid>,
     /// `original`, `high`, `medium` or `low`.
     pub playback_quality: String,
     pub wifi_only: bool,

@@ -81,7 +81,7 @@ pub struct UpdateProfile {
 }
 
 /// A field that is present, even as `null`, is `Some` (absent stays `None` by `default`).
-fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,

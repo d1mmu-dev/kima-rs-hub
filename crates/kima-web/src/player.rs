@@ -230,6 +230,8 @@ struct Inner {
     /// Start playing when the `<audio>` appears (true after a click, false when restoring a session).
     autoplay: Cell<bool>,
     audio: RefCell<Option<DomElementRef>>,
+    /// Retires deferred mount work on replacement or stop, even for the same track id.
+    audio_generation: Cell<u64>,
     ticker: RefCell<Option<DropResource>>,
     restored: Cell<bool>,
     /// Index whose `ended` was already handled, so a still-`ended` element is not advanced twice.
@@ -276,6 +278,7 @@ impl Player {
             duration: Value::new(0.0),
             autoplay: Cell::new(false),
             audio: RefCell::new(None),
+            audio_generation: Cell::new(0),
             ticker: RefCell::new(None),
             restored: Cell::new(false),
             ended_handled: Cell::new(None),
@@ -575,6 +578,9 @@ impl Player {
     /// Signed out: stop and forget the queue (the saved one stays on the server). Runs from a render
     /// callback, where vertigo forbids `Value::set`, so the reset is deferred.
     pub fn stop(&self) {
+        self.0
+            .audio_generation
+            .set(self.0.audio_generation.get().wrapping_add(1));
         self.0.restored.set(false);
         if let Some(audio) = self.0.audio.borrow().as_ref() {
             js! { #audio.pause() };
@@ -810,32 +816,39 @@ impl Player {
                 }
                 Some(item) => {
                     let token = me.0.session.current_token().unwrap_or_default();
-                    let mut element = dom_element! {
+                    let element = dom_element! {
                         <audio src={stream_url(&item.id, &token)} preload="auto" />
                     };
                     let autoplay = me.0.autoplay.get();
-                    if autoplay {
-                        element = element.attr("autoplay", "true");
-                    }
                     let audio = element.get_ref();
+                    let generation = me.0.audio_generation.get().wrapping_add(1);
+                    me.0.audio_generation.set(generation);
                     *me.0.audio.borrow_mut() = Some(audio.clone());
                     *me.0.audio_track.borrow_mut() = Some(item.id.clone());
                     *me.0.library_listen.borrow_mut() = LibraryListen::default();
                     me.arm_episode(Some(&item.id));
                     me.0.last_saved.set(NOT_SAVED);
-                    let volume = Self::read(&me.0.volume);
-                    audio
-                        .dom_access()
-                        .set("volume", JsJson::Number(JsJsonNumber(volume / 100.0)))
-                        .exec();
-                    if autoplay {
-                        // The `autoplay` attribute alone did not start playback in Chromium when it is
-                        // added right after `src`; ask explicitly once the element is in the document.
-                        get_driver().spawn(async move {
-                            get_driver().sleep(50).await;
+                    // Render has not mounted the element yet. Initialize only after it
+                    // returns, and before any playback (no native autoplay attribute).
+                    // A stopped/replaced element must never be accessed by this task.
+                    let mounted = me.clone();
+                    get_driver().spawn(async move {
+                        get_driver().sleep(50).await;
+                        if mounted.0.audio_generation.get() != generation
+                            || mounted.0.audio.borrow().as_ref() != Some(&audio)
+                            || mounted.0.session.current_token().as_deref() != Some(&token)
+                        {
+                            return;
+                        }
+                        let volume = Self::read(&mounted.0.volume);
+                        audio
+                            .dom_access()
+                            .set("volume", JsJson::Number(JsJsonNumber(volume / 100.0)))
+                            .exec();
+                        if autoplay && mounted.0.autoplay.get() {
                             js! { #audio.play() };
-                        });
-                    }
+                        }
+                    });
                     element.into()
                 }
             }))

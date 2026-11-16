@@ -37,21 +37,35 @@ for (let i = 0; i < 50; i++) {
 const page = targets.find((t) => t.type === 'page');
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((r) => (ws.onopen = r));
-let id = 0; const pending = new Map(); const errors = [];
-const contexts = new Map();
+let id = 0; const pending = new Map(); const errors = []; let audioStarts = [];
+// Each target has its own execution-context ids. Preserve target identity and
+// collect before navigation, including sibling and isolated-profile pages.
+const diagnosticTabs = new Set();
+const diagnostics = (tabId) => {
+  diagnosticTabs.add(tabId);
+  const contexts = new Map();
+  return (d) => {
+    if (d.method === 'Runtime.executionContextCreated') contexts.set(d.params.context.id, {origin:d.params.context.origin, name:d.params.context.name});
+    if (d.method === 'Runtime.exceptionThrown') {
+      const e = d.params.exceptionDetails;
+      errors.push({tabId, kind:'exception', text:e.text, description:e.exception?.description, properties:e.exception?.preview?.properties, context:contexts.get(e.executionContextId), stack:e.stackTrace});
+    }
+    if (d.method === 'Runtime.consoleAPICalled' && d.params.type === 'error') errors.push({tabId, kind:'console.error', text:d.params.args.map(a=>a.value ?? a.description).join(' '), context:contexts.get(d.params.executionContextId), stack:d.params.stackTrace});
+    if (d.method === 'Runtime.executionContextDestroyed') contexts.delete(d.params.executionContextId);
+    if (d.method === 'Runtime.executionContextsCleared') contexts.clear();
+  };
+};
+const collectMain = diagnostics(page.id);
 ws.onmessage = (m) => {
   const d = JSON.parse(m.data);
   if (d.id && pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); }
-  if (d.method === 'Runtime.executionContextCreated') contexts.set(d.params.context.id, {origin:d.params.context.origin, name:d.params.context.name});
-  if (d.method === 'Runtime.exceptionThrown') {
-    const e = d.params.exceptionDetails;
-    errors.push({kind:'exception', text:e.text, description:e.exception?.description, properties:e.exception?.preview?.properties, context:contexts.get(e.executionContextId), stack:e.stackTrace});
-  }
-  if (d.method === 'Runtime.consoleAPICalled' && d.params.type === 'error') errors.push({kind:'console.error', text:d.params.args.map((a) => a.value ?? a.description).join(' '), context:contexts.get(d.params.executionContextId), stack:d.params.stackTrace});
+  if (d.method === 'Runtime.bindingCalled' && d.params.name === '__reportAudioStart') audioStarts.push(JSON.parse(d.params.payload));
+  collectMain(d);
 };
 const send = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
 const ev = async (expr) => { const r = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }); if (r.result.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails)); return r.result.result.value; };
 await send('Runtime.enable'); await send('Page.enable');
+await send('Runtime.addBinding', {name:'__reportAudioStart'});
 // kima-web copies the legacy `body { text-transform: lowercase }`, which makes innerText lowercase. The checks
 // below compare the real text, so switch the transform off in every document this run opens.
 await send('Page.addScriptToEvaluateOnNewDocument', { source: `setInterval(()=>{if(document.documentElement&&!document.getElementById('e2e-no-transform')){const s=document.createElement('style');s.id='e2e-no-transform';s.textContent='*{text-transform:none!important}';document.documentElement.appendChild(s)}},20)` });
@@ -64,7 +78,7 @@ const apiCalls = (part) => ev(`performance.getEntriesByType('resource').filter((
 const button = (name) => ev(`(()=>{const b=document.querySelector('button[name=${name}]');if(!b)return false;b.click();return true})()`);
 const typeInto = (name, v) => ev(`(()=>{const i=document.querySelector('input[name=${name}]');i.value=${JSON.stringify(v)};i.dispatchEvent(new Event('input',{bubbles:true}))})()`);
 const login = async (pass) => { await setInput('username', USER); await setInput('password', pass); await ev(`document.querySelector('button[type=submit]').click()`); await sleep(2500); };
-const audio = () => ev(`(()=>{const a=document.querySelector('audio');return a?{src:a.currentSrc.replace(/token=.*/,'token=…'),paused:a.paused,t:a.currentTime,d:a.duration,rs:a.readyState,err:a.error&&a.error.code}:null})()`);
+const audio = () => ev(`(()=>{const a=document.querySelector('audio');return a?{src:a.currentSrc.replace(/token=.*/,'token=…'),paused:a.paused,volume:a.volume,t:a.currentTime,d:a.duration,rs:a.readyState,err:a.error&&a.error.code}:null})()`);
 const ctl = (label) => ev(`(()=>{const b=[...document.querySelectorAll('[role=group][aria-label="Playback controls"] button[aria-label=${JSON.stringify(label)}]')].find((b)=>b.offsetParent!==null);if(!b)return false;b.click();return true})()`);
 const results = []; const check = (name, ok, detail = '') => { results.push([ok, name, detail]); console.log(ok ? 'PASS' : 'FAIL', name, detail); };
 
@@ -177,8 +191,36 @@ const seeked = await audio();
 check('seek slider moves currentTime (served by HTTP range)', seeked.t >= 9.5, JSON.stringify(seeked));
 
 // next
+check('new audio starts at the UI default volume, not full volume', (await audio()).volume === 0.5);
+await ev(`(()=>{const s=document.querySelector('input[aria-label=Volume]');s.value='23';s.dispatchEvent(new Event('input',{bubbles:true}))})()`);
 check('next control exists', await ctl('Next track')); await sleep(2500);
 check('next plays the following track', /Song 1-3/.test(await text()) && (await audio()).t < 5);
+check('next track preserves actual audio volume', (await audio()).volume === 0.23);
+await clickText('button', 'Mute');
+await ctl('Next track'); await sleep(1200);
+check('next track remains actually muted', (await audio()).volume === 0);
+
+// Observe real play invocations, including detached elements. Burst queue
+// changes and sign-out must retire pending callbacks before they touch the DOM.
+audioStarts = [];
+await ev(`(()=>{const original=HTMLMediaElement.prototype.play;HTMLMediaElement.prototype.play=function(){window.__reportAudioStart(JSON.stringify({connected:this.isConnected,current:this===document.querySelector('audio'),volume:this.volume}));return original.call(this)}})()`);
+await ev(`(async()=>{const next=[...document.querySelectorAll('[aria-label="Next track"]')].find(b=>b.getClientRects().length);next.click();await new Promise(r=>setTimeout(r,10));next.click()})()`);
+await sleep(1200);
+const rapid = audioStarts.slice();
+check('rapid queue switches never play obsolete audio and retain mute', rapid.length > 0 && rapid.every(a=>a.connected && a.current && a.volume===0) && (await audio()).volume===0, JSON.stringify(rapid));
+await snapshot('muted-player');
+await clickText('button', 'Unmute');
+await rowClick('Song 1-3', 'button[title=Play]'); await sleep(1200);
+
+if (process.argv.includes('--audio-only')) {
+  audioStarts = []; const beforeStopErrors = errors.length;
+  await ev(`(async()=>{const next=[...document.querySelectorAll('[aria-label="Next track"]')].find(b=>b.getClientRects().length);next.click();await new Promise(r=>setTimeout(r,10));const s=[...document.querySelectorAll('summary[aria-label="Switch profile"]')].find(e=>e.getClientRects().length);s.closest('details').open=true;[...s.closest('details').querySelectorAll('button')].find(b=>b.textContent.trim()==='Sign out').click()})()`);
+  await sleep(500);
+  check('sign-out retires pending audio play', audioStarts.length===0 && !await ev(`!!document.querySelector('audio')`) && !errors.slice(beforeStopErrors).some(e=>e.text?.includes('Element not found')), JSON.stringify(audioStarts));
+  console.log('browser errors:', JSON.stringify(errors));
+  console.log(`${results.filter(r=>r[0]).length}/${results.length} passed`);
+  ws.close(); chrome.kill(); process.exit(results.every(r=>r[0]) ? 0 : 1);
+}
 
 // The backend keeps no in-track position for web saves: resume is scoped to the active profile.
 const positionKey = await ev(`(async()=>{
@@ -362,10 +404,11 @@ const connectPage = async (context) => {
   const sock = new WebSocket(list.find(t=>t.id===target.result.targetId).webSocketDebuggerUrl);
   await new Promise(r=>sock.onopen=r); let seq=0; const waiters=new Map();
   const statuses=[];
-  sock.onmessage=m=>{const d=JSON.parse(m.data);if(d.method==='Network.responseReceived' && d.params.response.url.includes('/api/'))statuses.push(d.params.response.status);if(d.id&&waiters.has(d.id)){waiters.get(d.id)(d);waiters.delete(d.id)}};
+  const collect = diagnostics(target.result.targetId);
+  sock.onmessage=m=>{const d=JSON.parse(m.data);collect(d);if(d.method==='Network.responseReceived' && d.params.response.url.includes('/api/'))statuses.push(d.params.response.status);if(d.id&&waiters.has(d.id)){waiters.get(d.id)(d);waiters.delete(d.id)}};
   const call=(method,params={})=>new Promise(r=>{const id=++seq;waiters.set(id,r);sock.send(JSON.stringify({id,method,params}))});
   const evalPage=async expression=>{const r=await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.result.exceptionDetails)throw Error('secondary page evaluation failed');return r.result.result.value};
-  await call('Page.enable'); await call('Network.enable');
+  await call('Runtime.enable'); await call('Page.enable'); await call('Network.enable');
   return {ev:evalPage, statuses, goto:async path=>{await call('Page.navigate',{url:BASE+path});await sleep(2500)}, close:async()=>{sock.close();await send('Target.closeTarget',{targetId:target.result.targetId})}};
 };
 const sibling = await connectPage();
@@ -398,6 +441,11 @@ await deletedTab.goto('/settings');
 check('profiles: deleted Kids next authenticated request returns 401, invalidates session and shows login', deletedTab.statuses.includes(401) && await deletedTab.ev(`(()=>{const s=JSON.parse(localStorage.getItem('kima-web.session') || 'null');return location.pathname==='/login' && (!s || localStorage.getItem('kima-web.session.invalid.'+s.generation)!==null)})()`));
 await deletedTab.close(); await browserSend('Target.disposeBrowserContext',{browserContextId:context}); browserSocket.close();
 
+check('diagnostics enabled on all three real tabs', diagnosticTabs.size === 3, String(diagnosticTabs.size));
+const extensionErrors = errors.filter(e=>e.context?.name==='Plasma Integration' || e.context?.origin?.startsWith('chrome-extension://'));
+const appErrors = errors.filter(e=>!extensionErrors.includes(e));
+check('all tabs have zero app-origin runtime errors', appErrors.length===0, JSON.stringify(appErrors));
+console.log('extension errors:', JSON.stringify(extensionErrors));
 console.log('browser errors:', JSON.stringify(errors));
 console.log(`${results.filter((r) => r[0]).length}/${results.length} passed`);
 ws.close(); chrome.kill();

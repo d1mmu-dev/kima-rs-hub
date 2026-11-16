@@ -227,8 +227,8 @@ struct Inner {
     playing: Value<bool>,
     position: Value<f64>,
     duration: Value<f64>,
-    /// Start playing when the `<audio>` appears (true after a click, false when restoring a session).
-    autoplay: Cell<bool>,
+    /// Playback intent is independent of sampled media state and mount timing.
+    intent: Cell<AudioIntent>,
     audio: RefCell<Option<DomElementRef>>,
     /// Retires deferred mount work on replacement or stop, even for the same track id.
     audio_generation: Cell<u64>,
@@ -263,6 +263,32 @@ struct Inner {
     sleep_open: Value<bool>,
 }
 
+/// Desired transport state and readiness belong to different transitions: a
+/// replacement invalidates readiness, never a newer pause or play instruction.
+#[derive(Clone, Copy, Default)]
+struct AudioIntent {
+    wants_play: bool,
+    initialized: bool,
+}
+
+impl AudioIntent {
+    fn request_play(&mut self) {
+        self.wants_play = true;
+    }
+    fn pause(&mut self) {
+        self.wants_play = false;
+    }
+    fn replace_audio(&mut self) {
+        self.initialized = false;
+    }
+    fn mounted(&mut self) {
+        self.initialized = true;
+    }
+    fn can_play(self) -> bool {
+        self.wants_play && self.initialized
+    }
+}
+
 #[derive(Clone)]
 pub struct Player(Rc<Inner>);
 
@@ -276,7 +302,7 @@ impl Player {
             playing: Value::new(false),
             position: Value::new(0.0),
             duration: Value::new(0.0),
-            autoplay: Cell::new(false),
+            intent: Cell::new(AudioIntent::default()),
             audio: RefCell::new(None),
             audio_generation: Cell::new(0),
             ticker: RefCell::new(None),
@@ -315,7 +341,7 @@ impl Player {
         }
         let start = start.min(queue.len() - 1);
         let before = self.current_item();
-        self.0.autoplay.set(true);
+        self.request_play();
         self.0.pending_seek.set(None);
         self.0.ended_handled.set(None);
         vertigo::transaction(|_| {
@@ -369,7 +395,7 @@ impl Player {
 
     fn go_to(&self, index: usize) {
         let before = self.current_item();
-        self.0.autoplay.set(true);
+        self.request_play();
         self.0.pending_seek.set(None);
         self.0.ended_handled.set(None);
         vertigo::transaction(|_| {
@@ -386,10 +412,7 @@ impl Player {
         if before.is_some() && before == self.current_item() {
             *self.0.library_listen.borrow_mut() = LibraryListen::default();
             self.seek(0.0);
-            if let Some(audio) = self.0.audio.borrow().clone() {
-                js! { #audio.play() };
-                self.0.playing.set(true);
-            }
+            self.play_initialized();
         }
     }
 
@@ -443,10 +466,7 @@ impl Player {
         if now >= deadline {
             self.0.sleep_deadline.set(None);
             self.0.sleep_left.set(None);
-            if let Some(audio) = self.0.audio.borrow().clone() {
-                js! { #audio.pause() };
-            }
-            self.0.playing.set(false);
+            self.pause();
         } else {
             let left = (deadline - now).div_ceil(1000);
             if Self::read(&self.0.sleep_left) != Some(left) {
@@ -463,15 +483,46 @@ impl Player {
     }
 
     pub fn toggle(&self) {
-        let Some(audio) = self.0.audio.borrow().clone() else {
-            return;
-        };
         if Self::read(&self.0.playing) {
-            js! { #audio.pause() };
-            self.0.playing.set(false);
+            self.pause();
         } else {
+            self.request_play();
+            self.play_initialized();
+        }
+    }
+
+    fn request_play(&self) {
+        let mut intent = self.0.intent.get();
+        intent.request_play();
+        self.0.intent.set(intent);
+        self.0.playing.set(true);
+    }
+
+    fn pause(&self) {
+        let mut intent = self.0.intent.get();
+        intent.pause();
+        self.0.intent.set(intent);
+        if intent.initialized
+            && let Some(audio) = self.0.audio.borrow().clone()
+        {
+            js! { #audio.pause() };
+        }
+        self.0.playing.set(false);
+    }
+
+    /// The only play invocation: all paths wait for this element's mount, then
+    /// initialize the latest volume before starting, including same-row replay.
+    fn play_initialized(&self) {
+        if !self.0.intent.get().can_play() {
+            return;
+        }
+        if let Some(audio) = self.0.audio.borrow().clone() {
+            let volume = Self::read(&self.0.volume) / 100.0;
+            audio
+                .dom_access()
+                .set("volume", JsJson::Number(JsJsonNumber(volume)))
+                .exec();
             js! { #audio.play() };
-            self.0.playing.set(true);
         }
     }
 
@@ -561,7 +612,7 @@ impl Player {
                     &queue[index].id,
                     queue[index].duration,
                 );
-                me.0.autoplay.set(false);
+                me.0.intent.set(AudioIntent::default());
                 me.0.pending_seek.set(resume);
                 vertigo::transaction(|_| {
                     me.0.queue.set(queue);
@@ -585,7 +636,7 @@ impl Player {
         if let Some(audio) = self.0.audio.borrow().as_ref() {
             js! { #audio.pause() };
         }
-        self.0.autoplay.set(false);
+        self.0.intent.set(AudioIntent::default());
         self.0.pending_seek.set(None);
         self.0.episode_marks.borrow_mut().clear();
         self.0.sleep_deadline.set(None);
@@ -629,7 +680,10 @@ impl Player {
             if duration > 0.0 {
                 self.0.duration.set(duration);
             }
-            self.0.playing.set(!paused && !ended);
+            // Do not overwrite pending start intent with an unstarted element.
+            if self.0.intent.get().initialized {
+                self.0.playing.set(!paused && !ended);
+            }
         });
         self.save_position(position);
         self.save_progress(position, duration, paused || ended, ended);
@@ -659,13 +713,16 @@ impl Player {
                 });
             }
         }
-        if ended && episode {
+        if ended && !self.0.intent.get().wants_play {
+            // A sleep/explicit pause must also fence end-of-track advancement.
+        } else if ended && episode {
             // An episode stops at its end: repeat applies to library tracks (D-215).
         } else if ended && Self::read(&self.0.repeat) == Repeat::One {
             // Loop this track: back to the start, play again.
             self.seek(0.0);
-            js! { #audio.play() };
-            self.0.playing.set(true);
+            if self.0.intent.get().wants_play {
+                self.play_initialized();
+            }
         } else if ended && self.0.ended_handled.get() != Some(index) {
             self.0.ended_handled.set(Some(index));
             self.next();
@@ -819,7 +876,9 @@ impl Player {
                     let element = dom_element! {
                         <audio src={stream_url(&item.id, &token)} preload="auto" />
                     };
-                    let autoplay = me.0.autoplay.get();
+                    let mut intent = me.0.intent.get();
+                    intent.replace_audio();
+                    me.0.intent.set(intent);
                     let audio = element.get_ref();
                     let generation = me.0.audio_generation.get().wrapping_add(1);
                     me.0.audio_generation.set(generation);
@@ -845,9 +904,10 @@ impl Player {
                             .dom_access()
                             .set("volume", JsJson::Number(JsJsonNumber(volume / 100.0)))
                             .exec();
-                        if autoplay && mounted.0.autoplay.get() {
-                            js! { #audio.play() };
-                        }
+                        let mut intent = mounted.0.intent.get();
+                        intent.mounted();
+                        mounted.0.intent.set(intent);
+                        mounted.play_initialized();
                     });
                     element.into()
                 }
@@ -1261,6 +1321,33 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_retires_pending_play_before_mount() {
+        let mut intent = AudioIntent::default();
+        intent.request_play();
+        intent.replace_audio();
+        intent.pause(); // Explicit pause and sleep expiry share this transition.
+        intent.mounted();
+        assert!(!intent.can_play());
+    }
+
+    #[test]
+    fn every_replay_waits_for_current_audio_initialization() {
+        let mut intent = AudioIntent::default();
+        intent.request_play();
+        intent.mounted();
+        assert!(intent.can_play());
+        intent.replace_audio();
+        intent.request_play(); // Same-row restart / toggle before mount callback.
+        assert!(!intent.can_play());
+        intent.mounted();
+        assert!(intent.can_play());
+        intent.pause();
+        assert!(!intent.can_play());
+        intent.request_play();
+        assert!(intent.can_play());
+    }
 
     #[test]
     fn library_listen_counts_only_continuous_playback_and_reports_once() {

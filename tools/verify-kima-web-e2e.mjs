@@ -11,7 +11,8 @@
 // The run changes the admin password to NEW_PASS (default secret34) through the Settings page and changes it
 // back at the end, so it can be repeated against the same stack. It creates and deletes the playlist
 // "E2E Playlist".
-// Chromium flags: --autoplay-policy=no-user-gesture-required --mute-audio (no audio device needed).
+// --standard-autoplay omits the autoplay override and sends a trusted CDP play gesture.
+// --mute-audio keeps the test silent; media volume and advancement remain observable.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 
@@ -25,7 +26,7 @@ const SSR = process.argv.includes('--ssr') || process.env.SSR === '1';
 const BASE = process.env.BASE || (SSR ? 'http://127.0.0.1:' + (process.env.KIMA_PORT || '3030') : 'http://127.0.0.1:4444');
 const MUSIC = process.env.MUSIC;
 const chrome = spawn(CHROME, ['--headless=new', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=' + PORT,
-  '--autoplay-policy=no-user-gesture-required', '--mute-audio', '--window-size=1100,800',
+  ...(process.argv.includes('--standard-autoplay') ? [] : ['--autoplay-policy=no-user-gesture-required']), '--mute-audio', '--window-size=1100,800',
   '--user-data-dir=' + fs.mkdtempSync(os.tmpdir() + '/kima-web-e2e-'), 'about:blank'], { stdio: 'ignore' });
 process.on('exit', () => chrome.kill());
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -171,7 +172,14 @@ const tracksText = await text();
 check('tracks listed', tracksText.includes('Song 1-1') && tracksText.includes('Song 2-3'));
 
 await ev(`window.__log=[];new MutationObserver(ms=>{for(const m of ms)for(const n of m.addedNodes)if(n.nodeName==='AUDIO'){window.__log.push('audio added');for(const e of ['play','playing','pause','canplay','ended','error'])n.addEventListener(e,()=>window.__log.push(e+' '+n.currentTime))}}).observe(document.body,{subtree:true,childList:true})`);
-check('play button exists on the Song 1-2 row', await rowClick('Song 1-2', 'button[title=Play]'));
+if (process.argv.includes('--standard-autoplay')) {
+  const point = await ev(`(()=>{const row=[...document.querySelectorAll('[data-track-row]')].find(r=>r.innerText.includes('Song 1-2'));const b=row.querySelector('button[title=Play]');b.scrollIntoView({block:'center'});const r=b.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`);
+  await send('Input.dispatchMouseEvent', {type:'mousePressed',button:'left',clickCount:1,...point});
+  await send('Input.dispatchMouseEvent', {type:'mouseReleased',button:'left',clickCount:1,...point});
+  check('standard autoplay policy receives a trusted playback gesture', await ev('navigator.userActivation.hasBeenActive'));
+} else {
+  check('play button exists on the Song 1-2 row', await rowClick('Song 1-2', 'button[title=Play]'));
+}
 await sleep(3500);
 console.log('audio events:', JSON.stringify(await ev('window.__log')));
 let a1 = await audio(); await sleep(1500); let a2 = await audio();
@@ -208,6 +216,35 @@ await ev(`(async()=>{const next=[...document.querySelectorAll('[aria-label="Next
 await sleep(1200);
 const rapid = audioStarts.slice();
 check('rapid queue switches never play obsolete audio and retain mute', rapid.length > 0 && rapid.every(a=>a.connected && a.current && a.volume===0) && (await audio()).volume===0, JSON.stringify(rapid));
+// Queue replacement followed by Pause must cancel the unmounted start intent.
+await rowClick('Song 1-2', 'button[title=Play]'); await sleep(300);
+audioStarts = [];
+await ev(`(async()=>{const b=l=>[...document.querySelectorAll('[aria-label="'+l+'"]')].find(b=>b.getClientRects().length);b('Next track').click();await new Promise(r=>setTimeout(r,10));b('Pause').click()})()`);
+await sleep(300);
+check('rapid next then pause cancels pending start', audioStarts.length===0 && (await audio()).paused, JSON.stringify(audioStarts));
+await ctl('Play'); await sleep(300);
+audioStarts = [];
+await rowClick('Song 1-2', 'button[title=Play]'); await sleep(300);
+audioStarts = [];
+await ev(`(async()=>{const b=[...document.querySelectorAll('[aria-label="Next track"]')].find(b=>b.getClientRects().length);b.click();await new Promise(r=>setTimeout(r,10));const row=[...document.querySelectorAll('[data-track-row]')].find(r=>r.innerText.includes('Song 1-3'));if(!row)throw new Error('same-track row missing');row.querySelector('button[title="Play"]').click()})()`);
+await sleep(300);
+check('muted next then same row play initializes volume before every play', audioStarts.length>0 && audioStarts.every(a=>a.connected&&a.current&&a.volume===0), JSON.stringify(audioStarts));
+// Deterministically hold only Vertigo's 50ms mount callback across a poll.
+// No production timing knob or longer production sleep is introduced.
+await rowClick('Song 1-2', 'button[title=Play]'); await sleep(300);
+await ev(`window.__realTimeout=window.setTimeout;window.setTimeout=(fn,ms,...args)=>window.__realTimeout(fn,ms===50?1200:ms,...args)`);
+audioStarts = [];
+await ev(`(async()=>{const b=l=>[...document.querySelectorAll('[aria-label="'+l+'"]')].find(b=>b.getClientRects().length);b('Next track').click();await new Promise(r=>setTimeout(r,10));b('Pause').click();b('Play').click()})()`);
+await sleep(1400);
+check('pending toggle resume waits for initialized muted current audio', audioStarts.length===1 && audioStarts.every(a=>a.connected&&a.current&&a.volume===0) && !(await audio()).paused, JSON.stringify(audioStarts));
+await rowClick('Song 1-2', 'button[title=Play]'); await sleep(1400);
+await clickText('button', 'Sleep timer'); await clickText('button', '15 minutes');
+audioStarts = [];
+await ctl('Next track');
+await ev(`window.__realNow=Date.now;Date.now=()=>window.__realNow()+16*60000`);
+await sleep(1500);
+check('sleep expiry cancels pending start across delayed mount', audioStarts.length===0 && (await audio()).paused && await ev(`!![...document.querySelectorAll('[aria-label="Sleep timer"]')].find(b=>b.getClientRects().length)`), JSON.stringify(audioStarts));
+await ev(`Date.now=window.__realNow;window.setTimeout=window.__realTimeout`);
 await snapshot('muted-player');
 await clickText('button', 'Unmute');
 await rowClick('Song 1-3', 'button[title=Play]'); await sleep(1200);
@@ -217,7 +254,10 @@ if (process.argv.includes('--audio-only')) {
   await ev(`(async()=>{const next=[...document.querySelectorAll('[aria-label="Next track"]')].find(b=>b.getClientRects().length);next.click();await new Promise(r=>setTimeout(r,10));const s=[...document.querySelectorAll('summary[aria-label="Switch profile"]')].find(e=>e.getClientRects().length);s.closest('details').open=true;[...s.closest('details').querySelectorAll('button')].find(b=>b.textContent.trim()==='Sign out').click()})()`);
   await sleep(500);
   check('sign-out retires pending audio play', audioStarts.length===0 && !await ev(`!!document.querySelector('audio')`) && !errors.slice(beforeStopErrors).some(e=>e.text?.includes('Element not found')), JSON.stringify(audioStarts));
-  console.log('browser errors:', JSON.stringify(errors));
+  const extensionErrors = errors.filter(e=>e.context?.name==='Plasma Integration' || e.context?.origin?.startsWith('chrome-extension://'));
+  const appErrors = errors.filter(e=>!extensionErrors.includes(e));
+  check('audio tab has zero app-origin runtime errors', appErrors.length===0, JSON.stringify(appErrors));
+  console.log('extension errors:', JSON.stringify(extensionErrors));
   console.log(`${results.filter(r=>r[0]).length}/${results.length} passed`);
   ws.close(); chrome.kill(); process.exit(results.every(r=>r[0]) ? 0 : 1);
 }

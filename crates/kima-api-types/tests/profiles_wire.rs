@@ -1,4 +1,4 @@
-//! Synthetic additive-key regression plus real captures (pending parent Docker capture).
+//! Synthetic additive-key regressions plus provenance-recorded real-server captures.
 use kima_api_types::auth::{LoginResponse, MeResponse};
 use kima_api_types::playlists::PlaylistDetail;
 use kima_api_types::profiles::{Profile, ProfilesResponse, SwitchResponse};
@@ -55,7 +55,6 @@ fn additive_playback_profile_id_survives_dto_round_trip() {
 }
 
 #[test]
-#[ignore = "parent must run KIMA_CAPTURE_SET=profiles tools/capture-api-fixtures.sh first"]
 fn captured_profiles_round_trip_and_legacy_additive_contract() {
     let login = fixture("profiles_login");
     let me = fixture("profiles_me");

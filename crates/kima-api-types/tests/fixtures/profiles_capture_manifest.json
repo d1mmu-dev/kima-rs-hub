@@ -1,0 +1,101 @@
+{
+  "captureSet": "profiles",
+  "conditions": [
+    "Fresh run-owned database; synthetic account and empty playlists",
+    "Main profile then standard profile (created as kids, updated before switch)",
+    "Main settings default; switched settings wifiOnly=true; main deletes sibling"
+  ],
+  "preservation": "All other response values, including dynamic UUIDs and timestamps, are unchanged",
+  "redactions": {
+    "fields": [
+      "token",
+      "refreshToken"
+    ],
+    "files": [
+      "profiles_login_response.json",
+      "profiles_switch_response.json"
+    ],
+    "replacement": "[REDACTED]"
+  },
+  "routes": [
+    {
+      "file": "profiles_login_response.json",
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200
+    },
+    {
+      "file": "profiles_me_response.json",
+      "method": "GET",
+      "path": "/auth/me",
+      "status": 200
+    },
+    {
+      "file": "profiles_create_response.json",
+      "method": "POST",
+      "path": "/profiles",
+      "status": 201
+    },
+    {
+      "file": "profiles_update_response.json",
+      "method": "PUT",
+      "path": "/profiles/01a1e4af-192d-76a2-a7ec-d35a4e082935",
+      "status": 200
+    },
+    {
+      "file": "profiles_list_response.json",
+      "method": "GET",
+      "path": "/profiles",
+      "status": 200
+    },
+    {
+      "file": "profiles_settings_response.json",
+      "method": "GET",
+      "path": "/settings",
+      "status": 200
+    },
+    {
+      "file": "profiles_playlist_response.json",
+      "method": "GET",
+      "path": "/playlists/01a1e4af-198d-77e6-a12d-cadf72b4f90f",
+      "status": 200
+    },
+    {
+      "file": "profiles_switch_response.json",
+      "method": "POST",
+      "path": "/profiles/01a1e4af-192d-76a2-a7ec-d35a4e082935/switch",
+      "status": 200
+    },
+    {
+      "file": "profiles_me_switched_response.json",
+      "method": "GET",
+      "path": "/auth/me",
+      "status": 200
+    },
+    {
+      "file": "profiles_settings_switched_response.json",
+      "method": "GET",
+      "path": "/settings",
+      "status": 200
+    },
+    {
+      "file": "profiles_playlist_switched_response.json",
+      "method": "GET",
+      "path": "/playlists/01a1e4af-1a17-7693-899b-906165d3121f",
+      "status": 200
+    },
+    {
+      "file": "profiles_delete_response.json",
+      "method": "DELETE",
+      "path": "/profiles/01a1e4af-192d-76a2-a7ec-d35a4e082935",
+      "status": 200
+    },
+    {
+      "file": "profiles_list_after_delete_response.json",
+      "method": "GET",
+      "path": "/profiles",
+      "status": 200
+    }
+  ],
+  "sourceCommit": "2e051814872bfcd09d36331300e98f157bb25f4d"
+}

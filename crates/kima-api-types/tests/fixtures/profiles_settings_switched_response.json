@@ -1,0 +1,12 @@
+{
+  "hasListenbrainzToken": false,
+  "liveSharingAvailable": false,
+  "maxCacheSizeMb": 10240,
+  "offlineEnabled": false,
+  "playbackQuality": "original",
+  "podcastAiContent": "hide",
+  "profileId": "01a1e4af-192d-76a2-a7ec-d35a4e082935",
+  "shareLiveListening": true,
+  "userId": "01a1e4af-1891-7310-a736-f5596631b53a",
+  "wifiOnly": true
+}

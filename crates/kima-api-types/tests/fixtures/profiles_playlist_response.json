@@ -1,0 +1,27 @@
+{
+  "_count": {
+    "items": 0
+  },
+  "createdAt": "2026-11-16T14:07:23.022125Z",
+  "id": "01a1e4af-198d-77e6-a12d-cadf72b4f90f",
+  "isHidden": false,
+  "isOwner": true,
+  "isPublic": false,
+  "items": [],
+  "mergedItems": [],
+  "mixId": null,
+  "name": "Main fixture",
+  "pendingCount": 0,
+  "pendingTracks": [],
+  "profileId": "01a1e4af-1891-7310-a736-f5596631b53a",
+  "profileName": "fixtureadmin",
+  "reverseOrder": false,
+  "spotifyPlaylistId": null,
+  "spotifyPlaylistUrl": null,
+  "trackCount": 0,
+  "updatedAt": "2026-11-16T14:07:23.022125Z",
+  "user": {
+    "username": "fixtureadmin"
+  },
+  "userId": "01a1e4af-1891-7310-a736-f5596631b53a"
+}

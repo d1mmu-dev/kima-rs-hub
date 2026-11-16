@@ -1,0 +1,18 @@
+{
+  "profile": {
+    "avatar": null,
+    "createdAt": "2026-11-16T14:07:22.770531Z",
+    "id": "01a1e4af-1891-7310-a736-f5596631b53a",
+    "isMain": true,
+    "kind": "main",
+    "name": "fixtureadmin"
+  },
+  "refreshToken": "[REDACTED]",
+  "token": "[REDACTED]",
+  "user": {
+    "id": "01a1e4af-1891-7310-a736-f5596631b53a",
+    "onboardingComplete": true,
+    "role": "admin",
+    "username": "fixtureadmin"
+  }
+}

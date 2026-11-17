@@ -35,8 +35,18 @@ The native text call still verifies its compiled model/tokenizer pins and uses T
 
 After separate authorization and per-artifact rights approval:
 
-1. Prepare already-licensed local music exports, cached tokenizer and the pinned analyzer's
-   Python dependencies in a private environment. No provisioning command is supplied here.
+1. Prepare already-licensed local music exports, a local `roberta-base` tokenizer directory and
+   the pinned analyzer's Python dependencies in a private environment. No provisioning command
+   is supplied here. Supply a **trusted tokenizer manifest** from outside the repository:
+   JSON `{"repository":"roberta-base","revision":"<40-hex commit>","files":{"<name>":"<sha256>"}}`.
+   The generator requires it to equal the revision and per-file SHA-256 values that the pinned
+   upstream `services/audio-analyzer-clap/Dockerfile` declares (read with `git show` at the pin;
+   nothing is hard-coded or derived from downloaded bytes), verifies every listed file
+   (no-follow, regular, bounded) before use, copies only the verified bytes into a private
+   offline Hugging Face cache under the temporary directory (`HF_HOME`/`HF_HUB_CACHE`, offline
+   flags set before the analyzer imports transformers), re-verifies that cache after inference
+   and records the identity as `tokenizer` in the reference output. `from_pretrained('roberta-base')`
+   therefore never resolves by name against a network or an ambient cache.
 2. Prepare a private JSON audio-list of **20 distinct real recordings** as objects with `path`
    and nonempty `license`. Use explicitly authorized files, never a scan of the owner's library.
 3. Run the reference generator explicitly:
@@ -45,6 +55,8 @@ After separate authorization and per-artifact rights approval:
    python3 tools/vibe-zero-shot-real-reference.py \
      --upstream <full-history-clone> --model-dir <private-music-model-dir> \
      --audio-list <private-20-audio-list.json> --output <private-reference.json> \
+     --tokenizer-dir <private-roberta-base-dir> \
+     --tokenizer-manifest <trusted-tokenizer-manifest.json> \
      --licensed-private-use-confirmed
    ```
 
@@ -57,13 +69,16 @@ After separate authorization and per-artifact rights approval:
    ```sh
    KIMA_CLAP_MODEL_DIR=<private-music-model-dir> \
    KIMA_ZERO_SHOT_REFERENCE=<private-reference.json> \
+   KIMA_ZERO_SHOT_TOKENIZER_MANIFEST=<trusted-tokenizer-manifest.json> \
    KIMA_ZERO_SHOT_LICENSED_PRIVATE_USE=1 \
    cargo test -j2 -p kima-ident --test readings_real \
      real_music_readings_match_upstream_python_on_twenty_tracks -- --ignored --exact
    ```
 
 The harness fails, rather than skips/passes, on missing input, unsupported native checkpoint,
-wrong pin/source, other than 20 distinct audio hashes, unlicensed input, malformed/non-unit
+wrong pin/source, a recorded tokenizer identity that differs from the trusted external manifest
+(or a manifest without a 40-hex revision and SHA-256 per file), a native text tokenizer whose
+pinned SHA-256 differs from the manifest's `tokenizer.json`, other than 20 distinct audio hashes, unlicensed input, malformed/non-unit
 reference vectors, changed audio or native inference failure. It embeds the actual 24 prompts
 with the verified native text provider and compares all four readings to the actual Python
 analyzer values with **absolute tolerance 1e-3**. Audio/reference reads reject final-component

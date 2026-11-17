@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """PRIVATE, opt-in real reference. Requires already licensed/local music exports and Python dependencies.
 Never downloads/converts models. Audio list: JSON array of exactly 20 {path, license} objects.
+Tokenizer: a local roberta-base directory plus an externally supplied trusted manifest
+{"repository", "revision", "files": {name: sha256}}; it must equal the revision and file
+SHA-256 values the pinned upstream Dockerfile declares, every file is verified before use and
+only the verified bytes are loaded (from a private offline cache), never resolved by name.
 """
 import argparse
 import hashlib
@@ -8,6 +12,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
@@ -32,12 +37,75 @@ def digest(path, limit):
             h.update(chunk)
         return h.hexdigest()
 
+TOKENIZER_REPOSITORY = 'roberta-base'
+HEX40 = re.compile(r'[0-9a-f]{40}')
+HEX64 = re.compile(r'[0-9a-f]{64}')
+BASENAME = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*')
+
+def read_small(path, limit):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(fd, 'rb') as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            raise ValueError('expected bounded regular file')
+        data = f.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError('file exceeds limit')
+        return data
+
+def upstream_tokenizer_pins(dockerfile):
+    """Revision and per-file SHA-256 the pinned upstream image bakes into its offline cache."""
+    revisions = set(re.findall(r'huggingface\.co/roberta-base/resolve/([0-9a-f]{40})', dockerfile))
+    files = {name: sha for sha, name in
+             re.findall(r"echo '([0-9a-f]{64})  '\"\$RS\"'/([A-Za-z0-9_.-]+)'", dockerfile)}
+    assert len(revisions) == 1 and files, 'pinned Dockerfile tokenizer pins not found'
+    return dict(repository=TOKENIZER_REPOSITORY, revision=revisions.pop(), files=files)
+
+def load_tokenizer_manifest(path):
+    manifest = json.loads(read_small(path, 1_000_000))
+    assert isinstance(manifest, dict) and set(manifest) == {'repository', 'revision', 'files'}, \
+        'tokenizer manifest must have exactly repository, revision, files'
+    assert manifest['repository'] == TOKENIZER_REPOSITORY
+    assert isinstance(manifest['revision'], str) and HEX40.fullmatch(manifest['revision'])
+    files = manifest['files']
+    assert isinstance(files, dict) and files, 'tokenizer manifest lists no files'
+    for name, sha in files.items():
+        assert BASENAME.fullmatch(name) and name not in ('.', '..'), name
+        assert isinstance(sha, str) and HEX64.fullmatch(sha), name
+    return manifest
+
+def stage_tokenizer(manifest, source_dir, cache_root):
+    """Copies verified bytes into a private offline Hugging Face cache; returns its HF_HOME."""
+    source = Path(source_dir).resolve(strict=True)
+    home = Path(cache_root, 'hf')
+    repo = home / 'hub' / f'models--{TOKENIZER_REPOSITORY}'
+    snapshot = repo / 'snapshots' / manifest['revision']
+    snapshot.mkdir(parents=True)
+    (repo / 'refs').mkdir()
+    (repo / 'refs' / 'main').write_text(manifest['revision'])
+    for name, expected in sorted(manifest['files'].items()):
+        data = read_small(source / name, 64_000_000)
+        assert hashlib.sha256(data).hexdigest() == expected, f'tokenizer {name} SHA-256 mismatch'
+        fd = os.open(snapshot / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as f:
+            f.write(data)
+    return home
+
+def verify_staged(manifest, home):
+    snapshot = home / 'hub' / f'models--{TOKENIZER_REPOSITORY}' / 'snapshots' / manifest['revision']
+    assert sorted(os.listdir(snapshot)) == sorted(manifest['files'])
+    for name, expected in manifest['files'].items():
+        assert hashlib.sha256(read_small(snapshot / name, 64_000_000)).hexdigest() == expected
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--upstream', required=True)
     p.add_argument('--model-dir', required=True)
     p.add_argument('--audio-list', required=True)
     p.add_argument('--output', required=True)
+    p.add_argument('--tokenizer-dir', required=True, help='local roberta-base tokenizer files')
+    p.add_argument('--tokenizer-manifest', required=True,
+                   help='trusted external JSON: repository, revision, files {name: sha256}')
     p.add_argument('--licensed-private-use-confirmed', action='store_true', required=True)
     args = p.parse_args()
     model = Path(args.model_dir).resolve(strict=True)
@@ -48,17 +116,24 @@ def main():
     assert all(x['license'].strip() for x in tracks)
     out = Path(args.output)
     assert not out.exists(), 'refusing to overwrite a private reference'
-    env = {'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
-           'CLAP_ONNX_MODEL_PATH': str(model / 'music_audio.onnx'),
-           'CLAP_ONNX_TEXT_MODEL_PATH': str(model / 'music_text.onnx')}
-    os.environ.update(env)
     def git(*cmd):
         return subprocess.check_output(['git', '-C', args.upstream, *cmd])
     prefix = 'services/audio-analyzer-clap/'
     source = git('show', f'{PIN}:{prefix}analyzer.py')
+    tokenizer = load_tokenizer_manifest(args.tokenizer_manifest)
+    expected_tokenizer = upstream_tokenizer_pins(git('show', f'{PIN}:{prefix}Dockerfile').decode())
+    assert tokenizer == expected_tokenizer, 'tokenizer manifest differs from the pinned upstream image'
+    for key in ('TRANSFORMERS_CACHE', 'HF_HUB_CACHE', 'HUGGINGFACE_HUB_CACHE', 'HF_ENDPOINT'):
+        os.environ.pop(key, None)
     # Use the exact pinned Python implementation even when the source clone is checked out elsewhere.
     # Only GPL source code is copied; no weights, audio or generated derivatives enter the repo.
     with tempfile.TemporaryDirectory(prefix='kima-zero-shot-reference-') as td:
+        hf_home = stage_tokenizer(tokenizer, args.tokenizer_dir, td)
+        # Set before the analyzer imports transformers/huggingface_hub: offline, private cache only.
+        os.environ.update({'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
+                           'HF_HOME': str(hf_home), 'HF_HUB_CACHE': str(hf_home / 'hub'),
+                           'CLAP_ONNX_MODEL_PATH': str(model / 'music_audio.onnx'),
+                           'CLAP_ONNX_TEXT_MODEL_PATH': str(model / 'music_text.onnx')})
         for raw in git('ls-tree', '-r', '--name-only', PIN, '--', prefix).decode().splitlines():
             relative = raw.removeprefix(prefix)
             if '/' not in relative and relative.endswith('.py'):
@@ -76,8 +151,9 @@ def main():
             results.append(dict(path=str(path), sha256=sha, license=item['license'],
                 audio_vector=vector.tolist(), expected=[analyzer.detect_vocals(vector),
                 analyzer.detect_acousticness(vector), valence, arousal]))
+        verify_staged(tokenizer, hf_home)
     result = dict(upstream=PIN, analyzer_sha256=hashlib.sha256(source).hexdigest(),
-        models=PINS, tracks=results)
+        models=PINS, tokenizer=tokenizer, tracks=results)
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, 'w') as f:
         json.dump(result, f, indent=2)

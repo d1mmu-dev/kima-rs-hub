@@ -139,23 +139,10 @@ async fn map(
         .await
         .map_err(|e| failure(ERROR, e))?
         .map_err(|e| failure(ERROR, e))?;
-    let accepts_gzip = headers
-        .get_all(header::ACCEPT_ENCODING)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .any(|value| {
-            value.split(',').any(|encoding| {
-                let mut parts = encoding.trim().split(';');
-                parts
-                    .next()
-                    .is_some_and(|name| name.trim().eq_ignore_ascii_case("gzip"))
-                    && !parts.any(|p| {
-                        p.trim()
-                            .strip_prefix("q=")
-                            .is_some_and(|q| q.parse::<f32>().map_or(true, |n| n <= 0.0))
-                    })
-            })
-        });
+    let accepts_gzip = match super::vibe_encoding::gzip(&headers) {
+        Ok(gzip) => gzip,
+        Err(status) => return Ok((status, Json(serde_json::json!({"error": if status == StatusCode::NOT_ACCEPTABLE { "No acceptable map encoding" } else { "Invalid Accept-Encoding" }}))).into_response()),
+    };
     let body = if accepts_gzip {
         state
             .vibe_map_cache

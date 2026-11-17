@@ -26,6 +26,7 @@ mod stubs;
 mod system;
 mod system_settings;
 mod vibe;
+mod vibe_encoding;
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()

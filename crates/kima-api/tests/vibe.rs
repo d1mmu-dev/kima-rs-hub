@@ -1,6 +1,35 @@
 //! M5 Task 13: real-router contract tests; all vectors/heads are synthetic.
 mod common;
 
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn map_negotiates_case_insensitive_quality_wildcard_and_identity(pool: kima_db::PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "encoding").await;
+    let srv = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    for (value, status, gzip) in [
+        ("gzip;Q=0,*;q=1,identity;q=0", 406, false),
+        ("*;q=1,identity;q=0", 200, true),
+        ("gzip;q=0,identity;q=0", 406, false),
+        ("br,identity;q=0", 406, false),
+        ("gzip;q=bogus", 400, false),
+        ("gzip;q=1.1", 400, false),
+        ("GZip; Q=0.5", 200, true),
+        ("identity", 200, false),
+    ] {
+        let res = srv
+            .get("/api/vibe/map")
+            .authorization_bearer(&token)
+            .add_header("accept-encoding", value)
+            .await;
+        assert_eq!(res.status_code().as_u16(), status, "{value}");
+        assert_eq!(
+            res.headers().get("content-encoding").is_some(),
+            gzip,
+            "{value}"
+        );
+    }
+}
+
 use axum_test::TestServer;
 use kima_db::PgPool;
 use serde_json::{Value, json};

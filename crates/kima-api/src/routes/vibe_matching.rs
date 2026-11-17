@@ -212,18 +212,74 @@ pub async fn alchemy(
     .into_response())
 }
 
+/// StringNumericLiteral, not parseFloat: signed radix prefixes and Rust's `inf` are invalid.
+/// Callers must apply JavaScript truthiness *before* coercion (empty string vs whitespace).
+fn string_number(s: &str) -> f64 {
+    let s = s.trim_matches(kima_vibe::ecmascript_whitespace);
+    if s.is_empty() {
+        return 0.0;
+    }
+    let radix = match s.as_bytes().get(..2) {
+        Some(b"0x" | b"0X") => Some(16),
+        Some(b"0o" | b"0O") => Some(8),
+        Some(b"0b" | b"0B") => Some(2),
+        _ => None,
+    };
+    if let Some(radix) = radix {
+        let digits: Option<Vec<u32>> = s[2..].chars().map(|c| c.to_digit(radix)).collect();
+        let Some(digits) = digits.filter(|d| !d.is_empty()) else {
+            return f64::NAN;
+        };
+        // Power-of-two radix integers round once to binary64, including ties-to-even.
+        // Retain the leading 53 bits plus guard/sticky instead of repeatedly rounding.
+        let width = radix.trailing_zeros();
+        let bits = digits
+            .iter()
+            .flat_map(|d| (0..width).rev().map(move |b| (d >> b) & 1));
+        let mut significant = bits.skip_while(|b| *b == 0);
+        let mut mantissa = 0_u64;
+        let mut count = 0_usize;
+        let mut guard = false;
+        let mut sticky = false;
+        for bit in significant.by_ref() {
+            if count < 53 {
+                mantissa = (mantissa << 1) | u64::from(bit);
+            } else if count == 53 {
+                guard = bit != 0;
+            } else {
+                sticky |= bit != 0;
+            }
+            count += 1;
+        }
+        if guard && (sticky || mantissa & 1 != 0) {
+            mantissa += 1;
+        }
+        if count > 1024 {
+            return f64::INFINITY;
+        }
+        return mantissa as f64 * 2_f64.powi(count.saturating_sub(53) as i32);
+    }
+    if matches!(s, "Infinity" | "+Infinity") {
+        return f64::INFINITY;
+    }
+    if s == "-Infinity" {
+        return f64::NEG_INFINITY;
+    }
+    // Rust accepts `inf`, `infinity` and case variants that ECMAScript does not.
+    if !s
+        .bytes()
+        .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'e' | b'E' | b'+' | b'-'))
+    {
+        return f64::NAN;
+    }
+    s.parse().unwrap_or(f64::NAN)
+}
+
 fn path_length(v: Option<&Value>) -> Option<usize> {
     let v = v.filter(|v| truthy(v))?;
     let n = match v {
         Value::Number(n) => n.as_f64(),
-        Value::String(s) => {
-            let s = s.trim_matches(kima_vibe::ecmascript_whitespace);
-            if s.is_empty() {
-                Some(0.0)
-            } else {
-                s.parse::<f64>().ok()
-            }
-        }
+        Value::String(s) => Some(string_number(s)),
         Value::Bool(b) => Some(u8::from(*b) as f64),
         _ => None,
     }?;
@@ -323,4 +379,42 @@ pub async fn song_path(
         },
     })
     .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ecmascript_string_number_boundaries() {
+        for (s, expected) in [
+            ("0x10", 16.0),
+            ("0b1000", 8.0),
+            ("0o12", 10.0),
+            ("\u{feff}+1.2e1\u{2029}", 12.0),
+            ("", 0.0),
+            ("Infinity", f64::INFINITY),
+            ("+Infinity", f64::INFINITY),
+            ("-Infinity", f64::NEG_INFINITY),
+            ("0x20000000000001", 9007199254740992.0),
+            ("0x20000000000003", 9007199254740996.0),
+        ] {
+            assert_eq!(string_number(s), expected, "{s:?}");
+        }
+        assert!(string_number("-0").is_sign_negative());
+        assert_eq!(
+            string_number(&format!("0x1{}", "0".repeat(256))),
+            f64::INFINITY
+        );
+        for s in [
+            "NaN", "inf", "infinity", "INFINITY", "+0x10", "-0b10", "0o8", "0x", "1_0", "1junk",
+            "\u{85}8",
+        ] {
+            assert!(string_number(s).is_nan(), "{s:?}");
+        }
+        assert_eq!(path_length(Some(&json!(""))), None);
+        assert_eq!(path_length(Some(&json!(" "))), Some(5));
+        assert_eq!(path_length(Some(&json!(0))), None);
+        assert_eq!(path_length(Some(&json!("-0"))), Some(5));
+    }
 }

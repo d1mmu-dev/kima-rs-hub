@@ -35,6 +35,18 @@ fn searchable() -> String {
     )
 }
 
+/// Shared with the opt-in real-recall harness: raw ANN, with no exact fallback.
+/// Both statements bind the already normalized vector ($1) and result limit ($2).
+pub fn measurement_sql() -> (String, String) {
+    let base = searchable();
+    (
+        format!("{base} ORDER BY (t.embedding <=> $1::real[]::vector) + 0,t.id LIMIT $2"),
+        format!(
+            "WITH nearest AS MATERIALIZED ({base} ORDER BY t.embedding <=> $1::real[]::vector LIMIT $2) SELECT * FROM nearest ORDER BY distance + 0,id"
+        ),
+    )
+}
+
 pub async fn search_tracks_by_embedding(
     pool: &PgPool,
     vector: &[f32],
@@ -60,14 +72,16 @@ pub async fn search_tracks_by_embedding(
     let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {}", *ELIGIBLE))
         .fetch_one(&mut *tx)
         .await?;
-    let base = searchable();
-    let exact = format!("{base} ORDER BY (t.embedding <=> $1::real[]::vector) + 0,t.id LIMIT $2");
+    let (exact, ann) = measurement_sql();
     let indexed = count as u64 > exact_max;
     let mut rows = if indexed {
         sqlx::query("SELECT set_config('hnsw.ef_search',$1,true),set_config('hnsw.iterative_scan','relaxed_order',true),set_config('hnsw.max_scan_tuples','40000',true)")
             .bind(ef_for_limit(limit as usize).to_string()).execute(&mut *tx).await?;
-        sqlx::query_as::<_,SearchTrack>(&format!("WITH nearest AS MATERIALIZED ({base} ORDER BY t.embedding <=> $1::real[]::vector LIMIT $2) SELECT * FROM nearest ORDER BY distance + 0,id"))
-            .bind(vector).bind(limit).fetch_all(&mut *tx).await?
+        sqlx::query_as::<_, SearchTrack>(&ann)
+            .bind(vector)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?
     } else {
         Vec::new()
     };

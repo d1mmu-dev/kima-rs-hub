@@ -96,11 +96,21 @@ async fn text_search_limits_shape_no_cutoff_and_errors(pool: PgPool) {
         (json!(0), 20),
         (json!(-9), 1),
         (json!("3junk"), 3),
+        (json!("\u{feff}3junk"), 3),
+        (json!("\u{feff}+3"), 3),
+        (json!("\u{feff}-3"), 1),
+        (json!("\u{0085}3"), 20),
+        (
+            json!(
+                "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}3tail"
+            ),
+            3,
+        ),
     ] {
         let res = srv
             .post("/api/vibe/search")
             .authorization_bearer(&token)
-            .json(&json!({"query":"  rain  ","limit":limit}))
+            .json(&json!({"query":"\u{feff}  rain  \u{feff}","limit":limit}))
             .await;
         res.assert_status_ok();
         let data: Value = res.json();
@@ -167,10 +177,15 @@ async fn text_search_validates_query_and_reports_real_model_unavailable(pool: Pg
         json!(null),
         json!(7),
         json!(" x "),
+        json!("\u{feff}a\u{feff}"),
         json!(""),
         json!("a".repeat(501)),
+        json!("😀".repeat(251)),
     ] {
-        let message = if query.as_str().is_some_and(|s| s.len() > 500) {
+        let message = if query
+            .as_str()
+            .is_some_and(|s| s.encode_utf16().count() > 500)
+        {
             "Query must be at most 500 characters"
         } else {
             "Query must be at least 2 characters"
@@ -183,16 +198,23 @@ async fn text_search_validates_query_and_reports_real_model_unavailable(pool: Pg
         res.assert_status_bad_request();
         assert_eq!(res.json::<Value>(), json!({"error":message}));
     }
-    let res = srv
-        .post("/api/vibe/search")
-        .authorization_bearer(&token)
-        .json(&json!({"query":"rain"}))
-        .await;
-    res.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        res.json::<Value>(),
-        json!({"error":"Text embedding service unavailable","message":"The CLAP text model is not available"})
-    );
+    for query in [
+        "rain".to_owned(),
+        "😀".into(),
+        "\u{0085}a\u{0085}".into(),
+        "😀".repeat(250),
+    ] {
+        let res = srv
+            .post("/api/vibe/search")
+            .authorization_bearer(&token)
+            .json(&json!({"query":query}))
+            .await;
+        res.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            res.json::<Value>(),
+            json!({"error":"Text embedding service unavailable","message":"The CLAP text model is not available"})
+        );
+    }
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

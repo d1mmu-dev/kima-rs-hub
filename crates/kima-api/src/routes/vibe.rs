@@ -30,7 +30,12 @@ async fn search(
         .get("query")
         .and_then(|q| q.as_str())
         .unwrap_or_default();
-    if query.trim().encode_utf16().count() < 2 {
+    if query
+        .trim_matches(ecmascript_whitespace)
+        .encode_utf16()
+        .count()
+        < 2
+    {
         return Err(ApiError::BadRequest(
             "Query must be at least 2 characters".into(),
         ));
@@ -41,7 +46,7 @@ async fn search(
         ));
     }
     let ctx = state.ident_ctx();
-    let vector = match embedding::vibe_embed_text(&ctx,query.trim(),state.vibe_text_embedder.as_ref()).await {
+    let vector = match embedding::vibe_embed_text(&ctx,query.trim_matches(ecmascript_whitespace),state.vibe_text_embedder.as_ref()).await {
         Ok(v) => v,
         Err(embedding::TextEmbeddingError::Unavailable(_)) => return Ok((StatusCode::SERVICE_UNAVAILABLE,Json(serde_json::json!({"error":"Text embedding service unavailable","message":"The CLAP text model is not available"}))).into_response()),
         Err(embedding::TextEmbeddingError::Timeout) => return Ok((StatusCode::GATEWAY_TIMEOUT,Json(serde_json::json!({"error":"Text embedding service unavailable","message":"The CLAP analyzer service did not respond in time"}))).into_response()),
@@ -80,7 +85,7 @@ async fn search(
         })
         .collect();
     Ok(Json(kima_api_types::vibe::SearchResponse {
-        query: query.trim().to_owned(),
+        query: query.trim_matches(ecmascript_whitespace).to_owned(),
         tracks,
     })
     .into_response())
@@ -93,7 +98,7 @@ fn parse_limit(raw: Option<&serde_json::Value>) -> usize {
         Some(serde_json::Value::Number(n)) => n.to_string(),
         _ => return 20,
     };
-    let text = text.trim_start();
+    let text = text.trim_start_matches(ecmascript_whitespace);
     let negative = text.starts_with('-');
     let unsigned = text.strip_prefix(['-', '+']).unwrap_or(text);
     let digits: String = unsigned
@@ -111,6 +116,14 @@ fn parse_limit(raw: Option<&serde_json::Value>) -> usize {
     } else {
         n.min(100) as usize
     }
+}
+
+/// ECMAScript WhiteSpace + LineTerminator, not Rust's Unicode White_Space.
+/// In particular JS includes BOM (FEFF) and excludes NEL (0085).
+fn ecmascript_whitespace(c: char) -> bool {
+    matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}'
+        | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
+        | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
 fn failure(message: &'static str, error: impl std::fmt::Debug) -> ApiError {

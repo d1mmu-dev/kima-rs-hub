@@ -1138,6 +1138,25 @@ fn entries_serialise_as_name_mbid_match() {
     );
 }
 
+/// Successful enrichment passes the merged discovery list through library reranking (D-189).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn similar_enrichment_marks_library_membership_without_matching_state(pool: PgPool) {
+    let a = seed(&pool, "Perturbator", "Dangerous Days").await;
+    set_mbid(&pool, a, M, "tag").await;
+    seed(&pool, "Owned result", "Album").await;
+    let w = known("Perturbator", M)
+        .get(
+            &lb_url(M),
+            json!([{"artist_mbid": LOW, "name": "Owned result", "score": 10}]),
+        )
+        .get(&fanart_url(M), json!({}));
+    let f = fx(&pool, w, World::default()).await;
+    assert_eq!(enrich(&f, a).await, ArtistResult::Completed);
+    let list = row(&pool, a).await.similar.unwrap();
+    assert_eq!(list[0]["inLibrary"], true);
+    assert_eq!(list[0]["match"], 0.95);
+}
+
 /// "a failed source keeps the old value and fails the step".
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn a_failed_similar_source_keeps_the_old_list(pool: PgPool) {

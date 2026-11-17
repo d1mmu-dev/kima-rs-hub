@@ -1,8 +1,8 @@
 //! Similar artists (spec §12.5; upstream `artistSimilarity.ts`): ListenBrainz by MBID, Deezer by
 //! name, merged into the list stored in `artists."similar"`.
 //!
-//! The library re-rank (`RERANK_MAX_DELTA`) needs M5's matching state; it is ported as delta 0,
-//! which leaves the merged order and scores as they are.
+//! Library re-ranking uses M5's matching state and artist profiles, without replacing discovery
+//! results with local artists. Read-time resolution remains independent of matching availability.
 //!
 //! At read time [`resolve`] matches the stored list against the library (spec §12.8): no
 //! request is made, and an artist outside the library has no image.
@@ -80,6 +80,137 @@ pub fn merge(lb: &[Similar], deezer: &[String]) -> Vec<Entry> {
         })
         .take(MAX_SIMILAR)
         .collect()
+}
+
+/// A discovery result with its current library membership (upstream `SimilarArtistWithLibrary`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Reranked {
+    #[serde(flatten)]
+    pub entry: Entry,
+    #[serde(rename = "inLibrary")]
+    pub in_library: bool,
+}
+
+/// Discovery scores move by at most ±0.1; missing assets/state/profiles do not change them.
+/// Seed lookup is MBID *or* exact name, never name fallback after an unknown seed MBID.
+/// Result lookup is MBID *then* exact name. Any database failure returns the original list
+/// in source order with membership false, even if earlier reads succeeded.
+pub async fn rerank(
+    pool: &PgPool,
+    probe: Option<&kima_vibe::feel_probe::FeelProbe>,
+    seed_mbid: Option<Mbid>,
+    seed_name: &str,
+    results: &[Entry],
+) -> Vec<Reranked> {
+    if results.is_empty() {
+        return Vec::new();
+    }
+    match try_rerank(pool, probe, seed_mbid, seed_name, results).await {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::warn!(error = %e, "similar-artist library rerank failed");
+            results
+                .iter()
+                .cloned()
+                .map(|entry| Reranked {
+                    entry,
+                    in_library: false,
+                })
+                .collect()
+        }
+    }
+}
+
+async fn try_rerank(
+    pool: &PgPool,
+    probe: Option<&kima_vibe::feel_probe::FeelProbe>,
+    seed_mbid: Option<Mbid>,
+    seed_name: &str,
+    results: &[Entry],
+) -> sqlx::Result<Vec<Reranked>> {
+    use kima_db::vibe::rank::{artist_profiles, load_matching_state};
+    use kima_vibe::formula::artist_match;
+
+    let mbids: Vec<_> = results
+        .iter()
+        .filter_map(|r| r.mbid.map(|m| m.0))
+        .chain(seed_mbid.map(|m| m.0))
+        .collect();
+    let names: Vec<_> = results
+        .iter()
+        .map(|r| r.name.as_str())
+        .chain(std::iter::once(seed_name))
+        .collect();
+    let rows: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, name, mbid FROM artists WHERE mbid = ANY($1) OR name = ANY($2) ORDER BY id",
+    )
+    .bind(&mbids)
+    .bind(&names)
+    .fetch_all(pool)
+    .await?;
+    let mut by_mbid = HashMap::new();
+    let mut by_name = HashMap::new();
+    for (id, name, mbid) in rows {
+        if let Some(mbid) = mbid {
+            by_mbid.entry(mbid).or_insert(id);
+        }
+        by_name.entry(name).or_insert(id);
+    }
+    let seed = match seed_mbid {
+        Some(mbid) => by_mbid.get(&mbid.0).copied(),
+        None => by_name.get(seed_name).copied(),
+    };
+    let found: Vec<_> = results
+        .iter()
+        .map(|r| {
+            r.mbid
+                .and_then(|m| by_mbid.get(&m.0).copied())
+                .or_else(|| by_name.get(&r.name).copied())
+        })
+        .collect();
+    let mut ids: Vec<_> = found.iter().flatten().copied().chain(seed).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let state = match probe {
+        Some(probe) => load_matching_state(pool, probe).await?,
+        None => None,
+    };
+    let profiles = match (probe, state.as_ref(), seed) {
+        (Some(probe), Some(state), Some(_)) => artist_profiles(pool, probe, state, &ids).await?,
+        _ => HashMap::new(),
+    };
+    let seed_profile = seed.and_then(|id| profiles.get(&id));
+    let mut out: Vec<_> = results
+        .iter()
+        .zip(found)
+        .map(|(r, id)| {
+            let mut entry = r.clone();
+            if let (Some(state), Some(a), Some(b)) = (
+                state.as_ref(),
+                seed_profile,
+                id.and_then(|id| profiles.get(&id)),
+            ) {
+                if let Some(closeness) = artist_match(a, b, &state.genres, state.genre_weight_sq())
+                {
+                    let distance = 1.0 - closeness;
+                    let delta = 0.1 * (1.0 - 2.0 * distance.clamp(0.0, 1.0));
+                    entry.r#match = (r.r#match + delta).clamp(0.0, 1.0);
+                }
+            }
+            Reranked {
+                entry,
+                in_library: id.is_some(),
+            }
+        })
+        .collect();
+    // Stable, like Array#sort: no secondary identifier/name tie-breaker.
+    out.sort_by(|a, b| {
+        b.entry
+            .r#match
+            .partial_cmp(&a.entry.r#match)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(out)
 }
 
 /// The similar artists a page shows (spec §12.8).

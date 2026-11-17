@@ -1,22 +1,28 @@
-//! Search, random and top songs, genres, and the similar-song stubs (spec §4.3 #16-#24).
+//! Search, random and top songs, genres, and similar songs (spec §4.3 #16-#24, D-190).
 
 use axum::Router;
 use axum::extract::State;
 use kima_api::AppState;
 use kima_core::profile::ProfileId;
 use kima_db::subsonic::{self, AlbumItem, ArtistItem, SearchPage, SongItem};
+use kima_db::vibe::rank::{self, WeightedInput};
 use kima_db::{PgPool, search};
+use kima_ident::similar;
+use kima_ident::stages::similarity;
 use uuid::Uuid;
 
 use super::add;
 use crate::auth::SubsonicUser;
 use crate::ctx::SubsonicCtx;
 use crate::error::SubsonicError;
+use crate::ids;
 use crate::map;
 use crate::params::Params;
 use crate::response::{Answer, Node};
 
 const MAX_PAGE: i64 = 500;
+/// The similar artists upstream's `getSimilarSongs` draws from besides the seed's own.
+const MAX_SIMILAR_ARTISTS: usize = 50;
 
 pub fn add_routes(router: Router<SubsonicCtx>) -> Router<SubsonicCtx> {
     let router = add(router, "search3", search3);
@@ -258,18 +264,107 @@ async fn get_top_songs(
     ))
 }
 
-async fn get_similar_songs(_user: SubsonicUser, params: Params) -> Result<Answer, SubsonicError> {
-    params.required("id")?;
+/// `getSimilarSongs`: a track seed with current matching data (verified feel probe, built
+/// matching state, an eligible `MATCHING_SOUND` vector) is ranked by the vibe formula, seed
+/// excluded, as `/api/vibe/similar` (owner decision Q8, D-190). Any other seed (album, artist,
+/// or a track without matching data) takes upstream's artist-based path: random present songs
+/// of the seed's artist and its stored similar artists in the library. An id naming nothing
+/// answers the empty element.
+async fn similar_songs(
+    name: &'static str,
+    user: SubsonicUser,
+    app: AppState,
+    params: Params,
+) -> Result<Answer, SubsonicError> {
+    let raw = params.required("id")?;
+    let count = params
+        .paging::<i64>("count")
+        .unwrap_or(50)
+        .clamp(1, MAX_PAGE);
+    let profile = user.user.profile;
+    let songs = match ids::parse(raw, &[]) {
+        None => Vec::new(),
+        Some(id) => match vibe_ranked(&app, id, count).await? {
+            Some(ranked) => subsonic::tracks_by_ids(&app.pool, profile, &ranked).await?,
+            None => artist_based(&app.pool, profile, id, count).await?,
+        },
+    };
     Ok(Answer::node(
-        Node::new("similarSongs").list("song", Vec::new()),
+        Node::new(name).list("song", songs.iter().map(map::song).collect()),
     ))
 }
 
-async fn get_similar_songs2(_user: SubsonicUser, params: Params) -> Result<Answer, SubsonicError> {
-    params.required("id")?;
-    Ok(Answer::node(
-        Node::new("similarSongs2").list("song", Vec::new()),
-    ))
+/// The vibe ranking for a track seed, best first; `None` when the seed has no current matching
+/// data (no probe, no state, not a track, or no eligible vector).
+async fn vibe_ranked(
+    app: &AppState,
+    seed: Uuid,
+    count: i64,
+) -> Result<Option<Vec<Uuid>>, SubsonicError> {
+    let Some(runtime) = similarity::runtime(&app.ident_ctx()).await else {
+        return Ok(None);
+    };
+    let Some(ctx) = rank::matching_context(&app.pool, &runtime.probe, &[seed]).await? else {
+        return Ok(None);
+    };
+    if !ctx.tracks.contains_key(&seed) {
+        return Ok(None);
+    }
+    let input = WeightedInput {
+        track_id: seed,
+        weight: 1.0,
+    };
+    let rows = rank::rank_matches(&app.pool, &ctx, &[input], count, &[seed])
+        .await
+        .map_err(SubsonicError::internal)?;
+    Ok(Some(rows.into_iter().map(|r| r.track.id).collect()))
+}
+
+/// Upstream's pick (`routes/subsonic/search.ts:350-405`): the seed's artist plus at most
+/// [`MAX_SIMILAR_ARTISTS`] stored similar artists in the library (by `match`, best first),
+/// `count` random present songs of theirs.
+async fn artist_based(
+    pool: &PgPool,
+    profile: ProfileId,
+    id: Uuid,
+    count: i64,
+) -> Result<Vec<SongItem>, SubsonicError> {
+    let Some((artist, stored)) = subsonic::similar_seed_artist(pool, id).await? else {
+        return Ok(Vec::new());
+    };
+    let mut entries = stored
+        .as_ref()
+        .map(similar::stored_entries)
+        .unwrap_or_default();
+    entries.sort_by(|a, b| b.r#match.total_cmp(&a.r#match));
+    let mut artists = vec![artist];
+    for found in similar::resolve(pool, &entries, entries.len()).await? {
+        if artists.len() > MAX_SIMILAR_ARTISTS {
+            break;
+        }
+        if let (true, Ok(id)) = (found.in_library, found.id.parse::<Uuid>())
+            && !artists.contains(&id)
+        {
+            artists.push(id);
+        }
+    }
+    Ok(subsonic::random_tracks_by_artists(pool, profile, &artists, count).await?)
+}
+
+async fn get_similar_songs(
+    user: SubsonicUser,
+    State(app): State<AppState>,
+    params: Params,
+) -> Result<Answer, SubsonicError> {
+    similar_songs("similarSongs", user, app, params).await
+}
+
+async fn get_similar_songs2(
+    user: SubsonicUser,
+    State(app): State<AppState>,
+    params: Params,
+) -> Result<Answer, SubsonicError> {
+    similar_songs("similarSongs2", user, app, params).await
 }
 
 async fn get_genres(

@@ -334,8 +334,6 @@ const UNAFFECTED: &[(&str, Option<u64>)] = &[
     ("jukeboxControl", Some(0)),
     // The shared probe parameters carry no `genre`.
     ("getSongsByGenre", Some(10)),
-    ("getSimilarSongs", None),
-    ("getSimilarSongs2", None),
 ];
 
 /// Unaffected endpoints that answer a playlist or an image, not an envelope. `hls` builds a URL

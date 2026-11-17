@@ -1,4 +1,4 @@
-//! Search, random and top songs, genre and similar stubs on the SQL fixture (spec §4.3, §10.2).
+//! Search, random and top songs, genres and similar songs on the SQL fixture (spec §4.3, §10.2).
 
 mod common;
 
@@ -717,18 +717,25 @@ fixture_test!(top_songs_unknown_artist_empty, |server, _pool| {
     assert!(xml.contains("<topSongs/>"), "{xml}");
 });
 
-fixture_test!(similar_songs_missing_id_10_else_empty, |server, _pool| {
-    assert_failed(&alice(&server, "getSimilarSongs", &[]).await, 10);
-    let res = alice(
-        &server,
-        "getSimilarSongs",
-        &[("id", &track_id(1).to_string())],
-    )
-    .await;
-    assert_eq!(res["similarSongs"]["song"], serde_json::json!([]));
-    let res = alice(&server, "getSimilarSongs", &[("id", "whatever")]).await;
-    assert_eq!(res["similarSongs"]["song"], serde_json::json!([]));
-});
+fixture_test!(
+    similar_songs_missing_id_10_unknown_empty,
+    |server, _pool| {
+        // The full contract (vibe ranking and the artist-based fallback) is in `similar_songs.rs`.
+        assert_failed(&alice(&server, "getSimilarSongs", &[]).await, 10);
+        let res = alice(
+            &server,
+            "getSimilarSongs",
+            &[("id", &track_id(1).to_string())],
+        )
+        .await;
+        assert_eq!(
+            sorted(ids(&res["similarSongs"]["song"])),
+            sorted(track_ids(&[1, 2, 3, 4, 5, 6, 7, 8, 9]))
+        );
+        let res = alice(&server, "getSimilarSongs", &[("id", "whatever")]).await;
+        assert_eq!(res["similarSongs"]["song"], serde_json::json!([]));
+    }
+);
 
 fixture_test!(search_page_fills_past_missing_top_hit, |server, pool| {
     seed_extra(&pool, 3, 3).await;
@@ -788,16 +795,22 @@ fixture_test!(
     }
 );
 
-fixture_test!(similar_songs2_empty, |server, _pool| {
-    let res = alice(
-        &server,
-        "getSimilarSongs2",
-        &[("id", &track_id(1).to_string())],
-    )
-    .await;
-    assert_eq!(res["similarSongs2"]["song"], serde_json::json!([]));
-    assert_failed(&alice(&server, "getSimilarSongs2", &[]).await, 10);
-});
+fixture_test!(
+    similar_songs2_artist_based_without_vibe_data,
+    |server, _pool| {
+        let res = alice(
+            &server,
+            "getSimilarSongs2",
+            &[("id", &track_id(10).to_string())],
+        )
+        .await;
+        assert_eq!(
+            sorted(ids(&res["similarSongs2"]["song"])),
+            sorted(track_ids(&[10, 11, 12, 17, 18, 19]))
+        );
+        assert_failed(&alice(&server, "getSimilarSongs2", &[]).await, 10);
+    }
+);
 
 fixture_test!(
     get_genres_counts_distinct_tracks_and_albums,

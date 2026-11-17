@@ -342,7 +342,8 @@ async fn profile_names_stay_in_the_account(pool: PgPool) {
     }
 }
 
-// ---- stars and ratings: star / setRating -> getStarred2, getSong, getAlbum; unstar as others ----
+// ---- stars and ratings: star / setRating -> getStarred2, getSong, getAlbum,
+// getSimilarSongs2; unstar as others ----
 
 async fn write_star(w: &World, who: Who, n: usize) -> (String, String) {
     let (track, album) = pick(n);
@@ -356,6 +357,15 @@ async fn sees_star(w: &World, who: Who, (track, album): &(String, String)) -> bo
     let starred = w.ok(who, "getStarred2", &[]).await;
     let song = w.ok(who, "getSong", &[("id", track)]).await;
     let one = w.ok(who, "getAlbum", &[("id", album)]).await;
+    // The seed's own song is among its artist's songs (artist-based path, D-190).
+    let similar = w
+        .ok(who, "getSimilarSongs2", &[("id", track), ("count", "500")])
+        .await;
+    let similar = similar["similarSongs2"]["song"]
+        .as_array()
+        .and_then(|songs| songs.iter().find(|s| s["id"] == track.as_str()))
+        .cloned()
+        .expect("the seed's own song is listed");
     agree(
         who,
         &[
@@ -365,6 +375,7 @@ async fn sees_star(w: &World, who: Who, (track, album): &(String, String)) -> bo
             ),
             ("getSong starred", song["song"].get("starred").is_some()),
             ("getAlbum userRating", one["album"]["userRating"] == 4),
+            ("getSimilarSongs2 starred", similar.get("starred").is_some()),
         ],
     )
 }

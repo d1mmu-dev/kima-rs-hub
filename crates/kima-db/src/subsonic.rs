@@ -480,6 +480,45 @@ pub async fn tracks_by_ids(
         .await
 }
 
+/// The artist a `getSimilarSongs` seed names, with its stored `artists."similar"`: a track's
+/// album artist, else an album's artist, else the artist itself. Like upstream, each table is
+/// looked up by the raw id whether or not the row has a present track.
+pub async fn similar_seed_artist(
+    pool: &PgPool,
+    id: Uuid,
+) -> sqlx::Result<Option<(Uuid, Option<serde_json::Value>)>> {
+    sqlx::query_as(
+        r#"SELECT ar.id, ar."similar" FROM artists ar
+           WHERE ar.id = COALESCE(
+               (SELECT al.artist_id FROM tracks t JOIN albums al ON al.id = t.album_id
+                WHERE t.id = $1),
+               (SELECT al.artist_id FROM albums al WHERE al.id = $1),
+               $1)"#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Up to `count` present tracks, in random order, whose album artist is one of `artists`.
+pub async fn random_tracks_by_artists(
+    pool: &PgPool,
+    profile: ProfileId,
+    artists: &[Uuid],
+    count: i64,
+) -> sqlx::Result<Vec<SongItem>> {
+    let sql = format!(
+        "{SONG_SELECT} WHERE t.missing_since IS NULL AND al.artist_id = ANY($2)
+         ORDER BY random() LIMIT $3"
+    );
+    sqlx::query_as(&sql)
+        .bind(profile)
+        .bind(artists)
+        .bind(count)
+        .fetch_all(pool)
+        .await
+}
+
 pub async fn albums_by_ids(
     pool: &PgPool,
     profile: ProfileId,

@@ -2,6 +2,7 @@
 
 mod common;
 
+use kima_core::profile::ProfileId;
 use std::net::SocketAddr;
 
 use axum::extract::connect_info::MockConnectInfo;
@@ -68,11 +69,13 @@ fn failed(res: &Value, code: u64) {
 
 /// The fixture gives alice a saved queue; tests that need none remove it.
 async fn no_state(pool: &PgPool) {
-    kima_db::playback::delete(pool, ALICE_ID).await.unwrap();
+    kima_db::playback::delete(pool, ProfileId::new(ALICE_ID))
+        .await
+        .unwrap();
 }
 
 async fn web_state(server_pool: &PgPool) -> kima_db::playback::PlaybackState {
-    kima_db::playback::get(server_pool, ALICE_ID)
+    kima_db::playback::get(server_pool, ProfileId::new(ALICE_ID))
         .await
         .unwrap()
         .unwrap()
@@ -179,7 +182,7 @@ fixture_test!(save_queue_current_not_in_ids_10, |server, pool| {
     );
     failed(&call(&server, "savePlayQueue", &q, &[]).await, 10);
     assert!(
-        kima_db::playback::get(&pool, ALICE_ID)
+        kima_db::playback::get(&pool, ProfileId::new(ALICE_ID))
             .await
             .unwrap()
             .is_none()
@@ -247,7 +250,7 @@ fixture_test!(by_index_rules, |server, pool| {
         10,
     );
     assert!(
-        kima_db::playback::get(&pool, ALICE_ID)
+        kima_db::playback::get(&pool, ProfileId::new(ALICE_ID))
             .await
             .unwrap()
             .is_none()

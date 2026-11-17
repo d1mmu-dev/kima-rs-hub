@@ -97,7 +97,7 @@ impl Setup {
     }
 
     async fn tokens_of(&self, user: &User) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM api_keys WHERE user_id = $1")
+        sqlx::query_scalar("SELECT count(*) FROM api_keys WHERE profile_id = $1")
             .bind(user.id)
             .fetch_one(&self.state.pool)
             .await
@@ -812,10 +812,13 @@ async fn password_change_revokes_web_sessions(pool: PgPool) {
         ("updateUser", s.root_password(), "bobnewer1"),
     ] {
         let bob = s.find("bob").await.unwrap();
-        let token = s
-            .state
-            .jwt
-            .issue_access(bob.id, &bob.username, &bob.role, bob.token_version);
+        let token = s.state.jwt.issue_access(
+            bob.account(),
+            bob.main_profile(),
+            &bob.username,
+            &bob.role,
+            bob.token_version,
+        );
         assert_eq!(me(&token).await, axum::http::StatusCode::OK);
         let mut events = s.state.events.subscribe();
 
@@ -831,7 +834,10 @@ async fn password_change_revokes_web_sessions(pool: PgPool) {
         assert_eq!(me(&token).await, axum::http::StatusCode::UNAUTHORIZED);
         let event = events.try_recv().expect("a revocation was published");
         assert!(event.is_revocation(), "{event:?}");
-        assert_eq!(event.user_id, Some(bob.id));
+        assert_eq!(
+            event.audience,
+            kima_core::events::Audience::Account(bob.account())
+        );
     }
 }
 

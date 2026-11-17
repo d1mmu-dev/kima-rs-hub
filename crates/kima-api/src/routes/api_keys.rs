@@ -1,5 +1,10 @@
 //! `/api/api-keys` (upstream `routes/apiKeys.ts`): per-app tokens for the Subsonic API. The
 //! plaintext token is returned once, by `POST`, and is never stored in the clear or logged.
+//!
+//! Tokens belong to the session's profile (M-PROF, D-244): each profile lists, creates and
+//! revokes its own only (another profile's token, the main profile's or a sibling's, is 404 like
+//! an unknown id; the main profile does not manage its children's tokens). The cap of
+//! [`api_keys::MAX_PER_USER`] counts every profile of the account.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -54,7 +59,8 @@ async fn create(
     let key = api_keys::create(
         &state.pool,
         id,
-        auth.id,
+        auth.account,
+        auth.profile,
         auth.token_version,
         name,
         &app_token::hash(&token),
@@ -79,7 +85,7 @@ async fn create(
 }
 
 async fn list(State(state): State<AppState>, auth: AuthUser) -> Result<Json<Value>, ApiError> {
-    let keys = api_keys::list_for_user(&state.pool, auth.id).await?;
+    let keys = api_keys::list_for_profile(&state.pool, auth.profile).await?;
     let keys: Vec<Value> = keys
         .into_iter()
         .map(|key| {
@@ -100,7 +106,7 @@ async fn revoke(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let id: Uuid = id.parse().map_err(|_| ApiError::NotFound(NOT_FOUND))?;
-    if !api_keys::delete_owned(&state.pool, id, auth.id).await? {
+    if !api_keys::delete_owned(&state.pool, id, auth.profile).await? {
         return Err(ApiError::NotFound(NOT_FOUND));
     }
     Ok(Json(json!({ "message": "API key revoked successfully" })))

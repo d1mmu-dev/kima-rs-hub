@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+use kima_api::auth::AuthUser;
+use kima_core::profile::{NamedOwner, subsonic_owner_name};
 use kima_db::browse::TrackRow;
 use kima_db::playlists::PlaylistSummary;
 use kima_db::subsonic::{AlbumItem, ArtistItem, SongItem};
@@ -168,16 +170,27 @@ pub fn artist_dir(a: &ArtistItem) -> Node {
     with_state(node, a.starred_at, a.rating)
 }
 
-/// A playlist header: `id name songCount duration public owner created changed`. The caller adds
-/// the `entry` songs where the endpoint sends them.
-pub fn playlist(p: &PlaylistSummary, duration_secs: i64) -> Node {
+/// A playlist header: `id name songCount duration public owner created changed`, `owner` named
+/// for the `viewer` session's profile by the D-244 rule. The caller adds the `entry` songs where
+/// the endpoint sends them.
+pub fn playlist(p: &PlaylistSummary, duration_secs: i64, viewer: &AuthUser) -> Node {
+    let owner = subsonic_owner_name(
+        viewer.profile,
+        viewer.account,
+        NamedOwner {
+            account: p.playlist.account_id,
+            profile: p.playlist.profile_id,
+            username: &p.username,
+            profile_name: &p.profile_name,
+        },
+    );
     Node::new("playlist")
         .attr("id", p.playlist.id.to_string())
         .attr("name", &p.playlist.name)
         .attr("songCount", p.track_count)
         .attr("duration", duration_secs)
         .attr("public", p.playlist.is_public)
-        .attr("owner", &p.username)
+        .attr("owner", owner)
         .attr("created", iso(p.playlist.created_at))
         .attr("changed", iso(p.playlist.updated_at))
 }
@@ -215,6 +228,7 @@ mod tests {
 
     fn track(bitrate: Option<i32>, codec: &str) -> TrackRow {
         TrackRow {
+            display_title: None,
             id: Uuid::from_u128(3),
             title: "Come Together".into(),
             artist_name: "Track Artist".into(),

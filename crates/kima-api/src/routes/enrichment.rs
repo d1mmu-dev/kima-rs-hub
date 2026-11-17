@@ -50,8 +50,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/enrichment/artists/{id}/metadata", put(editor::put_artist))
         .route("/enrichment/albums/{id}/metadata", put(editor::put_album))
+        .route("/enrichment/tracks/{id}/metadata", put(editor::put_track))
         .route("/enrichment/artists/{id}/reset", post(editor::reset_artist))
         .route("/enrichment/albums/{id}/reset", post(editor::reset_album))
+        .route("/enrichment/tracks/{id}/reset", post(editor::reset_track))
 }
 
 fn time_json(t: Option<OffsetDateTime>) -> Value {
@@ -171,13 +173,17 @@ async fn retry_failed_and_blocked(
     State(state): State<AppState>,
     _admin: AdminUser,
 ) -> Result<Json<Value>, ApiError> {
-    let queued = control::retry_failed_and_blocked(&state.ident_ctx()).await?;
+    let enrichment_queued = control::retry_failed_and_blocked(&state.ident_ctx()).await?;
+    // Feed refreshes are not identification steps: this control-plane action also re-queues
+    // every followed show with a recorded refresh failure right now, ignoring the sweep's
+    // hourly dispatch backoff. A show already queued or running is not queued again.
+    let podcast_queued = kima_podcast::refresh::retry_failed(&state.pool).await?;
     state.invalidate_progress();
     control::announce(&state.pool, &state.progress_events).await;
     Ok(Json(json!({
         "message": "Failed and blocked work re-queued",
-        "description": format!("{queued} stage questions handed to the queue"),
-        "queued": queued,
+        "description": format!("{enrichment_queued} stage questions handed to the queue"),
+        "queued": enrichment_queued + podcast_queued,
     })))
 }
 

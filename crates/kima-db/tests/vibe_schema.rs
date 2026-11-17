@@ -292,10 +292,7 @@ async fn eligible_requires_model_gate_dims_norm_and_presence(pool: PgPool) {
     embed(&pool, missing.track, &axis(4)).await;
     assert_eq!(count(&pool, "track_embeddings").await, 5);
 
-    let sql = format!(
-        "SELECT te.track_id FROM {} ORDER BY te.track_id",
-        *ELIGIBLE
-    );
+    let sql = format!("SELECT te.track_id FROM {} ORDER BY te.track_id", *ELIGIBLE);
     let eligible: Vec<uuid::Uuid> = sqlx::query_scalar(&sql).fetch_all(&pool).await.unwrap();
     assert_eq!(
         eligible,

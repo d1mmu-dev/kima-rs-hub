@@ -1,0 +1,27 @@
+{
+  "_count": {
+    "items": 0
+  },
+  "createdAt": "2026-11-16T14:07:23.160712Z",
+  "id": "01a1e4af-1a17-7693-899b-906165d3121f",
+  "isHidden": false,
+  "isOwner": true,
+  "isPublic": false,
+  "items": [],
+  "mergedItems": [],
+  "mixId": null,
+  "name": "Reader fixture",
+  "pendingCount": 0,
+  "pendingTracks": [],
+  "profileId": "01a1e4af-192d-76a2-a7ec-d35a4e082935",
+  "profileName": "Fixture Reader",
+  "reverseOrder": false,
+  "spotifyPlaylistId": null,
+  "spotifyPlaylistUrl": null,
+  "trackCount": 0,
+  "updatedAt": "2026-11-16T14:07:23.160712Z",
+  "user": {
+    "username": "fixtureadmin"
+  },
+  "userId": "01a1e4af-1891-7310-a736-f5596631b53a"
+}

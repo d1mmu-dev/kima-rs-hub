@@ -1,0 +1,20 @@
+{
+  "provenance": "SYNTHETIC, hand-written; not a service recording",
+  "request": {
+    "meta": "recordings releasegroups",
+    "batch": 1,
+    "inputs": [
+      {"index": 0, "duration": 201, "fingerprint": "SYNTHETIC_A"},
+      {"index": 1, "duration": 202, "fingerprint": "SYNTHETIC_B"},
+      {"index": 2, "duration": 203, "fingerprint": "SYNTHETIC_C"}
+    ]
+  },
+  "reply": {
+    "status": "ok",
+    "fingerprints": [
+      {"index": 0, "results": [{"id": "a0000000-0000-4000-8000-000000000001", "score": 0.95, "recordings": [{"id": "b0000000-0000-4000-8000-000000000001", "title": "Fixture One", "duration": 201, "artists": [{"id": "c0000000-0000-4000-8000-000000000001", "name": "Fixture Artist"}], "releasegroups": [{"id": "d0000000-0000-4000-8000-000000000001", "title": "Fixture Album"}]}]}]},
+      {"index": 1, "results": [{"id": "a0000000-0000-4000-8000-000000000002", "score": 0.93, "recordings": [{"id": "b0000000-0000-4000-8000-000000000002", "title": "Fixture Two", "duration": 202, "artists": [{"id": "c0000000-0000-4000-8000-000000000001", "name": "Fixture Artist"}], "releasegroups": [{"id": "d0000000-0000-4000-8000-000000000001", "title": "Fixture Album"}]}]}]},
+      {"index": 2, "results": []}
+    ]
+  }
+}

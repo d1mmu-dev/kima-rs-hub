@@ -1,0 +1,76 @@
+{
+  "inProgress": [
+    {
+      "episode": {
+        "aiLabel": "ai",
+        "aiLabelSource": "feed-show",
+        "coverUrl": "http://127.0.0.1:46427/img/robot.png",
+        "description": "Second race hour.",
+        "duration": 1500,
+        "id": "01a1d732-7fad-749c-bcb7-b8bc6dfcd7b6",
+        "progress": {
+          "currentTime": 300,
+          "isFinished": false,
+          "lastPlayedAt": "2026-11-13T23:16:13.514Z",
+          "progress": 20
+        },
+        "publishedAt": "2026-11-07T12:00:00.000Z",
+        "title": "Robot Hour 2"
+      },
+      "podcast": {
+        "aiLabel": "ai",
+        "aiLabelSource": "feed-show",
+        "coverUrl": "http://127.0.0.1:46427/img/robot.png",
+        "id": "01a1d732-7fa8-7741-9884-364e4992daa8",
+        "title": "Robot Radio"
+      }
+    },
+    {
+      "episode": {
+        "aiLabel": "human",
+        "aiLabelSource": "feed-episode",
+        "coverUrl": "http://127.0.0.1:46427/img/race.png",
+        "description": "The sprint race.",
+        "duration": 1200,
+        "id": "01a1d732-73fc-773f-88aa-8e794cd0dac5",
+        "progress": {
+          "currentTime": 120,
+          "isFinished": false,
+          "lastPlayedAt": "2026-11-13T23:16:13.474Z",
+          "progress": 10
+        },
+        "publishedAt": "2026-11-06T10:00:00.000Z",
+        "title": "Sprint"
+      },
+      "podcast": {
+        "aiLabel": "unknown",
+        "aiLabelSource": null,
+        "coverUrl": "http://127.0.0.1:46427/img/race.png",
+        "id": "01a1d732-73f5-741e-8603-638478e907b3",
+        "title": "Race Show"
+      }
+    }
+  ],
+  "newEpisodes": [
+    {
+      "episode": {
+        "aiLabel": "unknown",
+        "aiLabelSource": null,
+        "coverUrl": "http://127.0.0.1:46427/img/race-gp.png",
+        "description": "The main race, start to flag.",
+        "duration": 3600,
+        "id": "01a1d732-73f8-7296-b8cb-66ccded0d5ff",
+        "progress": null,
+        "publishedAt": "2026-11-08T10:00:00.000Z",
+        "title": "Grand Prix"
+      },
+      "podcast": {
+        "aiLabel": "unknown",
+        "aiLabelSource": null,
+        "coverUrl": "http://127.0.0.1:46427/img/race.png",
+        "id": "01a1d732-73f5-741e-8603-638478e907b3",
+        "title": "Race Show"
+      }
+    }
+  ]
+}

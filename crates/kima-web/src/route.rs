@@ -1,7 +1,8 @@
 //! The route table. Hand-written enum with a `From<String>` / `Display` pair (vertigo's router pattern).
 //!
 //! Login, setup (onboarding), the library browse root with its albums / tracks drill-downs, search,
-//! playlists (list and detail) and settings.
+//! playlists (list and detail), settings and podcasts (home, a followed show or an Apple preview,
+//! a category's chart).
 
 use std::fmt;
 
@@ -9,6 +10,7 @@ use std::fmt;
 pub enum Route {
     Login,
     Setup,
+    Profiles,
     /// `/collection`: the browse root (artists).
     Artists,
     /// `/collection/albums`, optionally `?artist=<uuid>`.
@@ -29,6 +31,20 @@ pub enum Route {
     },
     /// `/settings` (account slice).
     Settings,
+    /// `/podcasts`: followed shows, listening shelves, discovery.
+    Podcasts,
+    /// `/podcasts/show?id=<uuid>`: a show stored on this server.
+    PodcastShow {
+        id: String,
+    },
+    /// `/podcasts/show?itunesId=<digits>`: a show from Apple's catalogue, not followed yet.
+    PodcastPreview {
+        itunes_id: String,
+    },
+    /// `/podcasts/category?id=<n>`: one Apple category's chart.
+    PodcastCategory {
+        id: u32,
+    },
     NotFound,
 }
 
@@ -60,6 +76,7 @@ impl Route {
             "" | "/" | "/collection" => Route::Artists,
             "/login" => Route::Login,
             "/setup" => Route::Setup,
+            "/profiles" => Route::Profiles,
             "/collection/albums" => {
                 param("artist").map_or(Route::NotFound, |artist| Route::Albums { artist })
             }
@@ -69,12 +86,39 @@ impl Route {
             "/search" => Route::Search,
             "/playlists" => Route::Playlists,
             "/settings" => Route::Settings,
+            "/podcasts" => Route::Podcasts,
+            "/podcasts/show" => match (param("id"), raw(query, "itunesId")) {
+                (Ok(Some(id)), _) => Route::PodcastShow { id },
+                (Ok(None), Some(itunes)) if is_number(itunes) => Route::PodcastPreview {
+                    itunes_id: itunes.to_owned(),
+                },
+                _ => Route::NotFound,
+            },
+            "/podcasts/category" => match raw(query, "id").filter(|v| is_number(v)) {
+                Some(id) => id
+                    .parse()
+                    .map_or(Route::NotFound, |id| Route::PodcastCategory { id }),
+                None => Route::NotFound,
+            },
             _ => match path.strip_prefix("/playlists/") {
                 Some(id) if is_id(id) => Route::Playlist { id: id.to_owned() },
                 _ => Route::NotFound,
             },
         }
     }
+}
+
+/// The raw value of `name` in a query string, if present and non-empty.
+fn raw<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))
+        .filter(|v| !v.is_empty())
+}
+
+/// Apple ids and category ids: decimal digits only, short enough for any id Apple uses.
+fn is_number(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Ids are UUIDs; accept only their alphabet so a query value can never smuggle anything into a URL.
@@ -87,6 +131,7 @@ impl fmt::Display for Route {
         match self {
             Route::Login => f.write_str("/login"),
             Route::Setup => f.write_str("/setup"),
+            Route::Profiles => f.write_str("/profiles"),
             Route::Artists => f.write_str("/collection"),
             Route::Albums { artist: None } => f.write_str("/collection/albums"),
             Route::Albums { artist: Some(id) } => write!(f, "/collection/albums?artist={id}"),
@@ -96,6 +141,10 @@ impl fmt::Display for Route {
             Route::Playlists => f.write_str("/playlists"),
             Route::Playlist { id } => write!(f, "/playlists/{id}"),
             Route::Settings => f.write_str("/settings"),
+            Route::Podcasts => f.write_str("/podcasts"),
+            Route::PodcastShow { id } => write!(f, "/podcasts/show?id={id}"),
+            Route::PodcastPreview { itunes_id } => write!(f, "/podcasts/show?itunesId={itunes_id}"),
+            Route::PodcastCategory { id } => write!(f, "/podcasts/category?id={id}"),
             Route::NotFound => f.write_str("/404"),
         }
     }
@@ -113,6 +162,14 @@ mod tests {
 
     const ID: &str = "01a1aad3-f0c4-710b-b701-36f9f6b6972e";
 
+    #[test]
+    fn profiles_picker_is_guarded_and_round_trips() {
+        assert_eq!(Route::new("/profiles/"), Route::Profiles);
+        assert_eq!(Route::Profiles.to_string(), "/profiles");
+        assert!(Route::Profiles.requires_auth());
+        assert_eq!(Route::new("/profiles/manage"), Route::NotFound);
+    }
+
     fn table() -> Vec<(&'static str, Route)> {
         vec![
             ("/login", Route::Login),
@@ -123,6 +180,7 @@ mod tests {
             ("/search", Route::Search),
             ("/playlists", Route::Playlists),
             ("/settings", Route::Settings),
+            ("/podcasts", Route::Podcasts),
         ]
     }
 
@@ -140,6 +198,11 @@ mod tests {
                 album: Some(ID.into()),
             },
             Route::Playlist { id: ID.into() },
+            Route::PodcastShow { id: ID.into() },
+            Route::PodcastPreview {
+                itunes_id: "1450241676".into(),
+            },
+            Route::PodcastCategory { id: 1303 },
         ] {
             assert_eq!(Route::from(route.to_string()), route);
         }
@@ -163,7 +226,13 @@ mod tests {
     #[test]
     fn anything_else_is_not_found() {
         for url in [
-            "/podcasts",
+            "/podcasts/nope",
+            "/podcasts/show",
+            "/podcasts/show?id=<script>",
+            "/podcasts/show?itunesId=12a",
+            "/podcasts/category",
+            "/podcasts/category?id=-1",
+            "/podcasts/category?id=99999999999",
             "/collection/nope",
             "/playlists/not-an-id!",
             "/playlists/x/y",
@@ -172,6 +241,32 @@ mod tests {
         ] {
             assert_eq!(Route::new(url), Route::NotFound, "{url}");
         }
+    }
+
+    #[test]
+    fn podcast_pages_use_query_params_like_the_rest_of_kima_web() {
+        assert_eq!(
+            Route::PodcastShow { id: ID.into() }.to_string(),
+            format!("/podcasts/show?id={ID}")
+        );
+        assert_eq!(
+            Route::PodcastPreview {
+                itunes_id: "555".into()
+            }
+            .to_string(),
+            "/podcasts/show?itunesId=555"
+        );
+        assert_eq!(
+            Route::PodcastCategory { id: 1303 }.to_string(),
+            "/podcasts/category?id=1303"
+        );
+        // A followed show's id wins over a preview's Apple id when both are given.
+        assert_eq!(
+            Route::new(&format!("/podcasts/show?itunesId=555&id={ID}")),
+            Route::PodcastShow { id: ID.into() }
+        );
+        assert!(Route::Podcasts.requires_auth());
+        assert!(Route::PodcastCategory { id: 1 }.requires_auth());
     }
 
     #[test]

@@ -107,7 +107,8 @@ pub async fn app_token(state: &AppState, user: &User, name: &str) -> (Uuid, Stri
     kima_db::api_keys::create(
         &state.pool,
         id,
-        user.id,
+        kima_core::profile::AccountId::new(user.id),
+        kima_core::profile::ProfileId::new(user.id),
         user.token_version,
         name,
         &kima_core::app_token::hash(&token),

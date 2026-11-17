@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stars s SET track_id = $2 WHERE s.track_id = $1\n           AND NOT EXISTS (SELECT 1 FROM stars o WHERE o.profile_id = s.profile_id AND o.track_id = $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "40d1b1beffe93d6c38550d872790d1bc8e473ca545b25c1ef1668e990a747297"
+}

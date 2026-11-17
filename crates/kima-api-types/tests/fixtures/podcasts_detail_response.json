@@ -1,0 +1,80 @@
+{
+  "aiHidden": 1,
+  "aiLabel": "unknown",
+  "aiLabelSource": null,
+  "author": "Race Author",
+  "autoDownloadEpisodes": false,
+  "categories": [
+    {
+      "id": 1495,
+      "name": "Improv"
+    },
+    {
+      "id": 1303,
+      "name": "Comedy"
+    }
+  ],
+  "coverUrl": "http://127.0.0.1:46427/img/race.png",
+  "description": "Everything about the race weekend.",
+  "episodeLimit": 50,
+  "episodeOffset": 0,
+  "episodeTotal": 3,
+  "episodes": [
+    {
+      "aiLabel": "unknown",
+      "aiLabelSource": null,
+      "description": "The main race, start to flag.",
+      "duration": 3600,
+      "episodeNumber": 4,
+      "id": "01a1d732-73f8-7296-b8cb-66ccded0d5ff",
+      "imageUrl": "http://127.0.0.1:46427/img/race-gp.png",
+      "isDownloaded": false,
+      "progress": null,
+      "publishedAt": "2026-11-08T10:00:00.000Z",
+      "season": 1,
+      "title": "Grand Prix"
+    },
+    {
+      "aiLabel": "human",
+      "aiLabelSource": "feed-episode",
+      "description": "The sprint race.",
+      "duration": 1200,
+      "episodeNumber": 2,
+      "id": "01a1d732-73fc-773f-88aa-8e794cd0dac5",
+      "imageUrl": "http://127.0.0.1:46427/img/race.png",
+      "isDownloaded": false,
+      "progress": {
+        "currentTime": 120,
+        "isFinished": false,
+        "lastPlayedAt": "2026-11-13T23:16:13.474Z",
+        "progress": 10
+      },
+      "publishedAt": "2026-11-06T10:00:00.000Z",
+      "season": 1,
+      "title": "Sprint"
+    },
+    {
+      "aiLabel": "unknown",
+      "aiLabelSource": null,
+      "description": null,
+      "duration": 1800,
+      "episodeNumber": 1,
+      "id": "01a1d732-73fd-7053-903a-1743fabc7126",
+      "imageUrl": "http://127.0.0.1:46427/img/race.png",
+      "isDownloaded": false,
+      "progress": null,
+      "publishedAt": "2026-11-05T10:00:00.000Z",
+      "season": 1,
+      "title": "Qualifying"
+    }
+  ],
+  "feedUrl": "http://127.0.0.1:46427/feeds/race.xml",
+  "genres": [
+    "Improv",
+    "Comedy"
+  ],
+  "id": "01a1d732-73f5-741e-8603-638478e907b3",
+  "isSubscribed": true,
+  "itunesId": "555",
+  "title": "Race Show"
+}

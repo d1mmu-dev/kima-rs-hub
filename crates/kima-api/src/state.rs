@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kima_core::auth::JwtKeys;
 use kima_core::cipher::Cipher;
@@ -81,6 +81,10 @@ pub struct AppState {
     pub identify: IdentifySwitch,
     /// The one outbound HTTP client (spec §7). `Net::disabled()` unless `with_net` is used.
     pub net: Arc<Net>,
+    pub podcast_catalog: kima_podcast::catalog::Catalog,
+    /// `PREVIEW_RSS_TIMEOUT_MS` (Task 14): how long a podcast preview's feed read may take.
+    /// Tests shrink it so a feed host that never answers does not stall the suite.
+    pub preview_feed_timeout: Duration,
     /// Whether fingerprints can be made: ffmpeg was found at startup and `ACOUSTID_DISABLED`
     /// is not set (spec §9.4). `GET /api/system/features` answers it as `fpcalc`.
     pub fpcalc: bool,
@@ -112,10 +116,14 @@ impl AppState {
         let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
         let cipher = Arc::new(Cipher::random());
         let events = EventBus::new(1024);
+        let net = Arc::new(Net::disabled());
+        let podcast_catalog = kima_podcast::catalog::Catalog::new(net.clone(), pool.clone());
         Self {
+            podcast_catalog,
+            preview_feed_timeout: kima_podcast::preview::PREVIEW_RSS_TIMEOUT,
             settings: SettingsCache::new(pool.clone(), cipher.clone()),
             identify: IdentifySwitch::new(false, true),
-            net: Arc::new(Net::disabled()),
+            net,
             pool,
             jwt: Arc::new(JwtKeys::new(session_secret)),
             progress_events: ProgressEvents::new(events.clone()),
@@ -157,7 +165,14 @@ impl AppState {
     }
 
     pub fn with_net(mut self, net: Arc<Net>) -> Self {
+        self.podcast_catalog = kima_podcast::catalog::Catalog::new(net.clone(), self.pool.clone());
         self.net = net;
+        self
+    }
+
+    /// Overrides [`AppState::preview_feed_timeout`] (tests: a feed host that never answers).
+    pub fn with_preview_feed_timeout(mut self, d: Duration) -> Self {
+        self.preview_feed_timeout = d;
         self
     }
 

@@ -85,8 +85,11 @@ async fn payload_shape_and_broadcast_to_all_users() {
 
     events.notify(Some(Phase::Tracks), Status::Running);
     let e = rx.try_recv().unwrap();
-    assert_eq!(e.user_id, None);
-    assert!(e.is_for(Uuid::now_v7()));
+    assert_eq!(e.audience, kima_core::events::Audience::All);
+    assert!(e.is_for(
+        kima_core::profile::AccountId::new(Uuid::now_v7()),
+        kima_core::profile::ProfileId::new(Uuid::now_v7())
+    ));
     assert_eq!(
         e.data,
         json!({"type": "enrichment:progress", "phase": "tracks", "status": "running"})

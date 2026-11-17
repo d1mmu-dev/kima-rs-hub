@@ -33,6 +33,16 @@ fn is_collection(route: &Route) -> bool {
     )
 }
 
+fn is_podcasts(route: &Route) -> bool {
+    matches!(
+        route,
+        Route::Podcasts
+            | Route::PodcastShow { .. }
+            | Route::PodcastPreview { .. }
+            | Route::PodcastCategory { .. }
+    )
+}
+
 fn is_playlists(route: &Route) -> bool {
     matches!(route, Route::Playlists | Route::Playlist { .. })
 }
@@ -83,6 +93,79 @@ pub fn frame(ctx: &Ctx, page: DomNode) -> DomNode {
 }
 
 // ---- top bars ---------------------------------------------------------------------------------------------
+
+fn siblings(
+    data: &kima_api_types::profiles::ProfilesResponse,
+) -> Vec<&kima_api_types::profiles::Profile> {
+    data.profiles
+        .iter()
+        .filter(|p| p.id != data.current)
+        .collect()
+}
+
+fn profile_switcher(ctx: &Ctx) -> DomNode {
+    ctx.profiles_rev
+        .to_computed()
+        .render_value(bind!(ctx, |_rev: u32| { profile_switcher_data(&ctx) }))
+}
+
+fn profile_switcher_data(ctx: &Ctx) -> DomNode {
+    let busy = Value::new(false);
+    let error = Value::new(None);
+    let data = load(bind!(ctx, async move {
+        crate::api::profiles::list(&ctx.client).await
+    }));
+    data.render_value(bind!(ctx, busy, error, |state: Resource<Rc<kima_api_types::profiles::ProfilesResponse>>| {
+        let Resource::Ready(data) = state else {
+            return dom! { <a href={Route::Profiles.to_string()} class="text-sm text-white p-2">"Profiles"</a> };
+        };
+        let Some(current) = data.profiles.iter().find(|p| p.id == data.current) else {
+            return dom! { <a href={Route::Profiles.to_string()}>"Choose profile"</a> };
+        };
+        let picture = crate::pages::profiles::avatar(current);
+        let name = current.name.clone();
+        let rows: Vec<DomNode> = siblings(&data).iter().map(|p| {
+            let picture = crate::pages::profiles::avatar(p);
+            let name = p.name.clone();
+            let profile = (*p).clone();
+            let click = bind!(ctx, busy, error, |_| crate::pages::profiles::choose(&ctx, profile.clone(), busy.clone(), error.clone()));
+            dom! { <button class="w-full flex items-center gap-3 p-2 rounded-lg hover:bg-white/10 text-left disabled:opacity-50" on_click={click} disabled={flag(busy.to_computed())}>{picture}<span>{name}</span></button> }
+        }).collect();
+        let manage = if crate::auth::is_main(Some(current)) {
+            dom! { <a href={Route::Settings.to_string()} class="block p-2 text-brand hover:underline">"Manage profiles"</a> }
+        } else { dom! { <span /> } };
+        let failure = error.render_value(|message| match message {
+            Some(message) => dom! { <p role="alert" class="text-danger-light p-2">{message}</p> },
+            None => dom! { <span /> },
+        });
+        let sign_out = bind!(ctx, |_| ctx.sign_out());
+        dom! {
+            <details class="relative ml-2 text-white">
+                <summary aria-label="Switch profile" class="flex items-center gap-2 cursor-pointer rounded-lg focus:outline-none focus:ring-2 focus:ring-brand">
+                    {picture}<span class="max-w-24 truncate text-sm">{name}</span>
+                </summary>
+                <div class="absolute right-0 top-full mt-2 w-64 p-3 rounded-lg border border-white/10 bg-[var(--bg-primary)] shadow-lg z-(--z-dropdown)">
+                    <p class="text-xs text-[var(--text-muted)] p-2">{format!("Listening as {}", current.name)}</p>
+                    {..rows}
+                    <a href={Route::Profiles.to_string()} class="block p-2 hover:underline">"Who's listening?"</a>
+                    {manage}
+                    {failure}
+                    <button class="block p-2 text-danger-light hover:underline" on_click={sign_out}>"Sign out"</button>
+                </div>
+            </details>
+        }
+    }))
+}
+
+/// Resolve administrative UI capabilities from both the account role and current profile.
+fn admin_session(ctx: &Ctx) -> Computed<bool> {
+    load(bind!(ctx, async move {
+        ctx.client
+            .get::<kima_api_types::auth::MeResponse>("/api/auth/me")
+            .await
+    }))
+    .map(|state| matches!(state, Resource::Ready(me) if crate::auth::is_admin(&me)))
+}
 
 /// Starts a library scan and follows it; the outcome is a toast.
 fn start_scan(ctx: &Ctx, scanning: Value<bool>) {
@@ -153,8 +236,12 @@ fn on_search_submit(ctx: &Ctx) {
 
 fn top_bar_desktop(ctx: &Ctx, route: Computed<Route>) -> DomNode {
     let scanning = Value::new(false);
+    let admin = admin_session(ctx);
+    let scan_disabled = Computed::from(bind!(scanning, admin, |c| {
+        scanning.get(c) || !admin.get(c)
+    }));
     let scan = bind!(ctx, scanning, |_| start_scan(&ctx, scanning.clone()));
-    let sign_out = bind!(ctx, |_| ctx.session.clear());
+
     let on_input = bind!(ctx, |v: String| on_search_input(&ctx, v));
     let on_submit = bind!(ctx, || on_search_submit(&ctx));
     let sync_class = scanning.map(|s| {
@@ -202,17 +289,14 @@ fn top_bar_desktop(ctx: &Ctx, route: Computed<Route>) -> DomNode {
                 </form>
             </div>
             <div class="w-72 flex items-center justify-end gap-2 px-2">
-                <button on_click={scan} disabled={flag(scanning.to_computed())} class={sync_class}
+                <button on_click={scan} disabled={flag(scan_disabled)} class={sync_class}
                     aria-label="Sync library" title="sync library" name="scan">
                     {spin}
                 </button>
                 <a class={settings_class} aria-label="Settings" title="settings" href={Route::Settings.to_string()}>
                     {icon("settings", "w-5 h-5")}
                 </a>
-                <button class="w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 text-danger-light hover:brightness-125"
-                    aria-label="Logout" title="logout" on_click={sign_out}>
-                    {icon("power", "w-5 h-5")}
-                </button>
+                {profile_switcher(ctx)}
             </div>
         </header>
     }
@@ -240,6 +324,7 @@ fn top_bar_mobile(ctx: &Ctx) -> DomNode {
                         class="w-full h-11 pl-10 pr-3 bg-[var(--bg-hover)] hover:bg-[#242424] border-2 border-transparent focus:border-white/20 rounded-full text-sm text-white placeholder-gray-400 transition-all duration-200 outline-none" />
                 </div>
             </form>
+            {profile_switcher(ctx)}
         </header>
     }
 }
@@ -308,6 +393,12 @@ fn sidebar(ctx: &Ctx, route: Computed<Route>) -> DomNode {
         "Playlists",
         route.map(|r| is_playlists(&r)),
     );
+    let podcasts_nav = nav_item(
+        Route::Podcasts.to_string(),
+        "04",
+        "Podcasts",
+        route.map(|r| is_podcasts(&r)),
+    );
     let stack = playlist_stack(ctx, route);
     dom! {
         <aside class="w-64 bg-[var(--bg-primary)] flex flex-col overflow-hidden relative z-(--z-raised) rounded-lg tablet:hidden">
@@ -320,6 +411,7 @@ fn sidebar(ctx: &Ctx, route: Computed<Route>) -> DomNode {
                     {collection}
                     {search}
                     {playlists_nav}
+                    {podcasts_nav}
                 </div>
                 <div class="mt-4 mb-4 border-t-2 border-white/10"></div>
             </nav>
@@ -547,12 +639,19 @@ fn bottom_nav(route: Computed<Route>) -> DomNode {
         "list-music",
         route.map(|r| is_playlists(&r)),
     );
+    let podcasts = bottom_nav_item(
+        Route::Podcasts.to_string(),
+        "Podcasts",
+        "mic-vocal",
+        route.map(|r| is_podcasts(&r)),
+    );
     dom! {
         <nav class="fixed bottom-0 left-0 right-0 z-(--z-nav) bg-black border-t border-white/10 min-[1025px]:hidden" role="navigation" aria-label="Main navigation">
             <div class="flex items-center justify-around" style="height: var(--nav-h);">
                 {collection}
                 {search}
                 {playlists}
+                {podcasts}
             </div>
         </nav>
     }
@@ -560,9 +659,10 @@ fn bottom_nav(route: Computed<Route>) -> DomNode {
 
 fn drawer(ctx: &Ctx) -> DomNode {
     let scanning = Value::new(false);
+    let admin = admin_session(ctx);
     ctx.menu_open
         .to_computed()
-        .render_value(bind!(ctx, scanning, |open: bool| {
+        .render_value(bind!(ctx, scanning, admin, |open: bool| {
             if !open {
                 return dom! { <span /> };
             }
@@ -573,7 +673,7 @@ fn drawer(ctx: &Ctx) -> DomNode {
             });
             let sign_out = bind!(ctx, |_| {
                 ctx.menu_open.set(false);
-                ctx.session.clear();
+                ctx.sign_out();
             });
             dom! {
                 <div class="min-[1025px]:hidden">
@@ -592,7 +692,7 @@ fn drawer(ctx: &Ctx) -> DomNode {
                         <nav class="flex-1 overflow-y-auto py-4" role="navigation" aria-label="Mobile menu">
                             <div class="px-3">
                                 <div class="text-xs font-semibold text-[var(--text-muted)] px-3 mb-2">"Actions"</div>
-                                <button class="w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200 text-left text-[var(--text-secondary)] hover:text-white hover:bg-white/5" on_click={scan}>
+                                <button class="w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200 text-left text-[var(--text-secondary)] hover:text-white hover:bg-white/5 disabled:opacity-50" on_click={scan} disabled={flag(admin.map(|allowed| !allowed))}>
                                     {icon("refresh-cw", "w-5 h-5")}
                                     <span class="text-sm font-medium">"Sync Library"</span>
                                 </button>
@@ -612,4 +712,20 @@ fn drawer(ctx: &Ctx) -> DomNode {
                 </div>
             }
         }))
+}
+
+#[cfg(test)]
+mod profile_tests {
+    #[test]
+    fn header_lists_only_siblings_for_switching() {
+        let data: kima_api_types::profiles::ProfilesResponse = serde_json::from_value(serde_json::json!({
+            "profiles": [
+                {"id":"00000000-0000-0000-0000-000000000001","name":"Main","kind":"main","isMain":true,"avatar":null,"createdAt":"now"},
+                {"id":"00000000-0000-0000-0000-000000000002","name":"Kids","kind":"kids","isMain":false,"avatar":"cat","createdAt":"now"}
+            ], "current":"00000000-0000-0000-0000-000000000002", "max":5
+        })).unwrap();
+        let siblings = super::siblings(&data);
+        assert_eq!(siblings.len(), 1);
+        assert_eq!(siblings[0].name, "Main");
+    }
 }

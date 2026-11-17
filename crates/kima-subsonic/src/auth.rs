@@ -11,7 +11,9 @@ use axum::http::request::Parts;
 use hmac::{Hmac, KeyInit, Mac};
 use kima_api::auth::{AuthUser, ClientIp};
 use kima_core::cipher::Cipher;
-use kima_db::users::{self, MAX_USERNAME_CHARS, ROLE_ADMIN, User};
+use kima_core::profile::{ProfileId, ProfileKind};
+use kima_db::api_keys::KeySecret;
+use kima_db::users::{self, MAX_USERNAME_CHARS, User};
 use md5::{Digest, Md5};
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -47,8 +49,9 @@ pub struct SubsonicUser {
 }
 
 impl SubsonicUser {
+    /// Admin rights need an admin account acting as its main profile (D-241).
     pub fn require_admin(&self) -> Result<(), SubsonicError> {
-        if self.user.role == ROLE_ADMIN {
+        if self.user.is_admin() {
             Ok(())
         } else {
             Err(SubsonicError::not_authorized("Admin privileges required"))
@@ -66,13 +69,33 @@ impl SubsonicUser {
     }
 }
 
-fn auth_user(user: &User) -> AuthUser {
+/// The session of a sign-in as `profile` of `user`'s account (D-244): an app token signs into
+/// its own profile, the password into the main one.
+fn session(user: &User, profile: ProfileId, profile_kind: ProfileKind) -> AuthUser {
+    debug_assert!(
+        profile_kind.fits(user.account(), profile),
+        "a session's profile kind contradicts its id"
+    );
     AuthUser {
-        id: user.id,
+        account: user.account(),
+        profile,
+        profile_kind,
         username: user.username.clone(),
         role: user.role.clone(),
         token_version: user.token_version,
     }
+}
+
+/// The session of a password sign-in: always the account's main profile (answer Q7).
+fn main_session(user: &User) -> AuthUser {
+    session(user, user.main_profile(), ProfileKind::Main)
+}
+
+/// The profile of the token `matched` names, among the account's `keys`.
+pub fn matched_profile(keys: &[KeySecret], matched: Uuid) -> Option<(ProfileId, ProfileKind)> {
+    keys.iter()
+        .find(|k| k.id == matched)
+        .map(|k| (k.profile, k.profile_kind))
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -292,7 +315,7 @@ impl FromRequestParts<SubsonicCtx> for SubsonicUser {
             }
             ctx.token_used(owner.key_id, now);
             return Ok(Self {
-                user: auth_user(&owner.user),
+                user: session(&owner.user, owner.profile, owner.profile_kind),
                 method: AuthMethod::AppToken(owner.key_id),
             });
         }
@@ -308,18 +331,24 @@ impl FromRequestParts<SubsonicCtx> for SubsonicUser {
             }
             // One query whatever the user: no extra round trip for an existing user, so the
             // timing does not reveal which usernames exist (spec §5.3 step 3). Keep it so.
-            let (found, secrets) = kima_db::api_keys::user_with_secrets(pool, u).await?;
+            // The secrets of every profile's tokens: the matched one names the profile.
+            let (found, keys) = kima_db::api_keys::user_with_secrets(pool, u).await?;
+            let secrets: Vec<(Uuid, Vec<u8>)> =
+                keys.iter().map(|k| (k.id, k.secret_enc.clone())).collect();
             let outcome = ts_rounds(&ctx.app.cipher, &secrets, &ctx.dummy_secret, salt, t);
             for id in &outcome.undecryptable {
                 if ctx.decrypt_warn.allow(*id, now) {
                     tracing::warn!(key_id = %id, "app token secret cannot be decrypted");
                 }
             }
-            return match (found, outcome.matched) {
-                (Some(user), Some(key_id)) => {
+            let matched = outcome
+                .matched
+                .and_then(|key_id| Some((key_id, matched_profile(&keys, key_id)?)));
+            return match (found, matched) {
+                (Some(user), Some((key_id, (profile, kind)))) => {
                     ctx.token_used(key_id, now);
                     Ok(Self {
-                        user: auth_user(&user),
+                        user: session(&user, profile, kind),
                         method: AuthMethod::AppToken(key_id),
                     })
                 }
@@ -337,7 +366,7 @@ impl FromRequestParts<SubsonicCtx> for SubsonicUser {
             {
                 ctx.token_used(owner.key_id, now);
                 return Ok(Self {
-                    user: auth_user(&owner.user),
+                    user: session(&owner.user, owner.profile, owner.profile_kind),
                     method: AuthMethod::AppToken(owner.key_id),
                 });
             }
@@ -413,7 +442,7 @@ async fn password_auth(
             .store(user.id, &password, user.token_version, Instant::now());
     }
     Ok(SubsonicUser {
-        user: auth_user(&user),
+        user: main_session(&user),
         method: AuthMethod::Password,
     })
 }
@@ -421,6 +450,40 @@ async fn password_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_needs_the_main_profile() {
+        let account = kima_core::profile::AccountId::new(Uuid::now_v7());
+        let session = |profile, profile_kind, role: &str| SubsonicUser {
+            user: AuthUser {
+                account,
+                profile,
+                profile_kind,
+                username: "ana".into(),
+                role: role.into(),
+                token_version: 0,
+            },
+            method: AuthMethod::Password,
+        };
+        let main = kima_core::profile::ProfileId::main_of(account);
+        let kids = kima_core::profile::ProfileId::new(Uuid::now_v7());
+        assert!(
+            session(main, ProfileKind::Main, "admin")
+                .require_admin()
+                .is_ok()
+        );
+        for (profile, kind, role) in [
+            (kids, ProfileKind::Kids, "admin"),
+            (kids, ProfileKind::Standard, "admin"),
+            (main, ProfileKind::Main, "user"),
+        ] {
+            let refused = session(profile, kind, role).require_admin().unwrap_err();
+            assert_eq!(
+                refused,
+                SubsonicError::not_authorized("Admin privileges required")
+            );
+        }
+    }
 
     #[test]
     fn token_matches_subsonic_doc_vector() {
@@ -469,6 +532,50 @@ mod tests {
         let out = ts_rounds(&cipher, std::slice::from_ref(&foreign), &dummy, "salt", &t);
         assert_eq!(out.undecryptable, vec![foreign.0]);
         assert_eq!((out.matched, out.rounds), (None, 50));
+    }
+
+    /// The 50 rounds run over the tokens of every profile of the account together, whatever
+    /// their split, and the matched token names its profile.
+    #[test]
+    fn ts_rounds_constant_over_account_tokens() {
+        let cipher = Cipher::random();
+        let dummy = make_dummy(&cipher);
+        let main = ProfileId::new(Uuid::now_v7());
+        let kids = ProfileId::new(Uuid::now_v7());
+        for n in [0usize, 1, 50] {
+            let keys: Vec<KeySecret> = (0..n)
+                .map(|i| {
+                    let (id, secret_enc) = sealed(&cipher, &format!("tok-{i}"));
+                    let (profile, profile_kind) = if i % 2 == 0 {
+                        (main, ProfileKind::Main)
+                    } else {
+                        (kids, ProfileKind::Kids)
+                    };
+                    KeySecret {
+                        id,
+                        profile,
+                        profile_kind,
+                        secret_enc,
+                    }
+                })
+                .collect();
+            let secrets: Vec<_> = keys.iter().map(|k| (k.id, k.secret_enc.clone())).collect();
+            for (i, expected) in [
+                (0, Some((main, ProfileKind::Main))),
+                (1, Some((kids, ProfileKind::Kids))),
+            ] {
+                let out = ts_rounds(
+                    &cipher,
+                    &secrets,
+                    &dummy,
+                    "salt",
+                    &t_for(&format!("tok-{i}"), "salt"),
+                );
+                assert_eq!(out.rounds, TS_ROUNDS, "n={n}");
+                let profile = out.matched.and_then(|id| matched_profile(&keys, id));
+                assert_eq!(profile, expected.filter(|_| i < n), "n={n} i={i}");
+            }
+        }
     }
 
     #[test]

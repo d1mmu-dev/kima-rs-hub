@@ -318,10 +318,6 @@ const UNAFFECTED: &[(&str, Option<u64>)] = &[
     ("updateUser", Some(50)),
     ("deleteUser", Some(50)),
     ("changePassword", Some(50)),
-    ("getPodcasts", None),
-    ("getNewestPodcasts", None),
-    ("getPodcastEpisode", Some(70)),
-    ("refreshPodcasts", None),
     ("getShares", None),
     ("createShare", Some(0)),
     ("updateShare", Some(0)),
@@ -349,14 +345,15 @@ const NO_ENVELOPE: &[&str] = &["hls", "hls.m3u8", "getAvatar"];
 fixture_test!(
     every_endpoint_answers_internal_error_when_db_breaks,
     |server, pool| {
-        // Auth needs `users` and `api_keys`, so break everything else instead of closing the pool.
+        // Auth needs `users` and `api_keys` (and a new account writes its main profile with the
+        // `users` row), so break everything else instead of closing the pool.
         let tables: Vec<(String,)> =
             sqlx::query_as("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
         for (table,) in &tables {
-            if ["users", "api_keys", "_sqlx_migrations"].contains(&table.as_str()) {
+            if ["users", "profiles", "api_keys", "_sqlx_migrations"].contains(&table.as_str()) {
                 continue;
             }
             sqlx::query(&format!(
@@ -394,7 +391,7 @@ fixture_test!(
             ("fromYear", "2000"),
             ("toYear", "2001"),
             ("mediaType", "song"),
-            ("transcodeParams", "x"),
+            ("transcodeParams", "q-original"),
             ("mediaId", id.as_str()),
             ("action", "get"),
             ("size", "10"),
@@ -432,7 +429,7 @@ fixture_test!(
         }
 
         // The user writes under password auth, which is how they work for real. Password auth,
-        // the user lookups and the password and token updates touch only `users` and `api_keys`
+        // the user lookups and the password and token updates touch only `users`, `profiles` and `api_keys`
         // (session revocation is in memory), so all four still succeed with the other tables
         // gone. The outcomes are pinned, and `admin_call` checks that no body leaks a detail.
         let admin_call = |endpoint: &'static str, extra: Vec<(&'static str, String)>| {

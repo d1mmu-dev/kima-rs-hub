@@ -966,6 +966,150 @@ async fn enrichment_waits_for_a_running_scan(pool: PgPool) {
     );
 }
 
+/// Makes `op` on `table` wait, for rows matching `when`, in a BEFORE trigger until the
+/// advisory lock `key` is released: the writer has taken every lock before that write and
+/// sits inside its transaction holding them.
+async fn gate(pool: &PgPool, name: &str, op: &str, table: &str, when: &str, key: i64) {
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION test_gate() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_advisory_xact_lock_shared(TG_ARGV[0]::bigint); RETURN NEW; END $$",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!(
+        "CREATE TRIGGER {name} BEFORE {op} ON {table} FOR EACH ROW WHEN ({when}) \
+         EXECUTE FUNCTION test_gate({key})"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Waits until `n` sessions are waiting on an advisory lock.
+async fn advisory_waiters(pool: &PgPool, n: i64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() \
+             AND wait_event_type = 'Lock' AND wait_event = 'advisory'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting >= n {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{waiting} of {n} gated writers waiting"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The recording claim must not take a track another stage's work has locked for "nothing
+/// to do": the coordinator runs the analysis phase alongside the tracks phase, and their
+/// claims and reports lock the same track rows. Hosted CI caught the race in
+/// `enrichment_waits_for_a_running_scan` (`report.tracks.done` 0); here it is forced: the
+/// analysis failure report holds the track while the tracks phase claims.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn tracks_phase_claims_a_track_the_analysis_stage_holds(pool: PgPool) {
+    let rec = rec_id(1);
+    let replay = Replay::start(Recording(vec![details(&rec)])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    let t = track(&pool, "a.wav", Some(&rec)).await;
+
+    // Gate 1: the analysis failure report (its file is missing), after it locked the track.
+    gate(
+        &pool,
+        "gate_analysis_report",
+        "UPDATE",
+        "track_stages",
+        "NEW.stage = 'analysis' AND NEW.status <> 'working'",
+        1,
+    )
+    .await;
+    // Gate 2: the network phases, before the tracks phase starts (the artists phase's mark).
+    gate(
+        &pool,
+        "gate_artists_mark",
+        "UPDATE",
+        "enrichment_state",
+        "NEW.current_phase = 'artists'",
+        2,
+    )
+    .await;
+    // Every phase the cycle marks, so a tracks phase that claimed nothing is seen to end.
+    sqlx::query("CREATE TABLE test_phases (phase text)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE FUNCTION test_log_phase() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN INSERT INTO test_phases VALUES (NEW.current_phase); RETURN NEW; END $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER test_log_phase AFTER UPDATE ON enrichment_state FOR EACH ROW \
+         EXECUTE FUNCTION test_log_phase()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut holder = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(1), pg_advisory_lock(2)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let run = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { cycle(&ctx).await }
+    });
+    advisory_waiters(&pool, 2).await;
+
+    // The analysis report holds the track; now the tracks phase claims.
+    sqlx::query("SELECT pg_advisory_unlock(2)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let claimed = stage_status(&pool, t, "recording").await.is_some();
+        let ended: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM test_phases WHERE phase = 'tracks')")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if claimed || ended {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the tracks phase never claimed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    sqlx::query("SELECT pg_advisory_unlock(1)")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let report = run.await.unwrap();
+    assert!(report.ran);
+    assert_eq!(report.analysis.claimed, 1, "{report:?}");
+    assert_eq!(report.tracks.done, 1, "{report:?}");
+    assert_eq!(
+        stage_status(&pool, t, "recording").await.as_deref(),
+        Some("done")
+    );
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn an_organizer_or_autotag_job_does_not_hold_enrichment_back(pool: PgPool) {
     let dir = tempfile::tempdir().unwrap();

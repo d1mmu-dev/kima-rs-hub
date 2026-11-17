@@ -7,9 +7,10 @@ use std::collections::HashSet;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use kima_core::events::Event;
+use kima_core::profile::{ProfileId, shows_profile_names};
 use kima_db::playlists::{self, ItemRow, MoveError, Playlist, PlaylistSummary};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -25,18 +26,29 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/playlists", get(list).post(create))
-        .route("/playlists/{id}", get(detail).put(update).delete(remove))
-        .route("/playlists/{id}/hide", post(hide).delete(unhide))
         .route(
-            "/playlists/{id}/items",
-            post(add_items).delete(remove_items),
+            "/playlists/{id}",
+            get(detail).put(update).patch(update).delete(remove),
         )
+        .route("/playlists/{id}/hide", post(hide).delete(unhide))
+        .route("/playlists/{id}/items", post(add_items))
         .route("/playlists/{id}/items/batch", post(add_batch))
         .route("/playlists/{id}/items/{track_id}", delete(remove_item))
-        .route("/playlists/{id}/items/{item_id}/move", patch(move_item))
+        .route("/playlists/{id}/items/{item_id}/move", post(move_item))
 }
 
 const NOT_FOUND: &str = "Playlist not found";
+
+/// Upstream's `announcePlaylistChange(userId, playlistId, deleted)`: tells the open devices of
+/// the profile that made the change that a playlist changed, so their list and that playlist
+/// refetch (a deleted one is marked so no device asks for it again). Sibling profiles are not
+/// told (D-245), like other users upstream.
+pub(crate) fn announce(state: &AppState, who: ProfileId, playlist: Uuid, deleted: bool) {
+    state.events.publish(Event::for_profile(
+        who,
+        json!({ "type": "playlist:updated", "playlistId": playlist, "deleted": deleted }),
+    ));
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Need {
@@ -57,7 +69,7 @@ async fn guard(
     let playlist = playlists::find(&state.pool, id)
         .await?
         .ok_or_else(not_found)?;
-    let owner = playlist.user_id == user.id;
+    let owner = playlist.profile_id == user.profile;
     if !owner && !playlist.is_public {
         return Err(not_found());
     }
@@ -70,10 +82,12 @@ async fn guard(
 fn playlist_json(p: &Playlist) -> Value {
     json!({
         "id": p.id,
-        "userId": p.user_id,
+        "userId": p.account_id,
+        "profileId": p.profile_id,
         "mixId": null,
         "name": p.name,
         "isPublic": p.is_public,
+        "reverseOrder": p.reverse_order,
         "createdAt": iso(p.created_at),
         "updatedAt": iso(p.updated_at),
         "spotifyPlaylistId": null,
@@ -104,12 +118,20 @@ fn tagged_item_json(i: &ItemRow) -> Value {
     v
 }
 
-fn summary_json(s: &PlaylistSummary, viewer: Uuid) -> Value {
+fn summary_json(s: &PlaylistSummary, viewer: &AuthUser) -> Value {
     let mut v = playlist_json(&s.playlist);
     v["user"] = json!({ "username": s.username });
+    // Profile names stay inside the account: another account's session gets the key as null
+    // and only the account username above (D-242, owner 2026-11-14).
+    v["profileName"] = if shows_profile_names(viewer.account, s.playlist.account_id) {
+        json!(s.profile_name)
+    } else {
+        Value::Null
+    };
     v["trackCount"] = json!(s.track_count);
     v["_count"] = json!({ "items": s.track_count });
-    v["isOwner"] = json!(s.playlist.user_id == viewer);
+    // The viewer's own playlist: same profile, not merely the same account (D-242).
+    v["isOwner"] = json!(s.playlist.profile_id == viewer.profile);
     v["isHidden"] = json!(s.hidden);
     v
 }
@@ -141,7 +163,7 @@ async fn list(
         .clamp(1, 100);
     let rows = playlists::list(
         &state.pool,
-        user.id,
+        user.profile,
         limit,
         (page - 1).saturating_mul(limit),
     )
@@ -151,7 +173,7 @@ async fn list(
     let out: Vec<Value> = rows
         .iter()
         .map(|s| {
-            let mut v = summary_json(s, user.id);
+            let mut v = summary_json(s, &user);
             v["items"] = Value::Array(
                 firsts
                     .iter()
@@ -191,31 +213,66 @@ async fn create(
     let p = playlists::create(
         &state.pool,
         Uuid::now_v7(),
-        user.id,
+        user.profile,
         &body.name,
         body.is_public,
     )
     .await?;
+    announce(&state, user.profile, p.id, false);
     Ok(Json(playlist_json(&p)))
+}
+
+#[derive(Deserialize)]
+struct DetailParams {
+    order: Option<String>,
+}
+
+/// Upstream's `playlistOrderSchema = z.enum(["asc","rev"]).optional()`: anything else is 400
+/// `{"error":"Invalid order","details":[<zod issue>]}`.
+fn invalid_order() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "Invalid order",
+            "details": [{
+                "code": "invalid_value",
+                "values": ["asc", "rev"],
+                "path": [],
+                "message": "Invalid option: expected one of \"asc\"|\"rev\"",
+            }],
+        })),
+    )
+        .into_response()
 }
 
 async fn detail(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+    Query(params): Query<DetailParams>,
+) -> Result<Response, ApiError> {
     let p = guard(&state, &user, &id, Need::Reader).await?;
-    let summary = playlists::summary(&state.pool, p.id, user.id)
+    // An explicit `?order=` wins over the playlist's stored flag.
+    let reversed = match params.order.as_deref() {
+        None => p.reverse_order,
+        Some("asc") => false,
+        Some("rev") => true,
+        Some(_) => return Ok(invalid_order()),
+    };
+    let summary = playlists::summary(&state.pool, p.id, user.profile)
         .await?
         .ok_or(ApiError::NotFound(NOT_FOUND))?;
     let items = playlists::items(&state.pool, p.id).await?;
-    let items: Vec<Value> = items.iter().map(tagged_item_json).collect();
-    let mut v = summary_json(&summary, user.id);
+    let mut items: Vec<Value> = items.iter().map(tagged_item_json).collect();
+    if reversed {
+        items.reverse();
+    }
+    let mut v = summary_json(&summary, &user);
     v["pendingCount"] = json!(0);
     v["pendingTracks"] = json!([]);
     v["mergedItems"] = Value::Array(items.clone());
     v["items"] = Value::Array(items);
-    Ok(Json(v))
+    Ok(Json(v).into_response())
 }
 
 #[derive(Deserialize)]
@@ -223,8 +280,10 @@ async fn detail(
 struct UpdateBody {
     name: Option<String>,
     is_public: Option<bool>,
+    reverse_order: Option<bool>,
 }
 
+/// `PUT` and `PATCH` (upstream shares one handler): rename, visibility and `reverseOrder`.
 async fn update(
     State(state): State<AppState>,
     user: AuthUser,
@@ -235,9 +294,16 @@ async fn update(
     if let Some(name) = &body.name {
         check_name(name)?;
     }
-    let updated = playlists::update(&state.pool, p.id, body.name.as_deref(), body.is_public)
-        .await?
-        .ok_or(ApiError::NotFound(NOT_FOUND))?;
+    let updated = playlists::update(
+        &state.pool,
+        p.id,
+        body.name.as_deref(),
+        body.is_public,
+        body.reverse_order,
+    )
+    .await?
+    .ok_or(ApiError::NotFound(NOT_FOUND))?;
+    announce(&state, user.profile, p.id, false);
     Ok(Json(playlist_json(&updated)))
 }
 
@@ -248,6 +314,7 @@ async fn remove(
 ) -> Result<Json<Value>, ApiError> {
     let p = guard(&state, &user, &id, Need::Owner).await?;
     playlists::delete(&state.pool, p.id).await?;
+    announce(&state, user.profile, p.id, true);
     Ok(Json(json!({ "message": "Playlist deleted" })))
 }
 
@@ -257,7 +324,9 @@ async fn hide(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let p = guard(&state, &user, &id, Need::Reader).await?;
-    playlists::hide(&state.pool, user.id, p.id).await?;
+    if playlists::hide(&state.pool, user.profile, p.id).await? {
+        announce(&state, user.profile, p.id, false);
+    }
     Ok(Json(
         json!({ "message": "Playlist hidden", "isHidden": true }),
     ))
@@ -269,7 +338,9 @@ async fn unhide(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     if let Ok(p) = id.parse::<Uuid>() {
-        playlists::unhide(&state.pool, user.id, p).await?;
+        if playlists::unhide(&state.pool, user.profile, p).await? {
+            announce(&state, user.profile, p, false);
+        }
     }
     Ok(Json(
         json!({ "message": "Playlist unhidden", "isHidden": false }),
@@ -334,6 +405,9 @@ async fn add_items(
         .await?
         .ok_or(ApiError::NotFound(NOT_FOUND))?;
     rejected.extend(result.rejected.iter().map(Uuid::to_string));
+    if result.added > 0 {
+        announce(&state, user.profile, p.id, false);
+    }
     if result.added == 0 && result.duplicates == 0 {
         return Ok((
             StatusCode::NOT_FOUND,
@@ -356,22 +430,6 @@ struct TrackIdsBody {
     track_ids: Vec<String>,
 }
 
-async fn remove_items(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Path(id): Path<String>,
-    ApiJson(body): ApiJson<TrackIdsBody>,
-) -> Result<Json<Value>, ApiError> {
-    let p = guard(&state, &user, &id, Need::Owner).await?;
-    too_many(body.track_ids.len(), 1000)?;
-    let (ids, _) = split_ids(&body.track_ids);
-    let removed = playlists::remove_tracks(&state.pool, p.id, &ids).await?;
-    if removed == 0 {
-        return Err(ApiError::NotFound("No matching tracks in playlist"));
-    }
-    Ok(Json(json!({ "removed": removed })))
-}
-
 async fn add_batch(
     State(state): State<AppState>,
     user: AuthUser,
@@ -384,6 +442,9 @@ async fn add_batch(
     let result = playlists::add_tracks(&state.pool, p.id, &ids)
         .await?
         .ok_or(ApiError::NotFound(NOT_FOUND))?;
+    if result.added > 0 {
+        announce(&state, user.profile, p.id, false);
+    }
     let items = playlists::items_for_tracks(&state.pool, p.id, &ids).await?;
     Ok(Json(json!({
         "added": result.added,
@@ -405,6 +466,7 @@ async fn remove_item(
     if removed == 0 {
         return Err(not_in());
     }
+    announce(&state, user.profile, p.id, false);
     Ok(Json(json!({ "success": true, "removed": removed })))
 }
 
@@ -430,10 +492,7 @@ async fn move_item(
     };
     match playlists::move_item(&state.pool, p.id, item, after).await? {
         Ok(sort) => {
-            state.events.publish(Event {
-                user_id: Some(user.id),
-                data: json!({ "type": "playlist:updated", "playlistId": p.id }),
-            });
+            announce(&state, user.profile, p.id, false);
             Ok(Json(json!({ "success": true, "rank": rank_of(sort) })))
         }
         Err(MoveError::ItemNotFound) => Err(no_item()),

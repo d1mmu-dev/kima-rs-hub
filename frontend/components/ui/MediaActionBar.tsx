@@ -10,11 +10,6 @@ interface MediaActionBarProps {
     showPause: boolean;
     onPlayPause: () => void;
     onShuffle?: () => void;
-    /**
-     * "square" (rounded-lg) is the deliberate branch from Spotify's circles
-     * (Kevin's call); "circle" is the play disc.
-     */
-    discShape?: "circle" | "square";
     secondaryShape: "circle" | "square";
     /** Extra icon buttons and CTAs, in order, as MediaActionButton/CTA elements. */
     children?: ReactNode;
@@ -59,14 +54,13 @@ export const MediaActionBar = memo(function MediaActionBar({
     showPause,
     onPlayPause,
     onShuffle,
-    discShape = "circle",
     secondaryShape,
     children,
 }: MediaActionBarProps) {
     return (
         <div className="flex items-center gap-4">
             {showPlay && (
-                <PlayDisc showPause={showPause} onClick={onPlayPause} shape={discShape} />
+                <PlayDisc showPause={showPause} onClick={onPlayPause} shape="circle" />
             )}
 
             {showPlay && onShuffle && (
@@ -102,7 +96,8 @@ export const MediaActionButton = memo(function MediaActionButton({
     return (
         <button
             onClick={onClick}
-            title={label}
+            title={label.toLowerCase()}
+            aria-label={label}
             disabled={disabled}
             className={cn(
                 "h-8 w-8 hover:bg-white/10 flex items-center justify-center text-[var(--text-secondary)] hover:text-white transition-all disabled:opacity-50",

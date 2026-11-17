@@ -1,6 +1,7 @@
 //! The shared play queue (spec §4.5 #35-#38, §6.4). Subsonic and the web player use the user's one
 //! `playback_state` row, so a queue saved here shows up in the web player and the other way round.
 
+use kima_core::profile::ProfileId;
 use std::collections::HashSet;
 
 use axum::Router;
@@ -34,7 +35,7 @@ pub fn add_routes(router: Router<SubsonicCtx>) -> Router<SubsonicCtx> {
 /// still names a present track; the songs are in the same order.
 async fn hydrate(
     ctx: &SubsonicCtx,
-    user: Uuid,
+    user: ProfileId,
     requested: &[Option<Uuid>],
 ) -> Result<(Vec<SongItem>, Vec<bool>), SubsonicError> {
     let wanted: Vec<Uuid> = requested.iter().flatten().copied().collect();
@@ -97,7 +98,7 @@ async fn save(
         .take(QUEUE_LIMIT)
         .map(|raw| ids::parse(raw, &[]))
         .collect();
-    let (songs, kept) = hydrate(ctx, user.user.id, &requested).await?;
+    let (songs, kept) = hydrate(ctx, user.user.profile, &requested).await?;
     let index = if songs.is_empty() {
         0
     } else {
@@ -115,7 +116,7 @@ async fn save(
         position: Some(position(params)),
         changed_by: Some(Some(client_name(params))),
     };
-    playback::upsert(&ctx.app.pool, user.user.id, patch).await?;
+    playback::upsert(&ctx.app.pool, user.user.profile, patch).await?;
     Ok(Answer::ok())
 }
 
@@ -178,7 +179,7 @@ struct Stored {
 }
 
 async fn load(ctx: &SubsonicCtx, user: &SubsonicUser) -> Result<Stored, SubsonicError> {
-    let state = playback::get(&ctx.app.pool, user.user.id).await?;
+    let state = playback::get(&ctx.app.pool, user.user.profile).await?;
     let Some(state) = state else {
         return Ok(Stored {
             songs: Vec::new(),
@@ -200,7 +201,7 @@ async fn load(ctx: &SubsonicCtx, user: &SubsonicUser) -> Result<Stored, Subsonic
                 .collect()
         })
         .unwrap_or_default();
-    let (songs, kept) = hydrate(ctx, user.user.id, &requested).await?;
+    let (songs, kept) = hydrate(ctx, user.user.profile, &requested).await?;
     let stored = usize::try_from(state.current_index)
         .unwrap_or(0)
         .min(requested.len().saturating_sub(1));

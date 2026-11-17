@@ -41,7 +41,7 @@ async fn index(
     user: &SubsonicUser,
     name: &'static str,
 ) -> Result<Node, SubsonicError> {
-    let artists = subsonic::artists_sorted(&app.pool, user.user.id).await?;
+    let artists = subsonic::artists_sorted(&app.pool, user.user.profile).await?;
     let mut buckets: BTreeMap<String, Vec<Node>> = BTreeMap::new();
     for artist in &artists {
         buckets
@@ -93,7 +93,7 @@ async fn get_artist(
     let raw = params.required("id")?;
     let not_found = || SubsonicError::not_found("Artist not found");
     let id = ids::parse(raw, &[]).ok_or_else(not_found)?;
-    let (artist, albums) = subsonic::artist_with_albums(&app.pool, user.user.id, id)
+    let (artist, albums) = subsonic::artist_with_albums(&app.pool, user.user.profile, id)
         .await?
         .ok_or_else(not_found)?;
     let node = map::artist_id3(&artist).list("album", albums.iter().map(map::album_id3).collect());
@@ -107,7 +107,7 @@ async fn get_music_directory(
 ) -> Result<Answer, SubsonicError> {
     let raw = params.required("id")?;
     let not_found = || SubsonicError::not_found("Directory not found");
-    let me = user.user.id;
+    let me = user.user.profile;
     if raw.trim() == "1" {
         let artists = subsonic::artists_sorted(&app.pool, me).await?;
         return Ok(Answer::node(
@@ -161,7 +161,7 @@ async fn get_album(
     let raw = params.required("id")?;
     let not_found = || SubsonicError::not_found("Album not found");
     let id = ids::parse(raw, &[]).ok_or_else(not_found)?;
-    let (album, songs) = subsonic::album_with_tracks(&app.pool, user.user.id, id)
+    let (album, songs) = subsonic::album_with_tracks(&app.pool, user.user.profile, id)
         .await?
         .ok_or_else(not_found)?;
     Ok(Answer::node(
@@ -177,7 +177,7 @@ async fn get_song(
     let raw = params.required("id")?;
     let not_found = || SubsonicError::not_found("Song not found");
     let id: Uuid = ids::parse(raw, &[]).ok_or_else(not_found)?;
-    let song = subsonic::track(&app.pool, user.user.id, id)
+    let song = subsonic::track(&app.pool, user.user.profile, id)
         .await?
         .ok_or_else(not_found)?;
     Ok(Answer::node(map::song(&song)))
@@ -222,7 +222,7 @@ async fn album_list(
         .unwrap_or(DEFAULT_PAGE)
         .clamp(0, MAX_PAGE);
     let offset = params.paging::<i64>("offset").unwrap_or(0).max(0);
-    Ok(subsonic::album_list(&app.pool, user.user.id, kind, size, offset).await?)
+    Ok(subsonic::album_list(&app.pool, user.user.profile, kind, size, offset).await?)
 }
 
 async fn get_album_list2(

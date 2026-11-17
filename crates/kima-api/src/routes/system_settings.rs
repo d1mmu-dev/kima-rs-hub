@@ -24,9 +24,11 @@ pub fn routes() -> Router<AppState> {
         .route("/system-settings/test-fanart", post(test_fanart))
 }
 
-/// Any signed-in user. `KIMA_PUBLIC_URL`, empty when unset (D-096).
+/// The key-value state. The frontend's `getPublicConfig()` reads `canAcquire`, which kima-rs
+/// currently answers `false` (the acquisition path is M7 work). `KIMA_PUBLIC_URL`, empty when unset
+/// (D-096).
 async fn public_config(State(state): State<AppState>, _user: AuthUser) -> Json<Value> {
-    Json(json!({ "publicUrl": state.public_url.as_deref().unwrap_or("") }))
+    Json(json!({ "publicUrl": state.public_url.as_deref().unwrap_or(""), "canAcquire": false }))
 }
 
 fn body(settings: SystemSettings) -> Json<Value> {
@@ -52,6 +54,7 @@ async fn show(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<V
         "autoEnrichMetadataLocked": state.identify.locked(),
         "enrichmentConcurrency": kv.enrichment_concurrency,
         "autotagAutoApply": kv.autotag_auto_apply.as_str(),
+        "podcastChartCountry": kv.podcast_chart_country,
     })))
 }
 
@@ -127,6 +130,17 @@ fn changes(
                     ));
                 }
             },
+            Key::PodcastChartCountry => {
+                let bad = || invalid(format!("{} must be a two-letter country code", key.name()));
+                let s = value.as_str().ok_or_else(bad)?;
+                let normalized = s.trim().to_lowercase();
+                if normalized.chars().count() != 2
+                    || !normalized.chars().all(|c| c.is_ascii_lowercase())
+                {
+                    return Err(bad());
+                }
+                out.push(Change::Plain(key, Value::String(normalized)));
+            }
         }
     }
     Ok((registration_open, out))

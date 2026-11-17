@@ -77,7 +77,7 @@ async fn cover_art_404_for_unknown_album(pool: PgPool) {
         .get("/api/library/cover-art/not-a-uuid")
         .authorization_bearer(&token)
         .await;
-    bad.assert_status(StatusCode::NOT_FOUND);
+    bad.assert_status(StatusCode::BAD_REQUEST);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -471,11 +471,12 @@ async fn cover_route_unknown_id_404(pool: PgPool) {
         .with_library_root(music.path().into());
     let (_, token) = common::user_with_token(&state, "ana").await;
     let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
-    for id in [
-        stray.to_string(),
-        artist.to_string(),
-        "..%2F..%2Fetc%2Fpasswd".into(),
-    ] {
+    server
+        .get("/api/library/cover-art/..%2F..%2Fetc%2Fpasswd")
+        .authorization_bearer(&token)
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    for id in [stray.to_string(), artist.to_string()] {
         let res = server
             .get(&format!("/api/library/cover-art/{id}"))
             .authorization_bearer(&token)
@@ -607,4 +608,504 @@ async fn embedded_cover_beats_the_fallback(pool: PgPool) {
     let (_, token) = common::user_with_token(&state, "ana").await;
     let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
     assert_eq!(dims(&server, &token, album, None).await, (300, 100));
+}
+
+// ---- Task 15: the external cover proxy `?url=` (D-210) ----
+
+mod remote_proxy {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use axum::http::StatusCode;
+    use base64::Engine;
+    use kima_core::identify::IdentifySwitch;
+    use kima_db::PgPool;
+    use kima_net::testing::{Entry, Recording, Replay};
+    use kima_net::{Bases, Net, NetConfig};
+    use serde_json::Value;
+
+    fn noisy_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            let v = x
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(y.wrapping_mul(40_503));
+            image::Rgb([(v >> 3) as u8, (v >> 11) as u8, (v >> 19) as u8])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Jpeg).unwrap();
+        out.into_inner()
+    }
+
+    fn entry(path: &str, status: u16, content_type: &str, body: &[u8]) -> Entry {
+        let mut headers = BTreeMap::new();
+        headers.insert("content-type".to_string(), content_type.to_string());
+        Entry {
+            method: "GET".into(),
+            url: path.into(),
+            status,
+            headers,
+            body: Value::Null,
+            body_base64: Some(base64::engine::general_purpose::STANDARD.encode(body)),
+            request_body_sha256: None,
+        }
+    }
+
+    static PROXY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct Env {
+        _guard: tokio::sync::MutexGuard<'static, ()>,
+        server: axum_test::TestServer,
+        token: String,
+        replay: Replay,
+        #[allow(dead_code)]
+        data: tempfile::TempDir,
+    }
+
+    impl Env {
+        fn url(&self, path: &str) -> String {
+            format!("{}{path}", self.replay.url())
+        }
+    }
+
+    async fn env(pool: PgPool, rec: Recording) -> Env {
+        env_with(pool, rec, true).await
+    }
+
+    async fn env_with(pool: PgPool, rec: Recording, allow_private_images: bool) -> Env {
+        let guard = PROXY_TEST_LOCK.lock().await;
+        let replay = Replay::start(rec).await;
+        let mut cfg = NetConfig::for_tests(Bases::all(&replay.url()));
+        cfg.allow_private_images = allow_private_images;
+        let net = Net::new(cfg, pool.clone(), IdentifySwitch::new(false, true));
+        let data = tempfile::tempdir().unwrap();
+        let state = super::common::state(pool.clone())
+            .with_net(Arc::new(net))
+            .with_data_dir(data.path().to_path_buf());
+        let (_, token) = super::common::user_with_token(&state, "ana").await;
+        Env {
+            _guard: guard,
+            server: axum_test::TestServer::new(kima_api::router(state)).unwrap(),
+            token,
+            replay,
+            data,
+        }
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn task15_small_png_is_returned_unchanged_green(pool: PgPool) {
+        let bytes = super::png(1, 1);
+        assert!(bytes.len() < 1000);
+        let e = env(
+            pool,
+            Recording(vec![entry(
+                "/tiny",
+                200,
+                "application/octet-stream",
+                &bytes,
+            )]),
+        )
+        .await;
+        let response = e
+            .server
+            .get(&format!("/api/library/cover-art?url={}", e.url("/tiny")))
+            .authorization_bearer(&e.token)
+            .await;
+        response.assert_status_ok();
+        assert_eq!(response.as_bytes().as_ref(), bytes.as_slice());
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn task15_gif_original_bytes_green(pool: PgPool) {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+            .unwrap();
+        let e = env(
+            pool,
+            Recording(vec![entry("/tiny.gif", 200, "image/gif", &bytes)]),
+        )
+        .await;
+        let response = e
+            .server
+            .get(&format!(
+                "/api/library/cover-art?url={}",
+                e.url("/tiny.gif")
+            ))
+            .authorization_bearer(&e.token)
+            .await;
+        response.assert_status_ok();
+        assert_eq!(response.as_bytes().as_ref(), bytes.as_slice());
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn task15_bad_address_is_400_green(pool: PgPool) {
+        let e = env_with(pool, Recording(vec![]), false).await;
+        for url in [
+            "/api/library/cover-art/not-a-uuid",
+            "/api/library/cover-art?url=http://127.0.0.1:1/a",
+        ] {
+            e.server
+                .get(url)
+                .authorization_bearer(&e.token)
+                .await
+                .assert_status(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn interactive_cover_works_with_identification_off(pool: PgPool) {
+        let _guard = PROXY_TEST_LOCK.lock().await;
+        let replay = Replay::start(Recording(vec![entry(
+            "/off.jpg",
+            200,
+            "image/jpeg",
+            &noisy_jpeg(200, 200),
+        )]))
+        .await;
+        let mut cfg = NetConfig::for_tests(Bases::all(&replay.url()));
+        cfg.allow_private_images = true;
+        let net = Net::new(cfg, pool.clone(), IdentifySwitch::new(true, false));
+        let data = tempfile::tempdir().unwrap();
+        let state = super::common::state(pool)
+            .with_net(Arc::new(net))
+            .with_data_dir(data.path().to_path_buf());
+        let (_, token) = super::common::user_with_token(&state, "ana").await;
+        let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+        let res = server
+            .get(&format!(
+                "/api/library/cover-art?url={}/off.jpg",
+                replay.url()
+            ))
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+        assert_eq!(replay.asked().len(), 1);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn path_encoded_url_is_proxied_task15(pool: PgPool) {
+        let e = env(
+            pool,
+            Recording(vec![entry(
+                "/path.jpg",
+                200,
+                "image/jpeg",
+                &noisy_jpeg(200, 200),
+            )]),
+        )
+        .await;
+        let encoded: String =
+            form_urlencoded::byte_serialize(e.url("/path.jpg").as_bytes()).collect();
+        let res = e
+            .server
+            .get(&format!("/api/library/cover-art/{encoded}"))
+            .authorization_bearer(&e.token)
+            .await;
+        res.assert_status_ok();
+        assert_eq!(e.replay.asked().len(), 1);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn no_url_or_id_is_400(pool: PgPool) {
+        let e = env(pool, Recording(vec![])).await;
+        let res = e
+            .server
+            .get("/api/library/cover-art")
+            .authorization_bearer(&e.token)
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(res.json::<Value>()["error"], "No cover ID or URL provided");
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn url_proxy_fetches_resizes_and_caches_after_first_response_drop(pool: PgPool) {
+        let e = env(
+            pool,
+            Recording(vec![entry(
+                "/cover.jpg",
+                200,
+                "image/jpeg",
+                &noisy_jpeg(1200, 800),
+            )]),
+        )
+        .await;
+        let url = e.url("/cover.jpg");
+
+        let first = e
+            .server
+            .get(&format!("/api/library/cover-art?url={url}&size=100"))
+            .authorization_bearer(&e.token)
+            .await;
+        first.assert_status_ok();
+        assert_eq!(first.header("content-type"), "image/jpeg");
+        let img = image::load_from_memory(first.as_bytes()).unwrap();
+        assert_eq!((img.width(), img.height()), (100, 66));
+        let etag = first.header("etag").to_str().unwrap().to_string();
+        use md5::{Digest, Md5};
+        assert_eq!(etag, hex::encode(Md5::digest(first.as_bytes())));
+        // TestResponse retains the response bytes and therefore the proxy slot.
+        drop(first);
+
+        // Served again from the memory cache: no second fetch.
+        let second = e
+            .server
+            .get(&format!("/api/library/cover-art?url={url}&size=100"))
+            .authorization_bearer(&e.token)
+            .await;
+        second.assert_status_ok();
+        assert_eq!(e.replay.asked().len(), 1);
+
+        // A matching `If-None-Match` is a 304.
+        let not_modified = e
+            .server
+            .get(&format!("/api/library/cover-art?url={url}&size=100"))
+            .add_header(axum::http::header::IF_NONE_MATCH, etag)
+            .authorization_bearer(&e.token)
+            .await;
+        not_modified.assert_status(StatusCode::NOT_MODIFIED);
+        assert_eq!(e.replay.asked().len(), 1);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn retained_proxy_responses_get_busy_then_release_slots(pool: PgPool) {
+        let e = env(
+            pool,
+            Recording(vec![
+                entry("/first.jpg", 200, "image/jpeg", &noisy_jpeg(200, 200)),
+                entry("/second.jpg", 200, "image/jpeg", &noisy_jpeg(200, 200)),
+                entry("/third.jpg", 200, "image/jpeg", &noisy_jpeg(200, 200)),
+            ]),
+        )
+        .await;
+        let request = |path: &str| format!("/api/library/cover-art?url={}", e.url(path));
+        let first = e
+            .server
+            .get(&request("/first.jpg"))
+            .authorization_bearer(&e.token)
+            .await;
+        first.assert_status_ok();
+        let second = e
+            .server
+            .get(&request("/second.jpg"))
+            .authorization_bearer(&e.token)
+            .await;
+        second.assert_status_ok();
+        let busy = tokio::time::timeout(
+            std::time::Duration::from_secs(17),
+            e.server
+                .get(&request("/third.jpg"))
+                .authorization_bearer(&e.token),
+        )
+        .await
+        .expect("saturated proxy hung");
+        busy.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(e.replay.asked().len(), 2);
+        drop(first);
+        let third = e
+            .server
+            .get(&request("/third.jpg"))
+            .authorization_bearer(&e.token)
+            .await;
+        third.assert_status_ok();
+        assert_eq!(e.replay.asked().len(), 3);
+        drop(second);
+        drop(third);
+        let cached = e
+            .server
+            .get(&request("/first.jpg"))
+            .authorization_bearer(&e.token)
+            .await;
+        cached.assert_status_ok();
+        assert_eq!(e.replay.asked().len(), 3);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn url_proxy_remembers_404_for_an_hour(pool: PgPool) {
+        let e = env(
+            pool,
+            Recording(vec![entry("/gone.jpg", 404, "text/plain", b"nope")]),
+        )
+        .await;
+        let url = e.url("/gone.jpg");
+        for _ in 0..2 {
+            let res = e
+                .server
+                .get(&format!("/api/library/cover-art?url={url}"))
+                .authorization_bearer(&e.token)
+                .await;
+            res.assert_status(StatusCode::NOT_FOUND);
+            assert_eq!(res.json::<Value>()["error"], "Cover art not found");
+        }
+        // The second request was answered from the negative cache, not a second fetch.
+        assert_eq!(e.replay.asked().len(), 1);
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn url_proxy_private_address_is_400(pool: PgPool) {
+        let e = env_with(pool, Recording(vec![]), false).await;
+        let res = e
+            .server
+            .get("/api/library/cover-art?url=http://127.0.0.1:1/x.jpg")
+            .authorization_bearer(&e.token)
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(res.json::<Value>()["error"], "Invalid cover art URL");
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn url_proxy_host_down_is_502(pool: PgPool) {
+        let e = env(pool, Recording(vec![])).await;
+        // Keep the port bound but not listening so no other server can reuse it.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let dead = format!("http://{}/x.jpg", socket.local_addr().unwrap());
+        let res = e
+            .server
+            .get(&format!("/api/library/cover-art?url={dead}"))
+            .authorization_bearer(&e.token)
+            .await;
+        res.assert_status(StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            res.json::<Value>()["error"],
+            "The picture's host did not answer; try again shortly"
+        );
+    }
+
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn url_proxy_accepts_token_query(pool: PgPool) {
+        let e = env(
+            pool,
+            Recording(vec![entry(
+                "/cover.jpg",
+                200,
+                "image/jpeg",
+                &noisy_jpeg(200, 200),
+            )]),
+        )
+        .await;
+        let url = e.url("/cover.jpg");
+        // No Authorization header: the session comes from `?token=`.
+        let res = e
+            .server
+            .get(&format!(
+                "/api/library/cover-art?url={url}&token={}",
+                e.token
+            ))
+            .await;
+        res.assert_status_ok();
+    }
+
+    /// Task 15 (D-210): two cold fetches stalled well past `FETCH_BUDGET` must not block a
+    /// concurrent cache hit, and a third cold request waiting on the same two admission slots
+    /// must time out to a retryable 503 rather than hang. Exercised through the full axum
+    /// router (`kima_api::router`), not by calling `remote_cover` directly, so the HTTP layer
+    /// (auth, query parsing, status mapping) is covered end to end.
+    #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+    async fn router_parallel_stalled_fetches_leave_hit_fast_and_time_out_cold(pool: PgPool) {
+        let _guard = PROXY_TEST_LOCK.lock().await;
+        use axum::body::Body;
+        use axum::http::Request;
+        use kima_core::identify::IdentifySwitch;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let png = Arc::new(noisy_jpeg(16, 16));
+        let origin = axum::Router::new().route(
+            "/{id}",
+            axum::routing::get({
+                let release = release.clone();
+                let png = png.clone();
+                move |axum::extract::Path(id): axum::extract::Path<String>| {
+                    let (tx, release, png) = (tx.clone(), release.clone(), png.clone());
+                    async move {
+                        tx.send(id.clone()).unwrap();
+                        if id != "warm" {
+                            release.acquire().await.unwrap().forget();
+                        }
+                        ([("content-type", "image/jpeg")], png.as_ref().clone())
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let origin_task = tokio::spawn(async move { axum::serve(listener, origin).await.unwrap() });
+
+        let mut cfg = NetConfig::for_tests(Bases::all(&base));
+        cfg.allow_private_images = true;
+        let net = Net::new(cfg, pool.clone(), IdentifySwitch::new(false, true));
+        let data = tempfile::tempdir().unwrap();
+        let state = super::common::state(pool.clone())
+            .with_net(Arc::new(net))
+            .with_data_dir(data.path().to_path_buf());
+        let (_, token) = super::common::user_with_token(&state, "ana").await;
+        let app = kima_api::router(state);
+
+        let get = move |path: String, token: String, app: axum::Router| async move {
+            app.oneshot(
+                Request::get(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        };
+
+        // Warm the cache through the full router (not remote_cover directly).
+        let warm_url = format!("{base}/warm");
+        let warm_path = format!("/api/library/cover-art?url={warm_url}");
+        let warm_res = get(warm_path.clone(), token.clone(), app.clone()).await;
+        assert_eq!(warm_res.status(), StatusCode::OK);
+        assert_eq!(rx.recv().await.unwrap(), "warm");
+        // `warm_res` would itself retain a miss-gate permit (D-210) until dropped; release it
+        // before saturating the gate with genuinely stalled fetches below.
+        drop(warm_res);
+
+        // Two cold fetches that stall well past FETCH_BUDGET (15 s), occupying both miss-gate
+        // admission slots.
+        let mut stalled = Vec::new();
+        for id in ["one", "two"] {
+            let path = format!("/api/library/cover-art?url={base}/{id}");
+            stalled.push(tokio::spawn(get(path, token.clone(), app.clone())));
+        }
+        rx.recv().await.unwrap();
+        rx.recv().await.unwrap();
+
+        // A cache hit must stay fast while both miss slots are stalled beyond budget.
+        let hit = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            get(warm_path.clone(), token.clone(), app.clone()),
+        )
+        .await
+        .expect("cache hit was blocked by stalled cold fetches");
+        assert_eq!(hit.status(), StatusCode::OK);
+        drop(hit);
+
+        // A third, concurrent cold request started after the other two is admitted once one of
+        // them gives up its slot at its own FETCH_BUDGET deadline (self-timeout, D-210), then
+        // times out on its own still-stalled fetch in turn: 502, not a hang, after roughly two
+        // fetch budgets (~30 s). This is the real, deterministic outcome of two fetches stalled
+        // past budget (an admission-saturation 503 needs *retained, completed* responses instead
+        // — see `retained_proxy_responses_get_busy_then_release_slots` — because a gate permit
+        // held only by a stalled fetch always self-frees at the same 15 s deadline a later
+        // waiter's own admission wait would expire at).
+        let cold_path = format!("/api/library/cover-art?url={base}/cold");
+        let cold = tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            get(cold_path, token.clone(), app.clone()),
+        )
+        .await
+        .expect("cold request did not resolve within two fetch budgets");
+        assert_eq!(cold.status(), StatusCode::BAD_GATEWAY);
+
+        // Both stalled requests already gave up at their own FETCH_BUDGET deadline (same 502),
+        // well before `cold` resolved; release the mock origin's blocked handlers so it can stop.
+        for task in stalled {
+            let res = task.await.unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        }
+        release.add_permits(2);
+        origin_task.abort();
+    }
 }

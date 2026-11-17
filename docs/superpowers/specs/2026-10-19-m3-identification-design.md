@@ -1428,10 +1428,15 @@ Upstream `routes/enrichment.ts:466-833`:
 
 Routes the frontend never calls are dropped **(controller's call, C9)**, and log D-112: `POST /enrichment/artist/:id`,
 `POST /enrichment/album/:id` (gated by the never-set per-user `enrichmentSettings`), `POST /enrichment/retry`,
-`PUT /enrichment/tracks/:id/metadata` and `POST /enrichment/tracks/:id/reset` (in `api.ts` but no component mounts a
-track editor), `/library/image-backfill/*`, `/library/backfill-genres`, `/library/artist-counts/*`,
+`/library/image-backfill/*`, `/library/backfill-genres`, `/library/artist-counts/*`,
 `/library/album-cover/:mbid`, `/library/cover-art-colors`, `POST /system-settings/clear-caches`. `getMe`'s
 `enrichmentSettings` stays `null`.
+
+**Later M-SYNC Task 17 scope change (supersedes this M3a exclusion):** admin-only
+`PUT /api/enrichment/tracks/:id/metadata` (`{title}`) and `POST /api/enrichment/tracks/:id/reset`
+are ported even though the old frontend mounts no track editor. These authenticated endpoints
+store `tracks.display_title` separately from the scanned title; Subsonic `getSong` and library
+reads show the override. D-112 records this change.
 
 ### 16.5 Autotag routes (M3b, kima-rs own; all admin)
 

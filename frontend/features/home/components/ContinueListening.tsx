@@ -14,7 +14,7 @@ interface ContinueListeningProps {
 
 function imageFor(item: ListenedItem) {
     if (item.type === "audiobook") {
-        return api.getCoverArtUrl(`/audiobooks/${encodeURIComponent(item.id)}/cover`, 300);
+        return api.getCoverArtUrl(`/audiobooks/book/?id=${encodeURIComponent(item.id)}/cover`, 300);
     }
     return item.coverArt ? api.getCoverArtUrl(item.coverArt, 300) : null;
 }
@@ -43,7 +43,6 @@ const ContinueListening = memo(function ContinueListening({ items }: ContinueLis
                             index={index}
                             sizes="180px"
                             progress={type === "artist" ? undefined : item.progress ?? undefined}
-                            className="mx-1"
                         />
                     </CarouselItem>
                 );

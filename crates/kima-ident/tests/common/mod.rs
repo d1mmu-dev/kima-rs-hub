@@ -115,6 +115,7 @@ pub fn dead_bases() -> Bases {
         lrclib: dead(),
         coverartarchive: dead(),
         commons: dead(),
+        itunes: dead(),
     }
 }
 

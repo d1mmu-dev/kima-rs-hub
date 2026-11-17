@@ -82,15 +82,19 @@ async fn main() -> anyhow::Result<()> {
     let identify =
         kima_core::identify::IdentifySwitch::new(config.identify_env_off, kv.auto_enrich_metadata);
     // The one outbound HTTP client (spec §5): pauses survive restarts.
-    let net = kima_net::Net::new(
-        kima_net::NetConfig::production(
-            env!("CARGO_PKG_VERSION"),
-            &config.contact,
-            &config.musicbrainz_base_url,
-        ),
-        pool.clone(),
-        identify.clone(),
+    let mut net_config = kima_net::NetConfig::production(
+        env!("CARGO_PKG_VERSION"),
+        &config.contact,
+        &config.musicbrainz_base_url,
     );
+    net_config.bases.itunes = config.itunes_base_url.clone();
+    // Capture runs only (`tools/capture-api-fixtures.sh`): loopback feed/Apple stand-ins.
+    net_config.private_image_allow = kima_net::loopback_allow(
+        net_config.deny_real,
+        std::env::var("KIMA_NET_ALLOW_LOOPBACK").ok().as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let net = kima_net::Net::new(net_config, pool.clone(), identify.clone());
     net.load_pauses()
         .await
         .context("reading the source pauses")?;
@@ -213,6 +217,13 @@ async fn main() -> anyhow::Result<()> {
     let mood_snapshots =
         kima_ident::stages::moods::spawn_refresher(ident_ctx.clone(), shutdown.clone());
     registry.register_enrich(ident_ctx);
+    let podcast_ctx = kima_podcast::ctx::PodcastCtx {
+        pool: pool.clone(),
+        net: state.net.clone(),
+        data_dir: config.data_dir.clone(),
+    };
+    registry.register_podcast_cache(podcast_ctx.clone());
+    registry.register_podcast_refresh(podcast_ctx.clone());
     // Before any worker starts: recover library jobs a dead process left running, then queue
     // the safety-net reconcile (spec §4.4).
     kima_server::jobs::prepare_library_queue(&pool)
@@ -226,6 +237,16 @@ async fn main() -> anyhow::Result<()> {
     kima_server::jobs::prepare_autotag_queue(&pool)
         .await
         .context("preparing the autotag queue")?;
+    // Podcast startup work (upstream `index.ts:553-569`), in the background so it never holds
+    // up the start: the episode-cache cleanup and then the one-off length measuring, and the
+    // category fill-in for shows Apple knows that have none yet.
+    // A panic in it is logged rather than lost with a dropped handle.
+    let podcast_startup = kima_server::jobs::spawn_podcast_startup(podcast_ctx.clone());
+    tokio::spawn(async move {
+        if let Err(error) = podcast_startup.await {
+            error!(%error, "podcast startup work did not finish");
+        }
+    });
     let workers = kima_server::jobs::spawn_all(&pool, registry, shutdown.clone());
     // Stopped by the shutdown token. With `KIMA_WATCH_MODE=off` this only records the status.
     let watcher = kima_library::watch::spawn(
@@ -236,9 +257,12 @@ async fn main() -> anyhow::Result<()> {
         state.library.watch_status.clone(),
         shutdown.clone(),
     );
-    // Always runs: the safety-net reconcile when enabled (D-091), the cache prune and the
-    // enrichment backstop kick. Stopped by the shutdown token.
-    let scheduler = kima_server::schedule_entries(&config, sync_cron)
+    // Always runs: the safety-net reconcile when enabled (D-091), the cache prune, the
+    // enrichment backstop kick, and daily podcast-cache cleanup (04:00 UTC). Stopped by the
+    // shutdown token.
+    let mut schedule = kima_server::schedule_entries(&config, sync_cron);
+    schedule.extend(kima_server::podcast_schedule_entries(podcast_ctx));
+    let scheduler = schedule
         .into_iter()
         .fold(
             kima_jobs::schedule::Scheduler::new(),

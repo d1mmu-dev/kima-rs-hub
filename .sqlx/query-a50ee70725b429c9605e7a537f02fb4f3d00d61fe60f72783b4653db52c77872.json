@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM api_keys k USING profiles pr WHERE pr.id = k.profile_id AND pr.user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a50ee70725b429c9605e7a537f02fb4f3d00d61fe60f72783b4653db52c77872"
+}

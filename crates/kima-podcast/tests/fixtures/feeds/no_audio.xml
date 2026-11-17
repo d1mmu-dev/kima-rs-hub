@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Mixed media</title>
+    <item><title>Video first</title><guid>v1</guid>
+      <enclosure url="https://cdn.example/v1.mp4" type="video/mp4"/>
+      <enclosure url="https://cdn.example/v1.mp3" type="audio/mpeg"/>
+    </item>
+    <item><title>No enclosure</title><guid>n1</guid></item>
+    <item><title>No url</title><guid>u1</guid><enclosure type="audio/mpeg"/></item>
+    <item><title>No type</title><guid>t1</guid><enclosure url="https://cdn.example/t1.mp3"/></item>
+    <item><title>Mpeg video counts</title><guid>m1</guid><enclosure url="https://cdn.example/m1.mpg" type="video/mpeg"/></item>
+    <item><title>Audio</title><guid>a1</guid><enclosure url="https://cdn.example/a1.ogg" type="audio/ogg"/></item>
+  </channel>
+</rss>

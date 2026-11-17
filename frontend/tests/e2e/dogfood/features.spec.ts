@@ -1,20 +1,46 @@
 /**
  * The notification tray, ListenBrainz, the public library export and live feed, the
- * GPU runtime and the release window as one watched session. Needs
- * KIMA_PUBLIC_VIBE_TOKEN, both GPU switches on, and the analyzers restarted since
- * the GPU runtime was last installed.
+ * GPU runtime and the release window as one watched session. Needs both GPU switches
+ * on and the analyzers restarted since the GPU runtime was last installed; the public
+ * feed journey needs the instance's KIMA_PUBLIC_VIBE_TOKEN and is recorded as not covered
+ * when the run is not given one.
  */
 
 import { test, expect, Browser, Page, BrowserContext, APIRequestContext, request } from "@playwright/test";
-import { DogfoodSession, navigateByClick, openAlbumsTab, firstAlbumCard } from "./session";
+import { DogfoodSession, navigateByClick, openAlbumById } from "./session";
+import { LibraryPicker } from "../fixtures/picker";
 import { readPlayer, settle } from "../fixtures/shared";
+import { dismissWhatsNew, getAuthToken, loginAsTestUser } from "../fixtures/test-helpers";
+import { requireBaseUrl } from "../fixtures/target";
 
-const baseUrl = process.env.KIMA_UI_BASE_URL || "http://127.0.0.1:3030";
+const baseUrl = requireBaseUrl();
 const username = process.env.KIMA_TEST_USERNAME || "";
 const password = process.env.KIMA_TEST_PASSWORD || "";
 const vibeToken = process.env.KIMA_PUBLIC_VIBE_TOKEN || "";
 
 const GPU_INSTALL_MS = 25 * 60_000;
+
+/**
+ * The newest release as the release window shows it. Its heading, items and changelog text are content, checked
+ * word for word, so this block is updated with each release; the older releases stay, since the changelog keeps them.
+ */
+const NEWEST = {
+    version: "1.12.3",
+    heading: "Kima 1.12",
+    // A fresh library: "sound.rebuild" is only for libraries upgraded from 1.11.
+    items: [
+        "hotfix.1123", "hotfix.1122", "hotfix.1121", "moods.learned", "radio.stations", "mixes.recipes", "discover.only", "panel.redesign",
+        "podcasts.browse", "analysis.middle", "enrichment.rerun", "updates.pings", "fixes.12",
+    ],
+    changelogText: /podcast browser/i,
+};
+
+/** GET /api<path> as the holder of `token`, expecting 200, and parse the body. */
+async function getJsonAs<T>(page: Page, token: string, path: string): Promise<T> {
+    const res = await page.request.get(`/api${path}`, { headers: { Authorization: `Bearer ${token}` } });
+    expect(res.status(), `GET /api${path}`).toBe(200);
+    return (await res.json()) as T;
+}
 
 test.describe.configure({ mode: "serial" });
 
@@ -25,13 +51,12 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
     let session: DogfoodSession;
     let token = "";
     let publicApi: APIRequestContext;
+    // Settings that journeys 4 and 5 change; afterAll puts them back to what they were.
+    let shareBefore: boolean | null = null;
+    let gpuBefore: { enabled: boolean; analysis: boolean } | null = null;
 
     const auth = () => ({ Authorization: `Bearer ${token}` });
-    const getJson = async <T>(path: string): Promise<T> => {
-        const res = await page.request.get(`/api${path}`, { headers: auth() });
-        expect(res.status(), `GET /api${path}`).toBe(200);
-        return (await res.json()) as T;
-    };
+    const getJson = <T>(path: string) => getJsonAs<T>(page, token, path);
     const live = async () => {
         const res = await publicApi.get("/api/public/vibe/live", {
             headers: { Authorization: `Bearer ${vibeToken}` },
@@ -55,7 +80,6 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
     test.beforeAll(async ({ browser: launched }) => {
         browser = launched;
         expect(username && password, "KIMA_TEST_USERNAME and KIMA_TEST_PASSWORD must be set").toBeTruthy();
-        expect(vibeToken, "KIMA_PUBLIC_VIBE_TOKEN must be set").toBeTruthy();
         publicApi = await request.newContext({ baseURL: baseUrl });
         context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
         page = await context.newPage();
@@ -65,14 +89,32 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
 
     test.afterAll(async () => {
         if (session) {
-            const reportPath = session.writeReport("test-results");
+            const reportPath = session.writeReport("test-results/features");
             console.log(`\n[features-dogfood] report written to ${reportPath}`);
             console.log(
                 `[features-dogfood] ${session.steps.length} steps, ${session.violations.length} violations`,
             );
         }
-        await publicApi?.dispose();
-        await context?.close();
+        try {
+            if (token && shareBefore !== null) {
+                const res = await page.request.post("/api/settings", {
+                    headers: auth(), data: { shareLiveListening: shareBefore },
+                });
+                expect(res.status(), "restoring the live-sharing setting").toBe(200);
+            }
+            if (token && gpuBefore) {
+                const res = await page.request.post("/api/system-settings/gpu", { headers: auth(), data: gpuBefore });
+                expect(res.status(), "restoring the GPU switches").toBe(200);
+            }
+        } finally {
+            try {
+                // Anything that went wrong after a journey's own check, or in a journey that stopped before its own.
+                session?.assertNoneLeft();
+            } finally {
+                await publicApi?.dispose();
+                await context?.close();
+            }
+        }
     });
 
     test("1. arrive: sign in", async () => {
@@ -84,22 +126,13 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
         });
 
         await session.step("sign in", async () => {
-            await page.goto("/login");
-            await page.locator("#username").fill(username);
-            await page.locator("#password").fill(password);
-            await page.getByRole("button", { name: /sign in/i }).click();
-            await page.waitForURL((u) => !u.pathname.startsWith("/login"), { timeout: 30_000 });
-            token = await page.evaluate(() => localStorage.getItem("auth_token") ?? "");
+            await loginAsTestUser(page);
+            token = await getAuthToken(page);
             expect(token, "a token should be stored after login").toBeTruthy();
         });
 
         await session.step("close any release window", async () => {
-            const dialog = page.locator('div[role="dialog"][aria-labelledby="whats-new-title"]');
-            for (let i = 0; i < 4 && (await dialog.isVisible({ timeout: 3_000 }).catch(() => false)); i++) {
-                await page.getByTestId("whatsnew-done").click();
-                await settle(page, 800);
-            }
-            await expect(dialog).toBeHidden();
+            await dismissWhatsNew(page);
         });
 
         session.clearExpectedFailures();
@@ -140,16 +173,20 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
         });
 
         await session.step("the tray shows the same single row", async () => {
-            const toggle = page.getByRole("button", { name: "Toggle activity panel" });
-            const wasOpen = (await toggle.getAttribute("aria-expanded")) === "true";
-            if (!wasOpen) await toggle.click();
+            const handle = page.getByRole("button", { name: "open panel" });
+            const wasClosed = await handle.isVisible().catch(() => false);
+            if (wasClosed) await handle.click();
             const panel = page.locator("#activity-panel");
-            const tab = panel.getByRole("button", { name: /^Notifications/ });
-            if ((await tab.getAttribute("aria-pressed", { timeout: 10_000 })) !== "true") await tab.click();
-            const rows = panel.getByText("Library scan finished", { exact: true });
+            // The panel opens on listening; the alerts are under its activity tab.
+            await panel.getByRole("tablist", { name: "panel", exact: true }).getByRole("tab", { name: /^activity/ }).click();
+            const tab = panel.getByRole("tab", { name: /^alerts/ });
+            await tab.click();
+            await expect(tab).toHaveAttribute("aria-selected", "true");
+            // A row reads "new: Library scan finished" to a screen reader until it is read, so match the row, not its text.
+            const rows = panel.getByRole("listitem").filter({ hasText: /library scan finished/i });
             await expect(rows.first()).toBeVisible({ timeout: 10_000 });
             expect(await rows.count()).toBe(1);
-            if (!wasOpen) await toggle.click();
+            if (wasClosed) await panel.getByRole("button", { name: "hide panel" }).click();
             return { trayRows: 1 };
         });
 
@@ -161,14 +198,15 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
         const hasToken = async () =>
             (await getJson<{ hasListenbrainzToken: boolean }>("/settings")).hasListenbrainzToken;
 
+        // A token this user saved earlier cannot be put back once removed, so the journey leaves it alone.
+        if (await hasToken()) {
+            session.noteNotCovered("scrobbling: this user already has a ListenBrainz token, which the test would delete and cannot restore");
+            return;
+        }
+
         await session.step("open the scrobbling settings with no token", async () => {
             await navigateByClick(page, "/settings");
             await settle(page, 1500);
-            if (await hasToken()) {
-                await page.locator("#lb-token-clear").check();
-                await page.getByRole("button", { name: "Remove token" }).click();
-                await expect.poll(hasToken).toBe(false);
-            }
             await page.locator("#lb-token").scrollIntoViewIfNeeded();
             await expect(page.locator("#lb-token")).toHaveAttribute("placeholder", "Paste your LB user token");
         });
@@ -196,6 +234,11 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
     test("4. public feed: the export, the live trip, and the sharing switch", async () => {
         test.setTimeout(10 * 60_000);
         session.setJourney("4. Public feed");
+        if (!vibeToken) {
+            session.noteNotCovered("public feed: KIMA_PUBLIC_VIBE_TOKEN is not set for this run, so the export and live feed were not checked");
+            return;
+        }
+        shareBefore = (await getJson<{ shareLiveListening: boolean }>("/settings")).shareLiveListening;
 
         await session.step("the export refuses a missing token", async () => {
             const res = await publicApi.get("/api/public/vibe/library");
@@ -210,7 +253,14 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
                 await page.waitForTimeout(5_000);
                 res = await publicApi.get("/api/public/vibe/library", { headers });
             }
-            expect(res.status()).toBe(200);
+            // The export serves its last build and rebuilds in the background when the library has changed, so the
+            // first answer after the scan can still be the build from before it: ask again until it has the library.
+            for (const deadline = Date.now() + 5 * 60_000; ; ) {
+                expect(res.status()).toBe(200);
+                if (((await res.json()) as { tracks: unknown[] }).tracks.length > 0 || Date.now() > deadline) break;
+                await page.waitForTimeout(5_000);
+                res = await publicApi.get("/api/public/vibe/library", { headers });
+            }
             const etag = res.headers()["etag"];
             expect(etag, "the export must carry an ETag").toBeTruthy();
             const body = (await res.json()) as { version: number; tracks: { id: string; xyz: number[] }[]; excluded: number };
@@ -237,10 +287,9 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
 
         let trackId: string | null = null;
         await session.step("playing shows on the live feed", async () => {
-            await openAlbumsTab(page);
-            await firstAlbumCard(page).click();
-            await page.waitForURL(/\/album\//, { timeout: 15_000 });
-            await settle(page, 1000);
+            const album = await new LibraryPicker(page.request, token).albumWithTracks(1);
+            expect(album, "no library album has a playable song, so nothing can play on the feed").toBeTruthy();
+            await openAlbumById(page, album!.id);
             await page.getByLabel("Play all").click();
             await page.getByTitle("pause", { exact: true }).first().waitFor({ timeout: 15_000 });
             trackId = await playingTrackId();
@@ -281,20 +330,30 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
         session.assertClean("Journey 4 (public feed)");
     });
 
-    test("5. GPU: the runtime stays while either switch is on, goes when both are off, and each switch applies on its own", async () => {
+    test("5. GPU: the runtime stays while either switch is on and when both are off (inert), and each switch applies on its own", async () => {
         test.setTimeout(GPU_INSTALL_MS + 10 * 60_000);
         session.setJourney("5. GPU runtime");
 
         type Gpu = {
-            enabled: boolean; analysis: boolean; installed: boolean; installing: boolean;
+            supported: boolean; enabled: boolean; analysis: boolean; installed: boolean; installing: boolean;
             effective: boolean; analysisEffective: boolean; status: string; reason: string | null;
+            providerActive: boolean; analysisProviderActive: boolean;
         };
         const gpu = () => getJson<Gpu>("/system-settings/gpu");
         const vectorsStatus = () => page.getByTestId("gpu-onnx-toggle-status");
         const analysisStatus = () => page.getByTestId("gpu-analysis-toggle-status");
 
+        // The GPU runtime exists only for linux on x64; elsewhere the settings page offers no switches.
+        const gpuStart = await gpu();
+        if (!gpuStart.supported) {
+            session.noteNotCovered("GPU runtime: this host has no GPU switches (not linux on x64)");
+            return;
+        }
+        gpuBefore = { enabled: gpuStart.enabled, analysis: gpuStart.analysis };
+
         await session.step("vibe embeddings and audio analysis both run on the GPU", async () => {
             await navigateByClick(page, "/settings");
+            await navigateByClick(page, "/settings/library");
             await settle(page, 1500);
             await page.locator("#gpu-onnx-toggle").scrollIntoViewIfNeeded();
             const state = await gpu();
@@ -314,22 +373,37 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
             expect(state).toMatchObject({ enabled: false, analysis: true, installed: true });
         });
 
-        await session.step("switching audio analysis off too removes the runtime", async () => {
+        await session.step("switching audio analysis off too keeps the runtime installed and inert", async () => {
             await settingsSwitch("gpu-analysis-toggle").click();
-            await expect.poll(async () => (await gpu()).installed, { timeout: 2 * 60_000 }).toBe(false);
-            await expect(vectorsStatus()).toHaveText("Off (CPU)");
-            await expect(analysisStatus()).toHaveText("Off (CPU)");
-            expect(await gpu()).toMatchObject({ effective: false, analysisEffective: false });
+            await expect(analysisStatus()).toHaveText("Runtime installed; GPU is off.", { timeout: 2 * 60_000 });
+            await expect(vectorsStatus()).toHaveText("Runtime installed; GPU is off.");
+            await settle(page, 70_000); // longer than the analyzer takes to act on a switch
+            // Both analyzers restarted without the runtime, so the takeover below is a real one.
+            await expect
+                .poll(async () => { const g = await gpu(); return !g.providerActive && !g.analysisProviderActive; }, { timeout: 5 * 60_000 })
+                .toBe(true);
+            expect(await gpu()).toMatchObject({
+                enabled: false, analysis: false, installed: true, effective: false, analysisEffective: false, status: "installed",
+            });
         });
 
-        await session.step("switching both on downloads it again and both analyzers take it up on their own", async () => {
+        await session.step("switching both on again uses the kept runtime with no new download", async () => {
             const started = Date.now();
             await settingsSwitch("gpu-onnx-toggle").click();
             await settingsSwitch("gpu-analysis-toggle").click();
-            await expect(vectorsStatus()).toHaveText("Active", { timeout: GPU_INSTALL_MS + 3 * 60_000 });
+            let downloaded = false;
+            await expect
+                .poll(async () => {
+                    const g = await gpu();
+                    if (g.installing || !g.installed) downloaded = true;
+                    return g.effective && g.analysisEffective;
+                }, { timeout: 3 * 60_000, intervals: [1_000] })
+                .toBe(true);
+            expect(downloaded, "switching back on downloaded the runtime again").toBe(false);
+            await expect(vectorsStatus()).toHaveText("Active", { timeout: 3 * 60_000 });
             await expect(analysisStatus()).toHaveText("Active", { timeout: 3 * 60_000 });
             expect(await gpu()).toMatchObject({
-                enabled: true, analysis: true, installed: true, effective: true, analysisEffective: true, status: "installed",
+                enabled: true, analysis: true, installed: true, installing: false, effective: true, analysisEffective: true, status: "installed",
             });
             return { applySeconds: Math.round((Date.now() - started) / 1000) };
         });
@@ -337,7 +411,7 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
         session.assertClean("Journey 5 (GPU)");
     });
 
-    test("6. release window: a new admin answers every release", async () => {
+    test("6. release window: a new admin sees only the newest release", async () => {
         test.setTimeout(5 * 60_000);
         session.setJourney("6. Release window");
 
@@ -351,11 +425,7 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
         const dialog = fp.locator('div[role="dialog"][aria-labelledby="whats-new-title"]');
         const heading = fp.locator("#whats-new-title");
         let freshToken = "";
-        const freshGet = async <T>(path: string): Promise<T> => {
-            const res = await fp.request.get(`/api${path}`, { headers: { Authorization: `Bearer ${freshToken}` } });
-            expect(res.status(), `GET /api${path}`).toBe(200);
-            return (await res.json()) as T;
-        };
+        const freshGet = <T>(path: string) => getJsonAs<T>(fp, freshToken, path);
 
         try {
             await session.step("create an admin who has seen no release", async () => {
@@ -390,61 +460,20 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
                 return { mood: mood!.id };
             });
 
-            await session.step("the window opens on Kevin's note and one list of what's new", async () => {
+            await session.step("the window shows only the newest release, none of the older ones", async () => {
                 await expect(dialog).toBeVisible({ timeout: 15_000 });
-                await expect(heading).toHaveText("Kima 1.11");
-                await expect(dialog.getByRole("heading", { name: "A note from Kevin" })).toBeVisible();
-                for (const title of ["A play means you listened", "Clean up old play counts", "The new vibe engine", "The new vibe map"]) {
-                    await expect(dialog.locator("[data-item]").filter({ hasText: title }).first()).toBeVisible();
+                await expect(heading).toHaveText(NEWEST.heading);
+                for (const key of NEWEST.items) {
+                    await expect(dialog.locator(`[data-item="${key}"]`)).toBeVisible();
                 }
+                await expect(dialog.locator('[data-release="1.11.0"]')).toHaveCount(0);
+                await expect(dialog.locator('[data-release="1.10.1"]')).toHaveCount(0);
             });
 
-            await session.step("each line opens its own page, with its links, and comes back", async () => {
-                await dialog.locator('[data-item="plays.repair"]').click();
-                await expect(dialog.getByRole("link", { name: /Open the cleanup/ })).toHaveAttribute("href", "/stats#false-starts");
-                await dialog.locator("[data-back]").click();
-                await expect(dialog.locator('[data-item="plays.repair"]')).toBeFocused();
-                // The wipe is offered only to a library enriched before 1.11.
-                const wipe = dialog.locator('[data-item="engine.wipe"]');
-                if (await wipe.count()) {
-                    await wipe.click();
-                    await expect(fp.getByTestId("wipe-run")).toBeVisible();
-                    await dialog.locator("[data-back]").click();
-                } else {
-                    session.noteNotCovered("release window: the wipe item, since this library was enriched by 1.11 already");
-                }
-            });
-
-            await session.step("the mood mix is saved as a playlist, then rebuilt", async () => {
-                await dialog.locator('[data-item="moods.mixes"]').click();
-                await expect(fp.getByTestId("moodmix-name")).toBeVisible({ timeout: 10_000 });
-                const savedResponse = fp.waitForResponse((r) => r.url().includes("/whats-new/mood-mixes/save"));
-                await fp.getByTestId("moodmix-save").click();
-                const saved = (await (await savedResponse).json()) as { id: string; trackCount: number };
-                await expect(fp.getByTestId("moodmix-saved")).toBeVisible({ timeout: 15_000 });
-                await fp.getByTestId("moodmix-rebuild").click();
-                await expect(fp.getByTestId("moodmix-rebuilt")).toBeVisible({ timeout: 15_000 });
-                const state = await freshGet<{ mix: unknown }>("/whats-new/mood-mixes");
-                expect(state.mix, "the rebuilt mix should be gone").toBeNull();
-                // The rebuild clears the mix status, so read the playlist directly.
-                const playlist = await freshGet<{ id: string; items: unknown[] }>(`/playlists/${saved.id}`);
-                expect(playlist.items, "the saved playlist should keep its tracks").toHaveLength(saved.trackCount);
-                await dialog.locator("[data-back]").click();
-            });
-
-            await session.step("the GPU answer is kept through closing, and both releases close", async () => {
-                await dialog.locator('[data-item="gpu.accelerate"]').click();
-                const answered = fp.waitForResponse((r) => r.url().includes("/whats-new/1.11.0/choice"));
-                await dialog.getByRole("button", { name: "Turn it on", exact: true }).click();
-                expect((await answered).status()).toBe(200);
-                await expect(dialog.getByRole("button", { name: "Turn it on", exact: true })).toHaveAttribute("aria-pressed", "true");
-                const older = fp.waitForResponse((r) => r.url().includes("/whats-new/1.10.1/dismiss"));
-                const dismissed = fp.waitForResponse((r) => r.url().includes("/whats-new/1.11.0/dismiss"));
+            await session.step("closing it closes only the newest, and no older release comes back", async () => {
+                const newest = fp.waitForResponse((r) => r.url().includes(`/whats-new/${NEWEST.version}/dismiss`));
                 await fp.getByTestId("whatsnew-done").click();
-                expect((await older).status()).toBe(200);
-                const body = (await (await dismissed).json()) as { recordedDefaults: unknown[] };
-                expect(JSON.stringify(body.recordedDefaults), "an explicit answer must not be overwritten").not.toContain("gpu.accelerate");
-                expect((await getJson<{ enabled: boolean }>("/system-settings/gpu")).enabled).toBe(true);
+                expect((await newest).status()).toBe(200);
                 await expect(dialog).toBeHidden({ timeout: 10_000 });
                 const pending = await freshGet<{ releases: unknown[] }>("/whats-new/pending");
                 expect(pending.releases).toHaveLength(0);
@@ -453,11 +482,20 @@ test.describe("Dogfood: tray, scrobbling, public feed, GPU, release window", () 
                 await expect(dialog).toBeHidden();
             });
 
-            await session.step("the version number reopens the window, and Escape closes it", async () => {
+            await session.step("a mood mix saved on this release raises no 1.11 question", async () => {
+                // 1.11 asked about mixes saved before it shipped; this one was saved just now.
+                const open = await freshGet<{ items: Array<{ key: string }> }>("/whats-new/open");
+                expect(open.items.map((i) => i.key)).not.toContain("moods.mixes");
+                expect(open.items.map((i) => i.key)).not.toContain("moods.mixes.retired");
+                session.noteNotCovered("release window: answering 1.11's mood-mix question on the changelog page needs a mix saved before 1.11 (route tests cover it)");
+            });
+
+            await session.step("with everything read, the version number opens the changelog", async () => {
                 await fp.getByRole("button", { name: /what's new in v/i }).click();
-                await expect(dialog).toBeVisible({ timeout: 10_000 });
-                await fp.keyboard.press("Escape");
-                await expect(dialog).toBeHidden({ timeout: 10_000 });
+                await fp.waitForURL(/\/changelog$/, { timeout: 10_000 });
+                await expect(dialog).toBeHidden();
+                await expect(fp.locator(`[id="cl-${NEWEST.version}"]`)).toBeVisible({ timeout: 10_000 });
+                await expect(fp.locator("main")).toContainText(NEWEST.changelogText);
             });
         } finally {
             session.setActivePage(page);

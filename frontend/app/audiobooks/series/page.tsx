@@ -91,7 +91,7 @@ function SeriesDetailPageInner() {
                 colors={null}
             />
 
-            <div className="relative page-shell pb-24 animate-rise">
+            <div className="relative page-shell page-end animate-rise">
                 <div>
                     <div>
                         <SectionHeader type="audiobook" title="Books in Series" count={books.length} />

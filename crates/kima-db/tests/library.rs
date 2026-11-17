@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::library::{self, Guessed, ResolvedTrack};
 use time::OffsetDateTime;
@@ -38,6 +39,84 @@ async fn upsert(pool: &PgPool, t: &ResolvedTrack) -> uuid::Uuid {
     let id = library::upsert_track(&mut tx, t).await.unwrap().track;
     tx.commit().await.unwrap();
     id
+}
+
+/// Scanner and playlist must take the same UUID lock order even if heap order differs.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn missing_scan_and_playlist_lock_two_tracks_without_deadlock(pool: PgPool) {
+    use tokio::time::{Instant, sleep, timeout};
+
+    let b = upsert(&pool, &track("A", "X", None, "B", "/m/b")).await;
+    let a = upsert(&pool, &track("A", "X", None, "A", "/m/a")).await;
+    let first = uuid::Uuid::from_u128(1);
+    let second = uuid::Uuid::from_u128(2);
+    // Insert B before A, then give B the larger ID: a heap scan updates B first.
+    // Disable index and bitmap scans only in this scanner transaction.
+    sqlx::query("UPDATE tracks SET id = $1 WHERE id = $2")
+        .bind(second)
+        .bind(b)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tracks SET id = $1 WHERE id = $2")
+        .bind(first)
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut playlist = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM tracks WHERE id = $1 FOR SHARE")
+        .bind(first)
+        .fetch_one(&mut *playlist)
+        .await
+        .unwrap();
+    let scan_pool = pool.clone();
+    let scanner = tokio::spawn(async move {
+        let mut tx = scan_pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL enable_indexscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("SET LOCAL enable_bitmapscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let n = library::mark_missing_in(&mut tx, &["/m/a".into(), "/m/b".into()]).await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(n)
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+             AND wait_event_type = 'Lock' AND query LIKE '%missing_since = now()%'
+             AND pid <> pg_backend_pid())",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scanner never waited for playlist track lock"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+    let locked = timeout(Duration::from_secs(5), sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT id FROM tracks WHERE id = ANY($1) AND missing_since IS NULL ORDER BY id FOR SHARE"
+    ).bind(&[first, second][..]).fetch_all(&mut *playlist)).await.unwrap();
+    assert_eq!(locked.unwrap(), vec![first, second]);
+    playlist.commit().await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(5), scanner)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        2
+    );
 }
 
 async fn count(pool: &PgPool, table: &str) -> i64 {
@@ -534,7 +613,7 @@ async fn user(pool: &PgPool, name: &str) -> uuid::Uuid {
 
 async fn playlist(pool: &PgPool, owner: uuid::Uuid, tracks: &[uuid::Uuid]) -> uuid::Uuid {
     let id = uuid::Uuid::now_v7();
-    sqlx::query("INSERT INTO playlists (id, user_id, name) VALUES ($1, $2, 'P')")
+    sqlx::query("INSERT INTO playlists (id, profile_id, name) VALUES ($1, $2, 'P')")
         .bind(id)
         .bind(owner)
         .execute(pool)
@@ -556,7 +635,7 @@ async fn playlist(pool: &PgPool, owner: uuid::Uuid, tracks: &[uuid::Uuid]) -> uu
 }
 
 async fn star(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid) {
-    sqlx::query("INSERT INTO stars (id, user_id, track_id) VALUES ($1, $2, $3)")
+    sqlx::query("INSERT INTO stars (id, profile_id, track_id) VALUES ($1, $2, $3)")
         .bind(uuid::Uuid::now_v7())
         .bind(u)
         .bind(t)
@@ -566,7 +645,7 @@ async fn star(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid) {
 }
 
 async fn rate(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, r: i16) {
-    sqlx::query("INSERT INTO ratings (id, user_id, track_id, rating) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO ratings (id, profile_id, track_id, rating) VALUES ($1, $2, $3, $4)")
         .bind(uuid::Uuid::now_v7())
         .bind(u)
         .bind(t)
@@ -578,7 +657,7 @@ async fn rate(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, r: i16) {
 
 async fn bookmark(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, ms: i64) {
     sqlx::query(
-        "INSERT INTO subsonic_bookmarks (user_id, track_id, position_ms) VALUES ($1, $2, $3)",
+        "INSERT INTO subsonic_bookmarks (profile_id, track_id, position_ms) VALUES ($1, $2, $3)",
     )
     .bind(u)
     .bind(t)
@@ -589,7 +668,7 @@ async fn bookmark(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, ms: i64) {
 }
 
 async fn play(pool: &PgPool, u: uuid::Uuid, t: uuid::Uuid, heard: bool) {
-    sqlx::query("INSERT INTO plays (id, user_id, track_id, heard) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO plays (id, profile_id, track_id, heard) VALUES ($1, $2, $3, $4)")
         .bind(uuid::Uuid::now_v7())
         .bind(u)
         .bind(t)
@@ -743,11 +822,29 @@ async fn replaced_file_hands_history_to_copy(pool: PgPool) {
     rate(&pool, u, mp3, 4).await;
     bookmark(&pool, u, mp3, 1234).await;
     let p = playlist(&pool, u, &[mp3]).await;
+    let ben = user(&pool, "ben").await;
+    sqlx::query("INSERT INTO play_audit_ignore (profile_id, track_id, ignored_at) VALUES ($1, $3, '2020-01-01'), ($2, $3, '2021-01-01'), ($2, $4, '2022-01-01')")
+        .bind(u).bind(ben).bind(mp3).bind(flac).execute(&pool).await.unwrap();
     make_missing(&pool, mp3, 8).await;
 
     let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    let ignores: Vec<(uuid::Uuid, uuid::Uuid, OffsetDateTime)> = sqlx::query_as(
+        "SELECT profile_id, track_id, ignored_at FROM play_audit_ignore ORDER BY ignored_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ignores.len(), 2);
+    assert_eq!(
+        (ignores[0].0, ignores[0].1, ignores[0].2.year()),
+        (u, flac, 2020)
+    );
+    assert_eq!(
+        (ignores[1].0, ignores[1].1, ignores[1].2.year()),
+        (ben, flac, 2022)
+    );
     assert_eq!(r.tracks, 1);
-    assert_eq!(r.playlists, vec![(u, p)]);
+    assert_eq!(r.playlists, vec![(ProfileId::new(u), p)]);
 
     let heard: Vec<bool> = sqlx::query_scalar("SELECT heard FROM plays WHERE track_id = $1")
         .bind(flac)
@@ -768,6 +865,103 @@ async fn replaced_file_hands_history_to_copy(pool: PgPool) {
     let log = log_rows(&pool).await;
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].4, "replaced-by-another-file");
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn concurrent_destination_ignore_does_not_abort_retirement(pool: PgPool) {
+    use tokio::time::{Instant, sleep, timeout};
+
+    let Upgrade { u, mp3, flac } = upgrade_fixture(&pool).await;
+    sqlx::query("INSERT INTO play_audit_ignore VALUES ($1, $2, '2020-01-01')")
+        .bind(u)
+        .bind(mp3)
+        .execute(&pool)
+        .await
+        .unwrap();
+    make_missing(&pool, mp3, 8).await;
+    sqlx::raw_sql("CREATE FUNCTION gate_ignore() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.ignored_at = '2020-01-01'::timestamptz THEN PERFORM pg_advisory_xact_lock(784399); END IF; RETURN NEW; END $$; CREATE TRIGGER gate_ignore BEFORE INSERT OR UPDATE ON play_audit_ignore FOR EACH ROW EXECUTE FUNCTION gate_ignore()")
+        .execute(&pool).await.unwrap();
+    let mut gate = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(784399)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let mut writer = pool.begin().await.unwrap();
+    sqlx::query("INSERT INTO play_audit_ignore VALUES ($1, $2, '2022-01-01')")
+        .bind(u)
+        .bind(flac)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let retire_pool = pool.clone();
+    let retirement =
+        tokio::spawn(async move { library::retire_missing(&retire_pool, WEEK, None).await });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'advisory' AND query LIKE '%play_audit_ignore%' AND pid <> pg_backend_pid())")
+            .fetch_one(&pool).await.unwrap();
+        if waiting {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "retirement never reached ignore trigger"
+        );
+        sleep(Duration::from_millis(10)).await;
+    }
+    writer.commit().await.unwrap();
+    gate.commit().await.unwrap();
+    let result = timeout(Duration::from_secs(10), retirement)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        result.is_ok(),
+        "retirement failed after concurrent destination insert: {result:?}"
+    );
+    assert_eq!(result.unwrap().tracks, 1);
+    let rows: Vec<(uuid::Uuid, OffsetDateTime)> =
+        sqlx::query_as("SELECT track_id, ignored_at FROM play_audit_ignore WHERE profile_id = $1")
+            .bind(u)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].0, rows[0].1.year()), (flac, 2022));
+    let old_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tracks WHERE id = $1)")
+        .bind(mp3)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!old_exists);
+    assert_eq!(log_rows(&pool).await.len(), 1);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn failed_retirement_rolls_back_ignore_handover(pool: PgPool) {
+    let Upgrade { u, mp3, flac } = upgrade_fixture(&pool).await;
+    sqlx::query("INSERT INTO play_audit_ignore VALUES ($1, $2, '2020-01-01')")
+        .bind(u)
+        .bind(mp3)
+        .execute(&pool)
+        .await
+        .unwrap();
+    play(&pool, u, mp3, true).await;
+    make_missing(&pool, mp3, 8).await;
+    sqlx::raw_sql("CREATE FUNCTION fail_removal() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected failure'; END $$; CREATE TRIGGER fail_removal BEFORE INSERT ON removal_log FOR EACH ROW EXECUTE FUNCTION fail_removal()")
+        .execute(&pool).await.unwrap();
+    assert!(library::retire_missing(&pool, WEEK, None).await.is_err());
+    let rows: Vec<(uuid::Uuid, OffsetDateTime)> =
+        sqlx::query_as("SELECT track_id, ignored_at FROM play_audit_ignore WHERE profile_id = $1")
+            .bind(u)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].0, rows[0].1.year()), (mp3, 2020));
+    assert_eq!(count_for(&pool, "plays", mp3).await, 1);
+    assert_eq!(count_for(&pool, "plays", flac).await, 0);
+    assert!(log_rows(&pool).await.is_empty());
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -846,7 +1040,7 @@ async fn purged_track_reports_playlists_holding_it(pool: PgPool) {
     make_missing(&pool, mp3, 8).await;
     let mut r = library::retire_missing(&pool, WEEK, None).await.unwrap();
     r.playlists.sort();
-    let mut want = vec![(u, p1), (other, p2)];
+    let mut want = vec![(ProfileId::new(u), p1), (ProfileId::new(other), p2)];
     want.sort();
     assert_eq!(r.playlists, want);
 }
@@ -855,7 +1049,7 @@ async fn purged_track_reports_playlists_holding_it(pool: PgPool) {
 async fn purge_nulls_playback_state_and_lists_transcode_artifacts(pool: PgPool) {
     let Upgrade { u, mp3, .. } = upgrade_fixture(&pool).await;
     sqlx::query(
-        "INSERT INTO playback_state (user_id, playback_type, track_id) VALUES ($1, 'track', $2)",
+        "INSERT INTO playback_state (profile_id, playback_type, track_id) VALUES ($1, 'track', $2)",
     )
     .bind(u)
     .bind(mp3.to_string())
@@ -875,7 +1069,7 @@ async fn purge_nulls_playback_state_and_lists_transcode_artifacts(pool: PgPool) 
         .unwrap();
     assert_eq!(r.artifacts, vec![mine.clone()]);
     let state: Option<String> =
-        sqlx::query_scalar("SELECT track_id FROM playback_state WHERE user_id = $1")
+        sqlx::query_scalar("SELECT track_id FROM playback_state WHERE profile_id = $1")
             .bind(u)
             .fetch_one(&pool)
             .await
@@ -1058,4 +1252,84 @@ mod acoustid_group {
             .unwrap();
         (id, album)
     }
+}
+
+/// M-PROF Task 3: two profiles of one account keep their own history through a hand-over;
+/// the "already has it on the copy" rule compares profiles, not accounts.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn hand_over_keeps_profiles_apart(pool: PgPool) {
+    let Upgrade { u: main, mp3, flac } = upgrade_fixture(&pool).await;
+    let kid: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO profiles (id, user_id, name, kind) VALUES ($1, $2, 'Kids', 'kids') RETURNING id",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(main)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // Main: star and ignore the old copy, a rating and a bookmark already on the new one.
+    star(&pool, main, mp3).await;
+    rate(&pool, main, mp3, 4).await;
+    rate(&pool, main, flac, 2).await;
+    bookmark(&pool, main, flac, 500).await;
+    // Kids: the opposite.
+    star(&pool, kid, flac).await;
+    rate(&pool, kid, mp3, 5).await;
+    bookmark(&pool, kid, mp3, 1234).await;
+    play(&pool, kid, mp3, true).await;
+    sqlx::query(
+        "INSERT INTO play_audit_ignore (profile_id, track_id, ignored_at)
+         VALUES ($1, $3, '2020-01-01'), ($2, $4, '2021-01-01')",
+    )
+    .bind(main)
+    .bind(kid)
+    .bind(mp3)
+    .bind(flac)
+    .execute(&pool)
+    .await
+    .unwrap();
+    make_missing(&pool, mp3, 8).await;
+
+    let r = library::retire_missing(&pool, WEEK, None).await.unwrap();
+    assert_eq!((r.tracks, r.handed_over), (1, 1));
+
+    let rows = |sql: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let mut v: Vec<(uuid::Uuid, uuid::Uuid, i64)> =
+                sqlx::query_as(sql).fetch_all(&pool).await.unwrap();
+            v.sort();
+            v
+        }
+    };
+    let mut want_stars = vec![(main, flac, 0), (kid, flac, 0)];
+    want_stars.sort();
+    assert_eq!(
+        rows("SELECT profile_id, track_id, 0::bigint FROM stars").await,
+        want_stars
+    );
+    let mut want_ratings = vec![(main, flac, 2), (kid, flac, 5)];
+    want_ratings.sort();
+    assert_eq!(
+        rows("SELECT profile_id, track_id, rating::bigint FROM ratings").await,
+        want_ratings,
+        "main keeps its own rating on the copy, kids gets its rating handed over"
+    );
+    let mut want_marks = vec![(main, flac, 500), (kid, flac, 1234)];
+    want_marks.sort();
+    assert_eq!(
+        rows("SELECT profile_id, track_id, position_ms FROM subsonic_bookmarks").await,
+        want_marks
+    );
+    let mut want_ignores = vec![(main, flac, 2020), (kid, flac, 2021)];
+    want_ignores.sort();
+    assert_eq!(
+        rows("SELECT profile_id, track_id, extract(year FROM ignored_at)::bigint FROM play_audit_ignore")
+            .await,
+        want_ignores
+    );
+    assert_eq!(
+        rows("SELECT profile_id, track_id, 0::bigint FROM plays").await,
+        vec![(kid, flac, 0)]
+    );
 }

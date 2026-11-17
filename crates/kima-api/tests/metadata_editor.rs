@@ -125,6 +125,67 @@ fn album_path(id: impl std::fmt::Display) -> String {
     format!("/api/enrichment/albums/{id}/metadata")
 }
 
+fn track_path(id: impl std::fmt::Display) -> String {
+    format!("/api/enrichment/tracks/{id}/metadata")
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn track_title_edit_reset_requires_admin_and_valid_title(pool: PgPool) {
+    let s = one(&pool).await;
+    let e = env(pool.clone()).await;
+    let path = track_path(s.track);
+    let denied = e
+        .srv
+        .put(&path)
+        .authorization_bearer(&e.user)
+        .json(&json!({"title":"Edited"}))
+        .await;
+    assert_eq!(denied.status_code(), StatusCode::FORBIDDEN);
+    let reset = format!("/api/enrichment/tracks/{}/reset", s.track);
+    let denied = e.srv.post(&reset).authorization_bearer(&e.user).await;
+    assert_eq!(denied.status_code(), StatusCode::FORBIDDEN);
+    for body in [
+        json!({"title": 42}),
+        json!({"title": "x".repeat(501)}),
+        json!([]),
+    ] {
+        let (status, _) = put(&e, &path, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = put(&e, &track_path("not-a-uuid"), json!({"title":"Edited"})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = put(&e, &track_path(Uuid::new_v4()), json!({"title":"Edited"})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, answer) = put(&e, &path, json!({"title":"  Edited song  "})).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        get(&e, &format!("/api/library/tracks/{}", s.track)).await["title"],
+        "Edited song"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT title FROM tracks WHERE id = $1")
+            .bind(s.track)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "Song"
+    );
+    let (status, _) = post(&e, &e.admin, &reset).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        get(&e, &format!("/api/library/tracks/{}", s.track)).await["title"],
+        "Song"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT display_title FROM tracks WHERE id = $1")
+            .bind(s.track)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
 async fn one(pool: &PgPool) -> Seeded {
     seed(pool, Seed::new("Alpha", "First", Some(1999), "Song")).await
 }

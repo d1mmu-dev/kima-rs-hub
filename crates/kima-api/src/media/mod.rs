@@ -2,6 +2,7 @@
 
 pub mod conditional;
 mod cover;
+pub mod remote_cover;
 mod stream;
 
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use uuid::Uuid;
 use crate::error::ApiError;
 
 pub use cover::{CoverImage, cover};
+pub use remote_cover::{RemoteCover, RemoteCoverResult, remote_cover};
 pub use stream::{mime_for, resolve_track, serve_track};
 
 /// A failure of the shared media code. Each front end maps it to its own error format.

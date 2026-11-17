@@ -27,6 +27,52 @@ and a hashed `wasm_run.<hash>.js`. vertigo 0.13 writes no static `index.html` an
 Set `VERTIGO=/path/to/vertigo` to pick a CLI that is not first on `PATH`; keep it at the same version as the
 `vertigo` crate (`=0.13.4` in `Cargo.toml`).
 
+## Account profiles (M-PROF, D-248)
+
+- Login fetches the account-local profile list before entering the app: more than one profile opens
+  `/profiles` ("Who's listening?"), one goes directly to the library. The picker is a public SSR shell;
+  names and avatars load only in an authenticated browser. Kids badges describe the profile type, not
+  content suitability: no kids content filter or PIN is implemented yet.
+- Both headers show the current avatar and name, sibling switch buttons, a picker link and Sign out.
+  Main profiles also get Manage profiles in Settings.
+- Settings › Profiles lists the account's profiles for every profile; only main sees add/edit/delete
+  controls or the password-change control (main is independent of the account's admin role).
+  Add/edit supports names, any mix of kids/standard up to the server's five-profile limit, all 12 shared
+  avatar presets and the initial fallback; main's kind is immutable and main has no delete action.
+  Deleting requires the exact stored name and explicitly warns about irreversible personal-data,
+  session and app-token deletion. Lists refetch after successful changes; backend errors remain visible.
+- Settings › Apps lists/creates/revokes only the active profile's Subsonic app tokens, including on
+  kids/standard profiles. The 50-token cap is account-wide and server-authoritative, never inferred
+  from the active profile's list. A new secret is kept only in page-local state with Copy token and
+  explicit dismissal; lists never contain it and it is never persisted. Copy selects the read-only
+  field and uses the browser's copy command (also on HTTP); a denied copy offers manual selection.
+  This is a kima-only Settings extension, not a claim of upstream visual parity.
+- A successful switch pauses audio, retires outstanding API work, replaces both stored credentials
+  in one serialized `kima-web.session` record (`token`, `refresh`, `generation`) and replaces the document at `/`. This deliberately discards the
+  old queue, podcast marks, search/form state, Resources and timers rather than reusing profile caches.
+  A late response, including 401, cannot mutate the replacement session. A failed switch keeps the old
+  session and shows the server's error. No token refresh loop is added in this slice.
+- The session record is authoritative; the old `kima-web.token` / `kima-web.refresh` pair migrates
+  once and is removed. Token-only replacements drop the old refresh credential. A tab keeps its
+  own record generation: a deleted profile's 401 invalidates that tab and writes only a
+  `kima-web.session.invalid.<generation>` tombstone. It never removes or rewrites the shared
+  current record, so even a publication interleaved with invalidation survives (including one
+  with identical token strings). Reload rejects a tombstoned generation, not a newer record.
+  Publishing the pair is one `setItem`, so observers see a complete old or new pair, never half of
+  each. Concurrent publications are last-writer-wins. Explicit Sign out intentionally removes the
+  shared current record; concurrent login/logout is last-writer-wins, while loaded tabs keep their
+  tab-bound credentials until their next rejection/reload. Tombstones contain no credentials and
+  are retained (one per invalidated generation); no cross-tab garbage collection is attempted.
+  Tabs running an older invalidation implementation are not coordinated; reload them after upgrading.
+- DB-free driver regression: `CHROME=/path/to/chrome node tools/verify-kima-web-e2e.mjs --self-test-sign-out`
+  checks closed-menu sign-out in desktop/mobile DOM fixtures. This is not the full application E2E;
+  default and `--ssr` acceptance still need an authorized migrated demo stack.
+- Library-track resume positions use `kima-web.position.<profileId>`. The old unscoped key is consumed
+  once by main and removed; an existing scoped point wins. Podcast progress stays server-side.
+- Avatars use the shared preset keys with emoji glyphs on an id-derived colour, falling back to an
+  initial for absent/unknown presets. This is kima-only (upstream has no profile picker), not an upstream
+  visual-parity claim. Profiles are convenience partitions, **not a security boundary until PINs**.
+
 ## Run it locally (dev)
 
 `vertigo build` shells out to `rustup` and `wasm-opt`, so both must be on `PATH`.
@@ -106,7 +152,7 @@ GPL-3.0-only binary (Apache-2.0 is GPLv3-compatible). `actix-proxy`/`actix-tls` 
 
 Routes: `/login`, `/setup`, `/collection` (artists), `/collection/albums[?artist=]`,
 `/collection/tracks[?album=]`, `/search`, `/playlists`, `/playlists/<uuid>`, `/settings`, `NotFound`. Session
-token: `localStorage` key `kima-web.token` (the legacy Next.js app uses `auth_token`). Player: persistent bar,
+token: `localStorage` record `kima-web.session` (the legacy Next.js app uses `auth_token`). Player: persistent bar,
 `<audio>` on the existing stream endpoint (`?token=`), queue persisted through `/api/playback-state`.
 
 - **Search** (`pages/search.rs`): query box (300 ms debounce, Enter searches at once) over `GET /api/search`,
@@ -118,9 +164,10 @@ token: `localStorage` key `kima-web.token` (the legacy Next.js app uses `auth_to
   edits). Every track list (tracks, search, playlist) has a "＋ Playlist" picker (`tracklist.rs`); adding a
   track that is already there answers 200 with `duplicated`, shown as "Already in <name>". Reordering and
   hidden playlists are not in the UI (the detail page can toggle public/private).
-- **Settings** (`pages/settings.rs`, spec §5.7 account slice only): username and role from `GET /auth/me`, and
-  a password change (`POST /auth/change-password`). The backend revokes the old tokens on a change and returns
-  a new access token, which replaces the stored session; the audio element of a track that is already playing
+- **Settings** (`pages/settings.rs`, `pages/settings/{profiles,apps}.rs`): username and role from
+  `GET /auth/me`, main-only password/profile management, the per-profile podcast AI preference and
+  current-profile app tokens (M-PROF, described above). Password changes revoke old tokens and return
+  a new pair, which replaces the stored session; the audio element of a track that is already playing
   keeps the old `?token=` until the next track loads.
 - **Resume position** (`position.rs`): `POST /api/playback-state` stores the queue, index, track id and
   shuffle, but never the in-track position for web saves (`position` is written only by the Subsonic queue, as
@@ -154,6 +201,48 @@ the file): login, browse, playback, seek, resume position after a reload, search
 (create, add, play, rename, remove, delete), password change and re-login, scan, 401 handling. Chromium and
 its remote-debugging port are `CHROME` and `DEBUG_PORT`. The run changes the admin password through the
 Settings page and changes it back, so it can be repeated.
+
+## Podcasts (M6 Phase G)
+
+`/podcasts` (home), `/podcasts/show?id=` (followed show), `/podcasts/show?itunesId=` (Apple preview) and
+`/podcasts/category?id=` (a category's chart); episodes play in the shared player and save their progress. Differences
+from upstream (category links instead of per-category shelves, search results inline, no sort selects yet, episodes not
+restored after a reload) are listed in `docs/DIVERGENCES.md` D-215. Not yet visually compared.
+
+**Compromises on the podcast pages (M6a close-out, 2026-11-14)**, each also in D-215 or D-207:
+
+- Not measured with `tools/compare-kima-web-visual.mjs`: the podcast pages have no diff/ink/SSIM numbers yet, so their
+  look is unverified against v1.12.3 (the legacy reference itself was only smoke-tested against this backend: home,
+  category, preview, follow, show page, play with a ranged seek, next episode, unfollow, no failing `/api/podcasts*`).
+  **Deferred to M10 visual-parity work** (M6 plan Definition of done 8), not a styling gap fixed in M6a.
+- Home: top categories are links to their chart page, not one shelf each (each shelf would be one Apple request through
+  the 1-per-3-s limiter); search results render inline under the box, not in a floating dropdown.
+- Category page: 24 shows per page with a "more shows" button instead of loading on scroll; no hidden-AI count (the
+  chart answer is a bare list).
+- Show page: no sort or page-size selects (newest/oldest button, 20 per page); feed descriptions as plain text; a manual
+  refresh does not reload the episode list.
+- Player: an episode stops at its end — no automatic or "next episode" step to the show's following episode (upstream
+  `podcast-next.spec.ts`; the server's `/next` route exists and is tested); an episode is not written to
+  `/api/playback-state`, so a reload does not restore it (its progress is kept); switching away or signing out can
+  lose up to 15 s of progress.
+- Badges: cards name a known AI/human label in their subtitle (no badge slot); no separate explicit ("E") badge.
+
+**AI-content labels (kima-only, M6 Task 8, D-200/D-207).** The show and preview heroes and every episode row carry a badge:
+"AI", "Human" (tooltip: declared by the publisher for the show / for this episode, or confirmed by an admin) or "Unlabelled"
+(no disclosure; never treated as human). Lists hide AI-labelled shows and episodes; each section says how many it hides, and
+a pill (`name="ai-pill"`, on the home, category and show pages) shows or hides them for that view. The pill starts from the
+persistent switch in Settings ("Show AI-generated podcasts", `podcastAiContent`). Admins get "mark as AI / confirm human /
+clear label" buttons for the show and for each episode; a change shows at once (an episode marked AI leaves the list while
+hiding) and the episode page is fetched again, so episodes inheriting a changed show label update too. Paged lists (a show's
+episodes, a category's chart, continue listening / new episodes) are fetched with the pill's `?ai=hide|show` and fetched again
+when it flips, so the server filters before paging (full pages, a true "x–y of N"); their hidden count is the body's
+`aiHidden`, because vertigo 0.13's fetch API exposes no response headers (`X-Kima-Ai-Hidden` cannot be read). Short unpaged
+lists (your shows, for-you, similar, search, the home page's top shows) are fetched with `?ai=show` and filtered on the page.
+Lists and the pill render only once the Settings value is known (no flash of the hidden view), and the pill keeps its
+position when the page re-renders. Compromises: the category chart's answer is a bare list (upstream shape), so that page
+shows no hidden count; media cards have no badge slot, so cards name a known label in their subtitle ("Host · AI") and say
+nothing for unknown; there is no separate explicit ("E") badge because upstream's wire shapes carry no `explicit` key
+(plan S4 lists one; recorded in D-207).
 
 ## Visual parity: compromises and assets
 

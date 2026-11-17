@@ -250,7 +250,7 @@ async fn preview(
                 &body.mode,
                 &root_s,
                 &target_s,
-                Some(user.id),
+                Some(user.account.into_uuid()),
                 ids,
                 "user",
             )
@@ -263,7 +263,7 @@ async fn preview(
                 &body.mode,
                 &root_s,
                 &target_s,
-                Some(user.id),
+                Some(user.account.into_uuid()),
             )
             .await?
         }

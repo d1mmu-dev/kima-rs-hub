@@ -1,24 +1,27 @@
 "use client";
 
 import { Suspense, useState, useMemo } from "react";
+import { TrackRow } from "@/components/ui/TrackRow";
+import { MediaActionButton, PlayDisc } from "@/components/ui/MediaActionBar";
 import { useSearchParams, useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useAudioState, useAudioPlayback, useAudioControls } from "@/lib/audio-context";
 import { GradientSpinner } from "@/components/ui/GradientSpinner";
-import { Play, Pause, Music, Shuffle, Save, ListPlus } from "lucide-react";
-import { cn } from "@/lib/cn";
-import { formatTime, plural } from "@/lib/format";
+import { Music, Shuffle, Save, ListPlus } from "lucide-react";
+import { plural } from "@/lib/format";
 import { shuffleArray } from "@/lib/shuffle";
 import { notify } from "@/lib/notify";
 import { useMixQuery } from "@/hooks/useQueries";
 import { useDoubleTapList } from "@/hooks/useDoubleTap";
-import { CachedImage } from "@/components/ui/CachedImage";
+import { CoverArt } from "@/components/cards/MediaCard";
 import { PageMessage } from "@/components/ui/PageMessage";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { shownTitle } from "@/lib/track-title";
 
 interface MixTrack {
     id: string;
     title: string;
+    displayTitle?: string | null;
     duration: number;
     albumId: string;
     album: {
@@ -43,10 +46,11 @@ function MixPageInner() {
     const { data: mix, isLoading, error, refetch } = useMixQuery(mixId);
     const [isSaving, setIsSaving] = useState(false);
 
+    const mixTracks = mix?.tracks;
     const totalDuration = useMemo(() => {
-        if (!mix?.tracks) return 0;
-        return mix.tracks.reduce((sum: number, track: MixTrack) => sum + (track.duration || 0), 0);
-    }, [mix?.tracks]);
+        if (!mixTracks) return 0;
+        return mixTracks.reduce((sum: number, track: MixTrack) => sum + (track.duration || 0), 0);
+    }, [mixTracks]);
 
     const formatTotalDuration = (seconds: number) => {
         const total = Math.max(1, Math.round(seconds / 60));
@@ -69,6 +73,7 @@ function MixPageInner() {
         return tracks.map((track) => ({
             id: track.id,
             title: track.title,
+            displayTitle: track.displayTitle,
             artist: {
                 name: track.album.artist.name,
                 id: track.album.artist.id,
@@ -181,34 +186,14 @@ function MixPageInner() {
                 }}
             >
                 <div className="flex items-end gap-6">
-                        <div className="w-[140px] h-[140px] md:w-[192px] md:h-[192px] bg-[#282828] rounded shrink-0 overflow-hidden">
-                            {mix.coverUrls && mix.coverUrls.length > 0 ? (
-                                <div className="grid grid-cols-2 gap-0 w-full h-full">
-                                    {mix.coverUrls.slice(0, 4).map((url: string, index: number) => {
-                                        const proxiedUrl = api.getCoverArtUrl(url, 200);
-                                        return (
-                                            <div key={index} className="relative bg-[#181818]">
-                                                <CachedImage
-                                                    src={proxiedUrl}
-                                                    alt=""
-                                                    fill
-                                                    className="object-cover"
-                                                    sizes="96px"
-                                                />
-                                            </div>
-                                        );
-                                    })}
-                                    {Array.from({
-                                        length: Math.max(0, 4 - (mix.coverUrls?.length || 0)),
-                                    }).map((_, index) => (
-                                        <div key={`empty-${index}`} className="relative bg-[#282828]" />
-                                    ))}
-                                </div>
-                            ) : (
-                                <div className="w-full h-full flex items-center justify-center">
-                                    <Music className="w-16 h-16 text-[var(--text-muted)]" />
-                                </div>
-                            )}
+                        <div className="relative flex items-center justify-center w-[140px] h-[140px] md:w-[192px] md:h-[192px] bg-[#282828] rounded shrink-0 overflow-hidden">
+                            <CoverArt
+                                key={mix.id}
+                                imageUrl={(mix.coverUrls ?? []).map((url: string) => api.getCoverArtUrl(url, 300))}
+                                title=""
+                                sizes="192px"
+                                FallbackIcon={Music}
+                            />
                         </div>
 
                         <div className="flex-1 min-w-0 pb-1">
@@ -234,27 +219,21 @@ function MixPageInner() {
             <div className="bg-gradient-to-b from-[#1a1a1a]/60 to-transparent page-shell py-4">
                 <div className="flex items-center gap-4">
                     {mix.tracks && mix.tracks.length > 0 && (
-                        <button
+                        <PlayDisc
+                            showPause={isThisMixPlaying && isPlaying}
                             onClick={handlePlayMix}
-                            aria-label={isThisMixPlaying && isPlaying ? `Pause ${mix.name}` : `Play ${mix.name}`}
-                            className="h-12 w-12 rounded-full bg-brand hover:bg-brand-hover hover:scale-105 flex items-center justify-center transition-all"
-                        >
-                            {isThisMixPlaying && isPlaying ? (
-                                <Pause className="w-5 h-5 fill-current text-black" />
-                            ) : (
-                                <Play className="w-5 h-5 fill-current text-black ml-0.5" />
-                            )}
-                        </button>
+                            shape="circle"
+                            label={isThisMixPlaying && isPlaying ? `Pause ${mix.name}` : `Play ${mix.name}`}
+                        />
                     )}
 
                     {mix.tracks && mix.tracks.length > 1 && (
-                        <button
+                        <MediaActionButton
+                            icon={<Shuffle className="w-5 h-5" />}
+                            label={`Shuffle play ${mix.name}`}
                             onClick={handleShuffle}
-                            aria-label={`Shuffle play ${mix.name}`}
-                            className="h-8 w-8 rounded-full hover:bg-white/10 flex items-center justify-center text-[var(--text-secondary)] hover:text-white transition-all"
-                        >
-                            <Shuffle className="w-5 h-5" />
-                        </button>
+                            shape="circle"
+                        />
                     )}
 
                     <button
@@ -270,7 +249,7 @@ function MixPageInner() {
                 </div>
             </div>
 
-            <div className="page-shell pb-32">
+            <div className="page-shell page-end">
                 {mix.tracks && mix.tracks.length > 0 ? (
                     <div className="w-full">
                         <div className="hidden md:grid grid-cols-[40px_minmax(200px,4fr)_minmax(100px,1fr)_80px] gap-4 px-4 py-2 text-xs text-[var(--text-secondary)] border-b border-white/10 mb-2">
@@ -284,92 +263,35 @@ function MixPageInner() {
                             {mix.tracks.map((track: MixTrack, index: number) => {
                                 const isCurrentlyPlaying = currentTrack?.id === track.id;
                                 return (
-                                    <div
+                                    <TrackRow
                                         key={track.id}
-                                        data-track-index={index}
+                                        rowProps={{ "data-track-index": index }}
                                         onDoubleClick={() => handlePlayTrack(index)}
                                         onTouchEnd={handleRowTouchEnd}
-                                        className={cn(
-                                            "grid grid-cols-[40px_1fr_auto] md:grid-cols-[40px_minmax(200px,4fr)_minmax(100px,1fr)_80px] gap-4 px-4 py-2 rounded-md hover:bg-white/5 transition-colors group cursor-pointer touch-manipulation",
-                                            isCurrentlyPlaying && "bg-white/10"
-                                        )}
-                                    >
-                                        <div className="flex items-center justify-center">
+                                        className="px-4"
+                                        columns="grid-cols-[40px_1fr_auto] md:grid-cols-[40px_minmax(200px,4fr)_minmax(100px,1fr)_80px]"
+                                        index={index}
+                                        current={isCurrentlyPlaying}
+                                        playing={isPlaying}
+                                        onPlay={() => handlePlayTrack(index)}
+                                        title={shownTitle(track)}
+                                        subtitle={track.album.artist.name}
+                                        coverUrl={track.album?.coverUrl ? api.getCoverArtUrl(track.album.coverUrl, 100) : null}
+                                        extras={[<span key="album" className="truncate">{track.album.title}</span>]}
+                                        duration={track.duration}
+                                        actions={
                                             <button
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    handlePlayTrack(index);
-                                                }}
-                                                className="min-h-[44px] min-w-[44px] flex items-center justify-center"
-                                                aria-label={isCurrentlyPlaying && isPlaying ? `Pause ${track.title}` : `Play ${track.title}`}
-                                            >
-                                                <span
-                                                    className={cn(
-                                                        "text-sm group-hover:hidden",
-                                                        isCurrentlyPlaying ? "text-brand" : "text-[var(--text-secondary)]"
-                                                    )}
-                                                >
-                                                    {isCurrentlyPlaying && isPlaying ? (
-                                                        <Music className="w-4 h-4 text-brand animate-pulse" />
-                                                    ) : (
-                                                        index + 1
-                                                    )}
-                                                </span>
-                                                <Play className="w-4 h-4 text-white hidden group-hover:block" />
-                                            </button>
-                                        </div>
-
-                                        <div className="flex items-center gap-3 min-w-0">
-                                            <div className="relative w-10 h-10 bg-[#282828] rounded shrink-0 overflow-hidden">
-                                                {track.album?.coverUrl ? (
-                                                    <CachedImage
-                                                        src={api.getCoverArtUrl(track.album.coverUrl, 100)}
-                                                        alt={track.title}
-                                                        fill
-                                                        sizes="40px"
-                                                        className="object-cover"
-                                                    />
-                                                ) : (
-                                                    <div className="w-full h-full flex items-center justify-center">
-                                                        <Music className="w-5 h-5 text-[var(--text-muted)]" />
-                                                    </div>
-                                                )}
-                                            </div>
-                                            <div className="min-w-0">
-                                                <p
-                                                    className={cn(
-                                                        "text-sm font-medium truncate",
-                                                        isCurrentlyPlaying ? "text-brand" : "text-white"
-                                                    )}
-                                                >
-                                                    {track.title}
-                                                </p>
-                                                <p className="text-xs text-[var(--text-secondary)] truncate">
-                                                    {track.album.artist.name}
-                                                </p>
-                                            </div>
-                                        </div>
-
-                                        <p className="hidden md:flex items-center text-sm text-[var(--text-secondary)] truncate">
-                                            {track.album.title}
-                                        </p>
-
-                                        <div className="flex items-center justify-end gap-2">
-                                            <button
-                                                className="min-h-[44px] min-w-[44px] rounded-full opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-white/10 text-[var(--text-secondary)] hover:text-white transition-all flex items-center justify-center"
+                                                className="min-h-[44px] min-w-[44px] rounded-full opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-white/10 text-[var(--text-secondary)] hover:text-white transition-all flex items-center justify-center touch-reveal"
                                                 onClick={(e) => {
                                                     e.stopPropagation();
                                                     handleAddToQueue(track);
                                                 }}
-                                                aria-label={`Add ${track.title} to queue`}
+                                                aria-label={`Add ${shownTitle(track)} to queue`}
                                             >
                                                 <ListPlus className="w-4 h-4" />
                                             </button>
-                                            <span className="text-sm text-[var(--text-secondary)] w-12 text-right">
-                                                {formatTime(track.duration)}
-                                            </span>
-                                        </div>
-                                    </div>
+                                        }
+                                    />
                                 );
                             })}
                         </div>

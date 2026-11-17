@@ -97,7 +97,8 @@ pub struct TrackAnalysis {
 }
 
 /// Fence every write on the track still being at the exact generation the
-/// caller computed against, under `FOR UPDATE`, matching
+/// caller computed against, under `FOR NO KEY UPDATE` (it blocks the scanner's writes and
+/// deletes, not other stages' claims), matching
 /// `ml::complete_embedding`'s generation-fencing pattern. `false` means the
 /// track moved on (changed file, went missing, or was deleted) since the
 /// caller captured `file_generation`: never a quiet partial write.
@@ -107,7 +108,7 @@ async fn fence_generation(
     file_generation: i64,
 ) -> sqlx::Result<bool> {
     let current = sqlx::query_scalar!(
-        "SELECT id FROM tracks WHERE id=$1 AND ml_generation=$2 AND missing_since IS NULL FOR UPDATE",
+        "SELECT id FROM tracks WHERE id=$1 AND ml_generation=$2 AND missing_since IS NULL FOR NO KEY UPDATE",
         track_id,
         file_generation
     )

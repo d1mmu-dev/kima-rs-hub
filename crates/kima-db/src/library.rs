@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use kima_core::profile::ProfileId;
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
 use sqlx::{PgConnection, PgPool};
@@ -102,6 +103,9 @@ pub struct Upserted {
     pub artist: Uuid,
     /// The row existed and its stored content fingerprint differed.
     pub content_changed: bool,
+    /// The track row was inserted or at least one stored value changed; a re-read that
+    /// finds every value as stored writes nothing (`updated_at` stays).
+    pub row_changed: bool,
     /// The album row was created by this upsert.
     pub album_created: bool,
 }
@@ -173,12 +177,13 @@ pub async fn upsert_track(tx: &mut PgConnection, t: &ResolvedTrack) -> sqlx::Res
     )
     .fetch_one(&mut *tx)
     .await?;
-    let (track_id, content_changed) = upsert_track_row(tx, t, album.id).await?;
+    let (track_id, content_changed, row_changed) = upsert_track_row(tx, t, album.id).await?;
     Ok(Upserted {
         track: track_id,
         album: album.id,
         artist: artist_id,
         content_changed,
+        row_changed,
         album_created: album.created,
     })
 }
@@ -231,12 +236,13 @@ pub async fn upsert_track_pinned(
     let artist = sqlx::query_scalar!("SELECT artist_id FROM albums WHERE id = $1", album)
         .fetch_one(&mut *tx)
         .await?;
-    let (track, content_changed) = upsert_track_row(tx, t, album).await?;
+    let (track, content_changed, row_changed) = upsert_track_row(tx, t, album).await?;
     Ok(Upserted {
         track,
         album,
         artist,
         content_changed,
+        row_changed,
         album_created: false,
     })
 }
@@ -260,13 +266,14 @@ pub async fn release_autotag_albums(conn: &mut PgConnection, albums: &[Uuid]) ->
     Ok(r.rows_affected())
 }
 
-/// The track row of [`upsert_track`] on `album_id`: answers the track id and whether its stored
-/// content fingerprint differed.
+/// The track row of [`upsert_track`] on `album_id`: answers the track id, whether its stored
+/// content fingerprint differed, and whether the row was written at all (an existing row whose
+/// values all match is left alone).
 async fn upsert_track_row(
     tx: &mut PgConnection,
     t: &ResolvedTrack,
     album_id: Uuid,
-) -> sqlx::Result<(Uuid, bool)> {
+) -> sqlx::Result<(Uuid, bool, bool)> {
     let previous: Option<Vec<u8>> =
         sqlx::query_scalar!("SELECT fingerprint FROM tracks WHERE path = $1", t.path)
             .fetch_optional(&mut *tx)
@@ -301,6 +308,25 @@ async fn upsert_track_row(
                                   WHEN tracks.isrc_source = 'id3' THEN NULL
                                   ELSE tracks.isrc_source END,
                missing_since = NULL, updated_at = now()
+           WHERE (tracks.album_id, tracks.artist_name, tracks.title, tracks.year, tracks.disc,
+                  tracks.track_no, tracks.duration_secs, tracks.codec, tracks.bitrate, tracks.size,
+                  tracks.mtime, tracks.fingerprint, tracks.guessed, tracks.tag_recording_mbid,
+                  tracks.tag_release_track_mbid, tracks.tag_release_mbid,
+                  tracks.tag_release_group_mbid, tracks.tag_artist_mbids,
+                  tracks.tag_album_artist_mbids, tracks.disc_total, tracks.track_total)
+                 IS DISTINCT FROM
+                 (EXCLUDED.album_id, EXCLUDED.artist_name, EXCLUDED.title, EXCLUDED.year,
+                  EXCLUDED.disc, EXCLUDED.track_no, EXCLUDED.duration_secs, EXCLUDED.codec,
+                  EXCLUDED.bitrate, EXCLUDED.size, EXCLUDED.mtime, EXCLUDED.fingerprint,
+                  EXCLUDED.guessed, EXCLUDED.tag_recording_mbid, EXCLUDED.tag_release_track_mbid,
+                  EXCLUDED.tag_release_mbid, EXCLUDED.tag_release_group_mbid,
+                  EXCLUDED.tag_artist_mbids, EXCLUDED.tag_album_artist_mbids,
+                  EXCLUDED.disc_total, EXCLUDED.track_total)
+              OR tracks.missing_since IS NOT NULL
+              OR (EXCLUDED.isrc IS NOT NULL
+                  AND (tracks.isrc, tracks.isrc_source)
+                      IS DISTINCT FROM (EXCLUDED.isrc, EXCLUDED.isrc_source))
+              OR (EXCLUDED.isrc IS NULL AND tracks.isrc_source = 'id3')
            RETURNING id"#,
         Uuid::now_v7(),
         album_id,
@@ -327,12 +353,19 @@ async fn upsert_track_row(
         t.track_total,
         t.isrc,
     )
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok((
-        track_id,
-        previous.is_some_and(|f| f.as_slice() != t.fingerprint.as_slice()),
-    ))
+    let content_changed = previous.is_some_and(|f| f.as_slice() != t.fingerprint.as_slice());
+    match track_id {
+        Some(id) => Ok((id, content_changed, true)),
+        // The row exists and every value already matches: nothing was written.
+        None => {
+            let id = sqlx::query_scalar!("SELECT id FROM tracks WHERE path = $1", t.path)
+                .fetch_one(&mut *tx)
+                .await?;
+            Ok((id, content_changed, false))
+        }
+    }
 }
 
 /// Sets the album's `release_mbid` and `release_group_mbid` to the mode of its present tracks'
@@ -453,10 +486,16 @@ pub async fn mark_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> 
 }
 
 /// [`mark_missing`] on a connection, so it can share a transaction.
+/// Lock by id before updating: an unordered multi-row UPDATE can lock B then A while
+/// a playlist's `add_locked` holds A then waits for B, deadlocking the request.
 pub async fn mark_missing_in(conn: &mut PgConnection, paths: &[String]) -> sqlx::Result<u64> {
     let r = sqlx::query!(
-        "UPDATE tracks SET missing_since = now()
-         WHERE path = ANY($1) AND missing_since IS NULL",
+        "WITH locked AS MATERIALIZED (
+             SELECT id FROM tracks WHERE path = ANY($1) AND missing_since IS NULL
+             ORDER BY id FOR NO KEY UPDATE
+         )
+         UPDATE tracks t SET missing_since = now()
+         FROM locked WHERE t.id = locked.id",
         paths
     )
     .execute(conn)
@@ -544,7 +583,7 @@ pub struct Retired {
     /// The album of each deleted track (one id per track), to refresh what derives from them.
     pub albums: Vec<Uuid>,
     /// `(owner, playlist)` of every playlist that held a retired track, for live updates.
-    pub playlists: Vec<(Uuid, Uuid)>,
+    pub playlists: Vec<(ProfileId, Uuid)>,
     /// Transcode-cache files of the retired tracks; the caller unlinks them after the commit.
     pub artifacts: Vec<std::path::PathBuf>,
     /// The guard fired: more than 10 % (and at least 10) of all tracks are flagged missing.
@@ -556,7 +595,7 @@ pub struct Retired {
 /// Deletes tracks missing for longer than `older_than` (D-040, D-161), in one transaction:
 /// stands down on a mass disappearance; hands plays, stars, ratings, playlist places and
 /// bookmarks to a live copy of the same song (same album, disc, track number, title ignoring
-/// case) unless the user already has that on the copy; writes `removal_log`; clears
+/// case) unless the profile already has that on the copy; writes `removal_log`; clears
 /// `playback_state` references; deletes. `cache_dir` is where transcodes are cached as
 /// `<track id>-<quality>-<size>-<mtime>.mp3`; those files are listed, not unlinked.
 pub async fn retire_missing(
@@ -597,15 +636,15 @@ pub async fn retire_missing(
     }
     let ids: Vec<Uuid> = gone.iter().map(|g| g.id).collect();
 
-    let playlists: Vec<(Uuid, Uuid)> = sqlx::query!(
-        "SELECT DISTINCT p.user_id, p.id FROM playlist_items i JOIN playlists p ON p.id = i.playlist_id
+    let playlists: Vec<(ProfileId, Uuid)> = sqlx::query!(
+        "SELECT DISTINCT p.profile_id, p.id FROM playlist_items i JOIN playlists p ON p.id = i.playlist_id
          WHERE i.track_id = ANY($1) ORDER BY 1, 2",
         &ids
     )
     .fetch_all(&mut *tx)
     .await?
     .into_iter()
-    .map(|r| (r.user_id, r.id))
+    .map(|r| (ProfileId::new(r.profile_id), r.id))
     .collect();
 
     // Titles are compared here, not in SQL: the database lower-cases ASCII only.
@@ -710,7 +749,7 @@ pub async fn retire_missing(
     })
 }
 
-/// Moves `from`'s history onto `to`, each kind unless the same user already has it on `to`
+/// Moves `from`'s history onto `to`, each kind unless the same profile already has it on `to`
 /// (that row stays; the duplicate goes with the retiring track).
 async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Result<()> {
     sqlx::query!(
@@ -722,7 +761,7 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     .await?;
     sqlx::query!(
         "UPDATE stars s SET track_id = $2 WHERE s.track_id = $1
-           AND NOT EXISTS (SELECT 1 FROM stars o WHERE o.user_id = s.user_id AND o.track_id = $2)",
+           AND NOT EXISTS (SELECT 1 FROM stars o WHERE o.profile_id = s.profile_id AND o.track_id = $2)",
         from,
         to
     )
@@ -730,7 +769,7 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     .await?;
     sqlx::query!(
         "UPDATE ratings r SET track_id = $2 WHERE r.track_id = $1
-           AND NOT EXISTS (SELECT 1 FROM ratings o WHERE o.user_id = r.user_id AND o.track_id = $2)",
+           AND NOT EXISTS (SELECT 1 FROM ratings o WHERE o.profile_id = r.profile_id AND o.track_id = $2)",
         from,
         to
     )
@@ -746,7 +785,18 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     .await?;
     sqlx::query!(
         "UPDATE subsonic_bookmarks b SET track_id = $2 WHERE b.track_id = $1
-           AND NOT EXISTS (SELECT 1 FROM subsonic_bookmarks o WHERE o.user_id = b.user_id AND o.track_id = $2)",
+           AND NOT EXISTS (SELECT 1 FROM subsonic_bookmarks o WHERE o.profile_id = b.profile_id AND o.track_id = $2)",
+        from,
+        to
+    )
+    .execute(&mut *conn)
+    .await?;
+    // Copy in profile order so concurrent handovers acquire unique-index locks consistently.
+    // A destination row, including one committed after our snapshot, wins unchanged.
+    sqlx::query!(
+        "INSERT INTO play_audit_ignore (profile_id, track_id, ignored_at)
+         SELECT profile_id, $2, ignored_at FROM play_audit_ignore WHERE track_id = $1
+         ORDER BY profile_id ON CONFLICT (profile_id, track_id) DO NOTHING",
         from,
         to
     )
@@ -952,8 +1002,9 @@ pub async fn paths_under(pool: &PgPool, dir_prefix: &str) -> sqlx::Result<Vec<St
     .await
 }
 
-/// Clears the missing flag of tracks whose file is back at the same path, unchanged, and
-/// reopens their `FILE_MISSING` stage rows. Returns how many tracks changed.
+/// Clears the missing flag of tracks whose file is back at the same path and reopens their
+/// `FILE_MISSING` stage rows; re-reading a changed file is the caller's job. Returns how many
+/// tracks changed.
 pub async fn clear_missing(pool: &PgPool, paths: &[String]) -> sqlx::Result<u64> {
     let mut tx = pool.begin().await?;
     let n = clear_missing_in(&mut tx, paths).await?;

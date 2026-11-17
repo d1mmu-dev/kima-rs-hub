@@ -19,6 +19,7 @@ async fn extensions_need_no_auth(pool: PgPool) {
             {"name": "formPost", "versions": [1]},
             {"name": "indexBasedQueue", "versions": [1]},
             {"name": "songLyrics", "versions": [1]},
+            {"name": "getPodcastEpisode", "versions": [1]},
         ])
     );
     // The suffix-less path works too.

@@ -19,7 +19,7 @@ use time::OffsetDateTime;
 use tokio::time::Instant;
 
 use crate::cache;
-use crate::gate::{Busy, Gate};
+use crate::gate::{Busy, Gate, Priority};
 use crate::guard;
 use crate::outcome::{Evidence, Failure, Outcome};
 use crate::record::Entry;
@@ -45,6 +45,18 @@ const PAUSE_DOUBLING_AFTER: i32 = 5;
 /// `kima-rs/<version> ( <contact> )`, the shape MusicBrainz asks for.
 pub fn user_agent(version: &str, contact: &str) -> String {
     format!("kima-rs/{version} ( {contact} )")
+}
+
+/// The User-Agent podcast feeds are asked with (`rss-parser.ts:91`, D-203): upstream's form with
+/// kima-rs's version and contact.
+pub fn feed_user_agent(version: &str, contact: &str) -> String {
+    format!("Kima/{version} (+{contact}; podcast aggregator)")
+}
+
+/// The User-Agent episode audio is asked with, streaming and caching alike (`config.ts:106`,
+/// D-203): hosts that stitch ads in send each identity its own copy.
+pub fn audio_user_agent(version: &str, contact: &str) -> String {
+    format!("Kima/{version} ({contact})")
 }
 
 /// How long to wait before retrying a rate-limited request (`rateLimiter.ts:250-266`). A
@@ -86,10 +98,14 @@ pub fn redirect_allowed(from: &str, to: &str) -> bool {
 pub struct NetConfig {
     /// Sent on every request.
     pub user_agent: String,
+    /// Sent when fetching a podcast feed ([`feed_user_agent`]).
+    pub feed_user_agent: String,
+    /// Sent when fetching episode audio ([`audio_user_agent`]).
+    pub audio_user_agent: String,
     pub bases: Bases,
     /// Panic on any host but this machine (the network guard).
     pub deny_real: bool,
-    /// Lets image downloads reach private addresses (tests).
+    /// Lets image, feed and audio fetches reach private addresses (tests).
     pub allow_private_images: bool,
     /// Scales the limiter spacing and the rate-limit backoff, never the timeouts or the
     /// persisted pause lengths. 1.0 in production; tests shrink it so a retry ladder takes
@@ -101,8 +117,10 @@ pub struct NetConfig {
     /// Host names answered without DNS (tests). Their addresses go through the same checks as
     /// resolved ones.
     pub static_hosts: HashMap<String, Vec<IpAddr>>,
-    /// Socket addresses an image download may reach although they are not public (tests: the
-    /// replay server, so a redirect away from it can be checked). Empty in production.
+    /// Socket addresses an image, feed or audio fetch may reach although they are not public (tests: the
+    /// replay server, so a redirect away from it can be checked). Empty in production: outside
+    /// tests it is set only from `KIMA_NET_ALLOW_LOOPBACK`, and only together with
+    /// `KIMA_NET_DENY_REAL=1` (D-216).
     pub private_image_allow: Vec<SocketAddr>,
 }
 
@@ -111,6 +129,8 @@ impl NetConfig {
     pub fn production(version: &str, contact: &str, musicbrainz_base: &str) -> NetConfig {
         NetConfig {
             user_agent: user_agent(version, contact),
+            feed_user_agent: feed_user_agent(version, contact),
+            audio_user_agent: audio_user_agent(version, contact),
             bases: Bases::production(musicbrainz_base),
             deny_real: std::env::var("KIMA_NET_DENY_REAL").is_ok_and(|v| v.trim() == "1"),
             allow_private_images: false,
@@ -128,6 +148,14 @@ impl NetConfig {
                 env!("CARGO_PKG_VERSION"),
                 kima_core::config::DEFAULT_CONTACT,
             ),
+            feed_user_agent: feed_user_agent(
+                env!("CARGO_PKG_VERSION"),
+                kima_core::config::DEFAULT_CONTACT,
+            ),
+            audio_user_agent: audio_user_agent(
+                env!("CARGO_PKG_VERSION"),
+                kima_core::config::DEFAULT_CONTACT,
+            ),
             bases,
             deny_real: true,
             allow_private_images: true,
@@ -137,6 +165,31 @@ impl NetConfig {
             private_image_allow: Vec::new(),
         }
     }
+}
+
+/// Loopback socket addresses a feed, audio or image fetch may reach although they are not
+/// public, from `KIMA_NET_ALLOW_LOOPBACK` (`127.0.0.1:<port>[,...]`). Only for a capture run of
+/// the real server against loopback feed/Apple stand-ins (`tools/capture-api-fixtures.sh`):
+/// it is refused unless `deny_real` is on (so no real host can be reached at the same time),
+/// and every entry must be a loopback address with a nonzero port. Unset or empty: none.
+pub fn loopback_allow(deny_real: bool, raw: Option<&str>) -> Result<Vec<SocketAddr>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    if !deny_real {
+        return Err("KIMA_NET_ALLOW_LOOPBACK needs KIMA_NET_DENY_REAL=1".into());
+    }
+    raw.split(',')
+        .map(|item| {
+            let item = item.trim();
+            match item.parse::<SocketAddr>() {
+                Ok(addr) if addr.ip().is_loopback() && addr.port() != 0 => Ok(addr),
+                _ => Err(format!(
+                    "KIMA_NET_ALLOW_LOOPBACK: {item:?} is not a loopback address with a port"
+                )),
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -335,6 +388,12 @@ impl Net {
         Some(self.live.as_ref()?.gates[&source].concurrency())
     }
 
+    /// Snapshot of a source gate's registered waiter priorities, for diagnostics.
+    #[doc(hidden)]
+    pub fn queued_priorities(&self, source: Source) -> Option<Vec<bool>> {
+        Some(self.live.as_ref()?.gates[&source].queued_priorities())
+    }
+
     /// Whether outbound lookups may run now: a live client with the identification switch on
     /// (spec §15.3). A disabled client never is.
     pub fn enabled(&self) -> bool {
@@ -349,35 +408,68 @@ impl Net {
     }
 
     pub async fn get_json<T: DeserializeOwned>(&self, req: Req) -> Outcome<T> {
-        self.json(req).await
+        self.json(req, || async {}, None).await
+    }
+
+    /// Wait for caller admission only on a cache miss, before any live request.
+    pub async fn get_json_with_admission<T, F, Fut>(&self, req: Req, admit: F) -> Outcome<T>
+    where
+        T: DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        self.json(req, admit, None).await
+    }
+
+    /// Apply priority at the source gate, after cache lookup.
+    pub async fn get_json_with_priority<T: DeserializeOwned>(
+        &self,
+        req: Req,
+        priority: &Priority,
+    ) -> Outcome<T> {
+        self.json(req, || async {}, Some(priority)).await
     }
 
     pub async fn post_form_json<T: DeserializeOwned>(&self, req: Req) -> Outcome<T> {
-        self.json(req).await
+        self.json(req, || async {}, None).await
     }
 
     /// Switch, cache, pause, slot, cell, send (spec §7.3-§7.4). The switch comes first, so an
     /// off switch answers `DISABLED` whatever is cached.
-    async fn json<T: DeserializeOwned>(&self, req: Req) -> Outcome<T> {
+    async fn json<T, F, Fut>(&self, req: Req, admit: F, priority: Option<&Priority>) -> Outcome<T>
+    where
+        T: DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let Some(live) = &self.live else {
             return disabled();
         };
-        if !live.switch.enabled() {
+        if !live.switch.enabled() && !req.user_facing {
             return disabled();
         }
         let secrets = Secrets::of(&req);
-        let out = self.json_cached(live, &req, &secrets).await;
+        let out = self
+            .json_cached(live, &req, &secrets, admit, priority)
+            .await;
         scrubbed(out, &secrets)
     }
 
-    async fn json_cached<T: DeserializeOwned>(
+    async fn json_cached<T, F, Fut>(
         &self,
         live: &Live,
         req: &Req,
         secrets: &Secrets,
-    ) -> Outcome<T> {
+        admit: F,
+        priority: Option<&Priority>,
+    ) -> Outcome<T>
+    where
+        T: DeserializeOwned,
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let source = req.host.source();
-        let cached = match (req.no_cache, source.ttl()) {
+        let cached = match (req.no_cache, req.ttl.or(source.ttl())) {
             (false, Some(ttl)) => {
                 let canonical = cache::canonical(req, live.cfg.bases.get(req.host));
                 Some((cache::key(source, &canonical), canonical, ttl))
@@ -399,8 +491,9 @@ impl Net {
                 }
             }
         }
+        admit().await;
         // An echoed key is scrubbed before anything is parsed, stored or returned.
-        let fetched = match self.json_live(live, req, secrets).await {
+        let fetched = match self.json_live(live, req, secrets, priority).await {
             Outcome::Answered(value) => Outcome::Answered(secrets.scrub_json(value)),
             Outcome::Absent(evidence) => Outcome::Absent(Evidence(secrets.scrub_json(evidence.0))),
             other => other,
@@ -439,7 +532,13 @@ impl Net {
     }
 
     /// Pause, slot, cell, send, with the rate-limit retries; the answer as JSON.
-    async fn json_live(&self, live: &Live, req: &Req, secrets: &Secrets) -> Outcome<Value> {
+    async fn json_live(
+        &self,
+        live: &Live,
+        req: &Req,
+        secrets: &Secrets,
+        priority: Option<&Priority>,
+    ) -> Outcome<Value> {
         let source = req.host.source();
         if let Some(until) = self.paused_until(source) {
             return Outcome::RateLimited { until };
@@ -449,8 +548,10 @@ impl Net {
         let per_request = req.timeout.unwrap_or(limits.timeout);
         let mut budget_ends: Option<Instant> = None;
         let mut attempt = 0;
+        let default_priority = Priority::background();
+        let priority = priority.unwrap_or(&default_priority);
         loop {
-            let permit = match gate.acquire(req.max_wait).await {
+            let permit = match gate.acquire_with_priority(req.max_wait, priority).await {
                 Ok(p) => p,
                 Err(Busy) => {
                     return transient("BUSY", format!("{} is busy", source.as_str()));
@@ -462,6 +563,10 @@ impl Net {
                     .map_or(now + Duration::from_secs(86_400), |b| now + b)
             });
             let ends = budget_ends.min(now + per_request);
+            if now >= ends {
+                drop(permit);
+                return transient("TIMEOUT", format!("no answer within {per_request:?}"));
+            }
             let sent = tokio::time::timeout_at(ends, live.send(req, secrets)).await;
             drop(permit);
             let raw = match sent {
@@ -472,7 +577,7 @@ impl Net {
             match classify(req, source, raw, secrets) {
                 Step::Done(outcome) => return outcome,
                 Step::Limited(limited) => {
-                    if attempt < limits.rate_limit_retries {
+                    if attempt < limits.rate_limit_retries && !req.no_retry {
                         let jitter = Duration::from_millis(rand::thread_rng().gen_range(0..1000));
                         let delay = retry_delay(attempt, limited.retry_after.as_deref(), jitter)
                             .mul_f64(live.cfg.wait_scale.max(0.0));
@@ -757,6 +862,9 @@ fn classify(req: &Req, source: Source, raw: Raw, secrets: &Secrets) -> Step<Valu
         if req.absent_when.is_some_and(|f| f(&value)) {
             return Step::Done(Outcome::Absent(Evidence(value)));
         }
+        if req.valid_when.is_some_and(|f| !f(&value)) {
+            return Step::Done(transient("BAD_RESPONSE", "not the answer asked for"));
+        }
         return Step::Done(Outcome::Answered(value));
     }
     let limited = code == 429
@@ -813,6 +921,29 @@ mod tests {
         assert_eq!(cfg.user_agent, "kima-rs/1.2.3 ( me@example.org )");
         assert_eq!(cfg.bases.musicbrainz, "https://musicbrainz.org/ws/2");
         assert!(!cfg.allow_private_images);
+    }
+
+    #[test]
+    fn loopback_allow_needs_the_guard_and_loopback_ports() {
+        assert_eq!(loopback_allow(false, None), Ok(Vec::new()));
+        assert_eq!(loopback_allow(false, Some(" ")), Ok(Vec::new()));
+        assert_eq!(
+            loopback_allow(true, Some("127.0.0.1:4000, [::1]:4001")),
+            Ok(vec![
+                "127.0.0.1:4000".parse().unwrap(),
+                "[::1]:4001".parse().unwrap()
+            ])
+        );
+        assert!(loopback_allow(false, Some("127.0.0.1:4000")).is_err());
+        for bad in [
+            "10.0.0.1:80",
+            "127.0.0.1:0",
+            "127.0.0.1",
+            "localhost:80",
+            "8.8.8.8:53",
+        ] {
+            assert!(loopback_allow(true, Some(bad)).is_err(), "{bad} accepted");
+        }
     }
 
     /// `rateLimiterBackoff.test.ts`, with zero jitter.

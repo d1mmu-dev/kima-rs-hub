@@ -59,19 +59,39 @@ Optional. The address clients use to reach Kima, such as `https://music.example.
 All 81 paths upstream registers are answered, each with and without `.view`, by GET, HEAD or POST (form bodies are merged with the query string). 44 are complete, 8 partial and 29 stubs.
 
 - **System:** `ping`, `getLicense`, `getMusicFolders` (one folder, id `1`), `getOpenSubsonicExtensions` (no sign-in needed; advertises `apiKeyAuthentication`, `formPost`, `indexBasedQueue`), `tokenInfo`, `getScanStatus`, `startScan` (admin).
-- **Browsing:** `getArtists`, `getIndexes`, `getArtist`, `getMusicDirectory`, `getAlbum`, `getSong`, `getAlbumList` and `getAlbumList2` (every list type except `byGenre`, which is empty until M3).
-- **Search:** `search`, `search2` and `search3`. An empty query lists the whole library page by page, which is how Symfonium and others sync. `getRandomSongs` (the `genre` filter waits for M3), `getTopSongs`, `getNowPlaying`.
-- **Playing:** `stream`, `download`, `hls`, `getTranscodeDecision`, `getTranscodeStream` (songs; podcasts wait for M6), `getCoverArt` (albums and tracks; artist images wait for M3), `getAvatar`, `scrobble` (batches and now playing).
+- **Browsing:** `getArtists`, `getIndexes`, `getArtist`, `getMusicDirectory`, `getAlbum`, `getSong`, `getAlbumList` and `getAlbumList2` (every list type, `byGenre` included since M3).
+- **Search:** `search`, `search2` and `search3`. An empty query lists the whole library page by page, which is how Symfonium and others sync. `getRandomSongs` (with the `genre` filter since M3), `getTopSongs`, `getNowPlaying`.
+- **Playing:** `stream`, `download`, `hls`, `getTranscodeDecision`, `getTranscodeStream` (songs; podcasts wait for M6), `getCoverArt` (albums, tracks and, since M3, artists with a stored image), `getAvatar`, `scrobble` (batches and now playing).
 - **Queue and bookmarks:** `getPlayQueue`, `savePlayQueue`, the by-index variants, and bookmarks.
 - **Playlists:** list, read, create, update and delete.
 - **Starring and ratings:** `star`, `unstar`, `getStarred`, `getStarred2` and `setRating`, for songs, albums and artists.
 - **Users:** `getUser`, and for an admin `getUsers`, with any sign-in method. `createUser`, `updateUser`, `deleteUser` and `changePassword` need a password sign-in (an admin's, except for changing your own password) and refuse any app token with error 50.
 
+### Song stream decisions (D-167)
+
+`getTranscodeDecision`, `getTranscodeStream`, `stream` and `hls` share a song plan.
+`format=raw` serves the original. Without a cap, the source format serves directly;
+`format=mp3` serves directly only for an MP3 that fits the cap. With `maxBitRate`, a
+source already within the cap serves directly when no other format was requested;
+otherwise Kima makes MP3 at the highest available tier not above it (320, 192 or 128 kbps).
+A request for another output codec, or a cap below 128 kbps when the source does not fit,
+is refused by the decision endpoint.
+`stream` is more lenient for older clients: it retries without a refused format and, if
+still refused, falls back to 128 kbps MP3 (or the original if its bitrate fits).
+`download` always sends the original file.
+
+Direct decisions return `q-original`; MP3 decisions return `q-<high|medium|low>[-<cap>]`
+or `mp3-<high|medium|low>[-<cap>]`. `getTranscodeStream` accepts only valid decision
+parameters, not arbitrary quality strings. Source bitrate is recorded during scanning,
+not re-probed on each request; an unknown bitrate is transcode-eligible under a cap.
+The source format is taken from the filename extension. Podcast decisions and streams
+remain unavailable until M6 (D-101). See [D-167](DIVERGENCES.md) for remaining differences.
+
 Stubs, by the milestone that makes them real:
 
 | Milestone | Endpoints |
 |---|---|
-| M3 (identification) | `getGenres`, `getSongsByGenre`, `getLyrics`, `getLyricsBySongId`, `getArtistInfo`, `getArtistInfo2`; `byGenre` lists; artist cover art. These answer empty results (or 70 for artist art) |
+| M3 (identification) | `getGenres`, `getSongsByGenre`, `getLyrics`, `getLyricsBySongId`, `getArtistInfo`, `getArtistInfo2`; `byGenre` lists; artist cover art. These answered empty results (or 70 for artist art) until M3; they now read what identification stored (artist genres follow a person's edited list when one is set, D-166) |
 | M5 (vibe engine) | `getSimilarSongs`, `getSimilarSongs2` (empty) |
 | M6 (podcasts) | `getPodcasts`, `getNewestPodcasts`, `getPodcastEpisode` (70), `refreshPodcasts` (ok, nothing to refresh) |
 | M8 (hardening) | `getShares` (empty), `createShare`, `updateShare`, `deleteShare` (error 0, "Sharing is not supported by this server yet") |

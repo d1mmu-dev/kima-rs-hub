@@ -1,0 +1,4 @@
+[
+  {"host":"acoustid","method":"POST","path":"/lookup","body":"client=REPLACE_WITH_OWN_KEY&meta=recordings%20releasegroups&batch=1&duration.0=201&fingerprint.0=SYNTHETIC_A&duration.1=202&fingerprint.1=SYNTHETIC_B&duration.2=203&fingerprint.2=SYNTHETIC_C"},
+  {"host":"acoustid","method":"POST","path":"/lookup","body":"client=REPLACE_WITH_OWN_KEY&meta=recordings%20releasegroups&batch=1&duration.0=204&fingerprint.0=SYNTHETIC_VOTE_A&duration.1=205&fingerprint.1=SYNTHETIC_VOTE_B&duration.2=206&fingerprint.2=SYNTHETIC_VOTE_C"}
+]

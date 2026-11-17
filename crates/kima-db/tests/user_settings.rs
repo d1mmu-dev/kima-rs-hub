@@ -1,3 +1,4 @@
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::user_settings::{self, Patch, UserSettings};
 use kima_db::users::{self, Registration};
@@ -28,8 +29,8 @@ async fn rows(pool: &PgPool) -> i64 {
 async fn get_defaults_without_writing(pool: PgPool) {
     let id = user(&pool, "ana").await;
     assert_eq!(
-        user_settings::get(&pool, id).await.unwrap(),
-        UserSettings::defaults(id)
+        user_settings::get(&pool, ProfileId::new(id)).await.unwrap(),
+        UserSettings::defaults(ProfileId::new(id))
     );
     assert_eq!(rows(&pool).await, 0);
 }
@@ -39,7 +40,7 @@ async fn upsert_creates_then_merges(pool: PgPool) {
     let id = user(&pool, "ana").await;
     let a = user_settings::upsert(
         &pool,
-        id,
+        ProfileId::new(id),
         Patch {
             wifi_only: Some(true),
             max_cache_size_mb: Some(5),
@@ -53,7 +54,7 @@ async fn upsert_creates_then_merges(pool: PgPool) {
     assert_eq!(a.playback_quality, "original");
     let b = user_settings::upsert(
         &pool,
-        id,
+        ProfileId::new(id),
         Patch {
             playback_quality: Some("low".into()),
             ..Patch::default()
@@ -72,7 +73,7 @@ async fn checks_reject_bad_values(pool: PgPool) {
     let id = user(&pool, "ana").await;
     let bad_quality = user_settings::upsert(
         &pool,
-        id,
+        ProfileId::new(id),
         Patch {
             playback_quality: Some("ultra".into()),
             ..Patch::default()
@@ -82,7 +83,7 @@ async fn checks_reject_bad_values(pool: PgPool) {
     assert!(bad_quality.is_err());
     let bad_size = user_settings::upsert(
         &pool,
-        id,
+        ProfileId::new(id),
         Patch {
             max_cache_size_mb: Some(-1),
             ..Patch::default()
@@ -95,7 +96,7 @@ async fn checks_reject_bad_values(pool: PgPool) {
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn row_cascades_with_user(pool: PgPool) {
     let id = user(&pool, "ana").await;
-    user_settings::upsert(&pool, id, Patch::default())
+    user_settings::upsert(&pool, ProfileId::new(id), Patch::default())
         .await
         .unwrap();
     assert_eq!(rows(&pool).await, 1);

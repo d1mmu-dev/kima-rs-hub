@@ -683,3 +683,110 @@ mod stored_images {
         );
     }
 }
+
+/// The external cover proxy's image validation/resize (Task 15, D-210).
+mod remote_cover {
+    use kima_library::artwork;
+
+    fn noisy_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| {
+            let v = x
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(y.wrapping_mul(40_503));
+            image::Rgb([(v >> 3) as u8, (v >> 11) as u8, (v >> 19) as u8])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Jpeg).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn truncated_image_is_rejected_without_resize() {
+        let image = image::RgbImage::from_fn(300, 200, |x, y| {
+            image::Rgb([x as u8, y as u8, (x ^ y) as u8])
+        });
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let mut png = encoded.into_inner();
+        png.truncate(png.len() / 2);
+        assert!(!matches!(
+            artwork::remote_cover_image(&png, None),
+            Ok(Some(_))
+        ));
+    }
+
+    #[test]
+    fn no_width_passes_the_original_bytes_through() {
+        let jpeg = noisy_jpeg(300, 200);
+        let (bytes, mime) = artwork::remote_cover_image(&jpeg, None).unwrap().unwrap();
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(bytes, jpeg);
+    }
+
+    #[test]
+    fn narrower_than_the_source_resizes_and_reencodes_as_jpeg() {
+        let jpeg = noisy_jpeg(1200, 800);
+        let (bytes, mime) = artwork::remote_cover_image(&jpeg, Some(100))
+            .unwrap()
+            .unwrap();
+        assert_eq!(mime, "image/jpeg");
+        let img = image::load_from_memory(&bytes).unwrap();
+        // 800 * 100 / 1200, integer division, matching the implementation.
+        assert_eq!((img.width(), img.height()), (100, 66));
+    }
+
+    #[test]
+    fn wider_than_the_source_is_never_upscaled() {
+        let jpeg = noisy_jpeg(100, 50);
+        let (bytes, mime) = artwork::remote_cover_image(&jpeg, Some(2000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(bytes, jpeg);
+    }
+
+    #[test]
+    fn width_outside_the_resize_range_is_ignored() {
+        let jpeg = noisy_jpeg(1200, 800);
+        for width in [0, 1, 15, 2049, 1_000_000] {
+            let (bytes, _) = artwork::remote_cover_image(&jpeg, Some(width))
+                .unwrap()
+                .unwrap();
+            assert_eq!(bytes, jpeg, "width={width}");
+        }
+    }
+
+    #[test]
+    fn bytes_that_do_not_decode_answer_none() {
+        assert!(
+            artwork::remote_cover_image(b"not an image, just bytes claiming to be one", None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cache_key_depends_on_url_and_width() {
+        let data = std::path::Path::new("/data");
+        let (a_bin, a_json) = artwork::remote_cover_cache_paths(data, "http://x/a.jpg", None);
+        let (b_bin, b_json) = artwork::remote_cover_cache_paths(data, "http://x/b.jpg", None);
+        let (c_bin, _c_json) = artwork::remote_cover_cache_paths(data, "http://x/a.jpg", Some(100));
+        assert_ne!(a_bin, b_bin);
+        assert_ne!(a_bin, c_bin);
+        assert_eq!(
+            artwork::remote_cover_cache_paths(data, "http://x/a.jpg", None),
+            (a_bin.clone(), a_json.clone())
+        );
+        assert!(a_bin.starts_with(data.join("artwork/remote")));
+        assert_ne!(a_json, b_json);
+    }
+
+    #[test]
+    fn sha256_hex_is_stable_and_distinct() {
+        assert_eq!(artwork::sha256_hex(b"same"), artwork::sha256_hex(b"same"));
+        assert_ne!(artwork::sha256_hex(b"a"), artwork::sha256_hex(b"b"));
+        assert_eq!(artwork::sha256_hex(b"x").len(), 64);
+    }
+}

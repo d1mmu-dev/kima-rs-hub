@@ -8,17 +8,18 @@ import { BlendFunction } from "postprocessing";
 import * as THREE from "three";
 
 import type { VibeOperation } from "@/lib/audio-state-context";
-import { useDoubleClickById } from "@/hooks/useDoubleTap";
+import { DOUBLE_CLICK_MS, useDoubleClickById } from "@/hooks/useDoubleTap";
 import { useReducedMotion } from "@/hooks/useMediaQuery";
 import { normalizeNFC } from "@/lib/format";
 import { MOOD_COLORS, moodIndex } from "../mapUtils";
 import type { MapTrack } from "../types";
-import { createGlowTexture, createStarMaterial, emphasisScale, setStarFocus, STAR_MIN_PX, STAR_SIZE_SCALE, tickStars, type StarUniforms } from "./starShader";
+import { createStarMaterial, emphasisScale, setStarFocus, STAR_MIN_PX, STAR_SIZE_SCALE, tickStars, type StarUniforms } from "./starShader";
 import { buildTrackField, easeEmphasis, FIELD_RADIUS, toWorld, type TrackField } from "./trackField";
 import { buildQueueChart, CHART_RINGED, createChartMaterial, tickChart, type ChartUniforms } from "./queueChart";
 import { buildSkyField } from "./skyField";
 import { computeMoodAnchors } from "./moodAnchors";
 import { ScreenPicker } from "./screenPick";
+import { releaseSharedGeometry } from "./releaseSharedGeometry";
 import { createRingMaterial, fitRing, ringRadius, screenOf, type RingStar } from "./ringMark";
 
 export interface VibeMapSceneProps {
@@ -55,16 +56,11 @@ const OPERATION_RING: Partial<Record<VibeOperation["type"], string>> = {
 };
 const QUEUE_COLOR = "#c9b184";
 
-/** Two faint, far nebula wisps: depth at the edges only. */
-const NEBULA_WISPS: Array<{ p: [number, number, number]; s: number; c: string }> = [
-    { p: [-165, 26, -150], s: 150, c: "#5f2f8e" },
-    { p: [160, -44, 120], s: 150, c: "#7d2f66" },
-];
 const DRAG_TOLERANCE_PX = 5;
 const PICK_RADIUS_PX = 12;
 const HOVER_DWELL_MS = 400;
-// Matches useDoubleClickById's window; nothing moves the camera inside it.
-const DOUBLE_CLICK_WINDOW_MS = 420;
+// Just past the double-click window, so a double click never finds the camera moving.
+const DOUBLE_CLICK_WINDOW_MS = DOUBLE_CLICK_MS + 20;
 // The home view looks at the cloud from a little above, far enough back that
 // 95% of the stars fit the screen across and up, whatever its shape.
 const HOME_DIRECTION = new THREE.Vector3(0, 0.42, 1).normalize();
@@ -261,7 +257,6 @@ function Scene(props: VibeMapSceneProps & { apiRef: MutableRefObject<SceneApi | 
     );
     const picker = useMemo(() => new ScreenPicker(field.positions), [field]);
     const sky = useMemo(() => buildSkyField(), []);
-    const glow = useMemo(() => createGlowTexture(), []);
     const trackStars = useMemo(() => createStarMaterial({ sizeScale: STAR_SIZE_SCALE, opacity: 0.9, minPx: STAR_MIN_PX }), []);
     const skyStars = useMemo(() => createStarMaterial({ sizeScale: STAR_SIZE_SCALE, opacity: 0.9, minPx: STAR_MIN_PX, revealFade: 0.9 }), []);
     const chartInk = useMemo(() => createChartMaterial(QUEUE_COLOR, trackStars.uniforms), [trackStars]);
@@ -269,11 +264,10 @@ function Scene(props: VibeMapSceneProps & { apiRef: MutableRefObject<SceneApi | 
     useEffect(() => () => { field.geometry.dispose(); }, [field]);
     useEffect(() => () => {
         sky.dispose();
-        glow.dispose();
         trackStars.material.dispose();
         skyStars.material.dispose();
         chartInk.material.dispose();
-    }, [sky, glow, trackStars, skyStars, chartInk]);
+    }, [sky, trackStars, skyStars, chartInk]);
 
     // ── emphasis: search/similar/path/mood highlights, selection, now playing ──
     const emphasisGoal = useMemo(() => {
@@ -476,6 +470,8 @@ function Scene(props: VibeMapSceneProps & { apiRef: MutableRefObject<SceneApi | 
         return () => { apiRef.current = null; };
     }, [apiRef, picker, camera, size.width, size.height, tracks, clock]);
 
+    useEffect(() => releaseSharedGeometry, []);
+
     // ── overlays ──
     const starU = trackStars.uniforms;
     const selectedStar = fieldStar(field, starU, selectedTrackId);
@@ -537,12 +533,6 @@ function Scene(props: VibeMapSceneProps & { apiRef: MutableRefObject<SceneApi | 
     return (
         <>
             <points geometry={sky} material={skyStars.material} renderOrder={0} />
-            {NEBULA_WISPS.map((n, i) => (
-                <sprite key={i} position={n.p} scale={n.s} renderOrder={1}>
-                    <spriteMaterial map={glow} color={n.c} transparent opacity={0.04} blending={THREE.AdditiveBlending} depthWrite={false} />
-                </sprite>
-            ))}
-
             {queueChart && <points geometry={queueChart.geometry} material={chartInk.material} renderOrder={2} />}
 
             <points geometry={field.geometry} material={trackStars.material} renderOrder={3} />
@@ -585,6 +575,7 @@ function Scene(props: VibeMapSceneProps & { apiRef: MutableRefObject<SceneApi | 
 
             <EffectComposer>
                 <Bloom mipmapBlur luminanceThreshold={0.62} luminanceSmoothing={0.35} intensity={0.2} />
+                {/* The composer takes elements only, so reduced motion gets an empty fragment instead of the grain. */}
                 {reduced ? <></> : <Noise blendFunction={BlendFunction.OVERLAY} opacity={0.08} />}
                 <Vignette eskil={false} offset={0.22} darkness={0.82} />
             </EffectComposer>
@@ -657,8 +648,7 @@ export function VibeMapScene(props: VibeMapSceneProps) {
 
     const onPointerDown = useCallback((e: React.PointerEvent) => {
         activePointers.current.add(e.pointerId);
-        if (activePointers.current.size > 1) multiTouch.current = true;
-        else multiTouch.current = false;
+        multiTouch.current = activePointers.current.size > 1;
         if (activePointers.current.size === 1) pointer.current = { ...local(e), button: e.button, id: e.pointerId };
         setGrabbing(true);
         clearHover();

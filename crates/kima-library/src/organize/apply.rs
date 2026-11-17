@@ -24,7 +24,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kima_core::events::Event;
+use kima_core::events::{Audience, Event};
 use kima_db::organizer::{self as db, JournalRow, NewRow, Run};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -932,7 +932,7 @@ impl<'a> Runner<'a> {
         }
         self.progress.last = Some(Instant::now());
         self.ctx.events.publish(Event {
-            user_id: None,
+            audience: Audience::All,
             data: json!({
                 "type": "library:progress",
                 "job": "organize",

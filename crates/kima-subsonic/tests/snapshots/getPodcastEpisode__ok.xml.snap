@@ -1,0 +1,7 @@
+---
+source: crates/kima-subsonic/tests/snapshots.rs
+---
+<?xml version="1.0" encoding="UTF-8"?>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="Kima" serverVersion="[redacted]" openSubsonic="true">
+  <episode id="00000000-0000-7000-8000-900000000001" parent="00000000-0000-7000-8000-800000000001" isDir="false" channelId="00000000-0000-7000-8000-800000000001" title="Snapshot Episode" album="Snapshot Show" artist="Podcast" coverArt="00000000-0000-7000-8000-800000000001" description="Ep description" streamUrl="https://feed.example/ep1.mp3" streamId="00000000-0000-7000-8000-900000000001" publishDate="2026-01-01T00:00:00.000Z" created="2026-01-01T00:05:00.000Z" duration="125" status="completed" size="2048" contentType="audio/mpeg" suffix="mpeg" isVideo="false" type="podcast"/>
+</subsonic-response>

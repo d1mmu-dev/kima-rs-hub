@@ -1,13 +1,14 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { SettingsSection, SettingsRow, SettingsInput } from "../ui";
+import Link from "next/link";
+import { SettingsSection, SettingsRow, SettingsInput, CopyButton } from "../ui";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
 import { InlineStatus, StatusType } from "@/components/ui/InlineStatus";
 import { Button } from "@/components/ui/Button";
-import { copyText } from "@/lib/clipboard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { usePublicConfig } from "@/hooks/useQueries";
 
 interface ApiKey {
     id: string;
@@ -30,19 +31,19 @@ export function SubsonicSection() {
     const [status, setStatus] = useState<StatusType>("idle");
     const [message, setMessage] = useState("");
     const [revoking, setRevoking] = useState<string | null>(null);
-    const [serverUrl, setServerUrl] = useState("");
+    const config = usePublicConfig();
+    const serverUrl = config.publicUrl || (config.settled && typeof window !== "undefined" ? window.location.origin : "");
+
+    const loadApiKeys = () => {
+        return api
+            .get<{ apiKeys: ApiKey[] }>("/api-keys")
+            .then((data) => setApiKeys(data.apiKeys))
+            .catch(() => {
+                // Non-fatal — keys list stays empty
+            });
+    };
 
     useEffect(() => {
-        api.get<{ publicUrl: string }>("/system-settings/public-config")
-            .then((data) => {
-                setServerUrl(data.publicUrl || (typeof window !== "undefined" ? window.location.origin : ""));
-            })
-            .catch(() => {
-                if (typeof window !== "undefined") {
-                    setServerUrl(window.location.origin);
-                }
-            });
-
         loadApiKeys();
 
         // A password change deletes every token server-side; refetch so the list shows it.
@@ -54,15 +55,6 @@ export function SubsonicSection() {
         window.addEventListener(API_KEYS_CHANGED_EVENT, onChanged);
         return () => window.removeEventListener(API_KEYS_CHANGED_EVENT, onChanged);
     }, []);
-
-    const loadApiKeys = async () => {
-        try {
-            const data = await api.get<{ apiKeys: ApiKey[] }>("/api-keys");
-            setApiKeys(data.apiKeys);
-        } catch {
-            // Non-fatal — keys list stays empty
-        }
-    };
 
     const handleGenerate = async () => {
         const name = deviceName.trim() || "Subsonic";
@@ -110,21 +102,24 @@ export function SubsonicSection() {
     };
 
     return (
-        <SettingsSection id="subsonic" title="Native Apps">
+        <SettingsSection id="subsonic" title="Apps">
+            <SettingsRow
+                label="Kima app"
+                description="Sign the Kima phone app in with a QR code or a six-digit code, and see the devices already linked"
+            >
+                <Link href="/device" className="text-xs text-brand hover:text-brand-hover transition-colors">
+                    Link a device
+                </Link>
+            </SettingsRow>
             <SettingsRow
                 label="Server URL"
-                description="Enter this in your Subsonic-compatible client. Admins can set a persistent URL in Storage settings."
+                description="Enter this in your Subsonic-compatible client. Admins can set a persistent URL in Settings, under Server."
             >
                 <div className="flex items-center gap-2">
                     <span className="text-sm text-white bg-white/5 border border-white/10 px-3 py-2 rounded-lg tabular-nums break-all flex-1 min-w-0">
                         {serverUrl}
                     </span>
-                    <button
-                        onClick={() => void copyText(serverUrl)}
-                        className="text-xs text-brand hover:text-brand-hover transition-colors shrink-0"
-                    >
-                        Copy
-                    </button>
+                    <CopyButton text={serverUrl} />
                 </div>
             </SettingsRow>
 
@@ -145,7 +140,7 @@ export function SubsonicSection() {
                     <SettingsInput
                         value={deviceName}
                         onChange={setDeviceName}
-                        placeholder="Client name (e.g. Amperfy, Symfonium, DSub)"
+                        placeholder="Client name, e.g. Amperfy"
                     />
                     <div className="inline-flex items-center gap-3">
                         <Button
@@ -174,12 +169,7 @@ export function SubsonicSection() {
                         <code className="text-sm text-white bg-white/5 border border-white/10 px-3 py-2 rounded-lg font-mono break-all flex-1 min-w-0 overflow-hidden">
                             {newToken}
                         </code>
-                        <button
-                            onClick={() => void copyText(newToken)}
-                            className="text-xs text-brand hover:text-brand-hover transition-colors shrink-0 pt-2"
-                        >
-                            Copy
-                        </button>
+                        <CopyButton text={newToken} className="pt-2" />
                     </div>
                 </div>
             )}

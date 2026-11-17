@@ -429,7 +429,7 @@ fixture_test!(star_many_ids_one_kind_query, |server, pool| {
         ("artist_id", ids[2]),
     ] {
         let n: i64 = sqlx::query_scalar(&format!(
-            "SELECT count(*) FROM stars WHERE user_id = $1 AND {col} = $2"
+            "SELECT count(*) FROM stars WHERE profile_id = $1 AND {col} = $2"
         ))
         .bind(me)
         .bind(id)

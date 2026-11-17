@@ -41,9 +41,8 @@ export default function AttentionPage() {
     }
 
     return (
-        <div className="min-h-screen pb-32">
+        <div className="min-h-screen page-end">
             <PageHeader
-                eyebrow="Settings"
                 title="Needs attention"
                 description="Albums where the scanner had to guess. Review a match before changing tags."
                 actions={

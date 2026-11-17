@@ -936,6 +936,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2026,6 +2032,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
 name = "gimli"
 version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2468,6 +2484,8 @@ checksum = "e6506c6c10786659413faa717ceebcb8f70731c0a60cbae39795fdf114519c1a"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
  "image-webp",
  "moxcms",
  "num-traits",
@@ -2716,10 +2734,13 @@ dependencies = [
  "axum",
  "axum-test",
  "base64 0.22.1",
+ "form_urlencoded",
  "futures",
+ "hex",
  "http-body-util",
  "httpdate",
  "image",
+ "jsonwebtoken",
  "kima-api-types",
  "kima-core",
  "kima-db",
@@ -2727,8 +2748,10 @@ dependencies = [
  "kima-jobs",
  "kima-library",
  "kima-net",
+ "kima-podcast",
  "kima-test-support",
  "lofty",
+ "md-5 0.11.0",
  "serde",
  "serde_json",
  "sqlx",
@@ -2749,6 +2772,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "time",
  "uuid",
 ]
 
@@ -2766,6 +2790,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -2880,6 +2905,7 @@ version = "0.1.0"
 dependencies = [
  "ebur128",
  "kima-db",
+ "kima-test-support",
  "libc",
  "ort",
  "rubato",
@@ -2903,7 +2929,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "bytes",
  "form_urlencoded",
+ "futures",
  "kima-core",
  "kima-db",
  "kima-net",
@@ -2920,12 +2948,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "kima-podcast"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "kima-core",
+ "kima-db",
+ "kima-jobs",
+ "kima-net",
+ "kima-test-support",
+ "lofty",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "kima-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
  "axum-test",
+ "base64 0.22.1",
  "form_urlencoded",
  "futures",
  "kima-api",
@@ -2935,6 +2990,7 @@ dependencies = [
  "kima-jobs",
  "kima-library",
  "kima-net",
+ "kima-podcast",
  "kima-subsonic",
  "kima-test-support",
  "reqwest",
@@ -2958,6 +3014,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "axum-test",
+ "base64 0.22.1",
  "form_urlencoded",
  "hex",
  "hmac 0.13.0",
@@ -2970,6 +3027,7 @@ dependencies = [
  "kima-jobs",
  "kima-library",
  "kima-net",
+ "kima-podcast",
  "kima-test-support",
  "md-5 0.11.0",
  "quick-xml",
@@ -2990,7 +3048,10 @@ dependencies = [
 name = "kima-test-support"
 version = "0.1.0"
 dependencies = [
+ "kima-core",
+ "kima-db",
  "lofty",
+ "uuid",
 ]
 
 [[package]]
@@ -3011,6 +3072,7 @@ dependencies = [
  "kima-api-types",
  "serde",
  "serde_json",
+ "uuid",
  "vertigo",
 ]
 
@@ -6442,6 +6504,12 @@ checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
 ]
+
+[[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "whoami"

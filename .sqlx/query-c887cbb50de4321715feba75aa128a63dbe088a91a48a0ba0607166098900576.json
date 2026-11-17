@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE ratings r SET track_id = $2 WHERE r.track_id = $1\n           AND NOT EXISTS (SELECT 1 FROM ratings o WHERE o.profile_id = r.profile_id AND o.track_id = $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c887cbb50de4321715feba75aa128a63dbe088a91a48a0ba0607166098900576"
+}

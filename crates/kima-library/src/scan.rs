@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use kima_core::events::{Event, EventBus};
+use kima_core::events::{Audience, Event, EventBus};
 use kima_db::genres::{self, GenreSource};
 use kima_db::library::{self, IndexedTrack, ResolvedTrack, StoredCredit, TagIds};
 use kima_db::{PgConnection, PgPool, retry_once_on_conflict};
@@ -271,7 +271,7 @@ impl<'a> Progress<'a> {
     fn send(&mut self) {
         self.last = Some(Instant::now());
         self.events.publish(Event {
-            user_id: None,
+            audience: Audience::All,
             data: serde_json::json!({
                 "type": "library:progress",
                 "job": "scan",
@@ -414,7 +414,12 @@ impl Walker<'_> {
 
     fn file_error(&mut self, full: &Path, why: String) {
         match rel_of(self.root, full) {
-            Some(rel) => self.out.failed.push((rel, why)),
+            Some(rel) => {
+                // A metadata failure is not a missing file and cannot supply a vote.
+                // Shield both its indexed row and its complete album election group.
+                self.out.unreadable.push(rel.clone());
+                self.out.failed.push((rel, why));
+            }
             None => self.not_utf8(full),
         }
     }
@@ -797,7 +802,8 @@ async fn store(
     tx.commit().await?;
     let stored = match (repointed, old_album) {
         (Some(id), _) => Stored::Repointed(id),
-        (None, Some(_)) => Stored::Updated,
+        (None, Some(_)) if up.row_changed => Stored::Updated,
+        (None, Some(_)) => Stored::Unchanged,
         (None, None) => Stored::Added,
     };
     Ok(Some(StoreResult {
@@ -936,18 +942,24 @@ async fn refresh_albums(pool: &PgPool, albums: HashSet<Uuid>) -> sqlx::Result<()
     albums.sort_unstable();
     retry_once_on_conflict(|| async {
         let mut tx = pool.begin().await?;
-        refresh_albums_in(&mut tx, &albums).await?;
+        refresh_albums_in(&mut tx, &albums, true).await?;
         tx.commit().await
     })
     .await
 }
 
 /// The body of [`refresh_albums`] on the caller's transaction; `albums` sorted.
-async fn refresh_albums_in(conn: &mut PgConnection, albums: &[Uuid]) -> sqlx::Result<()> {
+async fn refresh_albums_in(
+    conn: &mut PgConnection,
+    albums: &[Uuid],
+    release_autotag: bool,
+) -> sqlx::Result<()> {
     for &album in albums {
         library::refresh_album_mbids(conn, album).await?;
     }
-    library::release_autotag_albums(conn, albums).await?;
+    if release_autotag {
+        library::release_autotag_albums(conn, albums).await?;
+    }
     let mut artists = library::artists_of_albums(conn, albums).await?;
     artists.sort_unstable();
     genres::recompute_file_genres(conn, albums, &artists).await
@@ -956,7 +968,12 @@ async fn refresh_albums_in(conn: &mut PgConnection, albums: &[Uuid]) -> sqlx::Re
 /// Marks these paths missing (`restore` false) or brings them back (`restore` true) and
 /// refreshes their albums, in one transaction, run again once after a deadlock: a victim never
 /// leaves the flag changed and the album's MBIDs and genres stale. Returns the rows changed.
-async fn flip_and_refresh(pool: &PgPool, paths: &[String], restore: bool) -> sqlx::Result<u64> {
+async fn flip_and_refresh(
+    pool: &PgPool,
+    paths: &[String],
+    restore: bool,
+    preserve_autotag: bool,
+) -> sqlx::Result<u64> {
     retry_once_on_conflict(|| async {
         let mut tx = pool.begin().await?;
         let changed = if restore {
@@ -967,7 +984,7 @@ async fn flip_and_refresh(pool: &PgPool, paths: &[String], restore: bool) -> sql
         let mut albums = library::albums_of_paths_in(&mut tx, paths).await?;
         albums.sort_unstable();
         albums.dedup();
-        refresh_albums_in(&mut tx, &albums).await?;
+        refresh_albums_in(&mut tx, &albums, !preserve_autotag).await?;
         tx.commit().await?;
         Ok(changed)
     })
@@ -978,6 +995,8 @@ async fn flip_and_refresh(pool: &PgPool, paths: &[String], restore: bool) -> sql
 enum Stored {
     Added,
     Updated,
+    /// Read again, and every stored value already matched: nothing was written.
+    Unchanged,
     /// Took over a missing track's row; carries that track's id.
     Repointed(Uuid),
 }
@@ -1083,6 +1102,7 @@ async fn process_folder(
     siblings: &[&IndexedTrack],
     known: &HashMap<String, IndexedTrack>,
     cause: ReadCause,
+    refile: bool,
 ) -> Result<FolderResult, ScanError> {
     let mut out = FolderResult::default();
     let mut touched = Touched::default();
@@ -1104,8 +1124,71 @@ async fn process_folder(
             Err(e) => out.failed.push((rel, e)),
         }
     }
+    // A re-file is a repair, not a normal incremental scan: never make an election from
+    // incomplete votes, or remove a source album/artist carrying a person's edits.
+    // An unreadable vote shields the folder (including its disc subfolders); edited
+    // tracks are protected individually so unrelated album groups can still be processed.
     let mut prepared =
         merge_moved_overrides(&ctx.pool, prepared, known, &overrides, &mut out).await?;
+    if refile && !out.failed.is_empty() {
+        return Ok(out);
+    }
+    if refile {
+        // A renamed last song has no row at its new path. Its fingerprint target still
+        // belongs to the edited source album: restore its path without re-electing or
+        // upserting its album identity (which would discard the person's edits).
+        let targets: Vec<Uuid> = prepared
+            .iter()
+            .filter_map(|p| p.target.or_else(|| known.get(&p.disk.rel).map(|t| t.id)))
+            .collect();
+        let edited_targets: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT t.id FROM tracks t JOIN albums al ON al.id = t.album_id
+             JOIN artists ar ON ar.id = al.artist_id
+             WHERE t.id = ANY($1) AND (
+                 al.identity_source = 'autotag' OR al.display_title IS NOT NULL
+                 OR al.display_year IS NOT NULL OR al.user_genres IS NOT NULL
+                 OR al.image_source = 'user' OR al.release_mbid_source = 'user'
+                 OR al.release_group_mbid_source = 'user'
+                 OR ar.display_name IS NOT NULL OR ar.user_bio IS NOT NULL
+                 OR ar.user_genres IS NOT NULL OR ar.image_source = 'user'
+                 OR ar.mbid_source = 'user')",
+        )
+        .bind(&targets)
+        .fetch_all(&ctx.pool)
+        .await?;
+        if !edited_targets.is_empty() {
+            // A protected row whose file is back at its own path was already restored by
+            // `reconcile_with`; protected rows are not written here.
+            for p in &prepared {
+                if let Some(id) = p.target.filter(|id| edited_targets.contains(id)) {
+                    let mut tx = ctx.pool.begin().await?;
+                    if library::repoint_exact_in(&mut tx, id, &p.disk.rel)
+                        .await?
+                        .is_some()
+                    {
+                        stages::reopen_file_missing(&mut tx, id).await?;
+                        let album: Uuid =
+                            sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = $1")
+                                .bind(id)
+                                .fetch_one(&mut *tx)
+                                .await?;
+                        refresh_albums_in(&mut tx, &[album], false).await?;
+                        tx.commit().await?;
+                        out.stored.push((p.disk.rel.clone(), Stored::Repointed(id)));
+                    } else {
+                        out.failed.push((
+                            p.disk.rel.clone(),
+                            "the moved edited track is no longer missing".into(),
+                        ));
+                    }
+                }
+            }
+            prepared.retain(|p| {
+                let id = p.target.or_else(|| known.get(&p.disk.rel).map(|t| t.id));
+                !id.is_some_and(|id| edited_targets.contains(&id))
+            });
+        }
+    }
     // One artist per album, elected from the changed files and the stored votes of their
     // unchanged siblings (D-164), before the album year groups form.
     let election = Election::new(&prepared, siblings);
@@ -1219,7 +1302,7 @@ async fn process_folder(
             Ok(Some(r)) => {
                 touched.add(&r, &track);
                 out.album_moved |= r.album_moved;
-                out.stored.push((s.path.clone(), Stored::Updated));
+                out.stored.push((s.path.clone(), r.stored));
             }
             Err(e) if per_file_db_error(&e) => out.failed.push((s.path.clone(), e.to_string())),
             Err(e) => return Err(e.into()),
@@ -1241,6 +1324,23 @@ pub async fn reconcile(ctx: &LibraryCtx) -> Result<ScanReport, ScanError> {
 pub async fn reconcile_cancellable(
     ctx: &LibraryCtx,
     cancel: &CancellationToken,
+) -> Result<ScanReport, ScanError> {
+    reconcile_with(ctx, cancel, false).await
+}
+
+/// Re-reads every present file through the same album-artist election as a normal scan.
+/// The library queue serializes this with other library writers.
+pub async fn refile_cancellable(
+    ctx: &LibraryCtx,
+    cancel: &CancellationToken,
+) -> Result<ScanReport, ScanError> {
+    reconcile_with(ctx, cancel, true).await
+}
+
+async fn reconcile_with(
+    ctx: &LibraryCtx,
+    cancel: &CancellationToken,
+    force: bool,
 ) -> Result<ScanReport, ScanError> {
     let check = || {
         if cancel.is_cancelled() {
@@ -1275,12 +1375,16 @@ pub async fn reconcile_cancellable(
 
     let on_disk: HashSet<&str> = walked.files.iter().map(|f| f.rel.as_str()).collect();
     let mut restore = Vec::new();
+    // A re-file reads every file again, but one present at its own path is back whether or
+    // not its folder group can be read: restore it up front, so a skipped group cannot
+    // leave it to the grace-period purge.
+    let mut returned = Vec::new();
     let mut changed: BTreeMap<String, Vec<DiskFile>> = BTreeMap::new();
     // Rows that are present, on disk and unchanged after this run, per folder.
     let mut settled: HashMap<&str, Vec<&IndexedTrack>> = HashMap::new();
     for f in &walked.files {
         match index.get(&f.rel) {
-            Some(row) if row.size == f.size && row.mtime == f.mtime => {
+            Some(row) if !force && row.size == f.size && row.mtime == f.mtime => {
                 if row.missing {
                     restore.push(f.rel.clone());
                 } else {
@@ -1291,10 +1395,15 @@ pub async fn reconcile_cancellable(
                     .or_default()
                     .push(row);
             }
-            _ => changed
-                .entry(vote::album_folder(&f.rel).to_string())
-                .or_default()
-                .push(f.clone()),
+            row => {
+                if force && row.is_some_and(|r| r.missing) {
+                    returned.push(f.rel.clone());
+                }
+                changed
+                    .entry(vote::album_folder(&f.rel).to_string())
+                    .or_default()
+                    .push(f.clone());
+            }
         }
     }
 
@@ -1351,27 +1460,45 @@ pub async fn reconcile_cancellable(
     // Each chunk's flag change commits with its albums' refresh (MBIDs and genres follow the
     // tracks that are present now).
     for chunk in vanished.chunks(MARK_CHUNK) {
-        report.missing += flip_and_refresh(&ctx.pool, chunk, false).await? as usize;
+        report.missing += flip_and_refresh(&ctx.pool, chunk, false, force).await? as usize;
     }
     library::set_via_symlink(&ctx.pool, &link_flag, true).await?;
     library::set_via_symlink(&ctx.pool, &link_clear, false).await?;
     let vanished_ids: HashSet<Uuid> = vanished.iter().map(|p| index[p].id).collect();
     for chunk in restore.chunks(MARK_CHUNK) {
-        report.restored += flip_and_refresh(&ctx.pool, chunk, true).await? as usize;
+        report.restored += flip_and_refresh(&ctx.pool, chunk, true, false).await? as usize;
     }
     progress.advance(report.unchanged + restore.len());
+    // Their files are still read with their folders below (and so counted there). The
+    // autotag identity is kept: its release waits until moved-track matching has finished.
+    for chunk in returned.chunks(MARK_CHUNK) {
+        report.restored += flip_and_refresh(&ctx.pool, chunk, true, true).await? as usize;
+    }
 
     for (folder, files) in changed {
         check()?;
         let n = files.len();
+        if force
+            && walked.unreadable.iter().any(|dir| {
+                dir == &folder
+                    || vote::album_folder(dir) == folder
+                    || dir.starts_with(&format!("{folder}/"))
+            })
+        {
+            // The walker did not see all the votes in this album (possibly a CD
+            // subfolder); leave the whole group untouched until it can be read.
+            progress.advance(n);
+            continue;
+        }
         let siblings = settled.get(folder.as_str()).map_or(&[][..], Vec::as_slice);
-        let result = process_folder(ctx, files, siblings, &index, ReadCause::Scan).await?;
+        let result = process_folder(ctx, files, siblings, &index, ReadCause::Scan, force).await?;
         report.tags_read += result.tags_read;
         report.failed.extend(result.failed);
         for (_, stored) in result.stored {
             match stored {
                 Stored::Added => report.added += 1,
                 Stored::Updated => report.updated += 1,
+                Stored::Unchanged => {}
                 Stored::Repointed(id) => {
                     report.repointed += 1;
                     if vanished_ids.contains(&id) {
@@ -1384,6 +1511,14 @@ pub async fn reconcile_cancellable(
     }
 
     check()?;
+    if force {
+        // A moved last song must retain its applied identity until fingerprint matching
+        // restores it. Release only genuinely empty autotag albums after all groups finish.
+        let mut conn = ctx.pool.acquire().await?;
+        let albums = library::albums_of_paths_in(&mut conn, &vanished).await?;
+        drop(conn);
+        refresh_albums(&ctx.pool, albums.into_iter().collect()).await?;
+    }
     if !report.root_empty_guard {
         let cache = ctx.data_dir.join("transcode");
         let retired = library::retire_missing(&ctx.pool, MISSING_GRACE, Some(&cache)).await?;
@@ -1408,6 +1543,16 @@ pub async fn reconcile_cancellable(
                 }
             }
             kima_db::genres::prune_unused(&ctx.pool).await?;
+        }
+        // Upstream `playlistsHoldingTracks` (`bafecf23`): the owner of each playlist that lost a
+        // place is told once, after the commit.
+        for (owner, playlist) in &retired.playlists {
+            ctx.events.publish(Event::for_profile(
+                *owner,
+                serde_json::json!({
+                    "type": "playlist:updated", "playlistId": playlist, "deleted": false,
+                }),
+            ));
         }
         refresh_albums(&ctx.pool, retired.albums.into_iter().collect()).await?;
     }
@@ -1485,7 +1630,7 @@ async fn gone(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, ScanError> {
         Some(row) if row.missing_since.is_some() => PathOutcome::Unchanged,
         Some(_) if !root_available(&ctx.root.get()).await => PathOutcome::RootUnavailable,
         Some(_) => {
-            flip_and_refresh(&ctx.pool, &[rel.to_string()], false).await?;
+            flip_and_refresh(&ctx.pool, &[rel.to_string()], false, false).await?;
             PathOutcome::MarkedMissing
         }
     })
@@ -1541,7 +1686,7 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
                     .await?;
             }
             if row.missing {
-                flip_and_refresh(&ctx.pool, std::slice::from_ref(&rel), true).await?;
+                flip_and_refresh(&ctx.pool, std::slice::from_ref(&rel), true, false).await?;
                 return Ok(PathOutcome::Updated);
             }
             return Ok(PathOutcome::Unchanged);
@@ -1557,7 +1702,7 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
         .filter(|t| t.path != rel && !t.missing)
         .collect();
 
-    let result = process_folder(ctx, vec![disk], &siblings, &known, ReadCause::Scan).await?;
+    let result = process_folder(ctx, vec![disk], &siblings, &known, ReadCause::Scan, false).await?;
     let mine = result
         .stored
         .iter()
@@ -1566,6 +1711,7 @@ pub async fn update_path(ctx: &LibraryCtx, rel: &str) -> Result<PathOutcome, Sca
     let outcome = match mine {
         Some(Stored::Added) => PathOutcome::Added,
         Some(Stored::Updated) => PathOutcome::Updated,
+        Some(Stored::Unchanged) => PathOutcome::Unchanged,
         Some(Stored::Repointed(_)) => PathOutcome::Repointed,
         None => {
             let reason = result
@@ -1662,7 +1808,7 @@ pub async fn reread_paths(
             .values()
             .filter(|t| !t.missing && !rels.contains(&t.path))
             .collect();
-        let result = process_folder(ctx, changed, &siblings, &known, cause).await?;
+        let result = process_folder(ctx, changed, &siblings, &known, cause, false).await?;
         report.tags_read += result.tags_read;
         report.failed.extend(result.failed);
         album_moved |= result.album_moved;
@@ -1670,6 +1816,7 @@ pub async fn reread_paths(
             match stored {
                 Stored::Added => report.added += 1,
                 Stored::Updated => report.updated += 1,
+                Stored::Unchanged => {}
                 Stored::Repointed(_) => report.repointed += 1,
             }
         }

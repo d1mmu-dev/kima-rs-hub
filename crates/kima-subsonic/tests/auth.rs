@@ -322,15 +322,21 @@ async fn last_used_set_on_use(pool: PgPool) {
     let (server, state) = server(pool);
     let alice = user(&state, "alice", "pw-alice", ROLE_USER).await;
     let (_, token) = app_token(&state, &alice, "phone").await;
-    let keys = kima_db::api_keys::list_for_user(&state.pool, alice.id)
-        .await
-        .unwrap();
+    let keys = kima_db::api_keys::list_for_profile(
+        &state.pool,
+        kima_core::profile::ProfileId::new(alice.id),
+    )
+    .await
+    .unwrap();
     assert!(keys[0].last_used_at.is_none());
     assert_ok(&ping_ts(&server, "alice", &token).await);
     for _ in 0..50 {
-        let keys = kima_db::api_keys::list_for_user(&state.pool, alice.id)
-            .await
-            .unwrap();
+        let keys = kima_db::api_keys::list_for_profile(
+            &state.pool,
+            kima_core::profile::ProfileId::new(alice.id),
+        )
+        .await
+        .unwrap();
         if keys[0].last_used_at.is_some() {
             return;
         }

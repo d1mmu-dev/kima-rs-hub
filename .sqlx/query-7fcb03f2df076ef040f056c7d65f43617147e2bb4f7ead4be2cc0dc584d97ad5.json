@@ -1,0 +1,57 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE profiles\n           SET name = COALESCE($3, name),\n               kind = COALESCE($4, kind),\n               avatar = CASE WHEN $5 THEN $6 ELSE avatar END\n           WHERE id = $1 AND user_id = $2\n           RETURNING id AS \"id: ProfileId\", user_id AS \"account: AccountId\", name, kind, avatar,\n                     created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id: ProfileId",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "account: AccountId",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "avatar",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "7fcb03f2df076ef040f056c7d65f43617147e2bb4f7ead4be2cc0dc584d97ad5"
+}

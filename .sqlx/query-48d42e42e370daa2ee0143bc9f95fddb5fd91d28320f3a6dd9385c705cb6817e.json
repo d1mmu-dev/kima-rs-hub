@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM play_audit_ignore WHERE profile_id = $1 AND track_id = ANY($2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "48d42e42e370daa2ee0143bc9f95fddb5fd91d28320f3a6dd9385c705cb6817e"
+}

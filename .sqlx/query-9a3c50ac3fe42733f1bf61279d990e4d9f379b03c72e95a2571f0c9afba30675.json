@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT profile_id AS \"profile_id: ProfileId\", playback_quality, wifi_only, offline_enabled, max_cache_size_mb,\n                  share_live_listening, podcast_ai_filter\n           FROM user_settings WHERE profile_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "profile_id: ProfileId",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "playback_quality",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "wifi_only",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 3,
+        "name": "offline_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_cache_size_mb",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "share_live_listening",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "podcast_ai_filter",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9a3c50ac3fe42733f1bf61279d990e4d9f379b03c72e95a2571f0c9afba30675"
+}

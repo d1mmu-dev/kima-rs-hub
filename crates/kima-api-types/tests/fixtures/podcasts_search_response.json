@@ -1,0 +1,44 @@
+{
+  "albums": [],
+  "artists": [],
+  "audiobooks": [],
+  "episodes": [
+    {
+      "aiLabel": "unknown",
+      "aiLabelSource": null,
+      "audioUrl": "http://127.0.0.1:46427/audio/race-gp.mp3",
+      "description": "The main race, start to flag.",
+      "duration": 3600,
+      "id": "01a1d732-73f8-7296-b8cb-66ccded0d5ff",
+      "podcastId": "01a1d732-73f5-741e-8603-638478e907b3",
+      "podcastTitle": "Race Show",
+      "publishedAt": "2026-11-08T10:00:00.000Z",
+      "title": "Grand Prix"
+    },
+    {
+      "aiLabel": "human",
+      "aiLabelSource": "feed-episode",
+      "audioUrl": "http://127.0.0.1:46427/audio/race-sprint.mp3",
+      "description": "The sprint race.",
+      "duration": 1200,
+      "id": "01a1d732-73fc-773f-88aa-8e794cd0dac5",
+      "podcastId": "01a1d732-73f5-741e-8603-638478e907b3",
+      "podcastTitle": "Race Show",
+      "publishedAt": "2026-11-06T10:00:00.000Z",
+      "title": "Sprint"
+    }
+  ],
+  "podcasts": [
+    {
+      "aiLabel": "unknown",
+      "aiLabelSource": null,
+      "author": "Race Author",
+      "description": "Everything about the race weekend.",
+      "episodeCount": 4,
+      "id": "01a1d732-73f5-741e-8603-638478e907b3",
+      "imageUrl": "http://127.0.0.1:46427/img/race.png",
+      "title": "Race Show"
+    }
+  ],
+  "tracks": []
+}

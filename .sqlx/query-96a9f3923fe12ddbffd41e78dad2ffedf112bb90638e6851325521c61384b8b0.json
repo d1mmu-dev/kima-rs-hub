@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM podcast_downloads WHERE profile_id = $1 AND episode_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "96a9f3923fe12ddbffd41e78dad2ffedf112bb90638e6851325521c61384b8b0"
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { SettingsSection, SettingsRow, SettingsInput } from "../ui";
+import { SettingsSection, SettingsRow, SettingsInput, SettingsToggle } from "../ui";
 import { SystemSettings } from "../../types";
 
 interface StoragePathsSectionProps {
@@ -12,8 +12,8 @@ export function StoragePathsSection({ settings, onUpdate }: StoragePathsSectionP
     return (
         <SettingsSection
             id="storage"
-            title="Storage"
-            description="Configure storage paths for your music library"
+            title="Address and storage"
+            description="Where Kima is reached, where your music lives, and whether Kima checks for updates"
         >
             <SettingsRow
                 label="Server URL"
@@ -28,28 +28,33 @@ export function StoragePathsSection({ settings, onUpdate }: StoragePathsSectionP
             </SettingsRow>
 
             <SettingsRow
+                label="Check for updates"
+                description="One anonymous request per day to github releases, so the version badge can flag a newer server. off suits installs without internet."
+            >
+                <SettingsToggle
+                    id="update-checks"
+                    checked={settings.updateChecksEnabled}
+                    onChange={(checked) => onUpdate({ updateChecksEnabled: checked })}
+                />
+            </SettingsRow>
+
+            <SettingsRow
                 label="Music library path"
-                description="Path to your music library"
+                description={
+                    settings.musicPathFixedByEnv
+                        ? <>Set by the server&apos;s <span className="font-mono">MUSIC_PATH</span>. Scans and downloads both use this folder.</>
+                        : "The folder Kima scans and downloads into, as the server sees it. A change applies on save."
+                }
             >
                 <SettingsInput
                     value={settings.musicPath}
                     onChange={(v) => onUpdate({ musicPath: v })}
                     placeholder="/music"
                     className="w-64"
+                    disabled={settings.musicPathFixedByEnv}
                 />
             </SettingsRow>
 
-            <SettingsRow
-                label="Download path"
-                description="Path for new downloads"
-            >
-                <SettingsInput
-                    value={settings.downloadPath}
-                    onChange={(v) => onUpdate({ downloadPath: v })}
-                    placeholder="/downloads"
-                    className="w-64"
-                />
-            </SettingsRow>
         </SettingsSection>
     );
 }

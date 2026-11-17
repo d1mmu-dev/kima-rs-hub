@@ -1,0 +1,22 @@
+{
+  "current": "01a1e4af-1891-7310-a736-f5596631b53a",
+  "max": 5,
+  "profiles": [
+    {
+      "avatar": null,
+      "createdAt": "2026-11-16T14:07:22.770531Z",
+      "id": "01a1e4af-1891-7310-a736-f5596631b53a",
+      "isMain": true,
+      "kind": "main",
+      "name": "fixtureadmin"
+    },
+    {
+      "avatar": "owl",
+      "createdAt": "2026-11-16T14:07:22.925958Z",
+      "id": "01a1e4af-192d-76a2-a7ec-d35a4e082935",
+      "isMain": false,
+      "kind": "standard",
+      "name": "Fixture Reader"
+    }
+  ]
+}

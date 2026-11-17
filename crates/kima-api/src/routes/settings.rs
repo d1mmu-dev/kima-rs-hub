@@ -5,6 +5,7 @@
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
+use kima_core::profile::AccountId;
 use kima_db::user_settings::{self, Patch, UserSettings};
 use serde_json::{Value, json};
 
@@ -18,22 +19,27 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// `hasListenbrainzToken` and `liveSharingAvailable` are always false in kima-rs (D-103).
-fn settings_json(s: &UserSettings) -> Value {
+/// `userId` is the account (D-242), whichever of its profiles the settings belong to.
+/// `userId` stays the account (upstream's key); `profileId` names the profile whose settings
+/// they are (D-242).
+fn settings_json(s: &UserSettings, account: AccountId) -> Value {
     json!({
-        "userId": s.user_id,
+        "userId": account,
+        "profileId": s.profile_id,
         "playbackQuality": s.playback_quality,
         "wifiOnly": s.wifi_only,
         "offlineEnabled": s.offline_enabled,
         "maxCacheSizeMb": s.max_cache_size_mb,
         "shareLiveListening": s.share_live_listening,
+        "podcastAiContent": s.podcast_ai_filter,
         "hasListenbrainzToken": false,
         "liveSharingAvailable": false,
     })
 }
 
 async fn read(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    let s = user_settings::get(&state.pool, user.id).await?;
-    Ok(Json(settings_json(&s)))
+    let s = user_settings::get(&state.pool, user.profile).await?;
+    Ok(Json(settings_json(&s, user.account)))
 }
 
 fn issue(path: &str, message: &str) -> Value {
@@ -91,6 +97,17 @@ fn parse(body: &Value) -> Result<Patch, Vec<Value>> {
         }
         Some(_) => issues.push(issue("maxCacheSizeMb", "Expected number")),
     }
+    // kima-only (D-207): whether podcast lists hide AI-labelled content.
+    match obj.get("podcastAiContent") {
+        None => {}
+        Some(Value::String(v)) if v == "hide" || v == "show" => {
+            patch.podcast_ai_filter = Some(v.clone());
+        }
+        Some(_) => issues.push(issue(
+            "podcastAiContent",
+            "podcastAiContent must be hide or show",
+        )),
+    }
     // `listenbrainzToken` is accepted (string or null) and ignored (D-103); anything else is
     // still a type error, as upstream.
     match obj.get("listenbrainzToken") {
@@ -119,6 +136,6 @@ async fn save(
         message: "Invalid settings".into(),
         details,
     })?;
-    let s = user_settings::upsert(&state.pool, user.id, patch).await?;
-    Ok(Json(settings_json(&s)))
+    let s = user_settings::upsert(&state.pool, user.profile, patch).await?;
+    Ok(Json(settings_json(&s, user.account)))
 }

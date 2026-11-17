@@ -69,6 +69,7 @@ fn config(frontend: Option<&Path>) -> Config {
         identify_env_off: false,
         contact: kima_core::config::DEFAULT_CONTACT.into(),
         musicbrainz_base_url: kima_core::config::DEFAULT_MUSICBRAINZ_BASE_URL.into(),
+        itunes_base_url: kima_core::config::DEFAULT_ITUNES_BASE_URL.into(),
         fingerprint_workers: 1,
         clap_model_dir: None,
         disable_clap: false,
@@ -90,8 +91,12 @@ fn legacy_export() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("index.html"), "legacy home").unwrap();
     std::fs::write(dir.path().join("404.html"), "legacy 404").unwrap();
-    std::fs::create_dir_all(dir.path().join("podcasts")).unwrap();
-    std::fs::write(dir.path().join("podcasts/index.html"), "legacy podcasts").unwrap();
+    std::fs::create_dir_all(dir.path().join("audiobooks")).unwrap();
+    std::fs::write(
+        dir.path().join("audiobooks/index.html"),
+        "legacy audiobooks",
+    )
+    .unwrap();
     dir
 }
 
@@ -148,6 +153,10 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
         "/playlists",
         "/playlists/0b1c2d3e",
         "/settings",
+        "/profiles",
+        "/podcasts",
+        "/podcasts/show?id=0b1c2d3e",
+        "/podcasts/category?id=1303",
         ASSETS[0],
         ASSETS[1],
     ] {
@@ -173,10 +182,10 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
     assert!(body.contains("Not found"), "{body}");
     let (status, body) = get("/rest/ping.view").await;
     assert!(!body.starts_with("ssr:"), "{status} {body}");
-    // The legacy export keeps what is not a kima-web route (`/podcasts` is its page here).
+    // The legacy export keeps what is not a kima-web route (`/audiobooks` is its page here).
     assert_eq!(
-        get("/podcasts/").await,
-        (StatusCode::OK, "legacy podcasts".into())
+        get("/audiobooks/").await,
+        (StatusCode::OK, "legacy audiobooks".into())
     );
     for path in [
         "/no/such/page",
@@ -219,7 +228,7 @@ async fn the_proxy_works_without_a_legacy_export(pool: PgPool) {
         assert_eq!(res.text().await.unwrap(), format!("ssr:{path}"));
     }
     let reached = hits.load(Ordering::SeqCst);
-    for path in ["/podcasts", "/nope", "/loginx", "/build/x"] {
+    for path in ["/audiobooks", "/nope", "/loginx", "/build/x"] {
         let res = reqwest::get(format!("{base}{path}")).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
     }
@@ -247,7 +256,11 @@ async fn without_a_proxy_nothing_changes(pool: PgPool) {
 
 #[tokio::test]
 async fn a_bad_gateway_when_the_ssr_server_is_gone() {
-    let port = free_port(); // nothing listens there
+    // Bound but never listening: connections are refused, and the port stays ours, so the
+    // server below cannot be handed the same port (which made the proxy call itself: 431).
+    let held = tokio::net::TcpSocket::new_v4().unwrap();
+    held.bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+    let port = held.local_addr().unwrap().port();
     let app = web_proxy::layer(
         Router::new().route("/ok", get(|| async { "ok" })),
         Arc::new(WebProxy::new(port, vec![])),
@@ -333,6 +346,13 @@ async fn login_is_server_rendered_markup(pool: PgPool) {
         .unwrap();
     assert!(!setup.contains("Welcome back"), "{setup}");
     assert!(setup.contains(">Loading…</p>"), "{setup}");
+    let profiles = reqwest::get(format!("{base}/profiles")).await.unwrap();
+    assert_eq!(profiles.status(), StatusCode::OK);
+    let profiles = profiles.text().await.unwrap();
+    assert!(profiles.contains("Who&#x27;s listening?"), "{profiles}");
+    assert!(profiles.contains("data-vertigo-run-wasm"), "{profiles}");
+    // Public SSR shell only: no account-local names or API data at render time.
+    assert!(profiles.contains(">Loading…</p>"), "{profiles}");
     // ... and `/` and `/playlists/<id>` render too (the legacy export would say "legacy home").
     let home = reqwest::get(format!("{base}/"))
         .await
@@ -373,13 +393,13 @@ async fn login_is_server_rendered_markup(pool: PgPool) {
 
     // Not-kima-web paths keep the app's routing while the SSR server is up.
     assert_eq!(
-        reqwest::get(format!("{base}/podcasts/"))
+        reqwest::get(format!("{base}/audiobooks/"))
             .await
             .unwrap()
             .text()
             .await
             .unwrap(),
-        "legacy podcasts"
+        "legacy audiobooks"
     );
     assert_eq!(
         reqwest::get(format!("{base}/api/health"))
@@ -539,8 +559,15 @@ fn the_process_exits_non_zero_when_the_ssr_server_cannot_start() {
         cases.push((dir, port));
     }
     for (build, ssr_port) in cases {
-        let out = Command::new(env!("CARGO_BIN_EXE_kima"))
-            .env_clear()
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_kima"));
+        cmd.env_clear();
+        // The cleared environment is the server's configuration. The dynamic loader path is
+        // not: the pinned libsoxr lives in a private prefix reached only through
+        // LD_LIBRARY_PATH (CI, Dockerfile), and without it the binary cannot even start.
+        if let Some(path) = std::env::var_os("LD_LIBRARY_PATH") {
+            cmd.env("LD_LIBRARY_PATH", path);
+        }
+        let out = cmd
             .env("DATABASE_URL", "postgres://nobody@127.0.0.1:1/none")
             .env("KIMA_DATA_DIR", data.path())
             .env("KIMA_WEB_BUILD_DIR", &build)

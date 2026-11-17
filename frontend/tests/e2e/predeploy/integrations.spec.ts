@@ -10,11 +10,7 @@ test.describe("Integrations", () => {
         skipIfNoEnv("KIMA_TEST_ABS_URL", testInfo);
         skipIfNoEnv("KIMA_TEST_ABS_API_KEY", testInfo);
 
-        await page.goto("/settings");
-
-        const mediaServersLink = page.locator("text=Media Servers").first();
-        await expect(mediaServersLink).toBeVisible({ timeout: 5000 });
-        await mediaServersLink.click();
+        await page.goto("/settings/sources");
 
         const absContainer = page.locator('#audiobookshelf');
         await expect(absContainer).toBeVisible({ timeout: 5000 });
@@ -41,20 +37,18 @@ test.describe("Integrations", () => {
         await expect(testBtn).toBeVisible({ timeout: 3000 });
         await testBtn.click();
 
-        await page.waitForTimeout(3000);
-        const pageText = await page.textContent("body");
-        const hasResult = pageText?.includes("Connected") ||
-                         pageText?.includes("v2.") ||
-                         pageText?.includes("Failed") ||
-                         pageText?.includes("error");
-        expect(hasResult).toBeTruthy();
+        // On success the status beside the button (a green InlineStatus) reads exactly "v<version>" or "Connected".
+        await expect(
+            absContainer.locator("span.text-success"),
+            "the Audiobookshelf connection test did not report a successful connection",
+        ).toHaveText(/^(v\d+(\.\d+)+[\w.+-]*|Connected)$/, { timeout: 20_000 });
     });
 
     test("Lidarr connection test", async ({ page }, testInfo) => {
         skipIfNoEnv("KIMA_TEST_LIDARR_URL", testInfo);
         skipIfNoEnv("KIMA_TEST_LIDARR_API_KEY", testInfo);
 
-        await page.goto("/settings");
+        await page.goto("/settings/sources");
 
         const lidarrContainer = page.locator('#lidarr');
         await expect(lidarrContainer).toBeVisible({ timeout: 5000 });
@@ -73,20 +67,18 @@ test.describe("Integrations", () => {
         await expect(testBtn).toBeVisible({ timeout: 3000 });
         await testBtn.click();
 
-        await page.waitForTimeout(3000);
-        const pageText = await page.textContent("body");
-        const hasResult = pageText?.includes("Connected") ||
-                         pageText?.includes("Failed") ||
-                         pageText?.includes("error") ||
-                         pageText?.includes("success");
-        expect(hasResult).toBeTruthy();
+        // On success the status beside the button (a green InlineStatus) reads exactly "v<version>" or "Connected".
+        await expect(
+            lidarrContainer.locator("span.text-success"),
+            "the Lidarr connection test did not report a successful connection",
+        ).toHaveText(/^(v\d+(\.\d+)+[\w.+-]*|Connected)$/, { timeout: 20_000 });
     });
 
     test("Soulseek connection test", async ({ page }, testInfo) => {
         skipIfNoEnv("KIMA_TEST_SOULSEEK_USER", testInfo);
         skipIfNoEnv("KIMA_TEST_SOULSEEK_PASS", testInfo);
 
-        await page.goto("/settings");
+        await page.goto("/settings/sources");
 
         const soulseekContainer = page.locator('#soulseek');
         await expect(soulseekContainer).toBeVisible({ timeout: 5000 });
@@ -105,8 +97,10 @@ test.describe("Integrations", () => {
         await expect(testBtn).toBeVisible({ timeout: 3000 });
         await testBtn.click();
 
-        // Soulseek handshake can take 10-15 seconds
-        const resultLocator = soulseekContainer.locator("text=/Connected|Connection failed|error/i");
-        await expect(resultLocator).toBeVisible({ timeout: 20_000 });
+        // The Soulseek handshake can take 10-15 seconds; the success text is "Connected to Soulseek".
+        await expect(
+            soulseekContainer.locator("span.text-success"),
+            "the Soulseek connection test did not report a successful connection",
+        ).toHaveText("Connected to Soulseek", { timeout: 20_000 });
     });
 });

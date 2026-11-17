@@ -1,5 +1,17 @@
-//! `/settings`: the account slice — who you are and a password change. Everything else on the legacy
-//! Settings page is M10.
+//! `/settings`: account password, per-profile settings, profile management and app tokens.
+
+mod apps;
+mod profiles;
+
+const FIELD: &str = "w-full bg-white/5 text-white text-sm px-3 py-2 rounded-lg border border-white/10 outline-none focus:ring-2 focus:ring-brand/30 disabled:opacity-50";
+const BUTTON: &str = "inline-flex items-center justify-center rounded-lg border border-white/20 px-3 py-2 text-sm text-white hover:bg-white/10 aria-pressed:bg-brand/20 aria-pressed:border-brand disabled:opacity-50 disabled:cursor-not-allowed";
+
+fn message_view(message: Value<Option<String>>) -> DomNode {
+    message.render_value(|value| match value {
+        Some(text) => dom! { <p role="alert" class="text-sm text-danger-light">{text}</p> },
+        None => dom! { <span /> },
+    })
+}
 
 use kima_api_types::auth::{ChangePassword, ChangePasswordResponse, MeResponse};
 use vertigo::{DomNode, Value, bind, dom, get_driver};
@@ -31,9 +43,9 @@ pub fn render(ctx: &Ctx) -> DomNode {
         ctx.client.get::<MeResponse>("/api/auth/me").await
     }));
     let show_form = Value::new(false);
-    let signed_in = resource_view(me, |me: std::rc::Rc<MeResponse>| {
+    let signed_in = resource_view(me.clone(), |me: std::rc::Rc<MeResponse>| {
         let username = me.username.clone();
-        let role = if me.role == "admin" {
+        let role = if crate::auth::is_admin(&me) {
             "Administrator"
         } else {
             "Member"
@@ -44,7 +56,17 @@ pub fn render(ctx: &Ctx) -> DomNode {
             dom! { <span id="account-username" class="text-sm text-white">{username}</span> },
         )
     });
-    let password_row = show_form.render_value(bind!(ctx, show_form, |open: bool| {
+    let password_row = resource_view(
+        me,
+        bind!(ctx, show_form, |me: std::rc::Rc<MeResponse>| {
+            if !me
+                .profile
+                .as_ref()
+                .is_some_and(|p| p.is_main && profiles::can_manage(p.kind))
+            {
+                return dom! { <span /> };
+            }
+            show_form.render_value(bind!(ctx, show_form, |open: bool| {
         let (class, label) = if open {
             ("text-xs text-[var(--text-muted)] hover:text-white/70 transition-colors", "Cancel")
         } else {
@@ -69,7 +91,12 @@ pub fn render(ctx: &Ctx) -> DomNode {
                 {form}
             </div>
         }
-    }));
+        }))
+        }),
+    );
+    let ai_row = podcast_ai_row(ctx);
+    let profile_section = profiles::render(ctx);
+    let apps_section = apps::render(ctx);
     dom! {
         <div class="min-h-screen bg-[var(--bg-primary)]">
             <header class="page-shell pt-8 pb-6">
@@ -99,14 +126,70 @@ pub fn render(ctx: &Ctx) -> DomNode {
                             <div class="space-y-1">
                                 {signed_in}
                                 {password_row}
+                                {ai_row}
                             </div>
                             <div class="border-t border-white/5 mt-8 mb-8"></div>
                         </section>
+                        {profile_section}
+                        {apps_section}
                     </div>
                 </div>
             </div>
         </div>
     }
+}
+
+/// The persisted podcast AI switch (kima-only, D-207): AI-labelled shows and episodes are hidden
+/// unless this is on. The pill on the podcast pages starts from it.
+fn podcast_ai_row(ctx: &Ctx) -> DomNode {
+    let on = Value::new(false);
+    let busy = Value::new(false);
+    if get_driver().is_browser() {
+        get_driver().spawn(bind!(ctx, on, async move {
+            if let Ok(show) = crate::api::podcasts::ai_setting(&ctx.client).await {
+                on.set(show);
+            }
+        }));
+    }
+    let toggle = bind!(ctx, on, busy, |_| {
+        let want = !vertigo::transaction(|c| on.get(c));
+        busy.set(true);
+        get_driver().spawn(bind!(ctx, on, busy, async move {
+            match crate::api::podcasts::save_ai_setting(&ctx.client, want).await {
+                Ok(show) => on.set(show),
+                Err(err) => ctx.notify(err.message),
+            }
+            busy.set(false);
+        }));
+    });
+    let checked = on.map(|v| v.to_string());
+    let class = on.map(|v| {
+        format!(
+            "relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 {}",
+            if v { "bg-brand" } else { "bg-white/15" }
+        )
+    });
+    let knob = on.map(|v| {
+        format!(
+            "inline-block h-5 w-5 rounded-full bg-white transition-transform {}",
+            if v {
+                "translate-x-5"
+            } else {
+                "translate-x-0.5"
+            }
+        )
+    });
+    row(
+        "Show AI-generated podcasts",
+        dom! { <p class="text-xs tabular-nums text-[var(--text-muted)] mt-0.5">"Shows and episodes labelled AI are hidden unless this is on; unlabelled ones always show"</p> },
+        dom! {
+            <button type="button" role="switch" name="podcast-ai" aria-label="Show AI-generated podcasts"
+                aria-checked={checked} class={class} on_click={toggle}
+                disabled={flag(busy.to_computed())}>
+                <span class={knob}></span>
+            </button>
+        },
+    )
 }
 
 /// `SettingsRow`: label and description on the left, the control on the right (stacked on phones).
@@ -163,7 +246,8 @@ fn password_form(ctx: &Ctx) -> DomNode {
                 {
                     Ok(answer) => {
                         // The backend revokes the old tokens; the reply carries the replacement.
-                        ctx.session.sign_in(&answer.token);
+                        ctx.session
+                            .replace_pair(&answer.token, &answer.refresh_token);
                         current.set(String::new());
                         new.set(String::new());
                         confirm.set(String::new());

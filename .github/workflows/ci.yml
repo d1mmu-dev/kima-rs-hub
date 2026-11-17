@@ -36,6 +36,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # The input-snapshot tests need FICLONE, which the runner's ext4 lacks; they fail loudly
+      # without it (docs/m4-input-snapshots.md). Give them a real reflink filesystem (loop XFS,
+      # reflink=1) owned by the runner user instead of skipping them, and prove a clone works.
+      - name: Reflink filesystem for the input-snapshot tests
+        run: |
+          sudo apt-get install -y xfsprogs
+          img="$RUNNER_TEMP/kima-reflink.img"
+          truncate -s 2G "$img"
+          mkfs.xfs -q -m reflink=1 "$img"
+          sudo mkdir -p /mnt/kima-reflink
+          sudo mount -o loop "$img" /mnt/kima-reflink
+          sudo chown "$(id -u):$(id -g)" /mnt/kima-reflink
+          echo probe > /mnt/kima-reflink/probe
+          cp --reflink=always /mnt/kima-reflink/probe /mnt/kima-reflink/probe.clone
+          rm /mnt/kima-reflink/probe /mnt/kima-reflink/probe.clone
+          findmnt /mnt/kima-reflink
+          echo "KIMA_TEST_REFLINK_DIR=/mnt/kima-reflink" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -51,6 +68,8 @@ jobs:
           python3 scripts/test-ort-packaging.py
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
+      - name: Per-profile keys grep gate (M-PROF, D-240)
+        run: tools/check-profile-keys.sh
       - name: Native soxr linkage checker self-test
         env:
           TMPDIR: ${{ runner.temp }}
@@ -61,12 +80,22 @@ jobs:
           cargo test --locked -p kima-ml --test clap_cold_start --test clap_prepare
           cargo test --locked -p kima-ml --features pg-publish --test clap_cold_start --test clap_prepare
           python3 - <<'PY'
-          import os, pathlib, subprocess
-          for target in ('clap_cold_start', 'clap_prepare'):
-              binaries = [p for p in pathlib.Path('target/debug/deps').glob(target + '-*') if p.is_file() and os.access(p, os.X_OK)]
-              assert binaries, target
-              for binary in binaries:
-                  subprocess.run(['sh', 'scripts/check-soxr-linkage.sh', str(binary), os.environ['RUNNER_TEMP'] + '/kima-soxr'], check=True)
+          import json, os, subprocess
+          # Ask Cargo where the test binaries are: since Cargo's build-dir layout (stable 2026-11) they
+          # are no longer under target/debug/deps.
+          for features in ([], ['--features', 'pg-publish']):
+              out = subprocess.run(
+                  ['cargo', 'test', '--locked', '-p', 'kima-ml', *features, '--test', 'clap_cold_start',
+                   '--test', 'clap_prepare', '--no-run', '--message-format=json'],
+                  check=True, capture_output=True, text=True).stdout
+              found = {}
+              for line in out.splitlines():
+                  msg = json.loads(line)
+                  if msg.get('reason') == 'compiler-artifact' and msg.get('executable') and msg['target']['name'] in ('clap_cold_start', 'clap_prepare'):
+                      found[msg['target']['name']] = msg['executable']
+              assert set(found) == {'clap_cold_start', 'clap_prepare'}, found
+              for binary in found.values():
+                  subprocess.run(['sh', 'scripts/check-soxr-linkage.sh', binary, os.environ['RUNNER_TEMP'] + '/kima-soxr'], check=True)
           PY
       # Failing test lines also go out as annotations, readable without log access.
       - run: |

@@ -14,12 +14,16 @@ does not match it yet, see [`crates/kima-web/README.md`](crates/kima-web/README.
 
 ## Status
 
-Milestones M1 (library and playback) and M2 (Subsonic) are done. On top of M0's accounts and
+Milestones M1 (library and playback) and M2 (Subsonic) are done. Most M-SYNC backend work
+through Task 18 is implemented locally, but M-SYNC is not accepted: Task 15's re-file route,
+the legacy frontend refresh (Task 19), runtime/upgrade checks and hosted CI remain open;
+see the [roadmap](docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md). On top of M0's accounts and
 login, kima-rs now scans and watches a music folder, shows it as Artist, then Year - Album, then songs, and lets you
 browse, search, stream (with transcodes), keep playlists and resume playback. An admin can also
 preview and apply a tidy on-disk layout. Music apps that speak Subsonic/OpenSubsonic can connect
 with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Identification and the album
-autotagger are built; audio analysis, podcasts and audiobooks, and integrations are not yet built. See
+autotagger and CLAP/analysis plumbing are built. Podcasts (M6a) are served, see [Podcasts](#podcasts);
+private-model inference acceptance, audiobooks (M6b) and integrations are still open. See
 `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` for what comes next.
 
 ## Quick start
@@ -52,8 +56,22 @@ reconcile also runs at startup.
   names `fs.inotify.max_user_watches`). Raise it on the host, for example
   `sudo sysctl fs.inotify.max_user_watches=524288`, or use `poll`. Network mounts (SMB/NFS)
   usually do not deliver events, so use `poll` there.
-- Files that disappear are flagged missing, not deleted, and are purged only after 7 days, so
-  an unplugged disk loses nothing. Plays and playlists stay attached when it comes back.
+- Files that disappear are flagged missing and retired only after 7 days. A mass-missing guard
+  (at least 10 missing tracks and more than 10% of the library) prevents retirement; when a
+  same-slot copy exists, history is handed over. `GET /api/library/removals` is an admin-only,
+  newest-first audit of retired tracks (`count`, `removals`; optional `limit` and `offset`).
+  Restoring a file before retirement clears its missing flag. There is no `RECONCILE_MODE`
+  switch as upstream has: the 7-day grace is fixed, and `KIMA_WATCH_MODE=off` stops the
+  event-driven scans (D-161).
+- `POST /api/library/scan` (admin) requests a normal reconcile, which skips files whose size and
+  modification time are unchanged; it answers with the `jobId` that
+  `GET /api/library/scan/status/:jobId` reports on.
+- `POST /api/library/refile` (admin) queues a one-off re-file: a forced full reconcile that
+  re-reads every present file, unchanged ones included, and files each album again under the
+  artist elected from all its songs. It answers 202 `{"message":"Re-filing albums by their tags"}`,
+  or 409 while a re-file is already queued or running. Albums or artists a person edited and
+  folders with an unreadable file or disc subfolder are left as they are; row ids, plays and
+  playlists are kept. The outcome is logged (`library re-file finished`), not returned (D-168).
 
 **Streaming.** `GET /api/library/tracks/:id/stream?quality=...` supports `original` (the file as
 is, with range requests for seeking), `high` (MP3 320 kbps), `medium` (MP3 192 kbps) and `low`
@@ -111,6 +129,12 @@ artist photos, biographies, similar artists and genres, album cover fallbacks an
 Progress shows under Settings > Library Tools; new files are picked up as they arrive. Identification
 itself only fills the database; the separate autotagger can write tags when explicitly configured.
 
+Admins can `POST /api/enrichment/rerun` with `{"step":"identification"}` or
+`{"step":"artists"}` to reset that step and its dependent answers; the reply includes
+`artists`, `tracks`, `vectors` and `message`. The other recognized steps (`analysis`,
+`vectors`, `moods`, `similarity`) currently return 409 without a reset; an unknown step returns
+400. This is a partial implementation of the upstream six-step route (D-112).
+
 - **Switch it off.** `KIMA_IDENTIFY=off` stops every outbound lookup for the whole server. An admin can
   also turn "Auto enrich metadata" off in Settings > Artwork; the environment switch wins and
   the toggle then says so.
@@ -124,6 +148,33 @@ itself only fills the database; the separate autotagger can write tags when expl
   Tagged files cost nothing, and later runs reuse a cache. Progress survives restarts. For a large library
   point `MUSICBRAINZ_BASE_URL` at a local MusicBrainz mirror.
 - Fingerprinting uses half the CPU cores by default; set `KIMA_FINGERPRINT_WORKERS` to change that.
+
+## Podcasts
+
+Follow shows from Apple's charts, categories and search or by RSS feed URL, play their episodes (with resume and
+"next episode") in `kima-web` or any Subsonic app. Served route groups (upstream v1.12.3 shapes, wire fixtures in
+`crates/kima-api-types/tests/fixtures/podcasts_*`):
+
+- `/api/podcasts/*`: all 24 upstream routes — the followed list, subscribe/unsubscribe, show detail and episode pages,
+  next episode, continue listening, categories, charts, for-you, discover top/genre(s), preview with its sample
+  episode and similar shows, manual refresh and refresh-all, episode stream (one range passed through to the host),
+  progress save/clear, show and episode covers.
+- kima-only: `PUT /api/podcasts/:id/ai-label` and `PUT /api/podcasts/:podcastId/episodes/:episodeId/ai-label` (admin).
+- Podcast parts of existing groups: `/api/search` (`podcasts`/`episodes`/`all`), `/api/search/discover?type=podcasts`
+  (music part empty until M7), `/api/library/recently-listened`, `/api/library/cover-art?url=` (external image proxy),
+  `/api/stats` `spoken.podcasts`, `/api/system-settings` `podcastChartCountry`, `/api/enrichment/failures` rows of type
+  `podcast`, `/api/system/features` `"podcasts": true`.
+- Subsonic: `getPodcasts`, `getNewestPodcasts`, `getPodcastEpisode`, `refreshPodcasts`, and the podcast branches of
+  `getTranscodeDecision` (direct play only) and `getTranscodeStream` (302 to the episode's audio URL on its host, as upstream).
+
+Background work: followed feeds are checked every 15 minutes (a show is refreshed when its last refresh is over an hour
+old; two refreshes at a time, three attempts), independently of `KIMA_IDENTIFY`; cached episodes older than 30 days are
+removed at start and daily at 04:00 UTC. **AI-generated content** is labelled from the feed's Podcasting 2.0
+`podcast:txt purpose="ai-content"` tag (show and episode) or an admin's label and hidden by default; a pill on the pages
+and a Settings switch show it (D-200, D-207). Audiobooks (Audiobookshelf) are M6b and stay off (`"audiobooks": false`).
+A played episode is cached in the background (one download per episode) and later plays are served from the cache
+(D-214); shows Apple knows but that have no categories get them at startup (D-211). Known gaps: none recorded for
+M6a's jobs; audiobooks and the stream's CORS headers wait for M6b.
 
 ## Local development
 
@@ -190,6 +241,8 @@ New in kima-rs:
 | `ACOUSTID_CLIENT_KEY` | unset | AcoustID client key (upstream's name), used when no key is stored in Settings. A secret: do not commit it. |
 | `FANART_API_KEY` | unset | fanart.tv key (upstream's name), used when no key is stored in Settings. A secret: do not commit it. |
 | `ACOUSTID_DISABLED` | `false` | `true` (any case) turns off fingerprinting and AcoustID lookups (upstream's name); `/api/system/features` then answers `fpcalc: false`. |
+| `KIMA_ITUNES_BASE_URL` | `https://itunes.apple.com` | Apple's iTunes API for podcast charts, categories, search and lookups (upstream `ITUNES_BASE_URL`). Must start with `http://` or `https://`. |
+| `KIMA_NET_ALLOW_LOOPBACK` | unset | Test/capture hook only: `127.0.0.1:<port>[,...]` loopback sockets the podcast feed, audio and image fetches may reach. Refused unless `KIMA_NET_DENY_REAL=1` is also set (D-216). Never set it in production. |
 | `KIMA_NET_DENY_REAL` | unset | `1` makes any outbound request to a host other than this machine panic. Set in CI so no test reaches the network. |
 | `KIMA_TRANSCODE_CACHE_MB` | `2048` | Size cap of the transcode cache under `KIMA_DATA_DIR`, in MB. |
 | `KIMA_ARTWORK_CACHE_MB` | `512` | Size cap of the cover-art cache under `KIMA_DATA_DIR/artwork`, in MB. The oldest albums are dropped first. `0` means nothing is kept, so every request rebuilds. |

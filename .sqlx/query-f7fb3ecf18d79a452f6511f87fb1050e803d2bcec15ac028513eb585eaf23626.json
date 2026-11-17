@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO play_audit_ignore (profile_id, track_id, ignored_at)\n         SELECT profile_id, $2, ignored_at FROM play_audit_ignore WHERE track_id = $1\n         ORDER BY profile_id ON CONFLICT (profile_id, track_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f7fb3ecf18d79a452f6511f87fb1050e803d2bcec15ac028513eb585eaf23626"
+}

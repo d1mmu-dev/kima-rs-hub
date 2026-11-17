@@ -2,6 +2,7 @@
 //! (spec §7.3). A track flagged missing keeps its stars; lists hide them until the purge deletes
 //! the track and the foreign keys cascade.
 
+use kima_core::profile::ProfileId;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -60,9 +61,14 @@ pub(crate) async fn target_exists(pool: &PgPool, kind: StarKind, id: Uuid) -> sq
 
 /// Stars the target for the user. `false` when the target does not exist. Starring twice keeps
 /// the first star (and its time).
-pub async fn set(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx::Result<bool> {
+pub async fn set(
+    pool: &PgPool,
+    profile: ProfileId,
+    kind: StarKind,
+    id: Uuid,
+) -> sqlx::Result<bool> {
     let sql = format!(
-        "INSERT INTO stars (id, user_id, {col})
+        "INSERT INTO stars (id, profile_id, {col})
          SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM {table} WHERE id = $3)
          ON CONFLICT DO NOTHING",
         col = kind.column(),
@@ -70,7 +76,7 @@ pub async fn set(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx::R
     );
     let inserted = match sqlx::query(&sql)
         .bind(Uuid::now_v7())
-        .bind(user)
+        .bind(profile)
         .bind(id)
         .execute(pool)
         .await
@@ -89,25 +95,38 @@ pub async fn set(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx::R
     target_exists(pool, kind, id).await
 }
 
-pub async fn clear(pool: &PgPool, user: Uuid, kind: StarKind, id: Uuid) -> sqlx::Result<()> {
+pub async fn clear(
+    pool: &PgPool,
+    profile: ProfileId,
+    kind: StarKind,
+    id: Uuid,
+) -> sqlx::Result<()> {
     let sql = format!(
-        "DELETE FROM stars WHERE user_id = $1 AND {} = $2",
+        "DELETE FROM stars WHERE profile_id = $1 AND {} = $2",
         kind.column()
     );
-    sqlx::query(&sql).bind(user).bind(id).execute(pool).await?;
+    sqlx::query(&sql)
+        .bind(profile)
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
 /// The user's starred targets of one kind, newest star first. Targets with no present track are
 /// left out.
-pub async fn list_for_user(pool: &PgPool, user: Uuid, kind: StarKind) -> sqlx::Result<Vec<Uuid>> {
+pub async fn list_for_user(
+    pool: &PgPool,
+    profile: ProfileId,
+    kind: StarKind,
+) -> sqlx::Result<Vec<Uuid>> {
     let sql = format!(
         "SELECT s.{col} FROM stars s JOIN {table} x ON x.id = s.{col}
-         WHERE s.user_id = $1 AND s.{col} IS NOT NULL AND {present}
+         WHERE s.profile_id = $1 AND s.{col} IS NOT NULL AND {present}
          ORDER BY s.starred_at DESC, s.id DESC",
         col = kind.column(),
         table = kind.table(),
         present = kind.present("x")
     );
-    sqlx::query_scalar(&sql).bind(user).fetch_all(pool).await
+    sqlx::query_scalar(&sql).bind(profile).fetch_all(pool).await
 }

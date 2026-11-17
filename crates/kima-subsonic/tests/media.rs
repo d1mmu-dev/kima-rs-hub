@@ -4,6 +4,7 @@
 
 mod common;
 
+use kima_core::profile::ProfileId;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -454,7 +455,7 @@ async fn transcode_decision_direct_play_and_format_change(pool: PgPool) {
                 "canDirectPlay": true,
                 "canTranscode": true,
                 "errorReason": "",
-                "transcodeParams": "",
+                "transcodeParams": "q-original",
                 "transcodeReason": [],
             }),
             "{params:?}"
@@ -472,7 +473,7 @@ async fn transcode_decision_direct_play_and_format_change(pool: PgPool) {
             "canDirectPlay": false,
             "canTranscode": true,
             "errorReason": "",
-            "transcodeParams": "format=mp3",
+            "transcodeParams": "mp3-high",
             "transcodeReason": ["source is flac, client asked for mp3"],
         })
     );
@@ -518,7 +519,7 @@ async fn transcode_stream_song_podcast_other(pool: PgPool) {
     if !require_ffmpeg() {
         return;
     }
-    let env = env(pool);
+    let env = env(pool.clone());
     let data = env.audio(FLAC_REL);
     let t1 = id(1);
     let song = env
@@ -527,7 +528,7 @@ async fn transcode_stream_song_podcast_other(pool: PgPool) {
             &[
                 ("mediaId", &t1),
                 ("mediaType", "song"),
-                ("transcodeParams", "x"),
+                ("transcodeParams", "q-original"),
             ],
         )
         .await;
@@ -540,8 +541,7 @@ async fn transcode_stream_song_podcast_other(pool: PgPool) {
             &[
                 ("mediaId", &t1),
                 ("mediaType", "SONG"),
-                ("transcodeParams", "x"),
-                ("maxBitRate", "128"),
+                ("transcodeParams", "q-low-128"),
             ],
         )
         .await;
@@ -558,6 +558,70 @@ async fn transcode_stream_song_podcast_other(pool: PgPool) {
         "Podcast episode not found",
     )
     .await;
+
+    // A real episode of a show alice follows: a redirect to its own audio URL, regardless of
+    // `transcodeParams` (D-101/D-167 amended: podcasts are always direct play of the feed).
+    let show = kima_db::podcasts::insert_show(
+        &pool,
+        uuid::Uuid::now_v7(),
+        &kima_db::podcasts::NewShow {
+            feed_url: "https://feed.example/show.xml",
+            title: "A Show",
+            author: None,
+            description: None,
+            image_url: None,
+            itunes_id: None,
+            category_ids: &[],
+            language: None,
+            explicit: false,
+            episode_count: 1,
+            feed_etag: None,
+            feed_last_modified: None,
+        },
+    )
+    .await
+    .unwrap();
+    kima_db::podcasts::insert_episodes(
+        &pool,
+        show.id,
+        &[kima_db::podcasts::NewEpisode {
+            guid: "ep-1".into(),
+            title: "Episode 1".into(),
+            description: None,
+            audio_url: "https://feed.example/ep1.mp3".into(),
+            duration: 120,
+            published_at: time::OffsetDateTime::now_utc(),
+            episode_number: None,
+            season: None,
+            image_url: None,
+            file_size: None,
+            mime_type: None,
+        }],
+    )
+    .await
+    .unwrap();
+    kima_db::podcasts::subscribe(&pool, ProfileId::new(ALICE_ID), show.id)
+        .await
+        .unwrap();
+    let episode = kima_db::podcasts::episodes_for_channel(&pool, show.id, 1, false)
+        .await
+        .unwrap()
+        .remove(0);
+    let redirect = env
+        .get(
+            "getTranscodeStream",
+            &[
+                ("mediaId", &episode.id.to_string()),
+                ("mediaType", "podcast"),
+                ("transcodeParams", "anything"),
+            ],
+        )
+        .await;
+    redirect.assert_status(StatusCode::FOUND);
+    assert_eq!(
+        redirect.header(axum::http::header::LOCATION),
+        "https://feed.example/ep1.mp3"
+    );
     env.assert_error(
         "getTranscodeStream",
         &[
@@ -574,7 +638,7 @@ async fn transcode_stream_song_podcast_other(pool: PgPool) {
         &[
             ("mediaId", &id(20)),
             ("mediaType", "song"),
-            ("transcodeParams", "x"),
+            ("transcodeParams", "q-original"),
         ],
         70,
         "Song not found",
@@ -835,5 +899,379 @@ async fn stream_file_gone_before_the_scan_flags_it_is_70_without_a_path(pool: Pg
         params.extend(extra.iter().copied());
         env.assert_error("stream", &params, 70, "Song not found")
             .await;
+    }
+}
+
+// ---- Task 16: one stream plan (upstream `transcodeDecisionStream.route.test.ts`) ----
+
+const M4A_REL: &str = "The Beatles/Abbey Road/02 Something.m4a";
+
+impl Env {
+    /// Gives a fixture track a stored bitrate (kbps, `None` = never probed).
+    async fn set_bitrate(&self, pool: &PgPool, track: u128, kbps: Option<i32>) {
+        sqlx::query("UPDATE tracks SET bitrate = $2 WHERE id = $1")
+            .bind(track_id(track))
+            .bind(kbps)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Track 2 becomes a real `.m4a` of the given stored bitrate.
+    async fn make_m4a(&self, pool: &PgPool, kbps: Option<i32>) {
+        sqlx::query("UPDATE tracks SET path = $2, bitrate = $3, codec = 'aac' WHERE id = $1")
+            .bind(track_id(2))
+            .bind(M4A_REL)
+            .bind(kbps)
+            .execute(pool)
+            .await
+            .unwrap();
+        self.audio(M4A_REL);
+    }
+
+    async fn decision(&self, song: u128, params: &[(&str, &str)]) -> Value {
+        let song = id(song);
+        let mut all = vec![("mediaId", song.as_str()), ("mediaType", "song")];
+        all.extend_from_slice(params);
+        let body = self.json("getTranscodeDecision", &all).await;
+        assert_eq!(body["status"], "ok", "{body}");
+        body["transcodeDecision"].clone()
+    }
+
+    async fn content_type(&self, endpoint: &str, params: &[(&str, &str)]) -> String {
+        let res = self.get(endpoint, params).await;
+        res.assert_status_ok();
+        res.header(CONTENT_TYPE).to_str().unwrap().to_owned()
+    }
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn direct_play_gets_a_transcode_params_value_and_the_stream_serves_the_file_as_it_is(
+    pool: PgPool,
+) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let env = env(pool);
+    let data = env.audio(FLAC_REL);
+    let t1 = id(1);
+    for q in [
+        vec![],
+        vec![("format", "flac")],
+        vec![("format", "raw"), ("maxBitRate", "128")],
+    ] {
+        let d = env.decision(1, &q).await;
+        assert_eq!(d["canDirectPlay"], true, "{q:?}");
+        assert_eq!(d["canTranscode"], true, "{q:?}");
+        assert_eq!(d["transcodeParams"], "q-original", "{q:?}");
+        assert_eq!(d["transcodeReason"], json!([]), "{q:?}");
+        let mut stream = vec![("id", t1.as_str())];
+        stream.extend_from_slice(&q);
+        let res = env.get("stream", &stream).await;
+        assert_eq!(res.header(CONTENT_TYPE), "audio/flac", "{q:?}");
+        assert_eq!(res.as_bytes().as_ref(), &data[..], "{q:?}");
+    }
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn a_bitrate_cap_is_never_exceeded_a_file_over_it_gets_the_highest_mp3_tier_within_it(
+    pool: PgPool,
+) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let env = env(pool.clone());
+    env.audio(FLAC_REL);
+    env.set_bitrate(&pool, 1, Some(900)).await;
+    let t1 = id(1);
+    for (cap, params) in [
+        ("320", "q-high-320"),
+        ("256", "q-medium-256"),
+        ("128", "q-low-128"),
+    ] {
+        let d = env.decision(1, &[("maxBitRate", cap)]).await;
+        assert_eq!(d["canDirectPlay"], false, "{cap}");
+        assert_eq!(d["canTranscode"], true, "{cap}");
+        assert_eq!(d["transcodeParams"], params, "{cap}");
+        assert_eq!(
+            d["transcodeReason"],
+            json!([format!("client capped the bitrate at {cap}")])
+        );
+        assert_eq!(
+            env.content_type("stream", &[("id", &t1), ("maxBitRate", cap)])
+                .await,
+            "audio/mpeg",
+            "{cap}"
+        );
+        assert_eq!(
+            env.content_type(
+                "getTranscodeStream",
+                &[
+                    ("mediaId", &t1),
+                    ("mediaType", "song"),
+                    ("transcodeParams", params)
+                ]
+            )
+            .await,
+            "audio/mpeg",
+            "{params}"
+        );
+    }
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn a_cap_below_the_smallest_mp3_is_refused_unless_the_file_already_fits(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let env = env(pool.clone());
+    env.audio(FLAC_REL);
+    env.set_bitrate(&pool, 1, Some(900)).await;
+    let d = env.decision(1, &[("maxBitRate", "64")]).await;
+    assert_eq!(d["canDirectPlay"], false);
+    assert_eq!(d["canTranscode"], false);
+    assert!(d.get("transcodeParams").is_none(), "{d}");
+    assert!(
+        d["errorReason"].as_str().unwrap().contains("smallest mp3"),
+        "{d}"
+    );
+    // The stream is not an error: the smallest mp3.
+    assert_eq!(
+        env.content_type("stream", &[("id", &id(1)), ("maxBitRate", "64")])
+            .await,
+        "audio/mpeg"
+    );
+    // A file already within a tiny cap plays as it is.
+    env.set_bitrate(&pool, 1, Some(48)).await;
+    let d = env.decision(1, &[("maxBitRate", "64")]).await;
+    assert_eq!(d["canDirectPlay"], true);
+    assert_eq!(d["transcodeParams"], "q-original");
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn a_file_already_within_the_cap_plays_as_it_is(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let env = env(pool.clone());
+    env.audio(FLAC_REL);
+    env.set_bitrate(&pool, 1, Some(900)).await;
+    let d = env.decision(1, &[("maxBitRate", "1000")]).await;
+    assert_eq!(d["canDirectPlay"], true);
+    assert_eq!(d["transcodeParams"], "q-original");
+    let d = env.decision(1, &[("maxBitRate", "500")]).await;
+    assert_eq!(d["canDirectPlay"], false);
+    assert_eq!(d["transcodeParams"], "q-high-500");
+    assert_eq!(
+        env.content_type("stream", &[("id", &id(1)), ("maxBitRate", "500")])
+            .await,
+        "audio/mpeg"
+    );
+
+    env.make_m4a(&pool, Some(64)).await;
+    let t2 = id(2);
+    for q in [
+        vec![("maxBitRate", "128")],
+        vec![("format", "m4a"), ("maxBitRate", "320")],
+    ] {
+        let d = env.decision(2, &q).await;
+        assert_eq!(d["canDirectPlay"], true, "{q:?}");
+        assert_eq!(d["transcodeParams"], "q-original", "{q:?}");
+        let mut stream = vec![("id", t2.as_str())];
+        stream.extend_from_slice(&q);
+        assert_eq!(
+            env.content_type("stream", &stream).await,
+            "audio/mp4",
+            "{q:?}"
+        );
+    }
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn a_file_whose_bitrate_cannot_be_read_is_made_into_an_mp3_under_a_cap(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let env = env(pool);
+    env.audio(FLAC_REL);
+    // Track 1's bitrate is unknown (NULL) in the fixture.
+    let d = env.decision(1, &[("maxBitRate", "1000")]).await;
+    assert_eq!(d["canDirectPlay"], false);
+    assert_eq!(d["transcodeParams"], "q-high-1000");
+    assert_eq!(
+        env.content_type("stream", &[("id", &id(1)), ("maxBitRate", "1000")])
+            .await,
+        "audio/mpeg"
+    );
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn an_asked_for_mp3_is_an_mp3_even_when_the_file_is_already_under_the_cap(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let env = env(pool.clone());
+    let flac = env.audio(FLAC_REL);
+    env.set_bitrate(&pool, 1, Some(900)).await;
+    let d = env.decision(1, &[("format", "mp3")]).await;
+    assert_eq!(d["transcodeParams"], "mp3-high");
+
+    env.make_m4a(&pool, Some(64)).await;
+    let d = env
+        .decision(2, &[("format", "mp3"), ("maxBitRate", "128")])
+        .await;
+    assert_eq!(d["canDirectPlay"], false);
+    assert_eq!(d["transcodeParams"], "mp3-low-128");
+    assert_eq!(
+        env.content_type(
+            "stream",
+            &[("id", &id(2)), ("format", "mp3"), ("maxBitRate", "128")]
+        )
+        .await,
+        "audio/mpeg"
+    );
+
+    // A cached mp3 does not change a later no-format decision, nor what it delivers.
+    env.content_type("stream", &[("id", &id(1)), ("format", "mp3")])
+        .await;
+    let d = env.decision(1, &[]).await;
+    assert_eq!(d["transcodeParams"], "q-original");
+    let res = env.get("stream", &[("id", &id(1))]).await;
+    assert_eq!(res.as_bytes().as_ref(), &flac[..]);
+
+    // An mp3 file asked as mp3 over the cap is remade at the cap; without a cap it is the file.
+    env.audio("The Beatles/White Album/1-01 Back in the U.S.S.R..mp3");
+    let d = env
+        .decision(6, &[("format", "mp3"), ("maxBitRate", "128")])
+        .await;
+    assert_eq!(d["transcodeParams"], "mp3-low-128");
+    let d = env.decision(6, &[("format", "mp3")]).await;
+    assert_eq!(d["canDirectPlay"], true);
+    assert_eq!(d["transcodeParams"], "q-original");
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn a_format_kima_cannot_make_is_refused_in_the_decision_with_no_params(pool: PgPool) {
+    let env = env(pool.clone());
+    env.make_m4a(&pool, Some(64)).await;
+    for (song, q, text) in [
+        (1, vec![("format", "opus")], "only to mp3"),
+        (
+            1,
+            vec![("format", "flac"), ("maxBitRate", "128")],
+            "cannot make flac smaller",
+        ),
+        (2, vec![("format", "aac")], "cannot make aac"),
+    ] {
+        let d = env.decision(song, &q).await;
+        assert_eq!(d["canDirectPlay"], false, "{q:?}");
+        assert_eq!(d["canTranscode"], false, "{q:?}");
+        assert!(d.get("transcodeParams").is_none(), "{d}");
+        assert!(d["errorReason"].as_str().unwrap().contains(text), "{d}");
+        assert_eq!(d["transcodeReason"].as_array().unwrap().len(), 1, "{d}");
+    }
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn stream_download_and_hls_follow_the_same_rule(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let env = env(pool);
+    let data = env.audio(FLAC_REL);
+    let t1 = id(1);
+    // A refused format is not an error for `stream`: the file as it is.
+    let res = env.get("stream", &[("id", &t1), ("format", "opus")]).await;
+    assert_eq!(res.header(CONTENT_TYPE), "audio/flac");
+    assert_eq!(res.as_bytes().as_ref(), &data[..]);
+    // `download` is always the file, whatever the rate.
+    let res = env
+        .get("download", &[("id", &t1), ("maxBitRate", "64")])
+        .await;
+    assert_eq!(res.as_bytes().as_ref(), &data[..]);
+    // `hls` links `stream.view` with the bitrate as `maxBitRate`.
+    let res = env.get("hls", &[("id", &t1), ("bitRate", "192")]).await;
+    assert!(res.text().contains("maxBitRate=192"), "{}", res.text());
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn transcode_params_kima_would_not_hand_out_are_an_error_not_a_stream(pool: PgPool) {
+    let env = env(pool);
+    let t1 = id(1);
+    for bad in [
+        "format=mp3",
+        "q-bogus",
+        "q-",
+        "mp3-",
+        "x-high",
+        "q-high-0",
+        "q-high-x",
+        "q-high-123456",
+        "q-original-128",
+        "mp3-original",
+        "q-high-100",
+        "q-high",
+        "mp3-low-100",
+        "q-low-64",
+        "mp3-medium-320",
+    ] {
+        env.assert_error(
+            "getTranscodeStream",
+            &[
+                ("mediaId", &t1),
+                ("mediaType", "song"),
+                ("transcodeParams", bad),
+            ],
+            0,
+            "Invalid transcodeParams: ask getTranscodeDecision again",
+        )
+        .await;
+    }
+}
+
+#[sqlx::test(
+    migrator = "kima_db::MIGRATOR",
+    fixtures(path = "fixtures", scripts("subsonic"))
+)]
+async fn a_decision_for_anything_but_a_song_is_an_error(pool: PgPool) {
+    let env = env(pool);
+    // `id(1)` is a song id, not a real podcast episode id, so the podcast branch (M6 Task 18)
+    // also answers "Media not found"; `decision_podcast_direct_only` (`tests/podcasts.rs`)
+    // covers a real one.
+    for kind in ["podcast", "album"] {
+        env.assert_error(
+            "getTranscodeDecision",
+            &[("mediaId", &id(1)), ("mediaType", kind)],
+            70,
+            "Media not found",
+        )
+        .await;
     }
 }

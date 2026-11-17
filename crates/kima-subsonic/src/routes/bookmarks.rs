@@ -32,7 +32,7 @@ async fn get_bookmarks(
     State(app): State<AppState>,
     _params: Params,
 ) -> Result<Answer, SubsonicError> {
-    let me = user.user.id;
+    let me = user.user.profile;
     let list = bookmarks::list_for_user(&app.pool, me).await?;
     let track_ids: Vec<_> = list.iter().map(|b| b.track_id).collect();
     let songs: HashMap<_, _> = subsonic::tracks_by_ids(&app.pool, me, &track_ids)
@@ -73,7 +73,7 @@ async fn create_bookmark(
     }
     let track = ids::parse(raw, &[]).ok_or_else(unknown)?;
     let comment = params.get("comment").filter(|c| !c.is_empty());
-    if !bookmarks::upsert(&app.pool, user.user.id, track, position, comment).await? {
+    if !bookmarks::upsert(&app.pool, user.user.profile, track, position, comment).await? {
         return Err(unknown());
     }
     Ok(Answer::ok())
@@ -85,6 +85,6 @@ async fn delete_bookmark(
     params: Params,
 ) -> Result<Answer, SubsonicError> {
     let track = ids::parse(params.required("id")?, &[]).ok_or_else(unknown)?;
-    bookmarks::delete(&app.pool, user.user.id, track).await?;
+    bookmarks::delete(&app.pool, user.user.profile, track).await?;
     Ok(Answer::ok())
 }

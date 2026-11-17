@@ -61,9 +61,8 @@ export default function MatchAlbumsPage() {
             />
         );
     return (
-        <div className="min-h-screen pb-32">
+        <div className="min-h-screen page-end">
             <PageHeader
-                eyebrow="Settings"
                 title="Match albums"
                 description="Review stored MusicBrainz proposals before accepting any changes."
             />

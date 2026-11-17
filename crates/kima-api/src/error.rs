@@ -21,6 +21,10 @@ pub enum ApiError {
     #[error("{0}")]
     BadRequest(String),
     #[error("{0}")]
+    BadGateway(&'static str),
+    #[error("Podcast feed could not be read")]
+    BadFeed(String),
+    #[error("{0}")]
     Unauthorized(&'static str),
     #[error("{0}")]
     Forbidden(&'static str),
@@ -95,6 +99,8 @@ impl ApiError {
             | Self::InvalidSettings(_)
             | Self::InvalidWithDetails { .. }
             | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
+            Self::BadFeed(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
@@ -117,6 +123,9 @@ impl ApiError {
             }
             Self::InvalidWithDetails { details, .. } => {
                 json!({ "error": self.to_string(), "details": details })
+            }
+            Self::BadFeed(detail) => {
+                json!({"error": "Podcast feed could not be read", "detail": detail})
             }
             Self::ConflictWith { message, extra } => {
                 let mut body = extra.as_object().cloned().unwrap_or_default();

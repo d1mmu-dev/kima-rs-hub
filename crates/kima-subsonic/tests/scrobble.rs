@@ -2,6 +2,7 @@
 
 mod common;
 
+use kima_core::profile::ProfileId;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -53,7 +54,7 @@ fn ok(res: &Value) {
 async fn subsonic_plays(pool: &PgPool, track: Uuid) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT to_char(played_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
-         FROM plays WHERE user_id = $1 AND track_id = $2 AND source = 'SUBSONIC'
+         FROM plays WHERE profile_id = $1 AND track_id = $2 AND source = 'SUBSONIC'
          ORDER BY played_at",
     )
     .bind(ALICE_ID)
@@ -64,7 +65,7 @@ async fn subsonic_plays(pool: &PgPool, track: Uuid) -> Vec<String> {
 }
 
 async fn play_count(pool: &PgPool, track: Uuid) -> i64 {
-    sqlx::query_scalar("SELECT count(*) FROM plays WHERE user_id = $1 AND track_id = $2")
+    sqlx::query_scalar("SELECT count(*) FROM plays WHERE profile_id = $1 AND track_id = $2")
         .bind(ALICE_ID)
         .bind(track)
         .fetch_one(pool)
@@ -189,7 +190,7 @@ fixture_test!(future_time_clamped_to_now, |server, pool| {
     )
     .await);
     let at: time::OffsetDateTime = sqlx::query_scalar(
-        "SELECT played_at FROM plays WHERE user_id = $1 AND track_id = $2 AND source = 'SUBSONIC'",
+        "SELECT played_at FROM plays WHERE profile_id = $1 AND track_id = $2 AND source = 'SUBSONIC'",
     )
     .bind(ALICE_ID)
     .bind(t)
@@ -267,11 +268,15 @@ fixture_test!(
             track_id: Some(Some(t.to_string())),
             ..Patch::default()
         };
-        playback::upsert(&pool, ALICE_ID, web(a)).await.unwrap();
+        playback::upsert(&pool, ProfileId::new(ALICE_ID), web(a))
+            .await
+            .unwrap();
         // Admin's web state is stale and does not count.
-        playback::upsert(&pool, ADMIN_ID, web(c)).await.unwrap();
+        playback::upsert(&pool, ProfileId::new(ADMIN_ID), web(c))
+            .await
+            .unwrap();
         sqlx::query(
-            "UPDATE playback_state SET updated_at = now() - interval '3 hours' WHERE user_id = $1",
+            "UPDATE playback_state SET updated_at = now() - interval '3 hours' WHERE profile_id = $1",
         )
         .bind(ADMIN_ID)
         .execute(&pool)
@@ -308,40 +313,25 @@ fixture_test!(
 #[test]
 fn now_playing_expires() {
     let np = NowPlaying::new();
-    let (user, track) = (Uuid::now_v7(), Uuid::now_v7());
+    let (user, track) = (ProfileId::new(Uuid::now_v7()), Uuid::now_v7());
     let t0 = Instant::now();
-    np.report(user, "alice", "Symfonium", track, 200, t0);
-    np.report(
-        user,
-        "alice",
-        "Feishin",
-        track,
-        200,
-        t0 + Duration::from_secs(10),
-    );
+    np.report(user, "Symfonium", track, 200, t0);
+    np.report(user, "Feishin", track, 200, t0 + Duration::from_secs(10));
     assert_eq!(np.entries(t0 + Duration::from_secs(259)).len(), 2);
     // 200 s + 60 s after the start: gone. The later start lives 10 s longer.
     let live = np.entries(t0 + Duration::from_secs(261));
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].player, "Feishin");
     assert!(np.entries(t0 + Duration::from_secs(271)).is_empty());
-    // One slot per (user, player): reporting again replaces.
+    // One slot per (profile, player): reporting again replaces.
     np.report(
         user,
-        "alice",
         "Feishin",
         Uuid::now_v7(),
         200,
         t0 + Duration::from_secs(300),
     );
-    np.report(
-        user,
-        "alice",
-        "Feishin",
-        track,
-        200,
-        t0 + Duration::from_secs(301),
-    );
+    np.report(user, "Feishin", track, 200, t0 + Duration::from_secs(301));
     let live = np.entries(t0 + Duration::from_secs(302));
     assert_eq!(live.len(), 1);
     assert_eq!(live[0].track, track);

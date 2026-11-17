@@ -87,6 +87,51 @@ fn code<T: std::fmt::Debug>(o: &Outcome<T>) -> String {
     }
 }
 
+#[tokio::test]
+async fn interactive_429_does_not_pause_other_hosts_or_enrichment() {
+    let limited = Replay::start(Recording(vec![status("/limited", 429)])).await;
+    let healthy = Replay::start(Recording(vec![image("/ok", "image/png", 1200)])).await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(100))
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .unwrap();
+    let net = net_with(&limited, &pool, |c| c.allow_private_images = true);
+    assert_eq!(
+        code(
+            &net.get_bytes_user_facing(&format!("{}/limited", limited.url()))
+                .await
+        ),
+        "RATE_LIMITED"
+    );
+    assert_eq!(
+        code(
+            &net.get_bytes_user_facing(&format!("{}/ok", healthy.url()))
+                .await
+        ),
+        "ANSWERED"
+    );
+    assert_eq!(
+        code(&net.get_bytes(&format!("{}/ok", healthy.url())).await),
+        "ANSWERED"
+    );
+    // An enrichment pause remains in force even when interactive requests succeed.
+    assert_eq!(
+        code(&net.get_bytes(&format!("{}/limited", limited.url())).await),
+        "RATE_LIMITED"
+    );
+    assert_eq!(
+        code(
+            &net.get_bytes_user_facing(&format!("{}/ok", healthy.url()))
+                .await
+        ),
+        "ANSWERED"
+    );
+    assert_eq!(
+        code(&net.get_bytes(&format!("{}/ok", healthy.url())).await),
+        "RATE_LIMITED"
+    );
+}
+
 #[test]
 fn is_public_table() {
     let private = [

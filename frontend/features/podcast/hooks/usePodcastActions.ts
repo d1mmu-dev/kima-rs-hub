@@ -4,19 +4,19 @@ import { useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAudio } from "@/lib/audio-context";
-import { useAudioState } from "@/lib/audio-state-context";
 import { api } from "@/lib/api";
 import { notify } from "@/lib/notify";
 import { Podcast, Episode, PodcastPreview } from "../types";
-import { queryKeys } from "@/hooks/useQueries";
+import { queryKeys, refreshFollowedShows } from "@/hooks/useQueries";
 import { dispatchQueryEvent } from "@/lib/query-events";
+import { useEpisodeToggle } from "./usePlayEpisode";
+import { episodeForPlayer } from "@/lib/podcast-episode";
 
-export function usePodcastActions(podcastId: string, sortedEpisodes?: Episode[]) {
+export function usePodcastActions(podcastId: string) {
     const router = useRouter();
     const queryClient = useQueryClient();
-    const { playPodcast, currentPodcast, isPlaying, pause, resumeWithGesture } =
-        useAudio();
-    const { setPodcastEpisodeQueue } = useAudioState();
+    const { playPodcast, currentPodcast, isPlaying, pause } = useAudio();
+    const toggleEpisode = useEpisodeToggle();
 
     const [isSubscribing, setIsSubscribing] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
@@ -34,7 +34,7 @@ export function usePodcastActions(podcastId: string, sortedEpisodes?: Episode[])
                 );
 
                 if (response.success && response.podcast?.id) {
-                    queryClient.invalidateQueries({ queryKey: queryKeys.podcasts() });
+                    refreshFollowedShows(queryClient);
                     router.push(`/podcasts/show/?id=${encodeURIComponent(response.podcast.id)}`);
                 }
             } catch (error: unknown) {
@@ -49,50 +49,26 @@ export function usePodcastActions(podcastId: string, sortedEpisodes?: Episode[])
     const handleRemovePodcast = useCallback(async () => {
         try {
             await api.removePodcast(podcastId);
-            // Invalidate podcasts cache so the list refreshes without the removed podcast
-            queryClient.invalidateQueries({ queryKey: queryKeys.podcasts() });
+            refreshFollowedShows(queryClient);
             router.push("/podcasts");
         } catch (error) {
             notify.error("Couldn't remove this podcast", { message: error instanceof Error ? error.message : undefined });
         }
     }, [podcastId, router, queryClient]);
 
+    const toPlay = useCallback(
+        (episode: Episode, podcast: Podcast) => episodeForPlayer(podcastId, podcast, episode),
+        [podcastId]
+    );
+
     const handlePlayEpisode = useCallback(
-        (episode: Episode, podcast: Podcast, around: Episode[] | undefined = sortedEpisodes) => {
-            // The queue is saved in the browser: 200 episodes around the one
-            // played, from the list it was picked from.
-            if (around && around.length > 0) {
-                const at = Math.max(0, around.findIndex((e) => e.id === episode.id));
-                const start = Math.max(0, Math.min(at - 100, around.length - 200));
-                setPodcastEpisodeQueue(around.slice(start, start + 200));
-            }
-            
-            playPodcast({
-                id: `${podcastId}:${episode.id}`,
-                title: episode.title,
-                podcastTitle: podcast.title,
-                coverUrl: podcast.coverUrl,
-                duration: episode.duration,
-                progress: episode.progress || null,
-            });
-        },
-        [podcastId, playPodcast, sortedEpisodes, setPodcastEpisodeQueue]
+        (episode: Episode, podcast: Podcast) => playPodcast(toPlay(episode, podcast)),
+        [toPlay, playPodcast]
     );
 
     const handlePlayPauseEpisode = useCallback(
-        (episode: Episode, podcast: Podcast) => {
-            const isCurrentEpisode =
-                currentPodcast?.id === `${podcastId}:${episode.id}`;
-
-            if (isCurrentEpisode && isPlaying) {
-                pause();
-            } else if (isCurrentEpisode) {
-                resumeWithGesture();
-            } else {
-                handlePlayEpisode(episode, podcast);
-            }
-        },
-        [podcastId, currentPodcast, isPlaying, pause, resumeWithGesture, handlePlayEpisode]
+        (episode: Episode, podcast: Podcast) => toggleEpisode(toPlay(episode, podcast)),
+        [toggleEpisode, toPlay]
     );
 
     const isEpisodePlaying = useCallback(
@@ -105,7 +81,6 @@ export function usePodcastActions(podcastId: string, sortedEpisodes?: Episode[])
     const handleMarkEpisodeComplete = useCallback(
         async (episodeId: string, duration: number) => {
             try {
-                // Mark episode as complete (set currentTime to duration and isFinished to true)
                 await api.updatePodcastEpisodeProgress(
                     podcastId,
                     episodeId,
@@ -113,10 +88,10 @@ export function usePodcastActions(podcastId: string, sortedEpisodes?: Episode[])
                     duration,
                     true
                 );
-                
+
                 // A fresh read after the write, so the episode shows as played.
                 queryClient.invalidateQueries({ queryKey: queryKeys.podcast(podcastId) });
-                
+
                 dispatchQueryEvent("podcast-progress-updated");
             } catch (error) {
                 notify.error("Couldn't mark the episode as played", { message: error instanceof Error ? error.message : undefined });

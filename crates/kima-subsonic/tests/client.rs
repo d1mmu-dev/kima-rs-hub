@@ -415,23 +415,15 @@ async fn real_handshake_end_to_end(pool: PgPool) {
     ok(&client
         .json("scrobble", &[("id", &songs[0]), ("submission", "true")])
         .await);
-    let (status, plays) = api(
-        &http,
-        &base,
-        reqwest::Method::GET,
-        "/plays",
-        Some(&bearer),
-        None,
+    // GET /plays was removed in Task 18; verify the persisted scrobble directly.
+    let source: String = sqlx::query_scalar(
+        "SELECT source FROM plays WHERE track_id = $1 ORDER BY played_at DESC LIMIT 1",
     )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let play = plays
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|p| p["trackId"] == songs[0])
-        .unwrap_or_else(|| panic!("no play in {plays}"));
-    assert_eq!(play["source"], "SUBSONIC");
+    .bind(Uuid::parse_str(&songs[0]).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(source, "SUBSONIC");
 
     // 7. A saved queue is the web player's queue.
     let queue: Vec<(&str, &str)> = songs.iter().map(|s| ("id", s.as_str())).collect();

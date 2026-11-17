@@ -125,7 +125,9 @@ async fn query_token_auth_works(pool: PgPool) {
     let id = track_with_file(&pool, root.path(), &bytes(100)).await;
     let state = setup(pool, root.path());
     let (user, token) = common::user_with_token(&state, "ana").await;
-    let stream = state.jwt.issue_stream(user.id, user.token_version);
+    let stream = state
+        .jwt
+        .issue_stream(user.account(), user.main_profile(), user.token_version);
     let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
     for t in [&token, &stream] {
         server

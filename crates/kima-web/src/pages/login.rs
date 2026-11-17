@@ -46,8 +46,27 @@ pub fn render(ctx: &Ctx) -> DomNode {
                 .post::<_, LoginResponse>("/api/auth/login", &creds)
                 .await
             {
-                // The guard sees the new token and moves on to the library.
-                Ok(done) => ctx.session.sign_in(&done.token),
+                Ok(done) => {
+                    // Do not expose a signed-in shell until the profile count is known.
+                    let client = crate::api::client::ApiClient::new(
+                        Value::new(Some(done.token.clone())).to_computed(),
+                        || {},
+                    );
+                    match crate::api::profiles::list(&client).await {
+                        Ok(profiles) => {
+                            ctx.client.retire();
+                            ctx.player.stop();
+                            if let Some(profile) = done.profile.as_ref() {
+                                ctx.session.remember_profile(profile);
+                            }
+                            let url =
+                                crate::auth::login_destination(profiles.profiles.len()).to_string();
+                            ctx.session.replace_pair(&done.token, &done.refresh_token);
+                            vertigo::js! { window.location.replace(url) };
+                        }
+                        Err(err) => error.set(Some(err.message)),
+                    }
+                }
                 Err(err) => error.set(Some(err.message)),
             }
             busy.set(false);

@@ -8,6 +8,9 @@ use uuid::Uuid;
 #[serde(rename_all = "camelCase")]
 pub struct UserSettings {
     pub user_id: Uuid,
+    /// Owner profile on M-PROF servers (D-242); `userId` remains the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<Uuid>,
     /// `original`, `high`, `medium` or `low`.
     pub playback_quality: String,
     pub wifi_only: bool,
@@ -18,4 +21,11 @@ pub struct UserSettings {
     pub has_listenbrainz_token: bool,
     /// Always `false` in kima-rs.
     pub live_sharing_available: bool,
+    /// kima-only (D-207): `hide` (default) or `show` AI-labelled podcasts and episodes.
+    #[serde(default = "hide")]
+    pub podcast_ai_content: String,
+}
+
+fn hide() -> String {
+    "hide".into()
 }

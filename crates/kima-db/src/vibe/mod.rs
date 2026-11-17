@@ -9,6 +9,7 @@ pub mod moods;
 pub mod path;
 pub mod rank;
 pub mod read;
+pub mod readings;
 pub mod search;
 pub mod state;
 

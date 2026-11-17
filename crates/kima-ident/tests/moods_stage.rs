@@ -72,6 +72,59 @@ async fn embedded(pool: &PgPool, seed: usize) -> Uuid {
     id
 }
 
+struct ReadingProvider;
+impl kima_ident::stages::embedding::TextEmbedder for ReadingProvider {
+    fn readings_identity(&self) -> Option<kima_ident::stages::readings::PromptIdentity> {
+        Some(kima_ident::stages::readings::PromptIdentity {
+            sound: MATCHING_SOUND,
+            text_sha256: [1; 32],
+            tokenizer_sha256: [2; 32],
+        })
+    }
+    fn embed<'a>(
+        &'a self,
+        _: &'a IdentCtx,
+        _: &'a str,
+    ) -> kima_ident::stages::embedding::TextEmbeddingFuture<'a> {
+        Box::pin(async {
+            let mut v = [0.; 512];
+            v[0] = 1.;
+            Ok(v)
+        })
+    }
+}
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn mood_state_readings_use_them(pool: PgPool) {
+    let (ctx, _dir) = ctx(&pool);
+    embedded(&pool, 1).await;
+    vibe_assets::install(&ctx, assets(Some(heads("readings"))));
+    // First build without readings, then backfill without any new mood scores.
+    moods::run_pass(&ctx).await.unwrap();
+    moods::run_pass_with(&ctx, &ReadingProvider, &CancellationToken::new())
+        .await
+        .unwrap();
+    let (ar,i,a,sd):(Option<f64>,Option<f64>,Option<f64>,Option<f64>)=sqlx::query_as("SELECT arousal_mean,instrumental_logit_mean,acoustic_logit_mean,arousal_sd FROM mood_state").fetch_one(&pool).await.unwrap();
+    // Independent Python math.log(.504/(1-.504)); all equal groups yield .504 arousal.
+    assert!((ar.unwrap() - 0.01600034134644112).abs() < 1e-6);
+    assert_eq!(i, Some(0.));
+    assert_eq!(a, Some(0.));
+    assert_eq!(sd, Some(0.));
+}
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn no_readings_means_absent_reading_stats(pool: PgPool) {
+    let (ctx, _dir) = ctx(&pool);
+    embedded(&pool, 1).await;
+    vibe_assets::install(&ctx, assets(Some(heads("no-readings"))));
+    moods::run_pass(&ctx).await.unwrap();
+    let values: (Option<f64>, Option<f64>, Option<f64>) = sqlx::query_as(
+        "SELECT arousal_mean,instrumental_logit_mean,acoustic_logit_mean FROM mood_state",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(values, (None, None, None));
+}
+
 async fn count(pool: &PgPool, table: &str) -> i64 {
     sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
         .fetch_one(pool)

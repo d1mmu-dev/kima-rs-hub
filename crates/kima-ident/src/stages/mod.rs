@@ -9,6 +9,7 @@ pub mod analysis;
 pub mod embedding;
 pub mod fingerprint;
 pub mod moods;
+pub mod readings;
 pub mod recording;
 pub mod similarity;
 pub mod vibe_assets;

@@ -15,6 +15,7 @@ pub mod pca;
 pub mod prng;
 pub mod song_path;
 pub mod umap;
+pub mod zero_shot;
 
 /// The CLAP vector width every probe, head and stored vector has.
 pub const CLAP_DIMS: usize = 512;

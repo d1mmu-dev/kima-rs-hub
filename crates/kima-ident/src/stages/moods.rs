@@ -75,6 +75,25 @@ pub async fn runtime(ctx: &IdentCtx) -> Option<Arc<MoodRuntime>> {
 /// One run of the step: [`MoodBuilder::build`], then the snapshot refresh. Errors are the caller's to log; a failing
 /// mood pass never stops the enrichment cycle (spec 9.1).
 pub async fn run_pass(ctx: &IdentCtx) -> sqlx::Result<MoodPass> {
+    run_pass_with(
+        ctx,
+        &super::embedding::NativeTextEmbedder,
+        &CancellationToken::new(),
+    )
+    .await
+}
+
+/// Readings precede the state build, even when mood heads are unavailable (map valence is independent).
+pub async fn run_pass_with(
+    ctx: &IdentCtx,
+    provider: &dyn super::embedding::TextEmbedder,
+    cancel: &CancellationToken,
+) -> sqlx::Result<MoodPass> {
+    if super::readings::run_with(ctx, provider, cancel).await?
+        == super::readings::ReadingPass::Cancelled
+    {
+        return Ok(MoodPass::Unavailable);
+    }
     match runtime(ctx).await {
         None => Ok(MoodPass::Unavailable),
         Some(rt) => run_with(&ctx.pool, &rt).await,

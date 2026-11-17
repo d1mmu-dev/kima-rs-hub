@@ -139,6 +139,41 @@ async fn cycle(ctx: &IdentCtx) -> CycleReport {
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cancelling_a_waiting_mood_phase_returns_without_late_writes(pool: PgPool) {
+    let (ctx, _dir) = ctx(&pool);
+    library(&pool, 2).await;
+    moods::run_pass(&ctx).await.unwrap();
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM mood_state FOR UPDATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let work = coordinator::run_cycle(&ctx, &cancel);
+    tokio::pin!(work);
+    let waiting = async {
+        loop {
+            let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE 'SELECT id FROM mood_state%')").fetch_one(&pool).await.unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! { _=&mut work=>panic!("phase must wait for its lock"), result=tokio::time::timeout(std::time::Duration::from_secs(5),waiting)=>{result.expect("observed the mood state row lock wait");} }
+    cancel.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_millis(300), &mut work)
+        .await
+        .expect("cancelled mood phase must return while lock stays held");
+    assert!(
+        result.is_err(),
+        "cancelled cycle returns its existing retry contract"
+    );
+    lock.rollback().await.unwrap();
+    assert_eq!(count(&pool, "matching_map").await, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn cycle_runs_mood_then_similarity_after_embedding(pool: PgPool) {
     let (ctx, _dir) = ctx(&pool);
     library(&pool, 4).await;

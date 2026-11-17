@@ -322,10 +322,32 @@ pub type TextEmbeddingFuture<'a> = std::pin::Pin<
 /// verified native text encoder below, never a fabricated embedding or an env override.
 pub trait TextEmbedder: Send + Sync {
     fn embed<'a>(&'a self, ctx: &'a IdentCtx, text: &'a str) -> TextEmbeddingFuture<'a>;
+    /// Explicit checkpoint association for calibrated readings. Search-only providers default to unavailable.
+    fn readings_identity(&self) -> Option<super::readings::PromptIdentity> {
+        None
+    }
 }
 
 pub struct NativeTextEmbedder;
 impl TextEmbedder for NativeTextEmbedder {
+    fn readings_identity(&self) -> Option<super::readings::PromptIdentity> {
+        let sound = kima_db::vibe::MATCHING_SOUND;
+        // M4's current hf_audio/text_model pair is NOT the music checkpoint. Keep this
+        // closed until the verified native audio AND text exports/pipeline are replaced.
+        if OnnxModel::ClapAudio.artifact_id().as_str() != sound.model_id
+            || OnnxModel::ClapAudio.expected_sha256() != sound.model_sha256
+            || PIPELINE_VERSION != sound.pipeline_version
+            || OnnxModel::ClapText.basename() != "music_text.onnx"
+            || OnnxModel::ClapText.expected_sha256() != super::readings::MUSIC_TEXT_SHA256
+        {
+            return None;
+        }
+        Some(super::readings::PromptIdentity {
+            sound,
+            text_sha256: OnnxModel::ClapText.expected_sha256(),
+            tokenizer_sha256: kima_ml::text_tokenizer::descriptor().expected_sha256,
+        })
+    }
     fn embed<'a>(&'a self, ctx: &'a IdentCtx, text: &'a str) -> TextEmbeddingFuture<'a> {
         Box::pin(embed_text(ctx, text))
     }

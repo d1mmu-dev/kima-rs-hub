@@ -538,7 +538,12 @@ async fn mood_phase(
     if !go_on(cancel, stop) {
         return out;
     }
-    match moods::run_pass(ctx).await {
+    let result = tokio::select! { biased;
+        () = cancel.cancelled() => return out,
+        () = stop.cancelled() => return out,
+        result = moods::run_pass_with(ctx, &embedding::NativeTextEmbedder, cancel) => result,
+    };
+    match result {
         Ok(MoodPass::Unavailable) => {
             tracing::debug!("mood heads unavailable; the mood step is off")
         }

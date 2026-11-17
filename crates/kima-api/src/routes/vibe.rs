@@ -10,6 +10,7 @@ use axum::{
 use kima_api_types::vibe::{Computing, MapResponse, MapTrack, MoodShare, MoodSummary, TrackMood};
 use kima_db::vibe::{moods::MoodSnapshot, read};
 use kima_ident::stages::{embedding, moods, vibe_assets};
+use kima_vibe::ecmascript_whitespace;
 use kima_vibe::moods::{SummaryTrack, mood_output, summarise};
 use std::sync::Arc;
 
@@ -116,14 +117,6 @@ fn parse_limit(raw: Option<&serde_json::Value>) -> usize {
     } else {
         n.min(100) as usize
     }
-}
-
-/// ECMAScript WhiteSpace + LineTerminator, not Rust's Unicode White_Space.
-/// In particular JS includes BOM (FEFF) and excludes NEL (0085).
-fn ecmascript_whitespace(c: char) -> bool {
-    matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}'
-        | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
-        | '\u{205f}' | '\u{3000}' | '\u{feff}')
 }
 
 fn failure(message: &'static str, error: impl std::fmt::Debug) -> ApiError {

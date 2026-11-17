@@ -15,18 +15,21 @@ async fn real_music_checkpoint_recall_at_20() {
 
 fn queries(bytes: &[u8]) -> Result<Vec<String>, String> {
     let values: Vec<String> = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-    let unique: HashSet<_> = values.iter().map(|s| s.trim()).collect();
+    let normalized: Vec<_> = values
+        .iter()
+        .map(|s| s.trim_matches(kima_vibe::ecmascript_whitespace).to_owned())
+        .collect();
+    let unique: HashSet<_> = normalized.iter().collect();
     if values.len() != 50
         || unique.len() != 50
-        || values
-            .iter()
-            .any(|s| s.trim().encode_utf16().count() < 2 || s.encode_utf16().count() > 500)
+        || normalized.iter().any(|s| s.encode_utf16().count() < 2)
+        || values.iter().any(|s| s.encode_utf16().count() > 500)
     {
         return Err(
             "need exactly 50 unique, nonempty real text queries (2..500 UTF-16 units)".into(),
         );
     }
-    Ok(values)
+    Ok(normalized)
 }
 
 #[test]
@@ -38,6 +41,22 @@ fn synthetic_harness_rejects_wrong_query_count_and_duplicates() {
         queries(&serde_json::to_vec(&values).unwrap()).unwrap(),
         values
     );
+}
+
+#[test]
+fn synthetic_queries_normalize_before_uniqueness_and_encoding() {
+    let mut values: Vec<_> = (0..50)
+        .map(|i| format!("\u{feff} query {i} \u{feff}"))
+        .collect();
+    let normalized = queries(&serde_json::to_vec(&values).unwrap()).unwrap();
+    assert_eq!(normalized[0], "query 0");
+    values[1] = "query 0".into();
+    assert!(queries(&serde_json::to_vec(&values).unwrap()).is_err());
+    values[1] = "\u{feff}x\u{feff}".into();
+    assert!(queries(&serde_json::to_vec(&values).unwrap()).is_err());
+    values[1] = "\u{0085}x\u{0085}".into();
+    let normalized = queries(&serde_json::to_vec(&values).unwrap()).unwrap();
+    assert_eq!(normalized[1], "\u{0085}x\u{0085}");
 }
 
 fn recall_at_20(exact: &[uuid::Uuid], ann: &[uuid::Uuid]) -> Result<f64, String> {

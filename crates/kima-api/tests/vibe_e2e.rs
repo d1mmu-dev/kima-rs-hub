@@ -6,9 +6,10 @@
 //!
 //! IMPLEMENTED, NOT RUN. It needs the M4 music-checkpoint swap (the native encoder must be
 //! `MATCHING_SOUND`, not today's `hf_audio`), private SHA-256-pinned vibe assets and an
-//! explicitly authorized isolated database. It never skips: every missing prerequisite panics
-//! before any database connection. No downloads, no owner library. See
-//! `docs/testing/vibe-e2e.md` for the exact command.
+//! explicitly authorized isolated database. It never skips: every missing prerequisite (including
+//! the SHA-256 of every CLAP model file and the snapshot/reflink setup) panics before any database
+//! connection. No downloads, no owner library. The throwaway database it creates is dropped on
+//! success and on panic, and only that database. See `docs/testing/vibe-e2e.md` for the command.
 //!
 //! Required environment:
 //! - `KIMA_CLAP_MODEL_DIR`: absolute directory with the verified native music audio/text export.
@@ -16,6 +17,7 @@
 //! - `ORT_DYLIB_PATH`: trusted ONNX Runtime library.
 //! - `DATABASE_URL` (127.0.0.1, not the development port) and `PGDATABASE` naming the same
 //!   empty database, plus `KIMA_VIBE_E2E_AUTHORIZED_DATABASE` equal to it (explicit consent).
+//! - `KIMA_NET_DENY_REAL=1`: the harness refuses to run with the real network reachable.
 //!
 //! No `#[sqlx::test]`: that harness would create databases before any guard could run.
 
@@ -58,6 +60,10 @@ fn absolute_dir(lookup: &dyn Fn(&str) -> Option<String>, key: &str) -> PathBuf {
 fn prerequisites(lookup: &dyn Fn(&str) -> Option<String>) -> Prerequisites {
     let model_dir = absolute_dir(lookup, "KIMA_CLAP_MODEL_DIR");
     let asset_dir = absolute_dir(lookup, "KIMA_VIBE_ASSET_DIR");
+    assert!(
+        lookup("KIMA_NET_DENY_REAL").is_some_and(|v| v.trim() == "1"),
+        "SAFETY REFUSAL: KIMA_NET_DENY_REAL=1 must be set"
+    );
     let ort = lookup("ORT_DYLIB_PATH").expect("ORT_DYLIB_PATH must be set");
     assert!(Path::new(&ort).is_file(), "ORT_DYLIB_PATH must name a file");
     let url = lookup("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -71,6 +77,7 @@ fn prerequisites(lookup: &dyn Fn(&str) -> Option<String>) -> Prerequisites {
         vibe_assets::native_audio_is_matching_sound(),
         "the native audio encoder is not the matching music checkpoint (hf_audio is forbidden)"
     );
+    verify_model_dir(&model_dir);
     let assets = vibe_assets::load(Some(&asset_dir), &vibe_assets::VibePins::compiled());
     assert!(
         assets.probe.is_some() && assets.heads.is_some(),
@@ -85,8 +92,51 @@ fn prerequisites(lookup: &dyn Fn(&str) -> Option<String>) -> Prerequisites {
     }
 }
 
-/// Verifies the server's own identity, then creates and migrates a throwaway database.
-async fn isolated_db(pre: &Prerequisites) -> (PgPool, PgPool, String) {
+/// Every file the native audio and text capabilities load must verify against its compiled
+/// SHA-256 pin, before any database exists.
+fn verify_model_dir(model_dir: &Path) {
+    use kima_ml::onnx::OnnxModel;
+    for descriptor in [
+        OnnxModel::ClapAudio.descriptor(),
+        OnnxModel::ClapText.descriptor(),
+        kima_ml::text_tokenizer::descriptor(),
+    ] {
+        if let Err(error) = kima_ml::verify_artifact(model_dir, &descriptor) {
+            panic!(
+                "KIMA_CLAP_MODEL_DIR: {} does not verify against its pin: {error:?}",
+                descriptor.basename
+            );
+        }
+    }
+}
+
+/// Counts every schema object a fresh database would not have: relations, sequences, views
+/// and types in any non-system schema (including `public`), extra schemas, functions and
+/// extensions other than the built-in `plpgsql`.
+const FOREIGN_OBJECTS: &str = "
+    WITH user_ns AS (
+        SELECT oid, nspname FROM pg_namespace
+        WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+          AND nspname NOT LIKE 'pg\\_toast%' AND nspname NOT LIKE 'pg\\_temp\\_%'
+    )
+    SELECT (SELECT count(*) FROM pg_class WHERE relnamespace IN (SELECT oid FROM user_ns))
+         + (SELECT count(*) FROM pg_type WHERE typnamespace IN (SELECT oid FROM user_ns))
+         + (SELECT count(*) FROM pg_proc WHERE pronamespace IN (SELECT oid FROM user_ns))
+         + (SELECT count(*) FROM user_ns WHERE nspname <> 'public')
+         + (SELECT count(*) FROM pg_extension WHERE extname <> 'plpgsql')";
+
+const OWNED_PREFIX: &str = "kima_vibe_e2e_";
+
+/// The throwaway database this run created, marked with its own run comment.
+#[derive(Clone)]
+struct OwnedDatabase {
+    name: String,
+    marker: String,
+}
+
+/// Verifies the server's own identity and that the authorized database is empty, then creates
+/// a uniquely named throwaway database. Returns the admin pool and what this run owns.
+async fn create_owned_db(pre: &Prerequisites) -> (PgPool, PgConnectOptions, OwnedDatabase) {
     let opts = PgConnectOptions::from_str(&pre.url).expect("DATABASE_URL must parse");
     assert_eq!(opts.get_host(), "127.0.0.1", "SAFETY REFUSAL: host");
     assert_ne!(
@@ -111,25 +161,84 @@ async fn isolated_db(pre: &Prerequisites) -> (PgPool, PgPool, String) {
         .await
         .unwrap();
     assert_eq!(current, pre.database, "SAFETY REFUSAL: connected database");
-    let has_schema: bool = sqlx::query_scalar(
-        "SELECT to_regclass('public.tracks') IS NOT NULL OR to_regclass('public._sqlx_migrations') IS NOT NULL",
-    )
-    .fetch_one(&admin)
-    .await
-    .unwrap();
-    assert!(!has_schema, "SAFETY REFUSAL: target already holds a schema");
-    let name = format!("kima_vibe_e2e_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+    let foreign: i64 = sqlx::query_scalar(FOREIGN_OBJECTS)
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(
+        foreign, 0,
+        "SAFETY REFUSAL: the authorized database is not empty"
+    );
+    let run = Uuid::new_v4().simple().to_string();
+    let owned = OwnedDatabase {
+        name: format!("{OWNED_PREFIX}{run}"),
+        marker: format!("kima vibe_e2e run {run}"),
+    };
+    sqlx::query(&format!("CREATE DATABASE \"{}\"", owned.name))
         .execute(&admin)
         .await
-        .unwrap();
-    let pool = PgPoolOptions::new()
-        .max_connections(6)
-        .connect_with(opts.database(&name))
-        .await
-        .unwrap();
-    kima_db::MIGRATOR.run(&pool).await.unwrap();
-    (pool, admin, name)
+        .expect("create the throwaway database");
+    (admin, opts, owned)
+}
+
+/// Marks the throwaway database right after creation, so cleanup can prove it is ours.
+async fn mark_owned(admin: &PgPool, owned: &OwnedDatabase) {
+    sqlx::query(&format!(
+        "COMMENT ON DATABASE \"{}\" IS '{}'",
+        owned.name, owned.marker
+    ))
+    .execute(admin)
+    .await
+    .expect("mark the throwaway database");
+}
+
+/// Drops the throwaway database, and only it: the name must carry this harness's prefix and
+/// the database's comment must still be this run's marker (an unmarked database is ours only
+/// if marking itself failed, so it is dropped only when it has no comment at all).
+async fn drop_owned(admin: &PgPool, owned: &OwnedDatabase) {
+    assert!(owned.name.starts_with(OWNED_PREFIX));
+    let comment: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = $1",
+    )
+    .bind(&owned.name)
+    .fetch_optional(admin)
+    .await
+    .expect("look up the throwaway database");
+    match comment {
+        None => {}
+        Some(c) if c.is_none() || c.as_deref() == Some(owned.marker.as_str()) => {
+            sqlx::query(&format!("DROP DATABASE \"{}\" WITH (FORCE)", owned.name))
+                .execute(admin)
+                .await
+                .expect("drop the throwaway database");
+        }
+        Some(other) => panic!(
+            "SAFETY REFUSAL: {} carries a foreign marker {other:?}; left in place",
+            owned.name
+        ),
+    }
+}
+
+/// Runs `body`, catching a panic raised while it is polled, always runs `cleanup`, then
+/// re-raises the body's panic (the router's test futures are not `Send`, so no task spawn).
+async fn run_then_clean_up<B, C>(body: B, cleanup: C)
+where
+    B: std::future::Future<Output = ()>,
+    C: std::future::Future<Output = ()>,
+{
+    let mut body = std::pin::pin!(body);
+    let outcome = std::future::poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Ok(std::task::Poll::Ready(())) => std::task::Poll::Ready(Ok(())),
+            Err(payload) => std::task::Poll::Ready(Err(payload)),
+        }
+    })
+    .await;
+    cleanup.await;
+    if let Err(payload) = outcome {
+        std::panic::resume_unwind(payload);
+    }
 }
 
 /// Deterministic xorshift for the noise tracks.
@@ -237,6 +346,7 @@ fn prerequisites_fail_closed_when_environment_is_unset_or_checkpoint_is_wrong() 
         "ORT_DYLIB_PATH" => Some(ort.clone()),
         "DATABASE_URL" => Some("postgres://u@127.0.0.1:1/isolated".into()),
         "PGDATABASE" | "KIMA_VIBE_E2E_AUTHORIZED_DATABASE" => Some("isolated".into()),
+        "KIMA_NET_DENY_REAL" => Some("1".into()),
         _ => None,
     };
     let refusal = std::panic::catch_unwind(|| prerequisites(&full)).unwrap_err();
@@ -248,17 +358,73 @@ fn prerequisites_fail_closed_when_environment_is_unset_or_checkpoint_is_wrong() 
     assert!(message.contains("hf_audio is forbidden"), "{message}");
 }
 
+#[test]
+fn prerequisites_refuse_without_the_network_deny_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_str().unwrap().to_owned();
+    for deny in [None, Some("0"), Some("")] {
+        let root = root.clone();
+        let env = move |key: &str| match key {
+            "KIMA_CLAP_MODEL_DIR" | "KIMA_VIBE_ASSET_DIR" => Some(root.clone()),
+            "KIMA_NET_DENY_REAL" => deny.map(str::to_owned),
+            _ => None,
+        };
+        let refusal = std::panic::catch_unwind(|| prerequisites(&env)).unwrap_err();
+        let message = refusal
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| refusal.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap();
+        assert!(
+            message.contains("KIMA_NET_DENY_REAL"),
+            "{deny:?}: {message}"
+        );
+    }
+}
+
+#[test]
+fn model_dir_without_pinned_files_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let refusal = std::panic::catch_unwind(|| verify_model_dir(dir.path())).unwrap_err();
+    let message = refusal.downcast_ref::<String>().cloned().unwrap();
+    assert!(
+        message.contains("does not verify against its pin"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_runs_when_the_body_panics_and_the_panic_is_kept() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let cleaned = Arc::new(AtomicBool::new(false));
+    let flag = cleaned.clone();
+    let outcome = tokio::spawn(run_then_clean_up(
+        async { panic!("body failed") },
+        async move { flag.store(true, Ordering::SeqCst) },
+    ))
+    .await;
+    assert!(
+        cleaned.load(Ordering::SeqCst),
+        "cleanup ran after the panic"
+    );
+    let payload = outcome.unwrap_err().into_panic();
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&"body failed"));
+    let cleaned = Arc::new(AtomicBool::new(false));
+    let flag = cleaned.clone();
+    run_then_clean_up(async {}, async move { flag.store(true, Ordering::SeqCst) }).await;
+    assert!(cleaned.load(Ordering::SeqCst), "cleanup ran after success");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the M4 native music checkpoint, pinned private vibe assets and an authorized isolated database; NOT RUN"]
 async fn real_music_clap_vibe_end_to_end_on_thirty_generated_tracks() {
     let pre = prerequisites(&|key| std::env::var(key).ok());
-    let (pool, admin, name) = isolated_db(&pre).await;
+    // Library, snapshot store and its reflink/mount check are settled before any database exists.
     let library = tempfile::tempdir().unwrap();
     let root = library.path().canonicalize().unwrap();
-    let mut ids = Vec::new();
     for n in 0..TRACKS {
         write_wav(&root.join(format!("synthetic-{n:02}.wav")), n);
-        ids.push(insert_track(&pool, n).await);
     }
     let snapshots = root.join(".kima-snapshots");
     {
@@ -266,16 +432,52 @@ async fn real_music_clap_vibe_end_to_end_on_thirty_generated_tracks() {
         std::fs::create_dir_all(&snapshots).unwrap();
         std::fs::set_permissions(&snapshots, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let state = common::state(pool.clone()).with_library_root(root.clone());
-    let mut ctx = state.ident_ctx();
-    ctx.config.fingerprinting = false;
-    ctx.config.vibe.asset_dir = Some(pre.asset_dir.clone());
-    ctx.config.embedding = kima_ident::EmbeddingConfig {
+    let mut embedding_config = kima_ident::EmbeddingConfig {
         model_dir: Some(pre.model_dir.clone()),
         snapshot_dir: Some(snapshots),
         ..Default::default()
     };
-    embedding::check_snapshot_setup(&mut ctx.config.embedding, &root).unwrap();
+    embedding::check_snapshot_setup(&mut embedding_config, &root)
+        .expect("snapshot store must support reflinks on the library's filesystem");
+
+    let (admin, opts, owned) = create_owned_db(&pre).await;
+    let target = opts.database(&owned.name);
+    let asset_dir = pre.asset_dir.clone();
+    let (marker_admin, marker_owned) = (admin.clone(), owned.clone());
+    run_then_clean_up(
+        async move {
+            mark_owned(&marker_admin, &marker_owned).await;
+            run_end_to_end(target, asset_dir, embedding_config, root).await;
+            drop(library);
+        },
+        async {
+            drop_owned(&admin, &owned).await;
+        },
+    )
+    .await;
+}
+
+async fn run_end_to_end(
+    target: PgConnectOptions,
+    asset_dir: PathBuf,
+    embedding_config: kima_ident::EmbeddingConfig,
+    root: PathBuf,
+) {
+    let pool = PgPoolOptions::new()
+        .max_connections(6)
+        .connect_with(target)
+        .await
+        .expect("connect to the throwaway database");
+    kima_db::MIGRATOR.run(&pool).await.unwrap();
+    let mut ids = Vec::new();
+    for n in 0..TRACKS {
+        ids.push(insert_track(&pool, n).await);
+    }
+    let state = common::state(pool.clone()).with_library_root(root);
+    let mut ctx = state.ident_ctx();
+    ctx.config.fingerprinting = false;
+    ctx.config.vibe.asset_dir = Some(asset_dir);
+    ctx.config.embedding = embedding_config;
     embedding::initialize(&ctx).await.unwrap();
     let assets = vibe_assets::initialize(&ctx).await.unwrap();
     assert!(assets.probe.is_some() && assets.heads.is_some());
@@ -357,8 +559,4 @@ async fn real_music_clap_vibe_end_to_end_on_thirty_generated_tracks() {
         assert_eq!(res.status_code().as_u16(), 200, "{path}: {data}");
     }
     pool.close().await;
-    sqlx::query(&format!("DROP DATABASE \"{name}\" WITH (FORCE)"))
-        .execute(&admin)
-        .await
-        .unwrap();
 }

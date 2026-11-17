@@ -8,3 +8,4 @@
 /frontend/playwright-report
 /.idea
 /crates/kima-web/build
+__pycache__/

@@ -24,6 +24,38 @@ struct Tokenizer {
     revision: String,
     files: std::collections::BTreeMap<String, String>,
 }
+/// The roberta-base tokenizer the pinned upstream image bakes into its offline cache: revision
+/// and per-file SHA-256 exactly as `services/audio-analyzer-clap/Dockerfile` at c7527577
+/// declares them (the revision is also `kima_ml::text_tokenizer`'s pinned revision).
+const TOKENIZER_REVISION: &str = "e2da8e2f811d1448a5b465c236feacd80ffbac7b";
+const TOKENIZER_FILES: [(&str, &str); 4] = [
+    (
+        "vocab.json",
+        "9e7f63c2d15d666b52e21d250d2e513b87c9b713cfa6987a82ed89e5e6e50655",
+    ),
+    (
+        "merges.txt",
+        "1ce1664773c50f3e0cc8842619a93edc4624525b728b188a9e0be33b7726adc5",
+    ),
+    (
+        "tokenizer.json",
+        "847bbeab6174d66a88898f729d52fa8d355fafe1bea101cf960dd404581df70e",
+    ),
+    (
+        "tokenizer_config.json",
+        "994f46754c5bf4014f1aa92d34b1374319c3a6b3f702105cd5b742beaecd18ce",
+    ),
+];
+fn pinned_tokenizer() -> Tokenizer {
+    Tokenizer {
+        repository: "roberta-base".into(),
+        revision: TOKENIZER_REVISION.into(),
+        files: TOKENIZER_FILES
+            .iter()
+            .map(|(name, sha)| ((*name).to_owned(), (*sha).to_owned()))
+            .collect(),
+    }
+}
 fn is_hex(s: &str, len: usize) -> bool {
     s.len() == len
         && s.bytes()
@@ -35,6 +67,11 @@ fn check_tokenizer(recorded: &Tokenizer, trusted: &Tokenizer) {
     assert!(!trusted.files.is_empty(), "trusted manifest lists files");
     assert!(trusted.files.values().all(|sha| is_hex(sha, 64)));
     assert!(trusted.files.contains_key("tokenizer.json"));
+    assert_eq!(
+        trusted,
+        &pinned_tokenizer(),
+        "trusted tokenizer manifest differs from the pinned upstream revision and file SHA-256"
+    );
     assert_eq!(
         recorded, trusted,
         "reference tokenizer identity differs from the trusted manifest"
@@ -121,26 +158,38 @@ fn real_reference_refuses_empty_or_synthetic_substitution() {
 }
 
 #[test]
-fn tokenizer_identity_must_equal_the_trusted_manifest() {
-    // Shape-only placeholders: real values come from the externally supplied manifest.
-    let trusted = Tokenizer {
-        repository: "roberta-base".into(),
-        revision: "1".repeat(40),
-        files: [
-            ("tokenizer.json".to_owned(), "2".repeat(64)),
-            ("vocab.json".to_owned(), "3".repeat(64)),
-        ]
-        .into(),
-    };
+fn tokenizer_identity_must_equal_the_trusted_manifest_and_the_compiled_pins() {
+    let trusted = pinned_tokenizer();
     check_tokenizer(&trusted, &trusted);
+    // kima-ml loads exactly the pinned tokenizer.json.
+    assert_eq!(
+        trusted.files["tokenizer.json"],
+        hex::encode(kima_ml::text_tokenizer::descriptor().expected_sha256)
+    );
     let mut revision = trusted.clone();
     revision.revision = "4".repeat(40);
     let mut file = trusted.clone();
     file.files.insert("vocab.json".into(), "5".repeat(64));
     let mut missing = trusted.clone();
     missing.files.remove("vocab.json");
-    for recorded in [revision, file, missing] {
+    for recorded in [revision.clone(), file.clone(), missing.clone()] {
         assert!(std::panic::catch_unwind(|| check_tokenizer(&recorded, &trusted)).is_err());
+    }
+    // A manifest that agrees with the reference but not with the compiled pins is refused:
+    // the external manifest is not trusted on its own.
+    let mut extra = trusted.clone();
+    extra
+        .files
+        .insert("special_tokens_map.json".into(), "6".repeat(64));
+    let mut config = trusted.clone();
+    config
+        .files
+        .insert("tokenizer_config.json".into(), "7".repeat(64));
+    for manifest in [revision, file, missing, extra, config] {
+        assert!(
+            std::panic::catch_unwind(|| check_tokenizer(&manifest, &manifest)).is_err(),
+            "{manifest:?}"
+        );
     }
     let mut unpinned = trusted.clone();
     unpinned.revision = "main".into();

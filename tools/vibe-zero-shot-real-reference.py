@@ -42,6 +42,14 @@ HEX40 = re.compile(r'[0-9a-f]{40}')
 HEX64 = re.compile(r'[0-9a-f]{64}')
 BASENAME = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*')
 
+class ReferenceRefusal(Exception):
+    """A provenance or input check failed. Raised explicitly (never `assert`), so `python -O`
+    cannot strip the checks."""
+
+def require(condition, message):
+    if not condition:
+        raise ReferenceRefusal(message)
+
 def read_small(path, limit):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     with os.fdopen(fd, 'rb') as f:
@@ -58,20 +66,22 @@ def upstream_tokenizer_pins(dockerfile):
     revisions = set(re.findall(r'huggingface\.co/roberta-base/resolve/([0-9a-f]{40})', dockerfile))
     files = {name: sha for sha, name in
              re.findall(r"echo '([0-9a-f]{64})  '\"\$RS\"'/([A-Za-z0-9_.-]+)'", dockerfile)}
-    assert len(revisions) == 1 and files, 'pinned Dockerfile tokenizer pins not found'
+    require(len(revisions) == 1 and files, 'pinned Dockerfile tokenizer pins not found')
     return dict(repository=TOKENIZER_REPOSITORY, revision=revisions.pop(), files=files)
 
 def load_tokenizer_manifest(path):
     manifest = json.loads(read_small(path, 1_000_000))
-    assert isinstance(manifest, dict) and set(manifest) == {'repository', 'revision', 'files'}, \
-        'tokenizer manifest must have exactly repository, revision, files'
-    assert manifest['repository'] == TOKENIZER_REPOSITORY
-    assert isinstance(manifest['revision'], str) and HEX40.fullmatch(manifest['revision'])
+    require(isinstance(manifest, dict) and set(manifest) == {'repository', 'revision', 'files'},
+            'tokenizer manifest must have exactly repository, revision, files')
+    require(manifest['repository'] == TOKENIZER_REPOSITORY, 'tokenizer repository')
+    require(isinstance(manifest['revision'], str) and HEX40.fullmatch(manifest['revision']),
+            'tokenizer revision must be 40 lowercase hex digits')
     files = manifest['files']
-    assert isinstance(files, dict) and files, 'tokenizer manifest lists no files'
+    require(isinstance(files, dict) and files, 'tokenizer manifest lists no files')
     for name, sha in files.items():
-        assert BASENAME.fullmatch(name) and name not in ('.', '..'), name
-        assert isinstance(sha, str) and HEX64.fullmatch(sha), name
+        require(isinstance(name, str) and BASENAME.fullmatch(name) and name not in ('.', '..'),
+                f'tokenizer file name {name!r}')
+        require(isinstance(sha, str) and HEX64.fullmatch(sha), f'tokenizer {name} SHA-256')
     return manifest
 
 def stage_tokenizer(manifest, source_dir, cache_root):
@@ -85,7 +95,7 @@ def stage_tokenizer(manifest, source_dir, cache_root):
     (repo / 'refs' / 'main').write_text(manifest['revision'])
     for name, expected in sorted(manifest['files'].items()):
         data = read_small(source / name, 64_000_000)
-        assert hashlib.sha256(data).hexdigest() == expected, f'tokenizer {name} SHA-256 mismatch'
+        require(hashlib.sha256(data).hexdigest() == expected, f'tokenizer {name} SHA-256 mismatch')
         fd = os.open(snapshot / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'wb') as f:
             f.write(data)
@@ -93,9 +103,10 @@ def stage_tokenizer(manifest, source_dir, cache_root):
 
 def verify_staged(manifest, home):
     snapshot = home / 'hub' / f'models--{TOKENIZER_REPOSITORY}' / 'snapshots' / manifest['revision']
-    assert sorted(os.listdir(snapshot)) == sorted(manifest['files'])
+    require(sorted(os.listdir(snapshot)) == sorted(manifest['files']), 'staged tokenizer files changed')
     for name, expected in manifest['files'].items():
-        assert hashlib.sha256(read_small(snapshot / name, 64_000_000)).hexdigest() == expected
+        require(hashlib.sha256(read_small(snapshot / name, 64_000_000)).hexdigest() == expected,
+                f'staged tokenizer {name} changed')
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -110,19 +121,20 @@ def main():
     args = p.parse_args()
     model = Path(args.model_dir).resolve(strict=True)
     for name, expected in PINS.items():
-        assert digest(model / name, 2_000_000_000) == expected, name
+        require(digest(model / name, 2_000_000_000) == expected, f'{name} SHA-256 mismatch')
     tracks = json.loads(Path(args.audio_list).read_text())
-    assert len(tracks) == 20 and len({x['path'] for x in tracks}) == 20
-    assert all(x['license'].strip() for x in tracks)
+    require(len(tracks) == 20 and len({x['path'] for x in tracks}) == 20,
+            'audio list must name exactly 20 distinct files')
+    require(all(x['license'].strip() for x in tracks), 'every track needs a licence')
     out = Path(args.output)
-    assert not out.exists(), 'refusing to overwrite a private reference'
+    require(not out.exists(), 'refusing to overwrite a private reference')
     def git(*cmd):
         return subprocess.check_output(['git', '-C', args.upstream, *cmd])
     prefix = 'services/audio-analyzer-clap/'
     source = git('show', f'{PIN}:{prefix}analyzer.py')
     tokenizer = load_tokenizer_manifest(args.tokenizer_manifest)
     expected_tokenizer = upstream_tokenizer_pins(git('show', f'{PIN}:{prefix}Dockerfile').decode())
-    assert tokenizer == expected_tokenizer, 'tokenizer manifest differs from the pinned upstream image'
+    require(tokenizer == expected_tokenizer, 'tokenizer manifest differs from the pinned upstream image')
     for key in ('TRANSFORMERS_CACHE', 'HF_HUB_CACHE', 'HUGGINGFACE_HUB_CACHE', 'HF_ENDPOINT'):
         os.environ.pop(key, None)
     # Use the exact pinned Python implementation even when the source clone is checked out elsewhere.
@@ -145,9 +157,9 @@ def main():
             path = Path(item['path']).resolve(strict=True)
             sha = digest(path, 2_000_000_000)
             vector = analyzer.get_audio_embedding(str(path))
-            assert vector is not None and len(vector) == 512
+            require(vector is not None and len(vector) == 512, 'analyzer returned no 512-d vector')
             valence, arousal = analyzer.detect_emotion(vector)
-            assert digest(path, 2_000_000_000) == sha, 'audio changed during inference'
+            require(digest(path, 2_000_000_000) == sha, 'audio changed during inference')
             results.append(dict(path=str(path), sha256=sha, license=item['license'],
                 audio_vector=vector.tolist(), expected=[analyzer.detect_vocals(vector),
                 analyzer.detect_acousticness(vector), valence, arousal]))

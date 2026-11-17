@@ -294,8 +294,9 @@ async fn degradation_hf_audio_library_has_no_vibe_engine(pool: PgPool) {
     assert_eq!(features["vibeEmbeddings"], false);
 }
 
-/// Missing or unprovisioned vibe assets never stop the server: the same initialization `main`
-/// runs succeeds, reports the vibe capabilities unavailable and the API answers.
+/// Missing or unprovisioned vibe assets never stop the server: the `vibe_assets::initialize`
+/// call `kima-server`'s `main` makes (run in-process here, not the binary) succeeds, reports the
+/// vibe capabilities unavailable and the API answers.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn server_boots_without_vibe_assets(pool: PgPool) {
     let empty = tempfile::tempdir().unwrap();

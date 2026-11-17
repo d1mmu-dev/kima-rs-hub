@@ -46,7 +46,10 @@ After separate authorization and per-artifact rights approval:
    offline Hugging Face cache under the temporary directory (`HF_HOME`/`HF_HUB_CACHE`, offline
    flags set before the analyzer imports transformers), re-verifies that cache after inference
    and records the identity as `tokenizer` in the reference output. `from_pretrained('roberta-base')`
-   therefore never resolves by name against a network or an ambient cache.
+   therefore never resolves by name against a network or an ambient cache. Every check raises
+   an explicit error (no `assert`), so `python -O` cannot strip it;
+   `tools/vibe-zero-shot-real-reference-selftest.py --upstream <clone>` exercises the refusals
+   offline on synthetic files and must pass both plainly and under `python3 -O`.
 2. Prepare a private JSON audio-list of **20 distinct real recordings** as objects with `path`
    and nonempty `license`. Use explicitly authorized files, never a scan of the owner's library.
 3. Run the reference generator explicitly:
@@ -76,8 +79,10 @@ After separate authorization and per-artifact rights approval:
    ```
 
 The harness fails, rather than skips/passes, on missing input, unsupported native checkpoint,
-wrong pin/source, a recorded tokenizer identity that differs from the trusted external manifest
-(or a manifest without a 40-hex revision and SHA-256 per file), a native text tokenizer whose
+wrong pin/source, a recorded tokenizer identity that differs from the trusted external manifest,
+a trusted manifest that differs from the revision `e2da8e2f…` and the `vocab.json`,
+`merges.txt`, `tokenizer.json` and `tokenizer_config.json` SHA-256 values compiled into the test
+(copied from the pinned upstream Dockerfile), a native text tokenizer whose
 pinned SHA-256 differs from the manifest's `tokenizer.json`, other than 20 distinct audio hashes, unlicensed input, malformed/non-unit
 reference vectors, changed audio or native inference failure. It embeds the actual 24 prompts
 with the verified native text provider and compares all four readings to the actual Python

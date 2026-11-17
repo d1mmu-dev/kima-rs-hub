@@ -184,8 +184,20 @@ pub fn native_audio_is_matching_sound() -> bool {
 
 /// The native audio capability is available and embeds into the matching vector space.
 pub fn matching_audio_available(ctx: &IdentCtx) -> bool {
-    native_audio_is_matching_sound()
-        && super::embedding::cached_status(ctx).is_some_and(|s| {
+    matching_audio_given(
+        native_audio_is_matching_sound(),
+        super::embedding::cached_status(ctx).as_ref(),
+    )
+}
+
+/// [`matching_audio_available`] with the identity check and the cached capability report
+/// supplied, so both halves of the predicate are unit-testable.
+fn matching_audio_given(
+    identity_matches: bool,
+    report: Option<&CapabilityEvaluationReport>,
+) -> bool {
+    identity_matches
+        && report.is_some_and(|s| {
             s.capabilities.get(&Capability::ClapAudioEmbedding)
                 == Some(&CapabilityStatus::Available)
         })
@@ -250,4 +262,35 @@ pub fn install(ctx: &IdentCtx, assets: VibeAssets) -> Arc<VibeAssets> {
         old.map.cancel();
     }
     assets
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(audio: CapabilityStatus) -> CapabilityEvaluationReport {
+        CapabilityEvaluationReport {
+            capabilities: BTreeMap::from([(Capability::ClapAudioEmbedding, audio)]),
+        }
+    }
+
+    /// The map's 202 layout-pending check (`routes/vibe.rs`) relies on this: an available
+    /// encoder counts only when it embeds into the matching music space.
+    #[test]
+    fn matching_audio_needs_the_matching_identity_and_an_available_encoder() {
+        let available = report(CapabilityStatus::Available);
+        assert!(matching_audio_given(true, Some(&available)));
+        // Today's compiled encoder is hf_audio: available, but the wrong identity.
+        assert!(!native_audio_is_matching_sound());
+        assert!(!matching_audio_given(
+            native_audio_is_matching_sound(),
+            Some(&available)
+        ));
+        assert!(!matching_audio_given(false, Some(&available)));
+        assert!(!matching_audio_given(true, None));
+        let unavailable = CapabilityEvaluationReport {
+            capabilities: BTreeMap::new(),
+        };
+        assert!(!matching_audio_given(true, Some(&unavailable)));
+    }
 }

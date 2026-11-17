@@ -14,9 +14,12 @@ answers from every route. It lives in `kima-api` (not `kima-ident`) because it d
 
 ## Fail-closed prerequisites
 
-Checked **before any database connection**; any gap panics (never skips):
+Checked **before any database connection or creation**; any gap panics (never skips):
 
-- `KIMA_CLAP_MODEL_DIR`: absolute directory with the verified native music audio/text export.
+- `KIMA_CLAP_MODEL_DIR`: absolute directory with the native music audio/text export; the audio
+  model, text model and `tokenizer.json` must each verify against their compiled SHA-256 pins.
+- The snapshot store under the generated library must pass the reflink/mount check.
+- `KIMA_NET_DENY_REAL=1` (the harness refuses otherwise).
 - `KIMA_VIBE_ASSET_DIR`: absolute directory whose `feel_probe.json`/`mood_heads.json` verify
   against the compiled SHA-256 pins (none are compiled today, so this refuses).
 - `ORT_DYLIB_PATH`: trusted ONNX Runtime library.
@@ -24,11 +27,17 @@ Checked **before any database connection**; any gap panics (never skips):
   the harness refuses with "hf_audio is forbidden". There is no synthetic or fallback path.
 - `DATABASE_URL` on `127.0.0.1` (not the development port), `PGDATABASE` naming the same database,
   and `KIMA_VIBE_E2E_AUTHORIZED_DATABASE` equal to it as explicit consent. The connected
-  `current_database()` must match and must hold no schema; only then a uniquely named throwaway
-  database is created, migrated and dropped at the end. No `#[sqlx::test]` harness is used.
+  `current_database()` must match and must be empty (no relation, type or function in any
+  non-system schema including `public`, no extra schema, no extension besides `plpgsql`); only
+  then a uniquely named `kima_vibe_e2e_<uuid>` database is created and marked with a run comment.
+  It is migrated and used, then dropped on success **and** on panic; cleanup drops only that
+  name and only while it carries this run's comment (or none). No `#[sqlx::test]` harness is used.
 
 The non-ignored `prerequisites_fail_closed_when_environment_is_unset_or_checkpoint_is_wrong`
-proves the empty environment and the current `hf_audio` checkpoint both refuse.
+proves the empty environment and the current `hf_audio` checkpoint both refuse;
+`prerequisites_refuse_without_the_network_deny_switch`, `model_dir_without_pinned_files_refuses`
+and `cleanup_runs_when_the_body_panics_and_the_panic_is_kept` cover the deny switch, the model
+pins and the cleanup path.
 
 ## Command (only after the M4 music-checkpoint swap, asset pins and authorization)
 

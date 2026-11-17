@@ -8,6 +8,7 @@ pub mod map;
 pub mod moods;
 pub mod path;
 pub mod rank;
+pub mod read;
 pub mod state;
 
 pub use eligible::{ELIGIBLE, MATCHING_SOUND, SoundIdentity};

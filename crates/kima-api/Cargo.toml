@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+flate2 = "1"
+sha2.workspace = true
 md-5.workspace = true
 hex.workspace = true
 form_urlencoded.workspace = true
@@ -21,6 +23,8 @@ kima-jobs.workspace = true
 kima-library.workspace = true
 kima-net.workspace = true
 kima-podcast.workspace = true
+kima-vibe.workspace = true
+kima-ml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

@@ -24,7 +24,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M9 | kima-web część 1 (logowanie, biblioteka, player, playlisty, ustawienia, SSR) | ✅ (wygląd 1:1 otwarty) |
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
 | **M-PROF** | **Profile w koncie (Netflix)** | ✅ na `main`; ręczne logowanie właściciela odłożone do wdrożenia |
-| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–12 gotowe; integracja z `main` lokalnie zweryfikowana; Task 13 nierozpoczęty |
+| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–13 zaimplementowane lokalnie; Task 13 czeka na niezależny przegląd |
 | M5b | Mixy, radio, „co nowego” | ⏳ ~1 tydz. |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
 | M6b | Audiobooki (Audiobookshelf) | ⏳ ~1 tydz., po M7 |
@@ -52,7 +52,9 @@ Ręczne sprawdzenie istniejącego konta właściciela odłożone do wdrożenia (
 
 ## M5 — punkt integracyjny
 
-Lokalna gałąź zachowuje Task 0–12 oraz profile i podcasty z `main`. Dwie kolejności aktualizacji migracji 0040/0060, świeża baza i rollback profili: zielone; oryginalne sumy wszystkich 40 migracji bez zmian. Wybrane 17 zestawów DB/ident/API: **247 PASS, 0 FAIL, 2 ignored**. Workspace check i stable Clippy (także pg-publish), SQLx prepare check, fmt, pin i klucze profili: PASS. To nie pełny odbiór M5: niezależny przegląd, pełny runtime workspace, CI i prawdziwy model pozostają otwarte. Task 13 nierozpoczęty; bez push i zmian uruchomionej aplikacji.
+Lokalna gałąź zachowuje Task 0–12 oraz profile i podcasty z `main`. Dwie kolejności aktualizacji migracji 0040/0060, świeża baza i rollback profili: zielone; oryginalne sumy wszystkich 40 migracji bez zmian. Wybrane 17 zestawów DB/ident/API: **247 PASS, 0 FAIL, 2 ignored**. Workspace check i stable Clippy (także pg-publish), SQLx prepare check, fmt, pin i klucze profili: PASS. To nie pełny odbiór M5: pełny runtime workspace, CI i prawdziwy model pozostają otwarte. Integracja zaakceptowana przez niezależny przegląd bez Critical/Important.
+
+Task 13: zaimplementowane `/api/vibe/map`, `/api/vibe/mood-summary`, `/api/vibe/mood/{id}` (auth, DTO, snapshot nastrojów, gzip z hashem treści zamiast niepełnych timestampów). Test globalnego rerun chroni pełne dane profili kids i standard, nie tylko głównego; mutacja kasująca niegłówne stars została wykryta. **314 PASS / 0 FAIL / 3 ignored** w 24 wybranych zestawach; benchmark 100 tys. uruchomiony osobno: warm gzip 1,477 s, identity 1,427 s, cold gzip 2,540 s. Pomiar natywnego routera z wybranymi pakietami opt-level 3, nie przeglądarki/release; cold gzip przekracza cel warm-cache. Workspace check/Clippy default+pg-publish, SQLx prepare, fmt/pin/profile keys: PASS. Flagi funkcji pozostają wyłączone; bez push i zmian uruchomionej aplikacji. Przed Task 14 wymagany niezależny przegląd Task 13.
 
 ## Decyzje właściciela (wiążące, nie pytać ponownie)
 

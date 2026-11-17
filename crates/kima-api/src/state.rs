@@ -103,6 +103,8 @@ pub struct AppState {
     pub progress_memo: Arc<Mutex<Option<(Instant, serde_json::Value)>>>,
     /// Failed password sign-ins, per (client IP, username).
     pub login_limit: Arc<LoginLimiter>,
+    /// The authenticated library-global map's compressed response (one content version).
+    pub vibe_map_cache: Arc<crate::vibe_cache::VibeMapCache>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
     password_permits: Arc<AtomicU64>,
 }
@@ -144,6 +146,7 @@ impl AppState {
             ident: None,
             progress_memo: Arc::new(Mutex::new(None)),
             login_limit: Arc::new(LoginLimiter::new()),
+            vibe_map_cache: Arc::default(),
             password_permits: Arc::new(AtomicU64::new(0)),
         }
     }

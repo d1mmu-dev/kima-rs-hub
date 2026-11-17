@@ -7,5 +7,12 @@ rust-version.workspace = true
 publish = false
 description = "Shared test helpers; only ever a dev-dependency."
 
+[features]
+# Seeds accounts and profiles in the database (M-PROF Task 9); pulls in kima-db.
+profiles = ["dep:kima-core", "dep:kima-db", "dep:uuid"]
+
 [dependencies]
 lofty.workspace = true
+kima-core = { workspace = true, optional = true }
+kima-db = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }

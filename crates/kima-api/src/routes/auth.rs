@@ -4,7 +4,10 @@ use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use kima_api_types::auth::{Credentials, LoginResponse, MeResponse, UserSummary};
+use kima_api_types::profiles::{Profile, ProfileKind};
 use kima_core::auth::{TokenKind, hash_password, verify_dummy, verify_password};
+use kima_core::profile::{AccountId, ProfileId};
+use kima_db::profiles;
 use kima_db::users::{self, Deletion, MAX_USERNAME_CHARS};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,6 +31,38 @@ pub fn routes() -> Router<AppState> {
         .route("/auth/users", get(list_users))
         .route("/auth/create-user", post(create_user))
         .route("/auth/users/{id}", delete(delete_user))
+}
+
+/// The wire shape of a profile (D-242).
+pub(crate) fn profile_body(profile: &profiles::Profile) -> Result<Profile, ApiError> {
+    Ok(Profile {
+        id: profile.id.into_uuid(),
+        name: profile.name.clone(),
+        kind: match profile.kind {
+            kima_core::profile::ProfileKind::Main => ProfileKind::Main,
+            kima_core::profile::ProfileKind::Kids => ProfileKind::Kids,
+            kima_core::profile::ProfileKind::Standard => ProfileKind::Standard,
+        },
+        avatar: profile.avatar.clone(),
+        is_main: profile.is_main(),
+        created_at: profile
+            .created_at
+            .format(&Rfc3339)
+            .map_err(anyhow::Error::from)?,
+    })
+}
+
+/// `profile` of `account` as the API shows it; gone (deleted meanwhile) is 401, like a token
+/// that names it.
+pub(crate) async fn load_profile(
+    state: &AppState,
+    account: AccountId,
+    profile: ProfileId,
+) -> Result<Profile, ApiError> {
+    let found = profiles::find(&state.pool, account, profile)
+        .await?
+        .ok_or(ApiError::Unauthorized("Not authenticated"))?;
+    profile_body(&found)
 }
 
 fn rate_limited(blocked: crate::login_limit::Blocked) -> ApiError {
@@ -97,17 +132,28 @@ async fn login(
     for attempt in attempts {
         attempt.success();
     }
+    // A sign-in lands in the main profile; the client offers the others from there.
+    let profile = load_profile(&state, user.account(), user.main_profile()).await?;
     Ok(Json(LoginResponse {
-        token: state
-            .jwt
-            .issue_access(user.id, &user.username, &user.role, user.token_version),
-        refresh_token: state.jwt.issue_refresh(user.id, user.token_version),
+        token: state.jwt.issue_access(
+            user.account(),
+            user.main_profile(),
+            &user.username,
+            &user.role,
+            user.token_version,
+        ),
+        refresh_token: state.jwt.issue_refresh(
+            user.account(),
+            user.main_profile(),
+            user.token_version,
+        ),
         user: UserSummary {
             id: user.id,
             username: user.username,
             role: user.role,
             onboarding_complete: user.onboarding_complete,
         },
+        profile: Some(profile),
     }))
 }
 
@@ -131,15 +177,32 @@ async fn refresh(
         .ok()
         .filter(|c| c.kind() == TokenKind::Refresh)
         .ok_or(ApiError::Unauthorized("Invalid refresh token"))?;
-    let user = users::find_by_id(&state.pool, claims.user_id)
-        .await?
-        .ok_or(ApiError::Unauthorized("User not found"))?;
-    if user.token_version != claims.token_version {
+    // The profile must still belong to the account (deleted, or a `profileId` of another
+    // account, is refused); a refresh keeps the token's profile.
+    let Some(session) =
+        users::find_session(&state.pool, claims.account(), claims.profile()).await?
+    else {
+        let account_exists = users::find_by_id(&state.pool, claims.user_id)
+            .await?
+            .is_some();
+        return Err(ApiError::Unauthorized(if account_exists {
+            "Profile not found"
+        } else {
+            "User not found"
+        }));
+    };
+    if session.token_version != claims.token_version {
         return Err(ApiError::Unauthorized("Token invalidated"));
     }
     Ok(Json(json!({
-        "token": state.jwt.issue_access(user.id, &user.username, &user.role, user.token_version),
-        "refreshToken": state.jwt.issue_refresh(user.id, user.token_version),
+        "token": state.jwt.issue_access(
+            session.account,
+            session.profile,
+            &session.username,
+            &session.role,
+            session.token_version,
+        ),
+        "refreshToken": state.jwt.issue_refresh(session.account, session.profile, session.token_version),
     })))
 }
 
@@ -148,10 +211,12 @@ async fn logout() -> Json<Value> {
     Json(json!({ "message": "Logged out" }))
 }
 
+/// The account (`id`, `username`, ... as upstream) plus the profile the session acts as.
 async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<MeResponse>, ApiError> {
-    let user = users::find_by_id(&state.pool, auth.id)
+    let user = users::find_by_id(&state.pool, auth.account.into_uuid())
         .await?
         .ok_or(ApiError::NotFound("User not found"))?;
+    let profile = load_profile(&state, auth.account, auth.profile).await?;
     let created_at = user
         .created_at
         .format(&Rfc3339)
@@ -162,6 +227,7 @@ async fn me(State(state): State<AppState>, auth: AuthUser) -> Result<Json<MeResp
         role: user.role,
         onboarding_complete: user.onboarding_complete,
         created_at,
+        profile: Some(profile),
     }))
 }
 
@@ -171,10 +237,11 @@ async fn stream_ticket(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Value>, ApiError> {
-    let user = users::find_by_id(&state.pool, auth.id)
-        .await?
-        .ok_or(ApiError::Unauthorized("Not authenticated"))?;
-    let token = state.jwt.issue_stream(user.id, user.token_version);
+    // `authenticate` has just checked the account's token version; the ticket keeps the
+    // profile, so a stream follows that profile's settings.
+    let token = state
+        .jwt
+        .issue_stream(auth.account, auth.profile, auth.token_version);
     Ok(Json(json!({
         "token": token,
         "ticket": token,
@@ -196,6 +263,12 @@ async fn change_password(
     auth: AuthUser,
     ApiJson(body): ApiJson<ChangePassword>,
 ) -> Result<Json<Value>, ApiError> {
+    // The password is the account's: only its main profile may change it (D-241).
+    if !auth.is_main_profile() {
+        return Err(ApiError::Forbidden(
+            "Only the main profile can change the password",
+        ));
+    }
     if body.current_password.is_empty() || body.new_password.is_empty() {
         return Err(ApiError::BadRequest(
             "Current and new password are required".into(),
@@ -206,7 +279,7 @@ async fn change_password(
             "New password must be at least 6 characters".into(),
         ));
     }
-    let user = users::find_by_id(&state.pool, auth.id)
+    let user = users::find_by_id(&state.pool, auth.account.into_uuid())
         .await?
         .ok_or(ApiError::NotFound("User not found"))?;
 
@@ -225,17 +298,18 @@ async fn change_password(
         return Err(ApiError::BadRequest("Current password is incorrect".into()));
     };
 
-    // The password and the revocation of the user's app tokens commit together.
+    // The password and the revocation of the account's app tokens (every profile's) commit
+    // together; the bumped token version ends every profile's sessions.
     let mut tx = state.pool.begin().await?;
-    let version = users::set_password(&mut tx, auth.id, &hash, Some(seen_version))
+    let version = users::set_password(&mut tx, auth.account.into_uuid(), &hash, Some(seen_version))
         .await?
         .ok_or_else(|| ApiError::Conflict("Password was changed concurrently, please retry"))?;
     tx.commit().await?;
-    revoke_sessions(&state, auth.id);
+    revoke_sessions(&state, auth.account);
     Ok(Json(json!({
         "message": "Password changed successfully",
-        "token": state.jwt.issue_access(auth.id, &auth.username, &auth.role, version),
-        "refreshToken": state.jwt.issue_refresh(auth.id, version),
+        "token": state.jwt.issue_access(auth.account, auth.profile, &auth.username, &auth.role, version),
+        "refreshToken": state.jwt.issue_refresh(auth.account, auth.profile, version),
     })))
 }
 
@@ -321,7 +395,7 @@ async fn delete_user(
     let id: Uuid = id
         .parse()
         .map_err(|_| ApiError::NotFound("User not found"))?;
-    if id == auth.id {
+    if id == auth.account.into_uuid() {
         return Err(ApiError::BadRequest(
             "Cannot delete your own account".into(),
         ));
@@ -330,7 +404,7 @@ async fn delete_user(
         Deletion::NotFound => Err(ApiError::NotFound("User not found")),
         Deletion::LastAdmin => Err(ApiError::BadRequest("Cannot delete the last admin".into())),
         Deletion::Deleted => {
-            revoke_sessions(&state, id);
+            revoke_sessions(&state, AccountId::new(id));
             Ok(Json(json!({ "message": "User deleted successfully" })))
         }
     }

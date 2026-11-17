@@ -44,6 +44,8 @@ pub struct Ctx {
     pub refresh: Value<u32>,
     /// Bumped when a playlist was created, renamed, deleted or changed so the sidebar refetches.
     pub playlists_rev: Value<u32>,
+    /// Bumped after profile CRUD so both persistent header switchers refetch.
+    pub profiles_rev: Value<u32>,
     /// The search box of the top bar; the search page shows the results for it.
     pub query: Value<String>,
     /// Sort and page size of the collection tabs, and whether the Refine panel is open.
@@ -56,6 +58,14 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    pub fn sign_out(&self) {
+        self.client.retire();
+        self.player.stop();
+        self.session.sign_out();
+        get_driver().history_replace("/login");
+        vertigo::js! { window.location.replace("/login") };
+    }
+
     /// Shows `message` in the toast for four seconds (a newer message replaces it and restarts the clock).
     pub fn notify(&self, message: impl Into<String>) {
         let id =

@@ -80,7 +80,7 @@ async fn refresh_all(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Value>, ApiError> {
-    let shows = kima_db::podcasts::followed_shows(&state.pool, user.id).await?;
+    let shows = kima_db::podcasts::followed_shows(&state.pool, user.profile).await?;
     if shows.is_empty() {
         return Ok(Json(
             json!({"queued": 0, "message": "No subscribed podcasts"}),
@@ -171,7 +171,8 @@ async fn subscribe(
             kima_db::podcasts::show_by_feed_or_itunes(&state.pool, feed_url, apple.as_deref())
                 .await?
         {
-            let inserted = kima_db::podcasts::subscribe(&state.pool, user.id, existing.id).await?;
+            let inserted =
+                kima_db::podcasts::subscribe(&state.pool, user.profile, existing.id).await?;
             return Ok(Json(
                 json!({"success": true, "podcast": {"id": existing.id, "title": existing.title},
                 "message": if inserted {"Subscribed successfully"} else {"Already subscribed"}}),
@@ -315,7 +316,7 @@ async fn subscribe(
     } else {
         return Err(ApiError::NotFound("Podcast not found in iTunes"));
     };
-    let inserted = kima_db::podcasts::subscribe(&state.pool, user.id, show.id).await?;
+    let inserted = kima_db::podcasts::subscribe(&state.pool, user.profile, show.id).await?;
     Ok(Json(
         json!({"success": true, "podcast": {"id": show.id, "title": show.title},
         "message": if inserted {"Subscribed successfully"} else {"Already subscribed"}}),
@@ -329,12 +330,13 @@ async fn list(
 ) -> Result<(HeaderMap, Json<Vec<kima_api_types::podcasts::FollowedShow>>), ApiError> {
     use kima_api_types::podcasts::{EpisodeSummary, FollowedShow};
     use kima_api_types::stats::js_iso;
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
-    let mut shows = kima_db::podcasts::followed_shows(&state.pool, user.id).await?;
+    let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
+    let mut shows = kima_db::podcasts::followed_shows(&state.pool, user.profile).await?;
     let mut hidden = retain_visible(filter, &mut shows, |s| from_db(&s.ai_label, None).0);
     let mut out = Vec::new();
     for show in shows {
-        let mut rows = kima_db::podcasts::recent_episodes(&state.pool, user.id, show.id).await?;
+        let mut rows =
+            kima_db::podcasts::recent_episodes(&state.pool, user.profile, show.id).await?;
         hidden += retain_visible(filter, &mut rows, |e| from_db(&e.ai_label, None).0);
         let episodes: Vec<_> = rows
             .into_iter()
@@ -385,7 +387,7 @@ async fn unsubscribe(
 ) -> Result<Json<Value>, ApiError> {
     let id = uuid::Uuid::parse_str(&id)
         .map_err(|_| ApiError::NotFound("Not subscribed to this podcast"))?;
-    if !kima_db::podcasts::unsubscribe(&state.pool, user.id, id).await? {
+    if !kima_db::podcasts::unsubscribe(&state.pool, user.profile, id).await? {
         return Err(ApiError::NotFound("Not subscribed to this podcast"));
     }
     Ok(Json(
@@ -432,7 +434,7 @@ struct CheckedPage {
 
 async fn checked_page(
     state: &AppState,
-    user: uuid::Uuid,
+    user: &AuthUser,
     id: &str,
     raw: Option<String>,
 ) -> Result<CheckedPage, ApiError> {
@@ -441,17 +443,18 @@ async fn checked_page(
     let missing = || ApiError::NotFound("Podcast not found or not subscribed");
     let filter = AiFilter::from_query(raw.as_deref())?;
     let id = uuid::Uuid::parse_str(id).map_err(|_| missing())?;
-    if !kima_db::podcasts::is_subscribed(&state.pool, user, id).await? {
+    let profile = user.profile;
+    if !kima_db::podcasts::is_subscribed(&state.pool, profile, id).await? {
         return Err(missing());
     }
     let filter = match filter {
         Some(f) => f,
-        None => AiFilter::resolve(state, user, None).await?,
+        None => AiFilter::resolve(state, user.profile, None).await?,
     };
     let page = page(raw);
     let found = kima_db::podcasts::episode_page(
         &state.pool,
-        user,
+        profile,
         id,
         page.limit,
         page.offset,
@@ -502,7 +505,7 @@ async fn episodes(
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
-    let found = checked_page(&state, user.id, &id, raw).await?;
+    let found = checked_page(&state, &user, &id, raw).await?;
     let mut body = json!({"episodes": found.rows, "total": found.total, "offset": found.page.offset, "limit": found.page.limit});
     found.filter.put_hidden(&mut body, found.hidden);
     Ok((found.filter.headers(found.hidden), Json(body)))
@@ -516,7 +519,7 @@ async fn detail(
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
-    let found = checked_page(&state, user.id, &id, raw).await?;
+    let found = checked_page(&state, &user, &id, raw).await?;
     let show = kima_db::podcasts::show_by_id(&state.pool, found.id)
         .await?
         .ok_or(ApiError::NotFound("Podcast not found"))?;
@@ -550,13 +553,14 @@ async fn next(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<Value>, ApiError> {
     use kima_api_types::stats::js_iso;
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
     let missing = || ApiError::NotFound("Episode not found");
     let show = uuid::Uuid::parse_str(&show).map_err(|_| missing())?;
     let episode = uuid::Uuid::parse_str(&episode).map_err(|_| missing())?;
-    let next = kima_db::podcasts::next_episode(&state.pool, user.id, show, episode, filter.hides())
-        .await?
-        .ok_or_else(missing)?;
+    let next =
+        kima_db::podcasts::next_episode(&state.pool, user.profile, show, episode, filter.hides())
+            .await?
+            .ok_or_else(missing)?;
     let Some(e) = next else {
         return Ok(Json(json!({"episode": null})));
     };
@@ -587,10 +591,11 @@ async fn listening(
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
     use kima_api_types::stats::js_iso;
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
     // Filtered in the query, before the limits and each show's newest pick (D-207).
+    let owner = user.profile;
     let (in_progress, new_episodes, hidden) =
-        kima_db::podcasts::listening(&state.pool, user.id, filter.hides()).await?;
+        kima_db::podcasts::listening(&state.pool, owner, filter.hides()).await?;
     let convert = |e: kima_db::podcasts::ListeningRow| {
         let progress = progress_of(
             e.current_time,

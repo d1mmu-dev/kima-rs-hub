@@ -61,9 +61,10 @@ async fn fixture_credentials_match_their_literals(pool: PgPool) {
     assert_eq!(alice.id, ALICE_ID);
 
     // The sealed copy opens to the token, and the lookup hash finds the row.
-    let secrets = kima_db::api_keys::secrets_for_user(&pool, alice.id)
-        .await
-        .unwrap();
+    let secrets =
+        kima_db::api_keys::secrets_for_profile(&pool, kima_core::profile::ProfileId::new(alice.id))
+            .await
+            .unwrap();
     assert_eq!(secrets.len(), 1);
     assert_eq!(secrets[0].0, ALICE_TOKEN_ID);
     let opened = kima_core::app_token::open(&state.cipher, secrets[0].0, &secrets[0].1).unwrap();

@@ -2,6 +2,7 @@
 //! lock on the playlist (`SELECT ... FOR UPDATE`) inside a transaction, so concurrent adds,
 //! removals and moves are serialised and the order stays dense and consistent.
 
+use kima_core::profile::{AccountId, ProfileId};
 use std::collections::HashSet;
 
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -13,7 +14,10 @@ use crate::browse::TrackRow;
 #[derive(Debug, Clone, FromRow)]
 pub struct Playlist {
     pub id: Uuid,
-    pub user_id: Uuid,
+    /// The owning profile.
+    pub profile_id: ProfileId,
+    /// The owning profile's account (the wire `userId`).
+    pub account_id: AccountId,
     pub name: String,
     pub is_public: bool,
     /// Shown newest first (display only; `sort` is unchanged).
@@ -26,7 +30,10 @@ pub struct Playlist {
 pub struct PlaylistSummary {
     #[sqlx(flatten)]
     pub playlist: Playlist,
+    /// The owner's account username.
     pub username: String,
+    /// The owning profile's name.
+    pub profile_name: String,
     /// Present items only (tracks flagged missing are not counted).
     pub track_count: i64,
     pub hidden: bool,
@@ -43,8 +50,14 @@ pub struct ItemRow {
     pub track: TrackRow,
 }
 
-const PLAYLIST_COLS: &str =
-    "p.id, p.user_id, p.name, p.is_public, p.reverse_order, p.created_at, p.updated_at";
+const PLAYLIST_COLS: &str = "p.id, p.profile_id,
+    (SELECT pr.user_id FROM profiles pr WHERE pr.id = p.profile_id) AS account_id,
+    p.name, p.is_public, p.reverse_order, p.created_at, p.updated_at";
+
+/// `RETURNING` columns of a write to `playlists` (no alias there).
+const RETURNING: &str = "RETURNING id, profile_id,
+    (SELECT pr.user_id FROM profiles pr WHERE pr.id = playlists.profile_id) AS account_id,
+    name, is_public, reverse_order, created_at, updated_at";
 
 const ITEM_COLS: &str = "pi.playlist_id, pi.id AS item_id, pi.sort,
         t.id, t.title, t.display_title, t.artist_name, t.duration_secs, t.disc, t.track_no,
@@ -68,16 +81,15 @@ pub async fn find(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<Playlist>> {
 pub async fn create(
     pool: &PgPool,
     id: Uuid,
-    user: Uuid,
+    profile: ProfileId,
     name: &str,
     is_public: bool,
 ) -> sqlx::Result<Playlist> {
-    sqlx::query_as(
-        "INSERT INTO playlists (id, user_id, name, is_public) VALUES ($1, $2, $3, $4)
-         RETURNING id, user_id, name, is_public, reverse_order, created_at, updated_at",
-    )
+    sqlx::query_as(&format!(
+        "INSERT INTO playlists (id, profile_id, name, is_public) VALUES ($1, $2, $3, $4) {RETURNING}"
+    ))
     .bind(id)
-    .bind(user)
+    .bind(profile)
     .bind(name)
     .bind(is_public)
     .fetch_one(pool)
@@ -91,12 +103,11 @@ pub async fn update(
     is_public: Option<bool>,
     reverse_order: Option<bool>,
 ) -> sqlx::Result<Option<Playlist>> {
-    sqlx::query_as(
+    sqlx::query_as(&format!(
         "UPDATE playlists SET name = COALESCE($2, name), is_public = COALESCE($3, is_public),
                 reverse_order = COALESCE($4, reverse_order), updated_at = now()
-         WHERE id = $1
-         RETURNING id, user_id, name, is_public, reverse_order, created_at, updated_at",
-    )
+         WHERE id = $1 {RETURNING}"
+    ))
     .bind(id)
     .bind(name)
     .bind(is_public)
@@ -113,20 +124,21 @@ pub async fn delete(pool: &PgPool, id: Uuid) -> sqlx::Result<bool> {
     Ok(done.rows_affected() > 0)
 }
 
-/// A playlist with its owner's name and the viewer's hidden flag. `None` when it does not exist
-/// or the viewer may not read it.
+/// A playlist with its owner's names and the viewer's hidden flag. `None` when it does not exist
+/// or the viewing profile may not read it.
 pub async fn summary(
     pool: &PgPool,
     id: Uuid,
-    viewer: Uuid,
+    viewer: ProfileId,
 ) -> sqlx::Result<Option<PlaylistSummary>> {
     Ok(summaries(pool, Some(id), viewer, 1, 0).await?.pop())
 }
 
-/// The viewer's own and public playlists, newest first.
+/// The viewing profile's own playlists and every public one (other accounts' and sibling
+/// profiles' alike), newest first.
 pub async fn list(
     pool: &PgPool,
-    viewer: Uuid,
+    viewer: ProfileId,
     limit: i64,
     offset: i64,
 ) -> sqlx::Result<Vec<PlaylistSummary>> {
@@ -136,20 +148,21 @@ pub async fn list(
 async fn summaries(
     pool: &PgPool,
     only: Option<Uuid>,
-    viewer: Uuid,
+    viewer: ProfileId,
     limit: i64,
     offset: i64,
 ) -> sqlx::Result<Vec<PlaylistSummary>> {
     sqlx::query_as(&format!(
-        "SELECT {PLAYLIST_COLS}, u.username,
+        "SELECT {PLAYLIST_COLS}, u.username, pr.name AS profile_name,
             (SELECT count(*) FROM playlist_items pi
                JOIN tracks t ON t.id = pi.track_id AND t.missing_since IS NULL
               WHERE pi.playlist_id = p.id) AS track_count,
             EXISTS (SELECT 1 FROM hidden_playlists h
-                     WHERE h.playlist_id = p.id AND h.user_id = $1) AS hidden
+                     WHERE h.playlist_id = p.id AND h.profile_id = $1) AS hidden
          FROM playlists p
-         JOIN users u ON u.id = p.user_id
-         WHERE ($2::uuid IS NULL OR p.id = $2) AND (p.user_id = $1 OR p.is_public)
+         JOIN profiles pr ON pr.id = p.profile_id
+         JOIN users u ON u.id = pr.user_id
+         WHERE ($2::uuid IS NULL OR p.id = $2) AND (p.profile_id = $1 OR p.is_public)
          ORDER BY p.created_at DESC, p.id DESC
          LIMIT $3 OFFSET $4"
     ))
@@ -251,7 +264,7 @@ pub enum SubsonicWrite {
 pub async fn subsonic_create(
     pool: &PgPool,
     id: Uuid,
-    user: Uuid,
+    profile: ProfileId,
     name: &str,
     tracks: &[Uuid],
 ) -> sqlx::Result<bool> {
@@ -259,12 +272,14 @@ pub async fn subsonic_create(
     if !all_present(&mut tx, tracks).await? {
         return Ok(false);
     }
-    sqlx::query("INSERT INTO playlists (id, user_id, name, is_public) VALUES ($1, $2, $3, false)")
-        .bind(id)
-        .bind(user)
-        .bind(name)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO playlists (id, profile_id, name, is_public) VALUES ($1, $2, $3, false)",
+    )
+    .bind(id)
+    .bind(profile)
+    .bind(name)
+    .execute(&mut *tx)
+    .await?;
     if !add_locked(&mut tx, id, tracks).await?.rejected.is_empty() {
         return Ok(false);
     }
@@ -654,25 +669,26 @@ pub async fn move_item(
     Ok(Ok(sort))
 }
 
-/// Hides a playlist from `user`'s view. `true` when it was not hidden before.
-pub async fn hide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<bool> {
+/// Hides a playlist from the profile's view. `true` when it was not hidden before.
+pub async fn hide(pool: &PgPool, profile: ProfileId, playlist: Uuid) -> sqlx::Result<bool> {
     let done = sqlx::query(
-        "INSERT INTO hidden_playlists (user_id, playlist_id) VALUES ($1, $2)
+        "INSERT INTO hidden_playlists (profile_id, playlist_id) VALUES ($1, $2)
          ON CONFLICT DO NOTHING",
     )
-    .bind(user)
+    .bind(profile)
     .bind(playlist)
     .execute(pool)
     .await?;
     Ok(done.rows_affected() > 0)
 }
 
-/// Shows a hidden playlist to `user` again. `true` when it was hidden.
-pub async fn unhide(pool: &PgPool, user: Uuid, playlist: Uuid) -> sqlx::Result<bool> {
-    let done = sqlx::query("DELETE FROM hidden_playlists WHERE user_id = $1 AND playlist_id = $2")
-        .bind(user)
-        .bind(playlist)
-        .execute(pool)
-        .await?;
+/// Shows a hidden playlist to the profile again. `true` when it was hidden.
+pub async fn unhide(pool: &PgPool, profile: ProfileId, playlist: Uuid) -> sqlx::Result<bool> {
+    let done =
+        sqlx::query("DELETE FROM hidden_playlists WHERE profile_id = $1 AND playlist_id = $2")
+            .bind(profile)
+            .bind(playlist)
+            .execute(pool)
+            .await?;
     Ok(done.rows_affected() > 0)
 }

@@ -10,6 +10,7 @@ use std::fmt;
 pub enum Route {
     Login,
     Setup,
+    Profiles,
     /// `/collection`: the browse root (artists).
     Artists,
     /// `/collection/albums`, optionally `?artist=<uuid>`.
@@ -75,6 +76,7 @@ impl Route {
             "" | "/" | "/collection" => Route::Artists,
             "/login" => Route::Login,
             "/setup" => Route::Setup,
+            "/profiles" => Route::Profiles,
             "/collection/albums" => {
                 param("artist").map_or(Route::NotFound, |artist| Route::Albums { artist })
             }
@@ -129,6 +131,7 @@ impl fmt::Display for Route {
         match self {
             Route::Login => f.write_str("/login"),
             Route::Setup => f.write_str("/setup"),
+            Route::Profiles => f.write_str("/profiles"),
             Route::Artists => f.write_str("/collection"),
             Route::Albums { artist: None } => f.write_str("/collection/albums"),
             Route::Albums { artist: Some(id) } => write!(f, "/collection/albums?artist={id}"),
@@ -158,6 +161,14 @@ mod tests {
     use super::*;
 
     const ID: &str = "01a1aad3-f0c4-710b-b701-36f9f6b6972e";
+
+    #[test]
+    fn profiles_picker_is_guarded_and_round_trips() {
+        assert_eq!(Route::new("/profiles/"), Route::Profiles);
+        assert_eq!(Route::Profiles.to_string(), "/profiles");
+        assert!(Route::Profiles.requires_auth());
+        assert_eq!(Route::new("/profiles/manage"), Route::NotFound);
+    }
 
     fn table() -> Vec<(&'static str, Route)> {
         vec![

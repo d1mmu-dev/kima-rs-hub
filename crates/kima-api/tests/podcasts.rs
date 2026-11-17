@@ -4,6 +4,7 @@
 
 mod common;
 
+use kima_core::profile::ProfileId;
 use std::sync::Arc;
 
 use axum::Router;
@@ -116,7 +117,9 @@ async fn manual_refresh_succeeds_green(pool: PgPool) {
     let env = env(pool.clone()).await;
     let feed = env.host.url("/feed.xml");
     let show = store(&pool, &feed, "Old Title", None).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
     res.assert_status_ok();
     let body = res.json::<Value>();
@@ -145,7 +148,9 @@ async fn manual_refresh_succeeds_green(pool: PgPool) {
 async fn manual_refresh_feed_gone_is_404_green(pool: PgPool) {
     let env = env(pool.clone()).await;
     let show = store(&pool, &env.host.url("/gone.xml"), "Gone", None).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
     res.assert_status(StatusCode::NOT_FOUND);
     assert_eq!(
@@ -170,7 +175,9 @@ async fn manual_refresh_unreadable_or_down_feed_is_502_green(pool: PgPool) {
     let env = env(pool.clone()).await;
     for path in ["/page.xml", "/down.xml"] {
         let show = store(&pool, &env.host.url(path), "Show", None).await;
-        podcasts::subscribe(&pool, env.user, show).await.unwrap();
+        podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+            .await
+            .unwrap();
         let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
         res.assert_status(StatusCode::BAD_GATEWAY);
         assert_eq!(
@@ -190,7 +197,9 @@ async fn manual_refresh_unreadable_or_down_feed_is_502_green(pool: PgPool) {
 async fn manual_refresh_feed_refused_is_404_green(pool: PgPool) {
     let env = env(pool.clone()).await;
     let show = store(&pool, &env.host.url("/forbidden.xml"), "Forbidden", None).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
     res.assert_status(StatusCode::NOT_FOUND);
     assert_eq!(
@@ -212,7 +221,9 @@ async fn manual_refresh_feed_blocked_ssrf_is_404_green(pool: PgPool) {
     let env = env_with(pool.clone(), |cfg| cfg.allow_private_images = false).await;
     let feed = "http://10.9.9.9:8080/feed.xml";
     let show = store(&pool, feed, "Blocked", None).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let res = env.get(&format!("/api/podcasts/{show}/refresh")).await;
     res.assert_status(StatusCode::NOT_FOUND);
     assert_eq!(
@@ -235,8 +246,12 @@ async fn refresh_all_with_mixed_followed_shows_green(pool: PgPool) {
     // best-effort enqueue both and answer from the followed set only.
     let good = store(&pool, &env.host.url("/race.xml"), "Good", None).await;
     let bad = store(&pool, &env.host.url("/down.xml"), "Bad", None).await;
-    podcasts::subscribe(&pool, env.user, good).await.unwrap();
-    podcasts::subscribe(&pool, env.user, bad).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), good)
+        .await
+        .unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), bad)
+        .await
+        .unwrap();
     let res = env.post("/api/podcasts/refresh-all", json!({})).await;
     res.assert_status_ok();
     let body = res.json::<Value>();
@@ -246,7 +261,7 @@ async fn refresh_all_with_mixed_followed_shows_green(pool: PgPool) {
     let followed: i64 = count(
         env.pool(),
         &format!(
-            "SELECT count(*) FROM podcast_subscriptions WHERE user_id = '{}'",
+            "SELECT count(*) FROM podcast_subscriptions WHERE profile_id = '{}'",
             env.user
         ),
     )
@@ -285,7 +300,9 @@ async fn refresh_one_superseded_by_concurrent_refresh_returns_409_green(pool: Pg
     // claims — the loser's later fence recheck finds it has been superseded.
     let env = env(pool.clone()).await;
     let show = store(&pool, &env.host.url("/race.xml"), "Race Show", None).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let path = format!("/api/podcasts/{show}/refresh");
     let (a, b) = tokio::join!(env.get(&path), env.get(&path));
     let mut codes = [a.status_code(), b.status_code()];
@@ -537,7 +554,7 @@ async fn episode_id(pool: &PgPool, guid: &str) -> Uuid {
 async fn progress(pool: &PgPool, user: Uuid, guid: &str, at: f64, of: f64, finished: bool) {
     let episode = episode_id(pool, guid).await;
     sqlx::query(
-        "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration, is_finished)
+        "INSERT INTO podcast_progress (profile_id, episode_id, \"current_time\", duration, is_finished)
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(user)
@@ -630,7 +647,7 @@ async fn follows_a_stored_show_found_by_its_apple_id_though_its_feed_address_has
         1
     );
     assert!(
-        podcasts::is_subscribed(pool, env.user, stored)
+        podcasts::is_subscribed(pool, ProfileId::new(env.user), stored)
             .await
             .unwrap()
     );
@@ -727,7 +744,11 @@ async fn concurrent_import_recovers_after_episode_rollback(pool: PgPool) {
         count(&pool, "SELECT count(*) FROM podcast_subscriptions").await,
         1
     );
-    assert!(podcasts::is_subscribed(&pool, env.user, id).await.unwrap());
+    assert!(
+        podcasts::is_subscribed(&pool, ProfileId::new(env.user), id)
+            .await
+            .unwrap()
+    );
     let episode: (Uuid, String) = sqlx::query_as("SELECT podcast_id, guid FROM podcast_episodes")
         .fetch_one(&pool)
         .await
@@ -943,7 +964,9 @@ async fn gives_each_followed_show_the_date_of_its_newest_episode_none_for_a_show
     .await;
     add_episodes(pool, new, &[("pl_n1", datetime!(2026-10-01 00:00 UTC))]).await;
     for show in [old, new, empty] {
-        podcasts::subscribe(pool, env.user, show).await.unwrap();
+        podcasts::subscribe(pool, ProfileId::new(env.user), show)
+            .await
+            .unwrap();
     }
     let res = env.get("/api/podcasts").await;
     res.assert_status_ok();
@@ -976,8 +999,12 @@ async fn followed_list_is_newest_follow_first_with_five_newest_episodes_and_prog
     let eps: Vec<(String, OffsetDateTime)> = (1..=7).map(|n| (format!("e{n}"), day(n))).collect();
     let eps: Vec<(&str, OffsetDateTime)> = eps.iter().map(|(g, t)| (g.as_str(), *t)).collect();
     add_episodes(pool, first, &eps).await;
-    podcasts::subscribe(pool, env.user, first).await.unwrap();
-    podcasts::subscribe(pool, env.user, second).await.unwrap();
+    podcasts::subscribe(pool, ProfileId::new(env.user), first)
+        .await
+        .unwrap();
+    podcasts::subscribe(pool, ProfileId::new(env.user), second)
+        .await
+        .unwrap();
     sqlx::query("UPDATE podcast_subscriptions SET subscribed_at = now() - interval '1 day' WHERE podcast_id = $1")
         .bind(first)
         .execute(pool)
@@ -1028,10 +1055,13 @@ async fn followed_list_is_newest_follow_first_with_five_newest_episodes_and_prog
         })
     );
     // Another user follows nothing.
-    let other_token =
-        env.state
-            .jwt
-            .issue_access(other.id, &other.username, &other.role, other.token_version);
+    let other_token = env.state.jwt.issue_access(
+        other.account(),
+        other.main_profile(),
+        &other.username,
+        &other.role,
+        other.token_version,
+    );
     let theirs = env
         .server
         .get("/api/podcasts")
@@ -1051,7 +1081,9 @@ async fn progress_percent_capped_at_100(pool: PgPool) {
         &[("over", day(3)), ("zero", day(2)), ("half", day(1))],
     )
     .await;
-    podcasts::subscribe(pool, env.user, show).await.unwrap();
+    podcasts::subscribe(pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     progress(pool, env.user, "over", 700.0, 600.0, false).await;
     progress(pool, env.user, "zero", 30.5, 0.0, false).await;
     progress(pool, env.user, "half", 150.0, 600.0, false).await;
@@ -1082,7 +1114,9 @@ async fn saves_a_position_past_the_stored_length(pool: PgPool) {
     let env = env(pool.clone()).await;
     let show = store(&pool, "https://f.invalid/p", "P", None).await;
     add_episodes(&pool, show, &[("past", day(1))]).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let episode = episode_id(&pool, "past").await;
     let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
     let res = env
@@ -1093,7 +1127,7 @@ async fn saves_a_position_past_the_stored_length(pool: PgPool) {
     assert_eq!(body["progress"]["currentTime"], json!(650));
     assert_eq!(body["progress"]["isFinished"], json!(false));
     let stored: f64 = sqlx::query_scalar(
-        "SELECT \"current_time\" FROM podcast_progress WHERE user_id = $1 AND episode_id = $2",
+        "SELECT \"current_time\" FROM podcast_progress WHERE profile_id = $1 AND episode_id = $2",
     )
     .bind(env.user)
     .bind(episode)
@@ -1108,7 +1142,9 @@ async fn accepts_numbers_sent_as_strings_and_a_missing_duration_keeps_the_stored
     let env = env(pool.clone()).await;
     let show = store(&pool, "https://f.invalid/p", "P", None).await;
     add_episodes(&pool, show, &[("s", day(1))]).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let episode = episode_id(&pool, "s").await;
     let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
     env.post(&path, json!({"currentTime": 30, "duration": 700}))
@@ -1116,7 +1152,7 @@ async fn accepts_numbers_sent_as_strings_and_a_missing_duration_keeps_the_stored
         .assert_status_ok();
     let res = env.post(&path, json!({"currentTime": "120"})).await;
     res.assert_status_ok();
-    let stored: (f64, f64) = podcasts::progress(&pool, env.user, episode)
+    let stored: (f64, f64) = podcasts::progress(&pool, ProfileId::new(env.user), episode)
         .await
         .unwrap()
         .unwrap();
@@ -1128,7 +1164,9 @@ async fn accepts_numbers_sent_as_strings_and_a_missing_duration_keeps_the_stored
 async fn answers_404_for_an_episode_that_does_not_exist(pool: PgPool) {
     let env = env(pool.clone()).await;
     let show = store(&pool, "https://f.invalid/p", "P", None).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let nope = Uuid::now_v7();
     let path = format!("/api/podcasts/{show}/episodes/{nope}/progress");
     let res = env
@@ -1143,7 +1181,9 @@ async fn answers_400_without_a_position(pool: PgPool) {
     let env = env(pool.clone()).await;
     let show = store(&pool, "https://f.invalid/p", "P", None).await;
     add_episodes(&pool, show, &[("s", day(1))]).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let episode = episode_id(&pool, "s").await;
     let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
     let res = env.post(&path, json!({"duration": 20})).await;
@@ -1156,7 +1196,7 @@ async fn answers_400_without_a_position(pool: PgPool) {
 
 async fn is_finished(pool: &PgPool, user: Uuid, episode: Uuid) -> bool {
     sqlx::query_scalar::<_, bool>(
-        "SELECT is_finished FROM podcast_progress WHERE user_id = $1 AND episode_id = $2",
+        "SELECT is_finished FROM podcast_progress WHERE profile_id = $1 AND episode_id = $2",
     )
     .bind(user)
     .bind(episode)
@@ -1172,7 +1212,9 @@ async fn counts_an_episode_finished_from_95_percent_of_its_length_on_whatever_th
     let env = env(pool.clone()).await;
     let show = store(&pool, "https://f.invalid/p", "P", None).await;
     add_episodes(&pool, show, &[("f", day(1))]).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let episode = episode_id(&pool, "f").await;
     let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
     save_progress(&env, &path, json!({"currentTime": 560, "duration": 600}))
@@ -1202,7 +1244,9 @@ async fn coercion_like_zod(pool: PgPool) {
     let env = env(pool.clone()).await;
     let show = store(&pool, "https://f.invalid/p", "P", None).await;
     add_episodes(&pool, show, &[("c", day(1))]).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let episode = episode_id(&pool, "c").await;
     let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
     let res = save_progress(&env, &path, json!({"currentTime": "12"})).await;
@@ -1238,7 +1282,9 @@ async fn delete_is_idempotent(pool: PgPool) {
     let env = env(pool.clone()).await;
     let show = store(&pool, "https://f.invalid/p", "P", None).await;
     add_episodes(&pool, show, &[("d", day(1))]).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let episode = episode_id(&pool, "d").await;
     let path = format!("/api/podcasts/{show}/episodes/{episode}/progress");
     env.post(&path, json!({"currentTime": 100, "duration": 200}))
@@ -1248,7 +1294,7 @@ async fn delete_is_idempotent(pool: PgPool) {
     env.delete(&path).await.assert_status_ok();
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM podcast_progress WHERE user_id = $1 AND episode_id = $2"
+            "SELECT count(*) FROM podcast_progress WHERE profile_id = $1 AND episode_id = $2"
         )
         .bind(env.user)
         .bind(episode)
@@ -1269,7 +1315,9 @@ async fn episode_of_any_show_id_in_path(pool: PgPool) {
     let show = store(&pool, "https://f.invalid/p", "P", None).await;
     let other = store(&pool, "https://f.invalid/other", "Other", None).await;
     add_episodes(&pool, show, &[("e", day(1))]).await;
-    podcasts::subscribe(&pool, env.user, show).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
     let episode = episode_id(&pool, "e").await;
     // The podcast id in the path is ignored (upstream follows the same convention).
     let path = format!("/api/podcasts/{other}/episodes/{episode}/progress");
@@ -1287,13 +1335,17 @@ async fn unfollowing_a_show_forgets_that_it_was_playing_so_no_device_restores_it
     let other = store(pool, "https://f.invalid/other", "Other", None).await;
     add_episodes(pool, show, &[("nx_15", day(8))]).await;
     add_episodes(pool, other, &[("nx_other", day(9))]).await;
-    podcasts::subscribe(pool, env.user, show).await.unwrap();
-    podcasts::subscribe(pool, env.user, other).await.unwrap();
+    podcasts::subscribe(pool, ProfileId::new(env.user), show)
+        .await
+        .unwrap();
+    podcasts::subscribe(pool, ProfileId::new(env.user), other)
+        .await
+        .unwrap();
     progress(pool, env.user, "nx_15", 10.0, 600.0, false).await;
     progress(pool, env.user, "nx_other", 10.0, 600.0, false).await;
     let nx_15 = episode_id(pool, "nx_15").await;
     sqlx::query(
-        "INSERT INTO podcast_downloads (user_id, episode_id, local_path, file_size_mb)
+        "INSERT INTO podcast_downloads (profile_id, episode_id, local_path, file_size_mb)
          VALUES ($1, $2, 'podcast-audio/x.audio', 1.5)",
     )
     .bind(env.user)
@@ -1302,7 +1354,7 @@ async fn unfollowing_a_show_forgets_that_it_was_playing_so_no_device_restores_it
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO playback_state (user_id, playback_type, podcast_id) VALUES ($1, 'podcast', $2)",
+        "INSERT INTO playback_state (profile_id, playback_type, podcast_id) VALUES ($1, 'podcast', $2)",
     )
     .bind(env.user)
     .bind(format!("{show}:{nx_15}"))
@@ -1427,7 +1479,7 @@ async fn episode_pages_are_bounded_report_the_true_total_and_order_on_the_server
     podcasts::insert_episodes(env.pool(), show, &episodes)
         .await
         .unwrap();
-    podcasts::subscribe(env.pool(), env.user, show)
+    podcasts::subscribe(env.pool(), ProfileId::new(env.user), show)
         .await
         .unwrap();
     for (suffix, key) in [("", "episodeTotal"), ("/episodes", "total")] {
@@ -1532,7 +1584,9 @@ async fn listening_lists_progress_and_newest_unplayed_only_for_followed_shows(po
     add_episodes(env.pool(), c, &[("c-new", day(9)), ("c-old", day(2))]).await;
     add_episodes(env.pool(), other, &[("other", day(12))]).await;
     for id in [a, b, c] {
-        podcasts::subscribe(env.pool(), env.user, id).await.unwrap();
+        podcasts::subscribe(env.pool(), ProfileId::new(env.user), id)
+            .await
+            .unwrap();
     }
     progress(env.pool(), env.user, "a-half", 300.0, 600.0, false).await;
     progress(env.pool(), env.user, "b-half", 60.0, 600.0, false).await;
@@ -1592,7 +1646,7 @@ async fn detail_requires_follow_and_survives_apple_down_with_user_progress_and_d
             json!({"error":"Podcast not found or not subscribed"})
         );
     }
-    podcasts::subscribe(env.pool(), env.user, show)
+    podcasts::subscribe(env.pool(), ProfileId::new(env.user), show)
         .await
         .unwrap();
     sqlx::query("UPDATE podcasts SET category_ids='{1495}' WHERE id=$1")
@@ -1601,7 +1655,7 @@ async fn detail_requires_follow_and_survives_apple_down_with_user_progress_and_d
         .await
         .unwrap();
     progress(env.pool(), env.user, "detail-ep", 30.0, 60.0, false).await;
-    sqlx::query("INSERT INTO podcast_downloads(user_id,episode_id,local_path,file_size_mb) VALUES ($1,$2,'test',1)")
+    sqlx::query("INSERT INTO podcast_downloads(profile_id,episode_id,local_path,file_size_mb) VALUES ($1,$2,'test',1)")
         .bind(env.user).bind(ep).execute(env.pool()).await.unwrap();
     let res = env.get(&format!("/api/podcasts/{show}")).await;
     res.assert_status_ok();
@@ -1624,7 +1678,7 @@ async fn next_and_episode_pages_break_equal_date_ties_by_id(pool: PgPool) {
         &[("tie-a", day(1)), ("tie-b", day(1)), ("tie-c", day(1))],
     )
     .await;
-    podcasts::subscribe(env.pool(), env.user, show)
+    podcasts::subscribe(env.pool(), ProfileId::new(env.user), show)
         .await
         .unwrap();
     let mut ids = vec![
@@ -1833,7 +1887,7 @@ async fn two_shows(env: &Env) -> (Uuid, Uuid) {
     let p2 = episode_id(env.pool(), "p2").await;
     set_tag(env.pool(), "podcast_episodes", p2, Some(true)).await;
     for show in [ai, plain] {
-        podcasts::subscribe(env.pool(), env.user, show)
+        podcasts::subscribe(env.pool(), ProfileId::new(env.user), show)
             .await
             .unwrap();
     }
@@ -1869,7 +1923,7 @@ async fn no_tag_is_unknown_not_human_and_stays_visible(pool: PgPool) {
     let env = env(pool).await;
     let show = store(env.pool(), "https://u.example.invalid/feed", "U", None).await;
     add_episodes(env.pool(), show, &[("u1", day(1))]).await;
-    podcasts::subscribe(env.pool(), env.user, show)
+    podcasts::subscribe(env.pool(), ProfileId::new(env.user), show)
         .await
         .unwrap();
     let res = env.get("/api/podcasts").await;
@@ -1951,7 +2005,7 @@ async fn x_kima_ai_hidden_counts_before_paging(pool: PgPool) {
         let id = episode_id(env.pool(), g).await;
         set_tag(env.pool(), "podcast_episodes", id, Some(true)).await;
     }
-    podcasts::subscribe(env.pool(), env.user, show)
+    podcasts::subscribe(env.pool(), ProfileId::new(env.user), show)
         .await
         .unwrap();
 
@@ -2044,7 +2098,7 @@ async fn setting_show_persists_per_user(pool: PgPool) {
         .await
         .unwrap();
     for show in [ai, plain] {
-        podcasts::subscribe(env.pool(), other_id, show)
+        podcasts::subscribe(env.pool(), ProfileId::new(other_id), show)
             .await
             .unwrap();
     }

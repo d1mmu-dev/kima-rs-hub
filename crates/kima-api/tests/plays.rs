@@ -45,7 +45,7 @@ async fn get(e: &Env, token: &str, path: &str) -> Value {
 
 async fn stored_plays(pool: &PgPool, user: Uuid) -> Vec<(Uuid, bool, String)> {
     sqlx::query_as(
-        "SELECT track_id, heard, source FROM plays WHERE user_id = $1 ORDER BY played_at DESC",
+        "SELECT track_id, heard, source FROM plays WHERE profile_id = $1 ORDER BY played_at DESC",
     )
     .bind(user)
     .fetch_all(pool)
@@ -159,11 +159,13 @@ async fn duplicate_within_window_not_double_counted(pool: PgPool) {
     assert_eq!(stored_plays(&pool, e.ana_id).await.len(), 1);
 
     // A play older than one track length (180 s) is a different listen.
-    sqlx::query("UPDATE plays SET played_at = now() - interval '181 seconds' WHERE user_id = $1")
-        .bind(e.ana_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE plays SET played_at = now() - interval '181 seconds' WHERE profile_id = $1",
+    )
+    .bind(e.ana_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_eq!(play(&e, &e.ana, s.track, 100.0).await["recorded"], true);
     assert_eq!(stored_plays(&pool, e.ana_id).await.len(), 2);
 }
@@ -197,7 +199,7 @@ async fn recently_listened_orders_by_last_play(pool: PgPool) {
     // (track, minutes ago): Alpha twice, so its newest play wins.
     for (track, mins) in [(a.track, 50), (b.track, 30), (c.track, 20), (a2.track, 10)] {
         sqlx::query(
-            "INSERT INTO plays (id, user_id, track_id, played_at, heard)
+            "INSERT INTO plays (id, profile_id, track_id, played_at, heard)
              VALUES ($1, $2, $3, now() - make_interval(mins => $4), true)",
         )
         .bind(Uuid::now_v7())
@@ -329,7 +331,7 @@ async fn api_plays_returns_stored_source(pool: PgPool) {
     assert_eq!(play(&e, &e.ana, s.track, 150.0).await["recorded"], true);
     // A Subsonic play, a day earlier (outside the duplicate window).
     sqlx::query(
-        "INSERT INTO plays (id, user_id, track_id, played_at, heard, source)
+        "INSERT INTO plays (id, profile_id, track_id, played_at, heard, source)
          VALUES ($1, $2, $3, now() - interval '1 day', true, 'SUBSONIC')",
     )
     .bind(Uuid::now_v7())
@@ -355,7 +357,7 @@ async fn recently_listened_leaves_out_various_artists_and_unknown_artist(pool: P
     // The compilation and the untagged album were played after the real artist's album.
     for (track, mins) in [(real.track, 30), (va.track, 10), (unknown.track, 20)] {
         sqlx::query(
-            "INSERT INTO plays (id, user_id, track_id, played_at, heard)
+            "INSERT INTO plays (id, profile_id, track_id, played_at, heard)
              VALUES ($1, $2, $3, now() - make_interval(mins => $4), true)",
         )
         .bind(Uuid::now_v7())
@@ -431,7 +433,7 @@ async fn seed_podcast_progress(
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO podcast_progress (user_id, episode_id, \"current_time\", duration, is_finished, last_played_at)
+        "INSERT INTO podcast_progress (profile_id, episode_id, \"current_time\", duration, is_finished, last_played_at)
          VALUES ($1, $2, 100, 1000, $3, now() - make_interval(mins => $4))",
     )
     .bind(user)
@@ -450,7 +452,7 @@ async fn recently_listened_mixes_podcasts_by_last_played(pool: PgPool) {
     let e = env(pool.clone()).await;
     // Artist play 40 minutes ago; three shows in progress at 35/25/5 minutes ago.
     sqlx::query(
-        "INSERT INTO plays (id, user_id, track_id, played_at, heard)
+        "INSERT INTO plays (id, profile_id, track_id, played_at, heard)
          VALUES ($1, $2, $3, now() - make_interval(mins => 40), true)",
     )
     .bind(Uuid::now_v7())

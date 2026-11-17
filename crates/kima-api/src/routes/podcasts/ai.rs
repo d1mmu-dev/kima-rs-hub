@@ -14,6 +14,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::routing::put;
 use kima_api_types::podcasts::{AiLabel, AiLabelSource, Labelled};
+use kima_core::profile::ProfileId;
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -59,17 +60,18 @@ impl AiFilter {
         }
     }
 
-    /// The request's `?ai=`, else `user`'s persisted setting (default hide).
+    /// The request's `?ai=`, else the profile's persisted setting (default hide). The switch is
+    /// a setting, so it is the session's profile's (D-246), never its account's main profile.
     pub async fn resolve(
         state: &AppState,
-        user: Uuid,
+        profile: ProfileId,
         raw: Option<&str>,
     ) -> Result<AiFilter, ApiError> {
         if let Some(filter) = AiFilter::from_query(raw)? {
             return Ok(filter);
         }
         Ok(
-            if kima_db::user_settings::hides_podcast_ai(&state.pool, user).await? {
+            if kima_db::user_settings::hides_podcast_ai(&state.pool, profile).await? {
                 AiFilter::Hide
             } else {
                 AiFilter::Show
@@ -183,9 +185,10 @@ async fn set_show_label(
     let label = parse_label(&body)?;
     let missing = || ApiError::NotFound("Podcast not found");
     let id = Uuid::parse_str(&id).map_err(|_| missing())?;
-    let row = kima_db::podcasts::set_show_override(&state.pool, id, label, admin.id)
-        .await?
-        .ok_or_else(missing)?;
+    let row =
+        kima_db::podcasts::set_show_override(&state.pool, id, label, admin.account.into_uuid())
+            .await?
+            .ok_or_else(missing)?;
     Ok(label_answer(row))
 }
 
@@ -200,10 +203,15 @@ async fn set_episode_label(
     let missing = || ApiError::NotFound("Episode not found");
     let podcast = Uuid::parse_str(&podcast).map_err(|_| missing())?;
     let episode = Uuid::parse_str(&episode).map_err(|_| missing())?;
-    let row =
-        kima_db::podcasts::set_episode_override(&state.pool, podcast, episode, label, admin.id)
-            .await?
-            .ok_or_else(missing)?;
+    let row = kima_db::podcasts::set_episode_override(
+        &state.pool,
+        podcast,
+        episode,
+        label,
+        admin.account.into_uuid(),
+    )
+    .await?
+    .ok_or_else(missing)?;
     Ok(label_answer(row))
 }
 

@@ -5,6 +5,7 @@
 use axum::Router;
 use axum::extract::State;
 use kima_api::{AppState, revoke_sessions};
+use kima_core::profile::AccountId;
 use kima_db::users::{self, Deletion, ROLE_ADMIN, ROLE_USER, RoleChange, User};
 use uuid::Uuid;
 
@@ -49,7 +50,7 @@ async fn find_self_or_admin(
 ) -> Result<User, SubsonicError> {
     let found = users::find_by_username(&app.pool, name).await?;
     match found {
-        Some(user) if user.id == caller.user.id => Ok(user),
+        Some(user) if user.id == caller.user.account.into_uuid() => Ok(user),
         other => {
             caller.require_admin()?;
             other.ok_or_else(user_not_found)
@@ -100,7 +101,7 @@ async fn set_password(app: &AppState, id: Uuid, password_hash: &str) -> Result<(
         .await?
         .ok_or_else(user_not_found)?;
     tx.commit().await?;
-    revoke_sessions(app, id);
+    revoke_sessions(app, AccountId::new(id));
     Ok(())
 }
 
@@ -111,7 +112,7 @@ async fn get_user(
 ) -> Result<Answer, SubsonicError> {
     let target = match params.get("username") {
         Some(name) if !name.is_empty() => find_self_or_admin(&app, &caller, name).await?,
-        _ => users::find_by_id(&app.pool, caller.user.id)
+        _ => users::find_by_id(&app.pool, caller.user.account.into_uuid())
             .await?
             .ok_or_else(user_not_found)?,
     };
@@ -181,7 +182,7 @@ async fn update_user(
         .bool("adminRole")?
         .map(|admin| if admin { ROLE_ADMIN } else { ROLE_USER });
     let password = new_password(&params)?;
-    if target.id == caller.user.id && role == Some(ROLE_USER) {
+    if target.id == caller.user.account.into_uuid() && role == Some(ROLE_USER) {
         return Err(SubsonicError::not_authorized(
             "Cannot remove your own admin role",
         ));
@@ -211,7 +212,7 @@ async fn update_user(
     }
     tx.commit().await?;
     if password_hash.is_some() {
-        revoke_sessions(&app, target.id);
+        revoke_sessions(&app, target.account());
     }
     Ok(Answer::ok())
 }
@@ -224,14 +225,14 @@ async fn delete_user(
     caller.require_password_auth()?;
     caller.require_admin()?;
     let target = find(&app, params.required("username")?).await?;
-    if target.id == caller.user.id {
+    if target.id == caller.user.account.into_uuid() {
         return Err(SubsonicError::not_authorized(
             "Cannot delete your own account",
         ));
     }
     match users::delete_unless_last_admin(&app.pool, target.id).await? {
         Deletion::Deleted => {
-            revoke_sessions(&app, target.id);
+            revoke_sessions(&app, target.account());
             Ok(Answer::ok())
         }
         Deletion::NotFound => Err(user_not_found()),

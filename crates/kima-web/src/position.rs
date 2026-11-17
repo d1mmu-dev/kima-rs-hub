@@ -10,6 +10,20 @@ use serde::{Deserialize, Serialize};
 
 pub const STORAGE_KEY: &str = "kima-web.position";
 
+pub fn profile_key(profile: &str) -> String {
+    format!("{STORAGE_KEY}.{profile}")
+}
+
+pub fn migrate_legacy(storage: &dyn crate::auth::Storage, profile: &str, main: bool) {
+    if main && let Some(raw) = storage.get(STORAGE_KEY) {
+        let key = profile_key(profile);
+        if storage.get(&key).is_none() {
+            storage.set(&key, &raw);
+        }
+        storage.remove(STORAGE_KEY);
+    }
+}
+
 /// A saved point is ignored this close to the end (the track would end at once) and below one second.
 pub const EDGE_SECS: f64 = 1.0;
 /// The position is written again only after it moved by this much.
@@ -50,6 +64,27 @@ pub fn should_write(last_written: f64, now: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn position_key_is_per_profile() {
+        assert_eq!(profile_key("kids"), "kima-web.position.kids");
+        assert_ne!(profile_key("main"), profile_key("kids"));
+    }
+
+    #[test]
+    fn legacy_position_key_migrates_to_main_once() {
+        use crate::auth::{MemoryStorage, Storage};
+        let storage = MemoryStorage::default();
+        storage.set(STORAGE_KEY, "old");
+        migrate_legacy(&storage, "kids", false);
+        assert_eq!(storage.get(STORAGE_KEY).as_deref(), Some("old"));
+        migrate_legacy(&storage, "main", true);
+        assert_eq!(storage.get(&profile_key("main")).as_deref(), Some("old"));
+        assert_eq!(storage.get(STORAGE_KEY), None);
+        storage.set(&profile_key("main"), "new");
+        migrate_legacy(&storage, "main", true);
+        assert_eq!(storage.get(&profile_key("main")).as_deref(), Some("new"));
+    }
 
     #[test]
     fn a_point_of_the_same_track_comes_back() {

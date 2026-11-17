@@ -3,7 +3,10 @@ mod common;
 use axum::http::StatusCode;
 use axum_test::TestServer;
 use kima_api::AppState;
+use kima_core::profile::{ProfileId, ProfileKind};
 use kima_db::PgPool;
+use kima_db::profiles::{self, NewProfile};
+use kima_db::users::User;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -269,4 +272,186 @@ async fn public_config_for_any_user(pool: PgPool) {
         .authorization_bearer(&jwt)
         .await;
     res.assert_json(&json!({ "publicUrl": "https://kima.example", "canAcquire": false }));
+}
+
+// ---- per profile (M-PROF Task 8, D-244) ----
+
+/// An access token for another profile of `user`, created in the database.
+async fn profile_token(
+    state: &AppState,
+    user: &User,
+    name: &str,
+    kind: ProfileKind,
+) -> (ProfileId, String) {
+    let profile = profiles::create(
+        &state.pool,
+        user.account(),
+        NewProfile {
+            name: name.into(),
+            kind,
+            avatar: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let token = state.jwt.issue_access(
+        user.account(),
+        profile.id,
+        &user.username,
+        &user.role,
+        user.token_version,
+    );
+    (profile.id, token)
+}
+
+async fn names(server: &TestServer, token: &str) -> Vec<String> {
+    let res = server
+        .get("/api/api-keys")
+        .authorization_bearer(token)
+        .await;
+    res.assert_status_ok();
+    let mut names: Vec<String> = res.json::<Value>()["apiKeys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["name"].as_str().unwrap().to_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The profile a stored token belongs to, by its name.
+async fn owner_of(pool: &PgPool, name: &str) -> Uuid {
+    sqlx::query_scalar("SELECT profile_id FROM api_keys WHERE name = $1")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn id_of(pool: &PgPool, name: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM api_keys WHERE name = $1")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn keys_list_shows_only_current_profile(pool: PgPool) {
+    let state = common::state(pool);
+    let (ana, main) = common::user_with_token(&state, "ana").await;
+    let (kids, kids_token) = profile_token(&state, &ana, "Kids", ProfileKind::Kids).await;
+    let (teen, teen_token) = profile_token(&state, &ana, "Teen", ProfileKind::Standard).await;
+    let (_, bob) = common::user_with_token(&state, "bob").await;
+    let server = serve(&state);
+
+    create(&server, &main, "main phone").await;
+    create(&server, &kids_token, "kids tablet").await;
+    create(&server, &kids_token, "kids speaker").await;
+    create(&server, &bob, "bob phone").await;
+
+    // Each token lands in the profile that created it.
+    assert_eq!(owner_of(&state.pool, "main phone").await, ana.id);
+    assert_eq!(owner_of(&state.pool, "kids tablet").await, kids.into_uuid());
+    assert_eq!(
+        owner_of(&state.pool, "kids speaker").await,
+        kids.into_uuid()
+    );
+
+    // Each profile lists its own tokens only; the main profile does not see its children's.
+    assert_eq!(names(&server, &main).await, ["main phone"]);
+    assert_eq!(
+        names(&server, &kids_token).await,
+        ["kids speaker", "kids tablet"]
+    );
+    assert!(names(&server, &teen_token).await.is_empty());
+    assert_eq!(names(&server, &bob).await, ["bob phone"]);
+    assert_ne!(teen, kids);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn revoke_sibling_key_is_404(pool: PgPool) {
+    let state = common::state(pool);
+    let (ana, main) = common::user_with_token(&state, "ana").await;
+    let (_, kids) = profile_token(&state, &ana, "Kids", ProfileKind::Kids).await;
+    let (_, teen) = profile_token(&state, &ana, "Teen", ProfileKind::Standard).await;
+    let server = serve(&state);
+    create(&server, &main, "main phone").await;
+    create(&server, &kids, "kids tablet").await;
+    let main_key = id_of(&state.pool, "main phone").await;
+    let kids_key = id_of(&state.pool, "kids tablet").await;
+
+    // Neither a sibling nor the main profile can revoke another profile's token, and the
+    // answer is the unknown-id one.
+    for (token, key) in [
+        (&kids, main_key),
+        (&teen, main_key),
+        (&teen, kids_key),
+        (&main, kids_key),
+    ] {
+        let res = server
+            .delete(&format!("/api/api-keys/{key}"))
+            .authorization_bearer(token)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+        res.assert_json(&json!({ "error": "API key not found or already deleted" }));
+    }
+    assert_eq!(names(&server, &main).await, ["main phone"]);
+    assert_eq!(names(&server, &kids).await, ["kids tablet"]);
+
+    // Each profile revokes its own.
+    server
+        .delete(&format!("/api/api-keys/{kids_key}"))
+        .authorization_bearer(&kids)
+        .await
+        .assert_status_ok();
+    server
+        .delete(&format!("/api/api-keys/{main_key}"))
+        .authorization_bearer(&main)
+        .await
+        .assert_status_ok();
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM api_keys")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn create_counts_against_account_cap(pool: PgPool) {
+    let state = common::state(pool);
+    let (ana, main) = common::user_with_token(&state, "ana").await;
+    let (_, kids) = profile_token(&state, &ana, "Kids", ProfileKind::Kids).await;
+    let (_, bob) = common::user_with_token(&state, "bob").await;
+    let server = serve(&state);
+    for i in 0..30 {
+        create(&server, &main, &format!("m{i}")).await;
+    }
+    for i in 0..20 {
+        create(&server, &kids, &format!("k{i}")).await;
+    }
+    assert_eq!(names(&server, &kids).await.len(), 20);
+    // 50 over the account's profiles: neither profile gets another one.
+    for token in [&kids, &main] {
+        let res = server
+            .post("/api/api-keys")
+            .authorization_bearer(token)
+            .json(&json!({ "deviceName": "one too many" }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        res.assert_json(&json!({ "error": "Too many app tokens; revoke one first" }));
+    }
+    // Another account is not affected.
+    create(&server, &bob, "bob phone").await;
+    // A kids token revoked frees a slot for any profile of the account.
+    let k0 = id_of(&state.pool, "k0").await;
+    server
+        .delete(&format!("/api/api-keys/{k0}"))
+        .authorization_bearer(&kids)
+        .await
+        .assert_status_ok();
+    create(&server, &main, "m30").await;
+    assert_eq!(names(&server, &main).await.len(), 31);
 }

@@ -6,19 +6,38 @@ use axum::http::HeaderMap;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use kima_core::auth::TokenKind;
+use kima_core::profile::{AccountId, ProfileId, ProfileKind};
 use kima_db::users;
-use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// The caller of a request: an account and the profile it acts as (D-241). Per-profile data
+/// is keyed by `profile`, credentials and account state by `account`; on the main profile the
+/// two ids are equal, so the types keep them apart.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuthUser {
-    pub id: Uuid,
+    pub account: AccountId,
+    pub profile: ProfileId,
+    pub profile_kind: ProfileKind,
+    /// The account's username.
     pub username: String,
+    /// The account's role.
     pub role: String,
-    /// The user's `token_version` that this session was checked against.
+    /// The account's `token_version` that this session was checked against.
     pub token_version: i32,
+}
+
+impl AuthUser {
+    pub fn is_main_profile(&self) -> bool {
+        self.profile_kind == ProfileKind::Main
+    }
+
+    /// Admin rights: an admin account acting as its main profile (D-241). A kids or standard
+    /// profile of an admin account is not an admin.
+    pub fn is_admin(&self) -> bool {
+        self.role == users::ROLE_ADMIN && self.is_main_profile()
+    }
 }
 
 pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -62,7 +81,9 @@ pub fn token_from_request(parts: &Parts) -> Option<String> {
         .or_else(|| query_token(parts))
 }
 
-/// The user a token names, if it is a live access token (or a stream token on a `/stream` path).
+/// The session a token names, if it is a live access token (or a stream token on a media
+/// path): its account's `token_version` still matches and its profile still belongs to that
+/// account. A token without `profileId` is the main profile's.
 pub async fn authenticate(
     state: &AppState,
     token: &str,
@@ -76,21 +97,30 @@ pub async fn authenticate(
         TokenKind::Stream if !is_media_path(path) => return Ok(None),
         TokenKind::Access | TokenKind::Stream => {}
     }
-    let Some(user) = users::find_by_id(&state.pool, claims.user_id).await? else {
+    let Some(session) =
+        users::find_session(&state.pool, claims.account(), claims.profile()).await?
+    else {
         return Ok(None);
     };
-    if user.token_version != claims.token_version {
+    if session.token_version != claims.token_version {
         return Ok(None);
     }
+    debug_assert!(
+        session.profile_kind.fits(session.account, session.profile),
+        "a session's profile kind contradicts its id"
+    );
     Ok(Some(AuthUser {
-        id: user.id,
-        username: user.username,
-        role: user.role,
-        token_version: user.token_version,
+        account: session.account,
+        profile: session.profile,
+        profile_kind: session.profile_kind,
+        username: session.username,
+        role: session.role,
+        token_version: session.token_version,
     }))
 }
 
-/// An authenticated admin. A missing or bad token is 401 (from `AuthUser`), a non-admin is 403.
+/// An authenticated admin ([`AuthUser::is_admin`]: role admin on the main profile). A missing
+/// or bad token is 401 (from `AuthUser`), anyone else is 403.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdminUser(pub AuthUser);
 
@@ -99,7 +129,7 @@ impl FromRequestParts<AppState> for AdminUser {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         let user = AuthUser::from_request_parts(parts, state).await?;
-        if user.role != users::ROLE_ADMIN {
+        if !user.is_admin() {
             return Err(ApiError::Forbidden("Admin access required"));
         }
         Ok(Self(user))

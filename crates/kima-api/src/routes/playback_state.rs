@@ -4,6 +4,7 @@
 use axum::extract::{DefaultBodyLimit, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use kima_core::profile::AccountId;
 use kima_db::playback::{self, PlaybackState, QUEUE_LIMIT};
 use serde_json::{Map, Value, json};
 
@@ -22,9 +23,13 @@ pub fn routes() -> Router<AppState> {
         .layer(DefaultBodyLimit::max(5 * 1024 * 1024))
 }
 
-fn state_json(s: &PlaybackState) -> Value {
+/// `userId` is the account (D-242), whichever of its profiles the state belongs to.
+/// `userId` stays the account (upstream's key); `profileId` names the profile whose state it is
+/// (D-242).
+fn state_json(s: &PlaybackState, account: AccountId) -> Value {
     json!({
-        "userId": s.user_id,
+        "userId": account,
+        "profileId": s.profile_id,
         "playbackType": s.playback_type,
         "trackId": s.track_id,
         "audiobookId": s.audiobook_id,
@@ -44,10 +49,12 @@ async fn limit(_user: AuthUser) -> Json<Value> {
 }
 
 async fn read(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    Ok(Json(match playback::get(&state.pool, user.id).await? {
-        Some(s) => state_json(&s),
-        None => Value::Null,
-    }))
+    Ok(Json(
+        match playback::get(&state.pool, user.profile).await? {
+            Some(s) => state_json(&s, user.account),
+            None => Value::Null,
+        },
+    ))
 }
 
 /// JavaScript's `String(v)` for the scalar ids a client may send; objects and arrays are junk.
@@ -173,8 +180,8 @@ async fn save(
         position: None,
         changed_by: None,
     };
-    let saved = playback::upsert(&state.pool, user.id, patch).await?;
-    Ok(Json(state_json(&saved)))
+    let saved = playback::upsert(&state.pool, user.profile, patch).await?;
+    Ok(Json(state_json(&saved, user.account)))
 }
 
 /// Upstream answers 404 for everyone but the public "live trip" user, and the web player stops
@@ -184,6 +191,6 @@ async fn live(_user: AuthUser) -> ApiError {
 }
 
 async fn clear(State(state): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
-    let removed = playback::delete(&state.pool, user.id).await?;
+    let removed = playback::delete(&state.pool, user.profile).await?;
     Ok(Json(json!({ "success": true, "cleared": removed })))
 }

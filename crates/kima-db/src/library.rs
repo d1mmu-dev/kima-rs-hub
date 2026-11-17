@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use kima_core::profile::ProfileId;
 use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
 use sqlx::{PgConnection, PgPool};
@@ -582,7 +583,7 @@ pub struct Retired {
     /// The album of each deleted track (one id per track), to refresh what derives from them.
     pub albums: Vec<Uuid>,
     /// `(owner, playlist)` of every playlist that held a retired track, for live updates.
-    pub playlists: Vec<(Uuid, Uuid)>,
+    pub playlists: Vec<(ProfileId, Uuid)>,
     /// Transcode-cache files of the retired tracks; the caller unlinks them after the commit.
     pub artifacts: Vec<std::path::PathBuf>,
     /// The guard fired: more than 10 % (and at least 10) of all tracks are flagged missing.
@@ -594,7 +595,7 @@ pub struct Retired {
 /// Deletes tracks missing for longer than `older_than` (D-040, D-161), in one transaction:
 /// stands down on a mass disappearance; hands plays, stars, ratings, playlist places and
 /// bookmarks to a live copy of the same song (same album, disc, track number, title ignoring
-/// case) unless the user already has that on the copy; writes `removal_log`; clears
+/// case) unless the profile already has that on the copy; writes `removal_log`; clears
 /// `playback_state` references; deletes. `cache_dir` is where transcodes are cached as
 /// `<track id>-<quality>-<size>-<mtime>.mp3`; those files are listed, not unlinked.
 pub async fn retire_missing(
@@ -635,15 +636,15 @@ pub async fn retire_missing(
     }
     let ids: Vec<Uuid> = gone.iter().map(|g| g.id).collect();
 
-    let playlists: Vec<(Uuid, Uuid)> = sqlx::query!(
-        "SELECT DISTINCT p.user_id, p.id FROM playlist_items i JOIN playlists p ON p.id = i.playlist_id
+    let playlists: Vec<(ProfileId, Uuid)> = sqlx::query!(
+        "SELECT DISTINCT p.profile_id, p.id FROM playlist_items i JOIN playlists p ON p.id = i.playlist_id
          WHERE i.track_id = ANY($1) ORDER BY 1, 2",
         &ids
     )
     .fetch_all(&mut *tx)
     .await?
     .into_iter()
-    .map(|r| (r.user_id, r.id))
+    .map(|r| (ProfileId::new(r.profile_id), r.id))
     .collect();
 
     // Titles are compared here, not in SQL: the database lower-cases ASCII only.
@@ -748,7 +749,7 @@ pub async fn retire_missing(
     })
 }
 
-/// Moves `from`'s history onto `to`, each kind unless the same user already has it on `to`
+/// Moves `from`'s history onto `to`, each kind unless the same profile already has it on `to`
 /// (that row stays; the duplicate goes with the retiring track).
 async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Result<()> {
     sqlx::query!(
@@ -760,7 +761,7 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     .await?;
     sqlx::query!(
         "UPDATE stars s SET track_id = $2 WHERE s.track_id = $1
-           AND NOT EXISTS (SELECT 1 FROM stars o WHERE o.user_id = s.user_id AND o.track_id = $2)",
+           AND NOT EXISTS (SELECT 1 FROM stars o WHERE o.profile_id = s.profile_id AND o.track_id = $2)",
         from,
         to
     )
@@ -768,7 +769,7 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     .await?;
     sqlx::query!(
         "UPDATE ratings r SET track_id = $2 WHERE r.track_id = $1
-           AND NOT EXISTS (SELECT 1 FROM ratings o WHERE o.user_id = r.user_id AND o.track_id = $2)",
+           AND NOT EXISTS (SELECT 1 FROM ratings o WHERE o.profile_id = r.profile_id AND o.track_id = $2)",
         from,
         to
     )
@@ -784,18 +785,18 @@ async fn hand_over(conn: &mut PgConnection, from: Uuid, to: Uuid) -> sqlx::Resul
     .await?;
     sqlx::query!(
         "UPDATE subsonic_bookmarks b SET track_id = $2 WHERE b.track_id = $1
-           AND NOT EXISTS (SELECT 1 FROM subsonic_bookmarks o WHERE o.user_id = b.user_id AND o.track_id = $2)",
+           AND NOT EXISTS (SELECT 1 FROM subsonic_bookmarks o WHERE o.profile_id = b.profile_id AND o.track_id = $2)",
         from,
         to
     )
     .execute(&mut *conn)
     .await?;
-    // Copy in user order so concurrent handovers acquire unique-index locks consistently.
+    // Copy in profile order so concurrent handovers acquire unique-index locks consistently.
     // A destination row, including one committed after our snapshot, wins unchanged.
     sqlx::query!(
-        "INSERT INTO play_audit_ignore (user_id, track_id, ignored_at)
-         SELECT user_id, $2, ignored_at FROM play_audit_ignore WHERE track_id = $1
-         ORDER BY user_id ON CONFLICT (user_id, track_id) DO NOTHING",
+        "INSERT INTO play_audit_ignore (profile_id, track_id, ignored_at)
+         SELECT profile_id, $2, ignored_at FROM play_audit_ignore WHERE track_id = $1
+         ORDER BY profile_id ON CONFLICT (profile_id, track_id) DO NOTHING",
         from,
         to
     )

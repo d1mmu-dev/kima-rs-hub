@@ -952,7 +952,7 @@ async fn progress_events_carry_run_id(pool: PgPool) {
     let mut sent = Vec::new();
     while let Ok(e) = rx.try_recv() {
         if e.data["type"] == "autotag:progress" {
-            assert_eq!(e.user_id, None);
+            assert_eq!(e.audience, kima_core::events::Audience::All);
             sent.push(e.data);
         }
     }

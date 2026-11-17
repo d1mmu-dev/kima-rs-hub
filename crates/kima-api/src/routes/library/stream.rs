@@ -33,9 +33,9 @@ async fn stream(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let quality = match params.quality.as_deref() {
-        // Without `quality` the caller's `playbackQuality` setting decides, as upstream.
+        // Without `quality` the caller profile's `playbackQuality` setting decides, as upstream.
         None => {
-            let saved = kima_db::user_settings::get(&state.pool, user.id).await?;
+            let saved = kima_db::user_settings::get(&state.pool, user.profile).await?;
             Quality::parse(&saved.playback_quality).unwrap_or(Quality::Original)
         }
         Some(q) => Quality::parse(q).ok_or_else(|| {

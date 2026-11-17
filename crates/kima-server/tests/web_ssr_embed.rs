@@ -151,6 +151,7 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
         "/playlists",
         "/playlists/0b1c2d3e",
         "/settings",
+        "/profiles",
         "/podcasts",
         "/podcasts/show?id=0b1c2d3e",
         "/podcasts/category?id=1303",
@@ -343,6 +344,13 @@ async fn login_is_server_rendered_markup(pool: PgPool) {
         .unwrap();
     assert!(!setup.contains("Welcome back"), "{setup}");
     assert!(setup.contains(">Loading…</p>"), "{setup}");
+    let profiles = reqwest::get(format!("{base}/profiles")).await.unwrap();
+    assert_eq!(profiles.status(), StatusCode::OK);
+    let profiles = profiles.text().await.unwrap();
+    assert!(profiles.contains("Who&#x27;s listening?"), "{profiles}");
+    assert!(profiles.contains("data-vertigo-run-wasm"), "{profiles}");
+    // Public SSR shell only: no account-local names or API data at render time.
+    assert!(profiles.contains(">Loading…</p>"), "{profiles}");
     // ... and `/` and `/playlists/<id>` render too (the legacy export would say "legacy home").
     let home = reqwest::get(format!("{base}/"))
         .await

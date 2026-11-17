@@ -25,6 +25,7 @@ pub mod playback;
 pub mod playlists;
 pub mod plays;
 pub mod podcasts;
+pub mod profiles;
 pub mod ratings;
 pub mod removal_log;
 pub mod search;

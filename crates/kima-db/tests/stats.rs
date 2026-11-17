@@ -1,3 +1,4 @@
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use uuid::Uuid;
 
@@ -24,32 +25,60 @@ async fn playable_db_counts_listens_and_respects_user(pool: PgPool) {
         sqlx::query("INSERT INTO tracks (id,album_id,artist_name,title,display_title,duration_secs,codec,path,size,mtime,fingerprint) VALUES ($1,$2,'artist',$3,$3,180,'flac',$3,0,now(),decode('','hex'))").bind(id).bind(album).bind(title).execute(&pool).await.unwrap();
     }
     for (who, track, offset) in [(user, a, 0), (user, a, -30), (user, b, -300), (other, b, 0)] {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now()+$4 * interval '1 second')").bind(Uuid::now_v7()).bind(who).bind(track).bind(offset as f64).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,now()+$4 * interval '1 second')").bind(Uuid::now_v7()).bind(who).bind(track).bind(offset as f64).execute(&pool).await.unwrap();
     }
-    let rows = playable_slice(&pool, user, "top", f64::NAN, 40, Period::All)
-        .await
-        .unwrap();
+    let rows = playable_slice(
+        &pool,
+        ProfileId::new(user),
+        "top",
+        f64::NAN,
+        40,
+        Period::All,
+    )
+    .await
+    .unwrap();
     assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), vec![a, b]);
     assert_eq!(rows[0].artist_name, "Edited artist");
     assert_eq!(rows[0].album_title, "Edited album");
     assert!(
-        playable_slice(&pool, user, "never", f64::NAN, 40, Period::All)
-            .await
-            .unwrap()
-            .is_empty()
+        playable_slice(
+            &pool,
+            ProfileId::new(user),
+            "never",
+            f64::NAN,
+            40,
+            Period::All
+        )
+        .await
+        .unwrap()
+        .is_empty()
     );
     assert_eq!(
-        playable_slice(&pool, other, "never", f64::NAN, 40, Period::All)
-            .await
-            .unwrap()[0]
+        playable_slice(
+            &pool,
+            ProfileId::new(other),
+            "never",
+            f64::NAN,
+            40,
+            Period::All
+        )
+        .await
+        .unwrap()[0]
             .id,
         a
     );
     assert_eq!(
-        playable_slice(&pool, user, "decade", 1990.0, 40, Period::All)
-            .await
-            .unwrap()
-            .len(),
+        playable_slice(
+            &pool,
+            ProfileId::new(user),
+            "decade",
+            1990.0,
+            40,
+            Period::All
+        )
+        .await
+        .unwrap()
+        .len(),
         2
     );
 }
@@ -79,7 +108,7 @@ async fn ignore_rows_cascade_with_track_and_user(pool: PgPool) {
     sqlx::query("INSERT INTO tracks (id, album_id, artist_name, title, codec, path, size, mtime, fingerprint) VALUES ($1, $2, 'a', 't', 'flac', '/t', 0, now(), decode('', 'hex'))")
         .bind(track).bind(album).execute(&pool).await.unwrap();
     for delete_track in [true, false] {
-        sqlx::query("INSERT INTO play_audit_ignore (user_id, track_id) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO play_audit_ignore (profile_id, track_id) VALUES ($1, $2)")
             .bind(user)
             .bind(track)
             .execute(&pool)
@@ -166,7 +195,7 @@ async fn walk_counts_listens_not_rows(pool: PgPool) {
         let mut last_id = Uuid::nil();
         for offset in offsets {
             last_id = Uuid::now_v7();
-            sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now() + $4 * interval '1 second')").bind(last_id).bind(user).bind(track).bind(offset as f64).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,now() + $4 * interval '1 second')").bind(last_id).bind(user).bind(track).bind(offset as f64).execute(&pool).await.unwrap();
         }
         let sql = format!("{} SELECT count(*) FROM p", listen_rows(Period::All, true));
         let count: i64 = sqlx::query_scalar(&sql)
@@ -236,7 +265,7 @@ async fn period_window_applies_after_the_walk(pool: PgPool) {
         .unwrap();
     sqlx::query("INSERT INTO tracks (id, album_id, artist_name, title, codec, path, size, mtime, fingerprint, duration_secs) VALUES ($1, $2, 'a', 't', 'flac', '/period', 0, now(), decode('', 'hex'), 259200)").bind(track).bind(album).execute(&pool).await.unwrap();
     for days in [31, 29] {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now() - $4 * interval '1 day')").bind(Uuid::now_v7()).bind(user).bind(track).bind(days as f64).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,now() - $4 * interval '1 day')").bind(Uuid::now_v7()).bind(user).bind(track).bind(days as f64).execute(&pool).await.unwrap();
     }
     for (period, expected) in [(Period::All, 1), (Period::Days30, 0), (Period::Months12, 1)] {
         let count: i64 = sqlx::query_scalar(&format!(
@@ -252,13 +281,13 @@ async fn period_window_applies_after_the_walk(pool: PgPool) {
 
     // A listen that starts before the twelve-month boundary must not be
     // reopened by a later raw row inside that boundary.
-    sqlx::query("DELETE FROM plays WHERE user_id = $1")
+    sqlx::query("DELETE FROM plays WHERE profile_id = $1")
         .bind(user)
         .execute(&pool)
         .await
         .unwrap();
     for offset in ["-1 hour", "1 hour"] {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now() - interval '12 months' + $4::interval)")
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,now() - interval '12 months' + $4::interval)")
             .bind(Uuid::now_v7()).bind(user).bind(track).bind(offset)
             .execute(&pool).await.unwrap();
     }
@@ -299,9 +328,11 @@ async fn overview_counts_raw_rows_for_shelf_and_listens_for_signature(pool: PgPo
     sqlx::query("INSERT INTO albums (id,artist_id,title,title_key,year,display_year) VALUES ($1,$2,'a','a',1905,1994)").bind(album).bind(artist).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO tracks (id,album_id,artist_name,title,codec,path,size,mtime,fingerprint,duration_secs) VALUES ($1,$2,'a','t','flac','/t',0,now(),decode('','hex'),180)").bind(track).bind(album).execute(&pool).await.unwrap();
     for (id, seconds) in [(user, 0), (user, 20), (other, 0)] {
-        sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,now()-interval '60 days'+$4*interval '1 second')").bind(Uuid::now_v7()).bind(id).bind(track).bind(seconds as f64).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,now()-interval '60 days'+$4*interval '1 second')").bind(Uuid::now_v7()).bind(id).bind(track).bind(seconds as f64).execute(&pool).await.unwrap();
     }
-    let all = overview(&pool, user, Period::All).await.unwrap();
+    let all = overview(&pool, ProfileId::new(user), Period::All)
+        .await
+        .unwrap();
     assert_eq!((all.total.tracks, all.heard.tracks), (1, 1));
     assert_eq!((all.decades[0].decade, all.decades[0].heard), (1990, 1));
     assert_eq!(
@@ -321,7 +352,9 @@ async fn overview_counts_raw_rows_for_shelf_and_listens_for_signature(pool: PgPo
         ),
         ("before 2000", 1994, 1)
     );
-    let recent = overview(&pool, user, Period::Days30).await.unwrap();
+    let recent = overview(&pool, ProfileId::new(user), Period::Days30)
+        .await
+        .unwrap();
     assert_eq!(recent.heard.tracks, 1);
     assert!(recent.concentration.distinct.is_none());
     assert!(recent.era.is_empty());
@@ -360,7 +393,7 @@ async fn walk_agrees_with_audit_grouping(pool: PgPool) {
     }
     let mut rng = 42_u64;
     for case in 0..200 {
-        sqlx::query("DELETE FROM plays WHERE user_id=$1")
+        sqlx::query("DELETE FROM plays WHERE profile_id=$1")
             .bind(user)
             .execute(&pool)
             .await
@@ -380,9 +413,11 @@ async fn walk_agrees_with_audit_grouping(pool: PgPool) {
             } else {
                 (next() % 401) as i64
             };
-            sqlx::query("INSERT INTO plays(id,user_id,track_id,played_at) VALUES($1,$2,$3,'2026-03-01'::timestamptz+$4*interval '1 second')").bind(Uuid::now_v7()).bind(user).bind(t).bind(at as f64).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO plays(id,profile_id,track_id,played_at) VALUES($1,$2,$3,'2026-03-01'::timestamptz+$4*interval '1 second')").bind(Uuid::now_v7()).bind(user).bind(t).bind(at as f64).execute(&pool).await.unwrap();
         }
-        let rows = audit::audit_rows(&pool, user).await.unwrap();
+        let rows = audit::audit_rows(&pool, ProfileId::new(user))
+            .await
+            .unwrap();
         let listens = audit::listens_of(&rows);
         let sql = format!(
             "{} SELECT track_id,count(*)::bigint FROM p GROUP BY track_id ORDER BY track_id",
@@ -453,7 +488,7 @@ async fn audit_play<'e>(
     heard: bool,
 ) -> Uuid {
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO plays (id,user_id,track_id,played_at,heard) VALUES ($1,$2,$3,'2026-03-01T12:00:00Z'::timestamptz + $4 * interval '1 second',$5)")
+    sqlx::query("INSERT INTO plays (id,profile_id,track_id,played_at,heard) VALUES ($1,$2,$3,'2026-03-01T12:00:00Z'::timestamptz + $4 * interval '1 second',$5)")
         .bind(id)
         .bind(user)
         .bind(track)
@@ -516,7 +551,7 @@ async fn collapse_never_deletes_a_play_recorded_after_its_read(pool: PgPool) {
     let mut holder = hold_plays(&pool).await;
     let task = tokio::spawn({
         let pool = pool.clone();
-        async move { audit::collapse(&pool, user).await.unwrap() }
+        async move { audit::collapse(&pool, ProfileId::new(user)).await.unwrap() }
     });
     parked(&pool, 1).await;
     // A late (back-dated) row inside the same listen, committed after the read
@@ -540,7 +575,11 @@ async fn remove_never_deletes_a_play_recorded_after_its_read(pool: PgPool) {
     let task = tokio::spawn({
         let pool = pool.clone();
         let wanted = vec![tracks[0]];
-        async move { audit::remove(&pool, user, &wanted).await.unwrap() }
+        async move {
+            audit::remove(&pool, ProfileId::new(user), &wanted)
+                .await
+                .unwrap()
+        }
     });
     parked(&pool, 1).await;
     let late = audit_play(&mut *holder, user, tracks[0], 5, true).await;
@@ -562,7 +601,7 @@ async fn concurrent_collapses_delete_each_row_once(pool: PgPool) {
     let holder = hold_plays(&pool).await;
     let spawn = || {
         let pool = pool.clone();
-        tokio::spawn(async move { audit::collapse(&pool, user).await.unwrap() })
+        tokio::spawn(async move { audit::collapse(&pool, ProfileId::new(user)).await.unwrap() })
     };
     let (first, second) = (spawn(), spawn());
     parked(&pool, 2).await;
@@ -577,7 +616,7 @@ async fn concurrent_collapses_delete_each_row_once(pool: PgPool) {
 async fn audit_play_at(pool: &PgPool, user: Uuid, track: Uuid, at: &str) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO plays (id,user_id,track_id,played_at) VALUES ($1,$2,$3,$4::timestamptz)",
+        "INSERT INTO plays (id,profile_id,track_id,played_at) VALUES ($1,$2,$3,$4::timestamptz)",
     )
     .bind(id)
     .bind(user)
@@ -610,7 +649,9 @@ async fn sub_millisecond_walk_and_audit_grouping_agree(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let rows = audit::audit_rows(&pool, user).await.unwrap();
+    let rows = audit::audit_rows(&pool, ProfileId::new(user))
+        .await
+        .unwrap();
     let listens = audit::listens_of(&rows);
     assert_eq!(walk, 1);
     assert_eq!(listens.len() as i64, walk);
@@ -627,7 +668,9 @@ async fn sub_millisecond_remove_keeps_a_row_inside_a_listen(pool: PgPool) {
     let b = audit_play_at(&pool, user, tracks[0], "2026-03-01T12:01:40.000100Z").await;
     let c = audit_play_at(&pool, user, tracks[1], "2026-03-01T12:01:50Z").await;
     assert_eq!(
-        audit::remove(&pool, user, &[tracks[0]]).await.unwrap(),
+        audit::remove(&pool, ProfileId::new(user), &[tracks[0]])
+            .await
+            .unwrap(),
         (0, 0)
     );
     let mut expected = vec![a, b, c];
@@ -675,7 +718,7 @@ async fn concurrent_collapses_keep_a_heard_row(pool: PgPool) {
     let mut gate = gate_deletes(&pool).await;
     let spawn = || {
         let pool = pool.clone();
-        tokio::spawn(async move { audit::collapse(&pool, user).await.unwrap() })
+        tokio::spawn(async move { audit::collapse(&pool, ProfileId::new(user)).await.unwrap() })
     };
     let first = spawn();
     parked(&pool, 1).await;
@@ -692,6 +735,8 @@ async fn concurrent_collapses_keep_a_heard_row(pool: PgPool) {
     let mut expected = vec![f, hb, n];
     expected.sort();
     assert_eq!(all_plays(&pool).await, expected);
-    let rows = audit::audit_rows(&pool, user).await.unwrap();
+    let rows = audit::audit_rows(&pool, ProfileId::new(user))
+        .await
+        .unwrap();
     assert_eq!(audit::listens_of(&rows)[0].verdict, audit::Verdict::Heard);
 }

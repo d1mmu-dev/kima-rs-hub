@@ -30,9 +30,13 @@ pub async fn user_with_token(state: &AppState, name: &str) -> (User, String) {
     else {
         panic!("registration failed")
     };
-    let token = state
-        .jwt
-        .issue_access(user.id, &user.username, &user.role, user.token_version);
+    let token = state.jwt.issue_access(
+        user.account(),
+        user.main_profile(),
+        &user.username,
+        &user.role,
+        user.token_version,
+    );
     (user, token)
 }
 

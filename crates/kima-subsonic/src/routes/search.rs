@@ -3,6 +3,7 @@
 use axum::Router;
 use axum::extract::State;
 use kima_api::AppState;
+use kima_core::profile::ProfileId;
 use kima_db::subsonic::{self, AlbumItem, ArtistItem, SearchPage, SongItem};
 use kima_db::{PgPool, search};
 use uuid::Uuid;
@@ -56,7 +57,7 @@ struct Found {
 
 async fn find(
     pool: &PgPool,
-    user: Uuid,
+    user: ProfileId,
     query: &str,
     page: SearchPage,
 ) -> Result<Found, SubsonicError> {
@@ -122,7 +123,7 @@ async fn search_result(
         song_offset: offset(&params, "songOffset"),
     };
     let query = params.get("query").unwrap_or("");
-    let found = find(&app.pool, user.user.id, query, page).await?;
+    let found = find(&app.pool, user.user.profile, query, page).await?;
     Ok(Answer::node(
         Node::new(name)
             .list(
@@ -173,7 +174,7 @@ async fn legacy_search(
         song_count: wanted + 1,
         song_offset,
     };
-    let mut found = find(&app.pool, user.user.id, query, page).await?;
+    let mut found = find(&app.pool, user.user.profile, query, page).await?;
     let more = i64::try_from(found.songs.len()).unwrap_or(i64::MAX) > wanted;
     found
         .songs
@@ -210,7 +211,7 @@ async fn get_random_songs(
         (from, to) => Some((from.unwrap_or(i32::MIN), to.unwrap_or(i32::MAX))),
     };
     let genre = params.get("genre").filter(|g| !g.trim().is_empty());
-    let songs = subsonic::random_tracks(&app.pool, user.user.id, size, years, genre).await?;
+    let songs = subsonic::random_tracks(&app.pool, user.user.profile, size, years, genre).await?;
     Ok(Answer::node(
         Node::new("randomSongs").list("song", songs.iter().map(map::song).collect()),
     ))
@@ -230,7 +231,7 @@ async fn get_songs_by_genre(
         .clamp(1, MAX_PAGE);
     let songs = subsonic::songs_by_genre(
         &app.pool,
-        user.user.id,
+        user.user.profile,
         genre,
         wanted,
         offset(&params, "offset"),
@@ -251,7 +252,7 @@ async fn get_top_songs(
         .paging::<i64>("count")
         .unwrap_or(50)
         .clamp(1, MAX_PAGE);
-    let songs = subsonic::top_tracks(&app.pool, user.user.id, artist, count).await?;
+    let songs = subsonic::top_tracks(&app.pool, user.user.profile, artist, count).await?;
     Ok(Answer::node(
         Node::new("topSongs").list("song", songs.iter().map(map::song).collect()),
     ))

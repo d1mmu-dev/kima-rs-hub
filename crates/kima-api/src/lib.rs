@@ -13,8 +13,20 @@ pub mod state;
 pub use routes::router;
 pub use state::{AppState, LibraryServices};
 
-/// Ends a user's open event streams and pending tickets. Call after bumping their `token_version`.
-pub fn revoke_sessions(state: &AppState, user: uuid::Uuid) {
-    state.sse.revoke_user(user);
-    state.events.publish(kima_core::events::Event::revoke(user));
+/// Ends the open event streams and pending tickets of every profile of an account. Call after
+/// bumping its `token_version` (or deleting it).
+pub fn revoke_sessions(state: &AppState, account: kima_core::profile::AccountId) {
+    state.sse.revoke_account(account);
+    state
+        .events
+        .publish(kima_core::events::Event::revoke_account(account));
+}
+
+/// Ends the open event streams and pending tickets of one profile. Call after deleting it; its
+/// siblings keep theirs.
+pub fn revoke_profile_sessions(state: &AppState, profile: kima_core::profile::ProfileId) {
+    state.sse.revoke_profile(profile);
+    state
+        .events
+        .publish(kima_core::events::Event::revoke_profile(profile));
 }

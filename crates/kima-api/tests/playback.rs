@@ -234,7 +234,14 @@ async fn live_update_reaches_other_tab(pool: PgPool) {
     let state = common::state(pool);
     let (ana, token) = common::user_with_token(&state, "ana").await;
     let app = kima_api::router(state.clone());
-    let mut other_tab = open_stream(&app, &state.sse.issue_ticket(ana.id)).await;
+    let mut other_tab = open_stream(
+        &app,
+        &state.sse.issue_ticket(kima_api::events::StreamOwner {
+            account: ana.account(),
+            profile: ana.main_profile(),
+        }),
+    )
+    .await;
 
     let server = axum_test::TestServer::new(app).unwrap();
     let res = server

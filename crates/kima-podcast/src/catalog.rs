@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use futures::future::{BoxFuture, Shared, WeakShared};
+use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::http_cache::{self, CacheOutcome};
 use kima_net::{Host, Net, Req};
@@ -712,13 +713,13 @@ impl Catalog {
             .collect())
     }
 
-    /// Rows from what `user` follows (`forYou`, `podcastCatalog.ts:360-387`): the categories of
+    /// Rows from what `profile` follows (`forYou`, `podcastCatalog.ts:360-387`): the categories of
     /// their shows weighed `(sub-category ? 2 : 1) / (position + 1)`, the top three, each that
     /// category's chart without shows already followed, twelve a row.
-    pub async fn for_you(&self, user: Uuid) -> Result<Vec<ForYouRow>, Upstream> {
+    pub async fn for_you(&self, profile: ProfileId) -> Result<Vec<ForYouRow>, Upstream> {
         const ROWS: usize = 3;
         const PER_ROW: usize = 12;
-        let subs = kima_db::podcasts::followed(&self.0.pool, user)
+        let subs = kima_db::podcasts::followed(&self.0.pool, profile)
             .await
             .map_err(Upstream::internal)?;
         let tree = self.categories().await?;

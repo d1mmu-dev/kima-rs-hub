@@ -1,24 +1,34 @@
-//! SSE tickets (single-use, short-lived) and the per-user cap on open streams.
+//! SSE tickets (single-use, short-lived) and the per-profile cap on open streams (D-245).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use kima_core::profile::{AccountId, ProfileId};
 use uuid::Uuid;
 
 pub const TICKET_TTL: Duration = Duration::from_secs(30);
-pub const MAX_STREAMS_PER_USER: usize = 5;
+/// Open event streams per profile (upstream: per user; each profile is a listener of its own).
+pub const MAX_STREAMS_PER_PROFILE: usize = 5;
+
+/// Who a ticket was issued to: a profile, and the account it belongs to (an account-wide
+/// revocation reaches the streams of all its profiles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamOwner {
+    pub account: AccountId,
+    pub profile: ProfileId,
+}
 
 pub struct SseRegistry {
     ttl: Duration,
-    tickets: Mutex<HashMap<String, (Uuid, Instant)>>,
-    open: Mutex<HashMap<Uuid, usize>>,
+    tickets: Mutex<HashMap<String, (StreamOwner, Instant)>>,
+    open: Mutex<HashMap<ProfileId, usize>>,
 }
 
-/// Holds one of a user's stream slots; dropping it (stream closed) frees the slot.
+/// Holds one of a profile's stream slots; dropping it (stream closed) frees the slot.
 pub struct StreamSlot {
     registry: Arc<SseRegistry>,
-    user: Uuid,
+    profile: ProfileId,
 }
 
 impl SseRegistry {
@@ -34,43 +44,57 @@ impl SseRegistry {
         }
     }
 
-    pub fn issue_ticket(&self, user: Uuid) -> String {
+    pub fn issue_ticket(&self, owner: StreamOwner) -> String {
         let ticket = Uuid::new_v4().simple().to_string();
         let now = Instant::now();
         let mut tickets = self.tickets.lock().unwrap();
         tickets.retain(|_, (_, issued)| now.duration_since(*issued) < self.ttl);
-        tickets.insert(ticket.clone(), (user, now));
+        tickets.insert(ticket.clone(), (owner, now));
         ticket
     }
 
-    /// Forgets every outstanding ticket of a user (their sessions were revoked).
-    pub fn revoke_user(&self, user: Uuid) {
+    /// Forgets every outstanding ticket of every profile of an account (its sessions were
+    /// revoked).
+    pub fn revoke_account(&self, account: AccountId) {
         self.tickets
             .lock()
             .unwrap()
-            .retain(|_, (id, _)| *id != user);
+            .retain(|_, (owner, _)| owner.account != account);
     }
 
-    pub fn redeem_ticket(&self, ticket: &str) -> Option<Uuid> {
-        let (user, issued) = self.tickets.lock().unwrap().remove(ticket)?;
-        (issued.elapsed() < self.ttl).then_some(user)
+    /// Forgets every outstanding ticket of one profile (it was deleted).
+    pub fn revoke_profile(&self, profile: ProfileId) {
+        self.tickets
+            .lock()
+            .unwrap()
+            .retain(|_, (owner, _)| owner.profile != profile);
     }
 
-    pub fn try_open(self: &Arc<Self>, user: Uuid) -> Option<StreamSlot> {
+    pub fn redeem_ticket(&self, ticket: &str) -> Option<StreamOwner> {
+        let (owner, issued) = self.tickets.lock().unwrap().remove(ticket)?;
+        (issued.elapsed() < self.ttl).then_some(owner)
+    }
+
+    pub fn try_open(self: &Arc<Self>, profile: ProfileId) -> Option<StreamSlot> {
         let mut open = self.open.lock().unwrap();
-        let count = open.entry(user).or_insert(0);
-        if *count >= MAX_STREAMS_PER_USER {
+        let count = open.entry(profile).or_insert(0);
+        if *count >= MAX_STREAMS_PER_PROFILE {
             return None;
         }
         *count += 1;
         Some(StreamSlot {
             registry: Arc::clone(self),
-            user,
+            profile,
         })
     }
 
-    pub fn open_streams(&self, user: Uuid) -> usize {
-        self.open.lock().unwrap().get(&user).copied().unwrap_or(0)
+    pub fn open_streams(&self, profile: ProfileId) -> usize {
+        self.open
+            .lock()
+            .unwrap()
+            .get(&profile)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -83,10 +107,10 @@ impl Default for SseRegistry {
 impl Drop for StreamSlot {
     fn drop(&mut self) {
         let mut open = self.registry.open.lock().unwrap();
-        if let Some(count) = open.get_mut(&self.user) {
+        if let Some(count) = open.get_mut(&self.profile) {
             *count -= 1;
             if *count == 0 {
-                open.remove(&self.user);
+                open.remove(&self.profile);
             }
         }
     }

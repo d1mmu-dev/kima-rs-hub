@@ -1,12 +1,13 @@
+use kima_core::profile::ProfileId;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::listens::{Period, listen_rows};
 
-pub async fn track_play_count(pool: &PgPool, user: Uuid, track: Uuid) -> sqlx::Result<i64> {
+pub async fn track_play_count(pool: &PgPool, profile: ProfileId, track: Uuid) -> sqlx::Result<i64> {
     let sql = format!("{} SELECT count(*) FROM p", listen_rows(Period::All, true));
     sqlx::query_scalar(&sql)
-        .bind(user)
+        .bind(profile)
         .bind(track)
         .fetch_one(pool)
         .await
@@ -32,7 +33,7 @@ pub struct HourDetail {
 
 pub async fn hour_detail(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     dow: i32,
     hour: i32,
     zone: &str,
@@ -43,13 +44,13 @@ pub async fn hour_detail(
         listen_rows(period, false)
     );
     let tracks = sqlx::query_as::<_, HourTrack>(&format!("{prefix} SELECT coalesce(t.display_title,t.title) AS title, coalesce(ar.display_name,ar.name) AS artist, count(*) AS listens FROM cell p JOIN tracks t ON t.id=p.track_id JOIN albums al ON al.id=p.album_id JOIN artists ar ON ar.id=al.artist_id GROUP BY 1,2 ORDER BY listens DESC, 1 LIMIT 6"))
-        .bind(user).bind(zone).bind(dow).bind(hour).fetch_all(pool).await?;
+        .bind(profile).bind(zone).bind(dow).bind(hour).fetch_all(pool).await?;
     let artists = sqlx::query_as::<_, HourArtist>(&format!("{prefix} SELECT coalesce(ar.display_name,ar.name) AS name, count(*) AS listens FROM cell p JOIN albums al ON al.id=p.album_id JOIN artists ar ON ar.id=al.artist_id GROUP BY 1 ORDER BY listens DESC, 1 LIMIT 4"))
-        .bind(user).bind(zone).bind(dow).bind(hour).fetch_all(pool).await?;
+        .bind(profile).bind(zone).bind(dow).bind(hour).fetch_all(pool).await?;
     let (listens, last_at) = sqlx::query_as::<_, (i64, Option<time::OffsetDateTime>)>(&format!(
         "{prefix} SELECT count(*), max(played_at) FROM cell"
     ))
-    .bind(user)
+    .bind(profile)
     .bind(zone)
     .bind(dow)
     .bind(hour)
@@ -105,7 +106,7 @@ pub struct ListeningStats {
 }
 pub async fn listening_stats(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     tz: &str,
     period: Period,
 ) -> sqlx::Result<ListeningStats> {
@@ -138,24 +139,24 @@ pub async fn listening_stats(
     );
     let (totals, by_source, clock_rows, drift, top_artists, top_tracks) = tokio::try_join!(
         sqlx::query_as::<_, Totals>(&totals_sql)
-            .bind(user)
+            .bind(profile)
             .fetch_one(pool),
         sqlx::query_as::<_, (String, i64)>(&source_sql)
-            .bind(user)
+            .bind(profile)
             .fetch_all(pool),
         sqlx::query_as::<_, (i32, i32, i64)>(&clock_sql)
-            .bind(user)
+            .bind(profile)
             .bind(tz)
             .fetch_all(pool),
         sqlx::query_as::<_, DriftMonth>(&drift_sql)
-            .bind(user)
+            .bind(profile)
             .bind(tz)
             .fetch_all(pool),
         sqlx::query_as::<_, TopArtist>(&artists_sql)
-            .bind(user)
+            .bind(profile)
             .fetch_all(pool),
         sqlx::query_as::<_, TopTrack>(&tracks_sql)
-            .bind(user)
+            .bind(profile)
             .fetch_all(pool),
     )?;
     let mut clock = [[0; 24]; 7];

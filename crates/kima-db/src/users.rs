@@ -1,3 +1,4 @@
+use kima_core::profile::{AccountId, ProfileId, ProfileKind};
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -24,6 +25,17 @@ pub struct User {
     pub onboarding_complete: bool,
     pub token_version: i32,
     pub created_at: OffsetDateTime,
+}
+
+impl User {
+    pub fn account(&self) -> AccountId {
+        AccountId::new(self.id)
+    }
+
+    /// The account's main profile (its id is the account's).
+    pub fn main_profile(&self) -> ProfileId {
+        ProfileId::main_of(self.account())
+    }
 }
 
 #[derive(Debug)]
@@ -164,6 +176,52 @@ pub async fn find_by_id(pool: &PgPool, id: Uuid) -> sqlx::Result<Option<User>> {
     )
     .fetch_optional(pool)
     .await
+}
+
+/// What a request's token resolves to: the account it names and one of that account's
+/// profiles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Session {
+    pub account: AccountId,
+    pub profile: ProfileId,
+    pub profile_kind: ProfileKind,
+    pub username: String,
+    pub role: String,
+    pub token_version: i32,
+}
+
+/// The session for `profile` of `account`, in one query that binds the two: a profile of
+/// another account (a forged or stale `profileId`) or a deleted one is `None`, never "that
+/// other profile".
+pub async fn find_session(
+    pool: &PgPool,
+    account: AccountId,
+    profile: ProfileId,
+) -> sqlx::Result<Option<Session>> {
+    let Some(row) = sqlx::query!(
+        r#"SELECT u.id AS "account: AccountId", p.id AS "profile: ProfileId", p.kind,
+                  u.username, u.role, u.token_version
+           FROM profiles p JOIN users u ON u.id = p.user_id
+           WHERE p.id = $1 AND u.id = $2"#,
+        profile.into_uuid(),
+        account.into_uuid()
+    )
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Session {
+        account: row.account,
+        profile: row.profile,
+        profile_kind: row
+            .kind
+            .parse()
+            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
+        username: row.username,
+        role: row.role,
+        token_version: row.token_version,
+    }))
 }
 
 pub async fn count(pool: &PgPool) -> sqlx::Result<i64> {
@@ -332,7 +390,7 @@ pub async fn set_role_unless_last_admin_in(
     Ok(RoleChange::Changed)
 }
 
-/// Sets a new password hash, bumps the token version and revokes all of the user's app tokens.
+/// Sets a new password hash, bumps the token version and revokes all of the account's app tokens (every profile's).
 /// `seen_version` is what the caller verified the old password against: the update then applies
 /// only if the version is unchanged. `None` updates unconditionally. Returns the new version,
 /// or `None` if nothing matched (the user changed meanwhile or is gone).
@@ -355,7 +413,7 @@ pub async fn set_password(
     .fetch_optional(&mut *conn)
     .await?;
     if version.is_some() {
-        api_keys::delete_all_for_user(conn, id).await?;
+        api_keys::delete_all_for_account(conn, AccountId::new(id)).await?;
     }
     Ok(version)
 }

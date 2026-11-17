@@ -37,6 +37,7 @@ pub fn render() -> DomNode {
         player: player.clone(),
         refresh: Value::new(0),
         playlists_rev: Value::new(0),
+        profiles_rev: Value::new(0),
         query: Value::new(String::new()),
         refine: Value::new(Refine::default()),
         refine_open: Value::new(false),
@@ -58,8 +59,8 @@ pub fn render() -> DomNode {
         })
     };
     // The shell is rebuilt only when switching between a bare page and an app page, not on every navigation.
-    let bare: Computed<bool> =
-        routes.map(|(_, effective)| matches!(effective, Route::Login | Route::Setup));
+    let bare: Computed<bool> = routes
+        .map(|(_, effective)| matches!(effective, Route::Login | Route::Setup | Route::Profiles));
 
     let page = bind!(ctx, routes, || -> DomNode {
         routes.render_value(bind!(ctx, |(requested, effective): (Route, Route)| {
@@ -70,6 +71,7 @@ pub fn render() -> DomNode {
             match effective {
                 Route::Login => pages::login::render(&ctx),
                 Route::Setup => pages::onboarding::render(&ctx),
+                Route::Profiles => pages::profiles::render(&ctx),
                 Route::Artists => pages::artists::render(&ctx),
                 Route::Albums { artist } => pages::albums::render(&ctx, artist),
                 Route::Tracks { album } => pages::tracks::render(&ctx, album),

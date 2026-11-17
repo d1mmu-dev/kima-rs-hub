@@ -6,6 +6,7 @@ pub mod login;
 pub mod onboarding;
 pub mod playlists;
 pub mod podcasts;
+pub mod profiles;
 pub mod search;
 pub mod settings;
 pub mod tracks;

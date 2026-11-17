@@ -11,7 +11,8 @@
 // The run changes the admin password to NEW_PASS (default secret34) through the Settings page and changes it
 // back at the end, so it can be repeated against the same stack. It creates and deletes the playlist
 // "E2E Playlist".
-// Chromium flags: --autoplay-policy=no-user-gesture-required --mute-audio (no audio device needed).
+// --standard-autoplay omits the autoplay override and sends a trusted CDP play gesture.
+// --mute-audio keeps the test silent; media volume and advancement remain observable.
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 
@@ -25,8 +26,9 @@ const SSR = process.argv.includes('--ssr') || process.env.SSR === '1';
 const BASE = process.env.BASE || (SSR ? 'http://127.0.0.1:' + (process.env.KIMA_PORT || '3030') : 'http://127.0.0.1:4444');
 const MUSIC = process.env.MUSIC;
 const chrome = spawn(CHROME, ['--headless=new', '--no-sandbox', '--disable-gpu', '--remote-debugging-port=' + PORT,
-  '--autoplay-policy=no-user-gesture-required', '--mute-audio', '--window-size=1100,800',
+  ...(process.argv.includes('--standard-autoplay') ? [] : ['--autoplay-policy=no-user-gesture-required']), '--mute-audio', '--window-size=1100,800',
   '--user-data-dir=' + fs.mkdtempSync(os.tmpdir() + '/kima-web-e2e-'), 'about:blank'], { stdio: 'ignore' });
+process.on('exit', () => chrome.kill());
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let targets;
 for (let i = 0; i < 50; i++) {
@@ -36,16 +38,35 @@ for (let i = 0; i < 50; i++) {
 const page = targets.find((t) => t.type === 'page');
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((r) => (ws.onopen = r));
-let id = 0; const pending = new Map(); const errors = [];
+let id = 0; const pending = new Map(); const errors = []; let audioStarts = [];
+// Each target has its own execution-context ids. Preserve target identity and
+// collect before navigation, including sibling and isolated-profile pages.
+const diagnosticTabs = new Set();
+const diagnostics = (tabId) => {
+  diagnosticTabs.add(tabId);
+  const contexts = new Map();
+  return (d) => {
+    if (d.method === 'Runtime.executionContextCreated') contexts.set(d.params.context.id, {origin:d.params.context.origin, name:d.params.context.name});
+    if (d.method === 'Runtime.exceptionThrown') {
+      const e = d.params.exceptionDetails;
+      errors.push({tabId, kind:'exception', text:e.text, description:e.exception?.description, properties:e.exception?.preview?.properties, context:contexts.get(e.executionContextId), stack:e.stackTrace});
+    }
+    if (d.method === 'Runtime.consoleAPICalled' && d.params.type === 'error') errors.push({tabId, kind:'console.error', text:d.params.args.map(a=>a.value ?? a.description).join(' '), context:contexts.get(d.params.executionContextId), stack:d.params.stackTrace});
+    if (d.method === 'Runtime.executionContextDestroyed') contexts.delete(d.params.executionContextId);
+    if (d.method === 'Runtime.executionContextsCleared') contexts.clear();
+  };
+};
+const collectMain = diagnostics(page.id);
 ws.onmessage = (m) => {
   const d = JSON.parse(m.data);
   if (d.id && pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); }
-  if (d.method === 'Runtime.exceptionThrown') errors.push(d.params.exceptionDetails.text + ' ' + (d.params.exceptionDetails.exception?.description || '') + ' ' + JSON.stringify(d.params.exceptionDetails.exception?.preview?.properties?.map((p) => p.name + '=' + p.value) || ''));
-  if (d.method === 'Runtime.consoleAPICalled' && d.params.type === 'error') errors.push('console.error: ' + d.params.args.map((a) => a.value ?? a.description).join(' '));
+  if (d.method === 'Runtime.bindingCalled' && d.params.name === '__reportAudioStart') audioStarts.push(JSON.parse(d.params.payload));
+  collectMain(d);
 };
 const send = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
 const ev = async (expr) => { const r = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }); if (r.result.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails)); return r.result.result.value; };
 await send('Runtime.enable'); await send('Page.enable');
+await send('Runtime.addBinding', {name:'__reportAudioStart'});
 // kima-web copies the legacy `body { text-transform: lowercase }`, which makes innerText lowercase. The checks
 // below compare the real text, so switch the transform off in every document this run opens.
 await send('Page.addScriptToEvaluateOnNewDocument', { source: `setInterval(()=>{if(document.documentElement&&!document.getElementById('e2e-no-transform')){const s=document.createElement('style');s.id='e2e-no-transform';s.textContent='*{text-transform:none!important}';document.documentElement.appendChild(s)}},20)` });
@@ -58,9 +79,41 @@ const apiCalls = (part) => ev(`performance.getEntriesByType('resource').filter((
 const button = (name) => ev(`(()=>{const b=document.querySelector('button[name=${name}]');if(!b)return false;b.click();return true})()`);
 const typeInto = (name, v) => ev(`(()=>{const i=document.querySelector('input[name=${name}]');i.value=${JSON.stringify(v)};i.dispatchEvent(new Event('input',{bubbles:true}))})()`);
 const login = async (pass) => { await setInput('username', USER); await setInput('password', pass); await ev(`document.querySelector('button[type=submit]').click()`); await sleep(2500); };
-const audio = () => ev(`(()=>{const a=document.querySelector('audio');return a?{src:a.currentSrc.replace(/token=.*/,'token=…'),paused:a.paused,t:a.currentTime,d:a.duration,rs:a.readyState,err:a.error&&a.error.code}:null})()`);
+const audio = () => ev(`(()=>{const a=document.querySelector('audio');return a?{src:a.currentSrc.replace(/token=.*/,'token=…'),paused:a.paused,volume:a.volume,t:a.currentTime,d:a.duration,rs:a.readyState,err:a.error&&a.error.code}:null})()`);
 const ctl = (label) => ev(`(()=>{const b=[...document.querySelectorAll('[role=group][aria-label="Playback controls"] button[aria-label=${JSON.stringify(label)}]')].find((b)=>b.offsetParent!==null);if(!b)return false;b.click();return true})()`);
 const results = []; const check = (name, ok, detail = '') => { results.push([ok, name, detail]); console.log(ok ? 'PASS' : 'FAIL', name, detail); };
+
+const snapshot = async (name) => {
+  if (!process.env.EVIDENCE_DIR) return;
+  fs.mkdirSync(process.env.EVIDENCE_DIR, {recursive:true});
+  if (name === 'settings-profiles') {
+    await ev(`document.getElementById('profiles').scrollIntoView({block:'start'})`);
+    await sleep(200);
+  }
+  const shot = await send('Page.captureScreenshot', {format:'png', captureBeyondViewport:false});
+  fs.writeFileSync(process.env.EVIDENCE_DIR + '/' + (SSR ? 'ssr-' : 'default-') + name + '.png', Buffer.from(shot.result.data, 'base64'));
+};
+const signOut = () => ev(`(()=>{
+  const summary = [...document.querySelectorAll('summary[aria-label="Switch profile"]')].find(e => e.getClientRects().length > 0);
+  if (!summary) return false;
+  const menu = summary.closest('details');
+  if (!menu.open) summary.click();
+  const button = [...menu.querySelectorAll('button')].find(e => e.getClientRects().length > 0 && e.textContent.trim() === 'Sign out');
+  if (!menu.open || !button) return false;
+  button.click(); return true;
+})()`);
+
+// DB-free regression for the harness: two responsive headers and closed native menus.
+// This checks the driver helper, not the application's authentication or CSS acceptance.
+if (process.argv.includes('--self-test-sign-out')) {
+  for (const [label, width] of [['desktop', 1440], ['mobile', 390]]) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: width < 1025 });
+    await ev(`document.body.innerHTML = ${JSON.stringify(`<style>.mobile{display:none}@media(max-width:1024px){.desktop{display:none}.mobile{display:block}}</style>` + ['desktop', 'mobile'].map((name) => `<header class="${name}"><details><summary aria-label="Switch profile">Main</summary><button onclick="window.clicked='${name}'">Sign out</button></details></header>`).join(''))}; window.clicked = null`);
+    check(`${label}: closed menu opens and visible Sign out is clicked`, await signOut() && await ev('window.clicked') === label);
+  }
+  ws.close(); chrome.kill();
+  process.exit(results.every((r) => r[0]) ? 0 : 1);
+}
 
 // A stale checked-in Tailwind sheet once shipped a page without any utility class. Fail loudly, before anything else.
 {
@@ -74,6 +127,8 @@ if (SSR) {
   const login = await page('/login');
   check('SSR: GET /login is 200 HTML with the sign-in form already in the markup',
     login.status === 200 && login.type.startsWith('text/html') && login.body.includes('Welcome back') && login.body.includes('<form') && login.body.includes('name="username"'));
+  const profiles = await page('/profiles');
+  check('SSR: /profiles returns the public picker shell without private names', profiles.status === 200 && /Who(?:'|&#x27;|&#39;)s listening\?/.test(profiles.body) && profiles.body.includes('data-vertigo-run-wasm') && !profiles.body.includes(USER));
   const root = await page('/collection');
   check('SSR: GET /collection is server-rendered by the wasm (bootstrap script + inlined stylesheet present)',
     root.status === 200 && root.body.includes('data-vertigo-run-wasm') && root.body.includes('tailwindcss'));
@@ -82,12 +137,13 @@ if (SSR) {
   check('SSR: the wasm named by the page is served through the proxy', wasm.status === 200 && Buffer.from(await wasm.arrayBuffer()).subarray(0, 4).toString('latin1') === '\0asm', wasmPath);
   const manifest = await page(wasmPath.replace(/\/[^/]*$/, '/index.json'));
   check('SSR: other files of the build directory are not served (index.json -> 404)', manifest.status === 404, String(manifest.status));
-  const foreign = await page('/podcasts/');
-  check('SSR: a path outside the kima-web routes is not proxied to the SSR server', !foreign.body.includes('data-vertigo-run-wasm'), String(foreign.status));
+  const foreign = await page('/__kima_e2e_unknown__');
+  check('SSR: a path outside the kima-web routes is 404 and not proxied to the SSR server', foreign.status === 404 && !foreign.body.includes('data-vertigo-run-wasm'), String(foreign.status));
   const health = await page('/api/health');
   check('SSR: /api is kima-server\'s own (health answers JSON)', health.status === 200 && health.type.includes('json'));
 }
 
+if (!process.argv.includes('--profiles-only')) {
 await goto(BASE + '/');
 await ev('localStorage.clear()'); await goto(BASE + '/collection');
 check('unauthenticated /collection shows login and rewrites the URL', (await ev('location.pathname')) === '/login' && (await text()).includes('Sign in to continue to Kima'));
@@ -104,7 +160,7 @@ check('wrong password shows the backend error verbatim, stays on /login', bad.in
 
 await setInput('password', PASS);
 await ev(`document.querySelector('button[type=submit]').click()`); await sleep(2500);
-check('login lands on /collection with a stored token', (await ev('location.pathname')) === '/collection' && (await ev(`(localStorage.getItem('kima-web.token')||'').length`)) > 20);
+check('login lands on /collection with a stored token', (await ev('location.pathname')) === '/collection' && (await ev(`(JSON.parse(localStorage.getItem('kima-web.session') || 'null')?.token ?? '').length`)) > 20);
 check('legacy storage key untouched', (await ev(`localStorage.getItem('auth_token')`)) === null);
 check('artists listed', (await text()).includes('Disc Band'));
 
@@ -116,7 +172,14 @@ const tracksText = await text();
 check('tracks listed', tracksText.includes('Song 1-1') && tracksText.includes('Song 2-3'));
 
 await ev(`window.__log=[];new MutationObserver(ms=>{for(const m of ms)for(const n of m.addedNodes)if(n.nodeName==='AUDIO'){window.__log.push('audio added');for(const e of ['play','playing','pause','canplay','ended','error'])n.addEventListener(e,()=>window.__log.push(e+' '+n.currentTime))}}).observe(document.body,{subtree:true,childList:true})`);
-check('play button exists on the Song 1-2 row', await rowClick('Song 1-2', 'button[title=Play]'));
+if (process.argv.includes('--standard-autoplay')) {
+  const point = await ev(`(()=>{const row=[...document.querySelectorAll('[data-track-row]')].find(r=>r.innerText.includes('Song 1-2'));const b=row.querySelector('button[title=Play]');b.scrollIntoView({block:'center'});const r=b.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`);
+  await send('Input.dispatchMouseEvent', {type:'mousePressed',button:'left',clickCount:1,...point});
+  await send('Input.dispatchMouseEvent', {type:'mouseReleased',button:'left',clickCount:1,...point});
+  check('standard autoplay policy receives a trusted playback gesture', await ev('navigator.userActivation.hasBeenActive'));
+} else {
+  check('play button exists on the Song 1-2 row', await rowClick('Song 1-2', 'button[title=Play]'));
+}
 await sleep(3500);
 console.log('audio events:', JSON.stringify(await ev('window.__log')));
 let a1 = await audio(); await sleep(1500); let a2 = await audio();
@@ -136,13 +199,78 @@ const seeked = await audio();
 check('seek slider moves currentTime (served by HTTP range)', seeked.t >= 9.5, JSON.stringify(seeked));
 
 // next
+check('new audio starts at the UI default volume, not full volume', (await audio()).volume === 0.5);
+await ev(`(()=>{const s=document.querySelector('input[aria-label=Volume]');s.value='23';s.dispatchEvent(new Event('input',{bubbles:true}))})()`);
 check('next control exists', await ctl('Next track')); await sleep(2500);
 check('next plays the following track', /Song 1-3/.test(await text()) && (await audio()).t < 5);
+check('next track preserves actual audio volume', (await audio()).volume === 0.23);
+await clickText('button', 'Mute');
+await ctl('Next track'); await sleep(1200);
+check('next track remains actually muted', (await audio()).volume === 0);
 
-// the backend keeps no in-track position for web saves: it is stored client-side (kima-web.position)
+// Observe real play invocations, including detached elements. Burst queue
+// changes and sign-out must retire pending callbacks before they touch the DOM.
+audioStarts = [];
+await ev(`(()=>{const original=HTMLMediaElement.prototype.play;HTMLMediaElement.prototype.play=function(){window.__reportAudioStart(JSON.stringify({connected:this.isConnected,current:this===document.querySelector('audio'),volume:this.volume}));return original.call(this)}})()`);
+await ev(`(async()=>{const next=[...document.querySelectorAll('[aria-label="Next track"]')].find(b=>b.getClientRects().length);next.click();await new Promise(r=>setTimeout(r,10));next.click()})()`);
+await sleep(1200);
+const rapid = audioStarts.slice();
+check('rapid queue switches never play obsolete audio and retain mute', rapid.length > 0 && rapid.every(a=>a.connected && a.current && a.volume===0) && (await audio()).volume===0, JSON.stringify(rapid));
+// Queue replacement followed by Pause must cancel the unmounted start intent.
+await rowClick('Song 1-2', 'button[title=Play]'); await sleep(300);
+audioStarts = [];
+await ev(`(async()=>{const b=l=>[...document.querySelectorAll('[aria-label="'+l+'"]')].find(b=>b.getClientRects().length);b('Next track').click();await new Promise(r=>setTimeout(r,10));b('Pause').click()})()`);
+await sleep(300);
+check('rapid next then pause cancels pending start', audioStarts.length===0 && (await audio()).paused, JSON.stringify(audioStarts));
+await ctl('Play'); await sleep(300);
+audioStarts = [];
+await rowClick('Song 1-2', 'button[title=Play]'); await sleep(300);
+audioStarts = [];
+await ev(`(async()=>{const b=[...document.querySelectorAll('[aria-label="Next track"]')].find(b=>b.getClientRects().length);b.click();await new Promise(r=>setTimeout(r,10));const row=[...document.querySelectorAll('[data-track-row]')].find(r=>r.innerText.includes('Song 1-3'));if(!row)throw new Error('same-track row missing');row.querySelector('button[title="Play"]').click()})()`);
+await sleep(300);
+check('muted next then same row play initializes volume before every play', audioStarts.length>0 && audioStarts.every(a=>a.connected&&a.current&&a.volume===0), JSON.stringify(audioStarts));
+// Deterministically hold only Vertigo's 50ms mount callback across a poll.
+// No production timing knob or longer production sleep is introduced.
+await rowClick('Song 1-2', 'button[title=Play]'); await sleep(300);
+await ev(`window.__realTimeout=window.setTimeout;window.setTimeout=(fn,ms,...args)=>window.__realTimeout(fn,ms===50?1200:ms,...args)`);
+audioStarts = [];
+await ev(`(async()=>{const b=l=>[...document.querySelectorAll('[aria-label="'+l+'"]')].find(b=>b.getClientRects().length);b('Next track').click();await new Promise(r=>setTimeout(r,10));b('Pause').click();b('Play').click()})()`);
+await sleep(1400);
+check('pending toggle resume waits for initialized muted current audio', audioStarts.length===1 && audioStarts.every(a=>a.connected&&a.current&&a.volume===0) && !(await audio()).paused, JSON.stringify(audioStarts));
+await rowClick('Song 1-2', 'button[title=Play]'); await sleep(1400);
+await clickText('button', 'Sleep timer'); await clickText('button', '15 minutes');
+audioStarts = [];
+await ctl('Next track');
+await ev(`window.__realNow=Date.now;Date.now=()=>window.__realNow()+16*60000`);
+await sleep(1500);
+check('sleep expiry cancels pending start across delayed mount', audioStarts.length===0 && (await audio()).paused && await ev(`!![...document.querySelectorAll('[aria-label="Sleep timer"]')].find(b=>b.getClientRects().length)`), JSON.stringify(audioStarts));
+await ev(`Date.now=window.__realNow;window.setTimeout=window.__realTimeout`);
+await snapshot('muted-player');
+await clickText('button', 'Unmute');
+await rowClick('Song 1-3', 'button[title=Play]'); await sleep(1200);
+
+if (process.argv.includes('--audio-only')) {
+  audioStarts = []; const beforeStopErrors = errors.length;
+  await ev(`(async()=>{const next=[...document.querySelectorAll('[aria-label="Next track"]')].find(b=>b.getClientRects().length);next.click();await new Promise(r=>setTimeout(r,10));const s=[...document.querySelectorAll('summary[aria-label="Switch profile"]')].find(e=>e.getClientRects().length);s.closest('details').open=true;[...s.closest('details').querySelectorAll('button')].find(b=>b.textContent.trim()==='Sign out').click()})()`);
+  await sleep(500);
+  check('sign-out retires pending audio play', audioStarts.length===0 && !await ev(`!!document.querySelector('audio')`) && !errors.slice(beforeStopErrors).some(e=>e.text?.includes('Element not found')), JSON.stringify(audioStarts));
+  const extensionErrors = errors.filter(e=>e.context?.name==='Plasma Integration' || e.context?.origin?.startsWith('chrome-extension://'));
+  const appErrors = errors.filter(e=>!extensionErrors.includes(e));
+  check('audio tab has zero app-origin runtime errors', appErrors.length===0, JSON.stringify(appErrors));
+  console.log('extension errors:', JSON.stringify(extensionErrors));
+  console.log(`${results.filter(r=>r[0]).length}/${results.length} passed`);
+  ws.close(); chrome.kill(); process.exit(results.every(r=>r[0]) ? 0 : 1);
+}
+
+// The backend keeps no in-track position for web saves: resume is scoped to the active profile.
+const positionKey = await ev(`(async()=>{
+  const token = JSON.parse(localStorage.getItem('kima-web.session')).token;
+  const me = await (await fetch('/api/auth/me', {headers:{Authorization:'Bearer ' + token}})).json();
+  return 'kima-web.position.' + me.profile.id;
+})()`);
 await ev(`(()=>{const s=document.querySelector('input[aria-label=Seek]');s.value='8';s.dispatchEvent(new Event('input',{bubbles:true}))})()`); await sleep(2000);
-const savedPos = await ev(`localStorage.getItem('kima-web.position')`);
-check('position is stored client-side under kima-web.position, scoped to the track id', /"id":"[0-9a-f-]+"/.test(savedPos || '') && /"t":(7|8|9)\./.test(savedPos || ''), savedPos);
+const savedPos = await ev(`localStorage.getItem(${JSON.stringify(positionKey)})`);
+check('position is stored client-side under the active profile key, scoped to the track id', /"id":"[0-9a-f-]+"/.test(savedPos || '') && /"t":(7|8|9)\./.test(savedPos || ''), savedPos);
 
 // reload restores the saved queue (paused)
 await goto(BASE + '/collection'); await sleep(1500);
@@ -222,7 +350,7 @@ await button('confirm-delete'); await sleep(1500);
 check('delete returns to the list without the playlist', (await ev('location.pathname')) === '/playlists' && !(await text()).includes('E2E Renamed'));
 
 // ---- settings: account slice ----
-const tokenBefore = await ev(`localStorage.getItem('kima-web.token')`);
+const tokenBefore = await ev(`JSON.parse(localStorage.getItem('kima-web.session') || 'null')?.token ?? null`);
 await clickText('a', 'Settings'); await sleep(1500);
 check('Settings shows the signed-in username', (await ev('location.pathname')) === '/settings' && (await ev(`document.getElementById('account-username')?.innerText`)) === USER);
 await clickText('button', 'Change'); await sleep(300);
@@ -231,10 +359,10 @@ check('a mismatching confirmation is refused before any request', (await text())
 await typeInto('confirm', NEW_PASS); await clickText('button', 'Change Password'); await sleep(2000);
 check('a wrong current password shows the backend message verbatim', (await text()).includes('Current password is incorrect'));
 await typeInto('current', PASS); await clickText('button', 'Change Password'); await sleep(2500);
-check('password change succeeds and the session token is replaced', (await text()).includes('Password changed successfully') && (await ev(`localStorage.getItem('kima-web.token')`)) !== tokenBefore);
+check('password change succeeds and the session token is replaced', (await text()).includes('Password changed successfully') && (await ev(`JSON.parse(localStorage.getItem('kima-web.session') || 'null')?.token ?? null`)) !== tokenBefore);
 await goto(BASE + '/collection'); await sleep(1500);
 check('the replaced token keeps the session across a reload', (await ev('location.pathname')) === '/collection');
-await clickText('button', 'Logout'); await sleep(1000);
+check('desktop profile menu opens and signs out', await signOut()); await sleep(1000);
 await login(PASS);
 check('the old password no longer signs in', (await ev('location.pathname')) === '/login');
 await login(NEW_PASS);
@@ -244,15 +372,121 @@ await clickText('a', 'Settings'); await sleep(1200); await clickText('button', '
 await typeInto('current', NEW_PASS); await typeInto('new', PASS); await typeInto('confirm', PASS); await clickText('button', 'Change Password'); await sleep(2500);
 check('password restored to the original', (await text()).includes('Password changed successfully'));
 
-await clickText('button', 'Logout'); await sleep(1500);
-check('sign out clears the token and shows login', (await ev('location.pathname')) === '/login' && (await ev(`localStorage.getItem('kima-web.token')`)) === null);
+await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+check('mobile profile menu opens and signs out', await signOut()); await sleep(1500);
+check('sign out clears the token and shows login', (await ev('location.pathname')) === '/login' && (await ev(`JSON.parse(localStorage.getItem('kima-web.session') || 'null')?.token ?? null`)) === null);
 
 // 401 handling: plant a bogus token
-await ev(`localStorage.setItem('kima-web.token','garbage')`); await goto(BASE + '/collection');
+await ev(`localStorage.setItem('kima-web.session', JSON.stringify({token:'garbage', refresh:null, generation:'e2e-invalid'}))`); await goto(BASE + '/collection');
 await sleep(1500);
-check('a 401 clears the stored token and redirects to login', (await ev('location.pathname')) === '/login' && (await ev(`localStorage.getItem('kima-web.token')`)) === null);
+check('a 401 invalidates its generation and redirects to login', (await ev('location.pathname')) === '/login' && await ev(`localStorage.getItem('kima-web.session.invalid.e2e-invalid') !== null`));
 
-console.log('browser errors:', JSON.stringify(errors.slice(0, 8)));
+}
+
+// ---- profiles: real API + real audio; never manufacture a play with a test POST ----
+await send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 800, deviceScaleFactor: 1, mobile: false });
+await goto(BASE + '/login'); await login(PASS);
+await goto(BASE + '/profiles');
+check('profiles: single-profile picker shows only main', await ev(`document.querySelectorAll('main .grid button').length === 1`));
+const mainName = await ev(`document.querySelector('main .grid button .font-semibold')?.textContent`);
+await goto(BASE + '/settings');
+await ev(`[...document.querySelectorAll('#profiles summary')].find(e=>e.textContent==='Add profile').click()`);
+await ev(`(()=>{const f=[...document.querySelectorAll('#profiles details')].find(e=>e.querySelector('summary')?.textContent==='Add profile');const i=f.querySelector('input');i.value='Kids';i.dispatchEvent(new Event('input',{bubbles:true}));[...f.querySelectorAll('button')].find(e=>e.textContent==='Kids').click();f.querySelector('button[type=submit]').click()})()`);
+await sleep(1800);
+check('profiles: main creates Kids in Settings and both headers refresh', (await text()).includes('Profile saved') && await ev(`[...document.querySelectorAll('summary[aria-label="Switch profile"]')].every(s=>s.closest('details').textContent.includes('Kids'))`));
+await snapshot('settings-profiles');
+await signOut(); await sleep(1000); await login(PASS);
+check('profiles: signing in with two profiles opens the picker', await ev(`location.pathname === '/profiles' && document.querySelectorAll('main .grid button').length === 2`));
+await snapshot('picker');
+await clickText('main .grid button', 'Kids'); await sleep(2500);
+check('profiles: picking Kids enters collection with Kids in header', await ev(`['/','/collection'].includes(location.pathname) && [...document.querySelectorAll('summary[aria-label="Switch profile"]')].every(e=>e.textContent.includes('Kids'))`));
+await goto(BASE + '/settings');
+check('profiles: Kids management is read-only and password change hidden', (await text()).includes('Only the main profile can manage profiles.') && !await ev(`!!document.querySelector('#profiles input[aria-label="Profile name"]')`) && !(await text()).includes('Change Password'));
+await ev(`(()=>{const i=document.querySelector('input[aria-label="App device name"]');i.value='Kids browser e2e';i.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#apps button[type=submit]').click()})()`);
+await sleep(1500);
+check('profiles: Kids creates an app token with one-time display', await ev(`!!document.getElementById('app-token-secret')?.value && document.querySelector('#apps').textContent.includes('Kids browser e2e')`));
+await clickText('#apps button', 'Copy token'); await sleep(300);
+check('profiles: app token copy reports its actual clipboard outcome', /App token copied|Copy was blocked/.test(await text()));
+await clickText('#apps button', 'I saved it — hide token');
+check('profiles: dismiss hides the one-time token', !await ev(`!!document.getElementById('app-token-secret')`));
+await goto(BASE + '/settings');
+check('profiles: reload never reveals token again', !await ev(`!!document.getElementById('app-token-secret')`) && (await text()).includes('Kids browser e2e'));
+await goto(BASE + '/collection/tracks');
+check('profiles: Kids can start its own track', await rowClick('Woods 1', 'button[title=Play]'));
+await sleep(1500);
+const kidsAudio = await audio();
+check('profiles: Kids real audio advances before threshold', kidsAudio && !kidsAudio.paused && kidsAudio.rs >= 3);
+// Forty-second generated track: listen continuously for over half its duration. No seek or rate change.
+await sleep(22000);
+const heard = await audio();
+check('profiles: actual Kids listening crosses half-track threshold', heard && !heard.paused && heard.t >= 20 && heard.t < 35, JSON.stringify(heard));
+const recent = () => ev(`(async()=>{const token=JSON.parse(localStorage.getItem('kima-web.session')).token;const r=await fetch('/api/library/recently-listened',{headers:{Authorization:'Bearer '+token}});if(!r.ok)throw Error('recent status '+r.status);return r.json()})()`);
+const kidsRecent = await recent();
+check('profiles: real playback records Kids recently-listened artist', JSON.stringify(kidsRecent).includes('Sleater-Kinney'));
+const switchHeader = async (name) => {
+  const clicked = await ev(`(()=>{const s=[...document.querySelectorAll('summary[aria-label="Switch profile"]')].find(e=>e.getClientRects().length);if(!s)return false;s.closest('details').open=true;const b=[...s.closest('details').querySelectorAll('button')].find(e=>e.querySelector('span:last-child')?.textContent===${JSON.stringify(name)});if(!b)return false;b.click();return true})()`);
+  await sleep(2500); return clicked;
+};
+check('profiles: header switches Kids to main', await switchHeader(mainName));
+check('profiles: switching stops Kids audio and main recent excludes Kids artist', (!await audio() || (await audio()).paused) && !JSON.stringify(await recent()).includes('Sleater-Kinney'));
+await goto(BASE + '/settings');
+check('profiles: main cannot see Kids app token', !(await text()).includes('Kids browser e2e'));
+await switchHeader('Kids');
+check('profiles: returning to Kids restores its recent artist and paused queue', JSON.stringify(await recent()).includes('Sleater-Kinney') && (await audio())?.paused === true);
+await goto(BASE + '/settings'); await clickText('#apps button', 'Revoke'); await sleep(1200);
+check('profiles: Kids can revoke its own app token', (await text()).includes('No app tokens for this profile.'));
+
+// Additional real pages share storage for cross-tab switch; an isolated browser context
+// retains a separate Kids session for server-side deletion/401 acceptance.
+const connectPage = async (context) => {
+  const target = await (context ? browserSend : send)('Target.createTarget', {url:'about:blank', ...(context ? {browserContextId:context} : {})});
+  const list = await (await fetch('http://127.0.0.1:' + PORT + '/json')).json();
+  const sock = new WebSocket(list.find(t=>t.id===target.result.targetId).webSocketDebuggerUrl);
+  await new Promise(r=>sock.onopen=r); let seq=0; const waiters=new Map();
+  const statuses=[];
+  const collect = diagnostics(target.result.targetId);
+  sock.onmessage=m=>{const d=JSON.parse(m.data);collect(d);if(d.method==='Network.responseReceived' && d.params.response.url.includes('/api/'))statuses.push(d.params.response.status);if(d.id&&waiters.has(d.id)){waiters.get(d.id)(d);waiters.delete(d.id)}};
+  const call=(method,params={})=>new Promise(r=>{const id=++seq;waiters.set(id,r);sock.send(JSON.stringify({id,method,params}))});
+  const evalPage=async expression=>{const r=await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.result.exceptionDetails)throw Error('secondary page evaluation failed');return r.result.result.value};
+  await call('Runtime.enable'); await call('Page.enable'); await call('Network.enable');
+  return {ev:evalPage, statuses, goto:async path=>{await call('Page.navigate',{url:BASE+path});await sleep(2500)}, close:async()=>{sock.close();await send('Target.closeTarget',{targetId:target.result.targetId})}};
+};
+const sibling = await connectPage();
+await sibling.goto('/collection');
+await sibling.ev(`(()=>{const b=[...document.querySelectorAll('[role=group][aria-label="Playback controls"] button[aria-label="Play"]')].find(e=>e.getClientRects().length);if(!b)throw Error('sibling play missing');b.click()})()`); await sleep(1200);
+await switchHeader(mainName);
+check('profiles: existing other tab remains bound to Kids, not newly published main', await sibling.ev(`[...document.querySelectorAll('summary[aria-label="Switch profile"]')].some(e=>e.textContent.includes('Kids')) && !document.querySelector('audio').paused`));
+await sibling.goto('/collection');
+check('profiles: reloading other tab adopts published main with paused queue', await sibling.ev(`[...document.querySelectorAll('summary[aria-label="Switch profile"]')].some(e=>e.textContent.includes(${JSON.stringify(mainName)})) && (!document.querySelector('audio') || document.querySelector('audio').paused)`));
+await sibling.close();
+const browserInfo = await (await fetch('http://127.0.0.1:' + PORT + '/json/version')).json();
+const browserSocket = new WebSocket(browserInfo.webSocketDebuggerUrl);
+await new Promise(r=>browserSocket.onopen=r);
+let browserSeq=0; const browserPending=new Map();
+browserSocket.onmessage=m=>{const d=JSON.parse(m.data);if(d.id&&browserPending.has(d.id)){browserPending.get(d.id)(d);browserPending.delete(d.id)}};
+const browserSend=(method,params={})=>new Promise(r=>{const id=++browserSeq;browserPending.set(id,r);browserSocket.send(JSON.stringify({id,method,params}))});
+const context = (await browserSend('Target.createBrowserContext')).result.browserContextId;
+const deletedTab = await connectPage(context);
+await deletedTab.goto('/login');
+await deletedTab.ev(`(()=>{for(const [name,value] of [['username',${JSON.stringify(USER)}],['password',${JSON.stringify(PASS)}]]){const i=document.querySelector('input[name='+name+']');i.value=value;i.dispatchEvent(new Event('input',{bubbles:true}))}document.querySelector('button[type=submit]').click()})()`);
+await sleep(2500);
+await deletedTab.ev(`[...document.querySelectorAll('main .grid button')].find(e=>e.textContent.includes('Kids')).click()`); await sleep(2500);
+check('profiles: independent Kids tab has a real session before deletion', await deletedTab.ev(`['/','/collection'].includes(location.pathname) && [...document.querySelectorAll('summary[aria-label="Switch profile"]')].some(e=>e.textContent.includes('Kids'))`));
+await goto(BASE + '/settings');
+await ev(`(()=>{const row=[...document.querySelectorAll('#profiles > div > div')].find(e=>e.querySelector('.font-semibold')?.textContent==='Kids') || [...document.querySelectorAll('#profiles .border')].find(e=>e.querySelector('.font-semibold')?.textContent==='Kids');if(!row)throw Error('Kids editor missing');for(const d of row.querySelectorAll('details'))d.open=true;const i=row.querySelector('input[aria-label="Confirm profile name"]');i.value='Kids';i.dispatchEvent(new Event('input',{bubbles:true}));[...row.querySelectorAll('button')].find(e=>e.textContent==='Delete permanently').click()})()`);
+await sleep(1800);
+check('profiles: main deletes Kids with exact-name confirmation and headers refresh', (await text()).includes('Profile and personal data deleted') && await ev(`[...document.querySelectorAll('summary[aria-label="Switch profile"]')].every(s=>!s.closest('details').textContent.includes('Kids'))`));
+deletedTab.statuses.length = 0;
+await deletedTab.goto('/settings');
+check('profiles: deleted Kids next authenticated request returns 401, invalidates session and shows login', deletedTab.statuses.includes(401) && await deletedTab.ev(`(()=>{const s=JSON.parse(localStorage.getItem('kima-web.session') || 'null');return location.pathname==='/login' && (!s || localStorage.getItem('kima-web.session.invalid.'+s.generation)!==null)})()`));
+await deletedTab.close(); await browserSend('Target.disposeBrowserContext',{browserContextId:context}); browserSocket.close();
+
+check('diagnostics enabled on all three real tabs', diagnosticTabs.size === 3, String(diagnosticTabs.size));
+const extensionErrors = errors.filter(e=>e.context?.name==='Plasma Integration' || e.context?.origin?.startsWith('chrome-extension://'));
+const appErrors = errors.filter(e=>!extensionErrors.includes(e));
+check('all tabs have zero app-origin runtime errors', appErrors.length===0, JSON.stringify(appErrors));
+console.log('extension errors:', JSON.stringify(extensionErrors));
+console.log('browser errors:', JSON.stringify(errors));
 console.log(`${results.filter((r) => r[0]).length}/${results.length} passed`);
 ws.close(); chrome.kill();
 process.exit(results.every((r) => r[0]) ? 0 : 1);

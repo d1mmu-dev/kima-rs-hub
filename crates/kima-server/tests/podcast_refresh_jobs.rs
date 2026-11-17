@@ -1,6 +1,7 @@
 //! The `podcasts` queue worker (M6 Task 9) through the real job runtime: a feed that answers
 //! 404 is gone for good, so its job fails on the first attempt instead of using up its retries.
 
+use kima_core::profile::ProfileId;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,7 +63,9 @@ async fn queued_refresh(pool: &PgPool, host: &Replay) -> Uuid {
     )
     .await
     .unwrap();
-    podcasts::subscribe(pool, user.id, show.id).await.unwrap();
+    podcasts::subscribe(pool, ProfileId::new(user.id), show.id)
+        .await
+        .unwrap();
     sqlx::query("UPDATE podcasts SET last_refreshed = now() - interval '2 hours' WHERE id = $1")
         .bind(show.id)
         .execute(pool)

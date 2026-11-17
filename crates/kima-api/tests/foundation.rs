@@ -73,7 +73,9 @@ async fn valid_access_token_is_accepted(pool: PgPool) {
 async fn refresh_token_is_not_an_access_token(pool: PgPool) {
     let state = common::state(pool);
     let (user, _) = common::user_with_token(&state, "ana").await;
-    let refresh = state.jwt.issue_refresh(user.id, user.token_version);
+    let refresh = state
+        .jwt
+        .issue_refresh(user.account(), user.main_profile(), user.token_version);
     probe(state)
         .get("/whoami")
         .authorization_bearer(&refresh)
@@ -85,7 +87,9 @@ async fn refresh_token_is_not_an_access_token(pool: PgPool) {
 async fn stream_token_only_works_on_stream_paths(pool: PgPool) {
     let state = common::state(pool);
     let (user, _) = common::user_with_token(&state, "ana").await;
-    let stream = state.jwt.issue_stream(user.id, user.token_version);
+    let stream = state
+        .jwt
+        .issue_stream(user.account(), user.main_profile(), user.token_version);
     let server = probe(state);
     server
         .get("/whoami")
@@ -135,7 +139,9 @@ async fn token_of_deleted_user_is_rejected(pool: PgPool) {
 async fn stream_token_in_query_works_on_stream_paths(pool: PgPool) {
     let state = common::state(pool);
     let (user, _) = common::user_with_token(&state, "ana").await;
-    let stream = state.jwt.issue_stream(user.id, user.token_version);
+    let stream = state
+        .jwt
+        .issue_stream(user.account(), user.main_profile(), user.token_version);
     probe(state)
         .get(&format!("/media/stream?token={stream}"))
         .await
@@ -146,7 +152,9 @@ async fn stream_token_in_query_works_on_stream_paths(pool: PgPool) {
 async fn query_token_rejected_off_stream_paths(pool: PgPool) {
     let state = common::state(pool);
     let (user, access) = common::user_with_token(&state, "ana").await;
-    let stream = state.jwt.issue_stream(user.id, user.token_version);
+    let stream = state
+        .jwt
+        .issue_stream(user.account(), user.main_profile(), user.token_version);
     let server = probe(state);
     for token in [access, stream] {
         server
@@ -189,7 +197,9 @@ async fn stream_ticket_endpoint(pool: PgPool) {
 async fn refresh_and_empty_query_tokens_are_rejected(pool: PgPool) {
     let state = common::state(pool);
     let (user, _) = common::user_with_token(&state, "ana").await;
-    let refresh = state.jwt.issue_refresh(user.id, user.token_version);
+    let refresh = state
+        .jwt
+        .issue_refresh(user.account(), user.main_profile(), user.token_version);
     let server = probe(state);
     server
         .get(&format!("/media/stream?token={refresh}"))
@@ -205,7 +215,9 @@ async fn refresh_and_empty_query_tokens_are_rejected(pool: PgPool) {
 async fn bad_header_falls_through_to_query_token(pool: PgPool) {
     let state = common::state(pool);
     let (user, _) = common::user_with_token(&state, "ana").await;
-    let stream = state.jwt.issue_stream(user.id, user.token_version);
+    let stream = state
+        .jwt
+        .issue_stream(user.account(), user.main_profile(), user.token_version);
     probe(state)
         .get(&format!("/media/stream?token={stream}"))
         .authorization_bearer("garbage")

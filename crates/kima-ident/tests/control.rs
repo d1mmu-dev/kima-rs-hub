@@ -1031,14 +1031,14 @@ async fn seed(pool: &PgPool) -> Wiped {
     .await;
     exec(
         pool,
-        "INSERT INTO plays (id, user_id, track_id) VALUES (gen_random_uuid(), $1, $2)",
+        "INSERT INTO plays (id, profile_id, track_id) VALUES (gen_random_uuid(), $1, $2)",
         &[user, trk],
     )
     .await;
     let pl = Uuid::new_v4();
     exec(
         pool,
-        "INSERT INTO playlists (id, user_id, name) VALUES ($1, $2, 'Mine')",
+        "INSERT INTO playlists (id, profile_id, name) VALUES ($1, $2, 'Mine')",
         &[pl, user],
     )
     .await;
@@ -1050,7 +1050,7 @@ async fn seed(pool: &PgPool) -> Wiped {
     .await;
     exec(
         pool,
-        "INSERT INTO stars (id, user_id, track_id) VALUES (gen_random_uuid(), $1, $2)",
+        "INSERT INTO stars (id, profile_id, track_id) VALUES (gen_random_uuid(), $1, $2)",
         &[user, trk],
     )
     .await;
@@ -1436,12 +1436,13 @@ async fn wipe_never_touches_user_overrides(pool: PgPool) {
     assert_eq!(alb.get::<String, _>("label"), "Label");
     // Playlists, plays and stars stay.
     for table in ["plays", "playlists", "stars"] {
-        let n: i64 =
-            sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE user_id = $1"))
-                .bind(w.user)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let n: i64 = sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {table} WHERE profile_id = $1"
+        ))
+        .bind(w.user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(n, 1, "{table}");
     }
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM playlist_items WHERE track_id = $1")

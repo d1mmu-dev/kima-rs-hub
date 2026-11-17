@@ -15,6 +15,7 @@ use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::routes::stats::args::{Arg, Args, js_number};
 use crate::state::AppState;
+use kima_core::profile::ProfileId;
 use kima_podcast::catalog::{CHART_MAX, Category, DiscoveryItem, Priority};
 
 use super::ai::{AiFilter, label_apple_items};
@@ -126,12 +127,12 @@ fn page_params(args: &Args) -> Option<Page> {
 /// without a category), paged, as discovery items.
 async fn answer_chart(
     state: &AppState,
-    user: Uuid,
+    profile: ProfileId,
     raw: Option<&str>,
     category_raw: Option<String>,
     args: &Args,
 ) -> Result<Labelled, ApiError> {
-    let filter = AiFilter::resolve(state, user, raw).await?;
+    let filter = AiFilter::resolve(state, profile, raw).await?;
     let category = match category_raw {
         None => None,
         Some(raw) => Some(integer_of(&raw).ok_or_else(invalid_page)?),
@@ -185,7 +186,7 @@ async fn charts(
 ) -> Result<Labelled, ApiError> {
     let args = parse_args(raw.clone());
     let category_raw = raw_of(args.get("category"));
-    answer_chart(&state, user.id, raw.as_deref(), category_raw, &args).await
+    answer_chart(&state, user.profile, raw.as_deref(), category_raw, &args).await
 }
 
 async fn discover_top(
@@ -194,7 +195,7 @@ async fn discover_top(
     RawQuery(raw): RawQuery,
 ) -> Result<Labelled, ApiError> {
     let args = parse_args(raw.clone());
-    answer_chart(&state, user.id, raw.as_deref(), None, &args).await
+    answer_chart(&state, user.profile, raw.as_deref(), None, &args).await
 }
 
 async fn discover_genre(
@@ -204,7 +205,7 @@ async fn discover_genre(
     RawQuery(raw): RawQuery,
 ) -> Result<Labelled, ApiError> {
     let args = parse_args(raw.clone());
-    answer_chart(&state, user.id, raw.as_deref(), Some(genre_id), &args).await
+    answer_chart(&state, user.profile, raw.as_deref(), Some(genre_id), &args).await
 }
 
 /// `/discover/genres?genres=a,b`: the first ten of each real category's chart, keyed by id;
@@ -215,7 +216,7 @@ async fn discover_genres(
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
     const PER_CATEGORY: usize = 10;
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
     let mut hidden = 0;
     let bad_genres =
         || ApiError::BadRequest("genres parameter required (comma-separated genre IDs)".into());
@@ -267,10 +268,10 @@ async fn for_you(
     user: AuthUser,
     RawQuery(raw): RawQuery,
 ) -> Result<Labelled, ApiError> {
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
     let rows = state
         .podcast_catalog
-        .for_you(user.id)
+        .for_you(user.profile)
         .await
         .map_err(apple_failure)?;
     let mut hidden = 0;
@@ -291,7 +292,7 @@ async fn similar(
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<Labelled, ApiError> {
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
     let missing = || ApiError::NotFound("Podcast not found");
     let id = Uuid::parse_str(&id).map_err(|_| missing())?;
     let show = kima_db::podcasts::show_by_id(&state.pool, id)
@@ -313,7 +314,7 @@ async fn preview_similar(
     Path(itunes_id): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<Labelled, ApiError> {
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
     let missing = || ApiError::NotFound("Podcast not found");
     if itunes_id.is_empty() || !itunes_id.bytes().all(|b| b.is_ascii_digit()) {
         return Err(missing());

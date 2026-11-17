@@ -143,16 +143,20 @@ async fn podcast_refresh_failure_shows_in_http_counts_and_retries(pool: PgPool) 
         _ => panic!("registration failed"),
     };
     sqlx::query(
-        "INSERT INTO podcast_subscriptions (user_id, podcast_id) VALUES ($1::uuid, $2::uuid)",
+        "INSERT INTO podcast_subscriptions (profile_id, podcast_id) VALUES ($1::uuid, $2::uuid)",
     )
     .bind(user.id)
     .bind(podcast)
     .execute(&pool)
     .await
     .unwrap();
-    let admin = state
-        .jwt
-        .issue_access(user.id, &user.username, &user.role, user.token_version);
+    let admin = state.jwt.issue_access(
+        user.account(),
+        user.main_profile(),
+        &user.username,
+        &user.role,
+        user.token_version,
+    );
 
     let srv = TestServer::new(kima_api::router(state.clone())).unwrap();
 

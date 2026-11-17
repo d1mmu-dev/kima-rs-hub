@@ -10,7 +10,7 @@
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
-use kima_core::events::{Event, EventBus};
+use kima_core::events::{Audience, Event, EventBus};
 use kima_db::enrichment::{Phase, Status};
 use tokio::time::Instant;
 
@@ -99,7 +99,7 @@ impl Shared {
     /// path, no secret.
     fn publish(&self, phase: Option<Phase>, status: Status) {
         self.bus.publish(Event {
-            user_id: None,
+            audience: Audience::All,
             data: serde_json::json!({
                 "type": TYPE,
                 "phase": phase.map(Phase::as_str),

@@ -2,6 +2,7 @@
 //! rule): the track is longer than 30 seconds and was heard for half its length or four minutes,
 //! whichever comes first.
 
+use kima_core::profile::ProfileId;
 use sqlx::{FromRow, PgPool};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -86,7 +87,7 @@ pub async fn count_present_tracks(pool: &PgPool) -> sqlx::Result<i64> {
 /// advisory lock, so concurrent reports of one play cannot both write.
 pub async fn record(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     track: Uuid,
     listen: Listen,
     source: Source,
@@ -117,16 +118,16 @@ pub async fn record(
     // Namespace 7001 plus the user/track hash. READ COMMITTED (the default) is what lets the
     // waiting writer see the committed row.
     sqlx::query("SELECT pg_advisory_xact_lock(7001, hashtext($1))")
-        .bind(format!("{user}:{track}"))
+        .bind(format!("{profile}:{track}"))
         .execute(&mut *tx)
         .await?;
     // Strict bounds on both sides: exactly one duration away, the song has finished and that
     // play is a genuine replay.
     let recent: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM plays WHERE user_id = $1 AND track_id = $2
+        "SELECT id FROM plays WHERE profile_id = $1 AND track_id = $2
            AND played_at > $3 AND played_at < $4 LIMIT 1",
     )
-    .bind(user)
+    .bind(profile)
     .bind(track)
     .bind(anchor - window)
     .bind(anchor + window)
@@ -137,11 +138,11 @@ pub async fn record(
     }
     let id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO plays (id, user_id, track_id, played_at, heard, source)
+        "INSERT INTO plays (id, profile_id, track_id, played_at, heard, source)
          VALUES ($1, $2, $3, $4, true, $5)",
     )
     .bind(id)
-    .bind(user)
+    .bind(profile)
     .bind(track)
     .bind(anchor)
     .bind(source.as_str())
@@ -154,7 +155,7 @@ pub async fn record(
 #[derive(Debug, Clone, FromRow)]
 pub struct PlayRow {
     pub id: Uuid,
-    pub user_id: Uuid,
+    pub profile_id: ProfileId,
     pub track_id: Uuid,
     pub played_at: OffsetDateTime,
     pub heard: bool,
@@ -164,15 +165,15 @@ pub struct PlayRow {
 /// A user's plays, newest first, whose tracks are still present.
 pub async fn recent(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     limit: i64,
 ) -> sqlx::Result<Vec<(PlayRow, TrackRow)>> {
     let plays: Vec<PlayRow> = sqlx::query_as(
-        "SELECT p.id, p.user_id, p.track_id, p.played_at, p.heard, p.source
+        "SELECT p.id, p.profile_id, p.track_id, p.played_at, p.heard, p.source
          FROM plays p JOIN tracks t ON t.id = p.track_id AND t.missing_since IS NULL
-         WHERE p.user_id = $1 ORDER BY p.played_at DESC, p.id DESC LIMIT $2",
+         WHERE p.profile_id = $1 ORDER BY p.played_at DESC, p.id DESC LIMIT $2",
     )
-    .bind(user)
+    .bind(profile)
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -200,7 +201,7 @@ pub struct RecentArtist {
 /// no one.
 pub async fn recent_artists(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     limit: i64,
 ) -> sqlx::Result<Vec<RecentArtist>> {
     sqlx::query_as(
@@ -210,7 +211,7 @@ pub async fn recent_artists(
              JOIN tracks t ON t.id = p.track_id AND t.missing_since IS NULL
              JOIN albums al ON al.id = t.album_id
              JOIN artists ar ON ar.id = al.artist_id
-             WHERE p.user_id = $1 AND ar.name_key <> ALL($3) GROUP BY ar.id
+             WHERE p.profile_id = $1 AND ar.name_key <> ALL($3) GROUP BY ar.id
              ORDER BY max(p.played_at) DESC LIMIT $2)
          SELECT ar.id, ar.name, ar.mbid, ar.display_name,
              (ar.image_path IS NOT NULL) AS has_image,
@@ -224,7 +225,7 @@ pub async fn recent_artists(
          FROM last JOIN artists ar ON ar.id = last.id
          ORDER BY last.last_played_at DESC",
     )
-    .bind(user)
+    .bind(profile)
     .bind(limit)
     .bind(crate::browse::NO_ONE_KEYS.as_slice())
     .fetch_all(pool)

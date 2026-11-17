@@ -54,7 +54,7 @@ async fn create(
     };
     let outcome = plays::record(
         &state.pool,
-        user.id,
+        user.profile,
         track,
         Listen::Seconds(body.seconds_listened),
         Source::Library,
@@ -92,11 +92,11 @@ async fn recently_listened(
     Query(params): Query<LimitParams>,
     RawQuery(raw): RawQuery,
 ) -> Result<(HeaderMap, Json<Value>), ApiError> {
-    let filter = AiFilter::resolve(&state, user.id, raw.as_deref()).await?;
+    let filter = AiFilter::resolve(&state, user.profile, raw.as_deref()).await?;
     let limit = limit_of(&params, 10, 100);
     let (artist_rows, (podcast_rows, hidden)) = tokio::try_join!(
-        plays::recent_artists(&state.pool, user.id, limit),
-        kima_db::podcasts::recent_in_progress(&state.pool, user.id, limit, filter.hides()),
+        plays::recent_artists(&state.pool, user.profile, limit),
+        kima_db::podcasts::recent_in_progress(&state.pool, user.profile, limit, filter.hides()),
     )?;
     let mut items: Vec<(OffsetDateTime, Value)> = artist_rows
         .iter()

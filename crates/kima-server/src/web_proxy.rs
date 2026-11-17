@@ -25,6 +25,7 @@ pub const WEB_ROUTES: &[&str] = &[
     "/search",
     "/playlists",
     "/settings",
+    "/profiles",
     "/podcasts",
 ];
 

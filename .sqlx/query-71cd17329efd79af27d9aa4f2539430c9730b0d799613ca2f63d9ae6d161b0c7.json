@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pr.id AS \"profile: ProfileId\", pr.user_id AS \"account: AccountId\",\n                  u.username, pr.name\n           FROM profiles pr JOIN users u ON u.id = pr.user_id\n           WHERE pr.id = ANY($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "profile: ProfileId",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "account: AccountId",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "username",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "71cd17329efd79af27d9aa4f2539430c9730b0d799613ca2f63d9ae6d161b0c7"
+}

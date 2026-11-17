@@ -1,6 +1,7 @@
 //! Task 9 follow-up: failed podcast refreshes must be exposed to, and retriable from, the
 //! enrichment control plane's "retry failed and blocked" action, not only the hourly sweep.
 
+use kima_core::profile::ProfileId;
 use kima_db::podcasts::{self, NewShow};
 use kima_db::users::{self, Registration};
 use kima_podcast::refresh;
@@ -44,7 +45,9 @@ async fn retry_failed_requeues_failed_shows_ignoring_the_sweep_backoff(pool: PgP
         panic!("registration failed")
     };
     let failed = show(&pool, "https://example.invalid/failed").await;
-    podcasts::subscribe(&pool, user.id, failed).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(user.id), failed)
+        .await
+        .unwrap();
     // A recent failed attempt: inside the sweep's hourly backoff window, but a failure.
     sqlx::query(
         "UPDATE podcasts SET refresh_error = 'boom', refresh_failed_at = now(),\n         refresh_failures = 1, refresh_attempted_at = now() WHERE id = $1",
@@ -55,7 +58,9 @@ async fn retry_failed_requeues_failed_shows_ignoring_the_sweep_backoff(pool: PgP
     .unwrap();
 
     let healthy = show(&pool, "https://example.invalid/healthy").await;
-    podcasts::subscribe(&pool, user.id, healthy).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(user.id), healthy)
+        .await
+        .unwrap();
 
     let not_followed = show(&pool, "https://example.invalid/not-followed").await;
     sqlx::query(

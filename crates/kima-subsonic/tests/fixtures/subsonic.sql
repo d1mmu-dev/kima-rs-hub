@@ -19,7 +19,7 @@ INSERT INTO users (id, username, password_hash, role, onboarding_complete, creat
  '$argon2id$v=19$m=19456,t=2,p=1$JoG/62hQ3BH8bsH6SGAc2Q$l8r7h4RnvDWcgboqE57ajkVVyhqlx5XhPbyyvSUajLU',
  'user', true, '2026-01-01T00:02:00Z');
 
-INSERT INTO api_keys (id, user_id, name, key_hash, secret_enc, created_at) VALUES
+INSERT INTO api_keys (id, profile_id, name, key_hash, secret_enc, created_at) VALUES
 ('00000000-0000-7000-8000-600000000001', '00000000-0000-7000-8000-400000000002', 'Phone',
  decode('a8ae6e6ee929abea3afcfc5258c8ccd6f85273e0d4626d26c7279f3250f77c8e', 'hex'),
  decode('01006a01021e31c3295d2654fe5db037262d3a24a217c1e5022312e2f79b72c7f87a101b7cfd53ccd2dd090c28a07f1b8c51d909edf7423cbc1c744e1e3132a942fb69d7c2eb7d80d0a2984419cf4df1f6a519dc156855466a9cec053a73fea81fc827d32b138467ed', 'hex'),
@@ -65,7 +65,7 @@ INSERT INTO tracks (id, album_id, artist_name, title, year, disc, track_no, dura
 
 -- Plays. Alice: album 3 three times (last 02:42), album 1 twice (last 02:51), album 4 once (02:30).
 -- Admin plays track 6 once. The last alice play on album 1 came from a Subsonic client.
-INSERT INTO plays (id, user_id, track_id, played_at, heard, source) VALUES
+INSERT INTO plays (id, profile_id, track_id, played_at, heard, source) VALUES
 ('00000000-0000-7000-8000-a00000000001', '00000000-0000-7000-8000-400000000002', '00000000-0000-7000-8000-300000000010', '2026-01-01T02:40:00Z', true, 'LIBRARY'),
 ('00000000-0000-7000-8000-a00000000002', '00000000-0000-7000-8000-400000000002', '00000000-0000-7000-8000-300000000011', '2026-01-01T02:41:00Z', true, 'LIBRARY'),
 ('00000000-0000-7000-8000-a00000000003', '00000000-0000-7000-8000-400000000002', '00000000-0000-7000-8000-300000000010', '2026-01-01T02:42:00Z', true, 'LIBRARY'),
@@ -75,7 +75,7 @@ INSERT INTO plays (id, user_id, track_id, played_at, heard, source) VALUES
 ('00000000-0000-7000-8000-a00000000007', '00000000-0000-7000-8000-400000000001', '00000000-0000-7000-8000-300000000006', '2026-01-01T03:00:00Z', true, 'LIBRARY');
 
 -- Playlists: alice's public "Road Trip" and private "Private Mix", admin's private "Admin Picks".
-INSERT INTO playlists (id, user_id, name, is_public, created_at, updated_at) VALUES
+INSERT INTO playlists (id, profile_id, name, is_public, created_at, updated_at) VALUES
 ('00000000-0000-7000-8000-500000000001', '00000000-0000-7000-8000-400000000002', 'Road Trip', true, '2026-01-01T01:01:00Z', '2026-01-01T01:01:00Z'),
 ('00000000-0000-7000-8000-500000000002', '00000000-0000-7000-8000-400000000002', 'Private Mix', false, '2026-01-01T01:02:00Z', '2026-01-01T01:02:00Z'),
 ('00000000-0000-7000-8000-500000000003', '00000000-0000-7000-8000-400000000001', 'Admin Picks', false, '2026-01-01T01:03:00Z', '2026-01-01T01:03:00Z');
@@ -90,7 +90,7 @@ INSERT INTO playlist_items (id, playlist_id, track_id, sort) VALUES
 
 -- Stars. Alice: tracks 1 and 20 (missing, hidden), albums 3, 1 (newest) and 6 (no present track),
 -- artist 1. Admin: track 2.
-INSERT INTO stars (id, user_id, track_id, album_id, artist_id, starred_at) VALUES
+INSERT INTO stars (id, profile_id, track_id, album_id, artist_id, starred_at) VALUES
 ('00000000-0000-7000-8000-800000000001', '00000000-0000-7000-8000-400000000002', '00000000-0000-7000-8000-300000000001', NULL, NULL, '2026-01-01T04:01:00Z'),
 ('00000000-0000-7000-8000-800000000002', '00000000-0000-7000-8000-400000000002', '00000000-0000-7000-8000-300000000020', NULL, NULL, '2026-01-01T04:02:00Z'),
 ('00000000-0000-7000-8000-800000000003', '00000000-0000-7000-8000-400000000002', NULL, '00000000-0000-7000-8000-200000000003', NULL, '2026-01-01T04:03:00Z'),
@@ -101,7 +101,7 @@ INSERT INTO stars (id, user_id, track_id, album_id, artist_id, starred_at) VALUE
 
 -- Ratings. Alice: track 1 = 5, track 20 (missing) = 2, album 1 = 4, album 4 = 5, artist 2 = 3.
 -- Admin: track 1 = 1.
-INSERT INTO ratings (id, user_id, track_id, album_id, artist_id, rating, rated_at) VALUES
+INSERT INTO ratings (id, profile_id, track_id, album_id, artist_id, rating, rated_at) VALUES
 ('00000000-0000-7000-8000-900000000001', '00000000-0000-7000-8000-400000000002', '00000000-0000-7000-8000-300000000001', NULL, NULL, 5, '2026-01-01T05:01:00Z'),
 ('00000000-0000-7000-8000-900000000002', '00000000-0000-7000-8000-400000000002', '00000000-0000-7000-8000-300000000020', NULL, NULL, 2, '2026-01-01T05:02:00Z'),
 ('00000000-0000-7000-8000-900000000003', '00000000-0000-7000-8000-400000000002', NULL, '00000000-0000-7000-8000-200000000001', NULL, 4, '2026-01-01T05:03:00Z'),
@@ -110,12 +110,12 @@ INSERT INTO ratings (id, user_id, track_id, album_id, artist_id, rating, rated_a
 ('00000000-0000-7000-8000-900000000006', '00000000-0000-7000-8000-400000000001', '00000000-0000-7000-8000-300000000001', NULL, NULL, 1, '2026-01-01T05:06:00Z');
 
 -- Alice's bookmarks: track 3 at 1:30 with a comment, and one on the missing track 20 (hidden).
-INSERT INTO subsonic_bookmarks (user_id, track_id, position_ms, comment, created_at, changed_at) VALUES
+INSERT INTO subsonic_bookmarks (profile_id, track_id, position_ms, comment, created_at, changed_at) VALUES
 ('00000000-0000-7000-8000-400000000002', '00000000-0000-7000-8000-300000000003', 90000, 'resume here', '2026-01-01T06:00:00Z', '2026-01-01T06:05:00Z'),
 ('00000000-0000-7000-8000-400000000002', '00000000-0000-7000-8000-300000000020', 1000, NULL, '2026-01-01T06:10:00Z', '2026-01-01T06:10:00Z');
 
 -- Alice's saved play queue: tracks 5, 7, 12, playing the second, 12.345 s in, from "Phone".
-INSERT INTO playback_state (user_id, playback_type, track_id, queue, current_index, is_shuffle, position,
+INSERT INTO playback_state (profile_id, playback_type, track_id, queue, current_index, is_shuffle, position,
                             changed_by, created_at, updated_at) VALUES
 ('00000000-0000-7000-8000-400000000002', 'track', '00000000-0000-7000-8000-300000000007',
  '[{"id":"00000000-0000-7000-8000-300000000005","title":"Here Comes the Sun","duration":185,"artist":{"id":"00000000-0000-7000-8000-100000000001","name":"The Beatles"},"album":{"id":"00000000-0000-7000-8000-200000000001","title":"Abbey Road","coverArt":"00000000-0000-7000-8000-200000000001"}},

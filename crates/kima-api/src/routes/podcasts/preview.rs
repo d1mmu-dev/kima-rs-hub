@@ -105,7 +105,7 @@ async fn preview_show(
     // `subscribedPodcastId` only when this user follows it (`podcasts.ts:389`): a stored show
     // someone else follows is not this user's page to open.
     let is_subscribed = match &stored {
-        Some(s) => kima_db::podcasts::is_subscribed(&state.pool, user.id, s.id).await?,
+        Some(s) => kima_db::podcasts::is_subscribed(&state.pool, user.profile, s.id).await?,
         None => false,
     };
     let subscribed_podcast_id = stored.as_ref().filter(|_| is_subscribed).map(|s| s.id);

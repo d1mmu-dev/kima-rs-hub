@@ -1,19 +1,22 @@
 //! Per-app tokens for the Subsonic API (spec §5, §7.1). The table holds a lookup hash and an
-//! encrypted copy of each token, never the token itself.
+//! encrypted copy of each token, never the token itself. A token belongs to a profile (D-244);
+//! the cap and the token+salt scan span the whole account.
 
+use kima_core::profile::{AccountId, ProfileId, ProfileKind};
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::users::User;
 
-/// Most tokens one user can hold.
+/// Most tokens one account can hold, over all its profiles (token+salt auth tries each one,
+/// so this bounds that scan).
 pub const MAX_PER_USER: i64 = 50;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApiKey {
     pub id: Uuid,
-    pub user_id: Uuid,
+    pub profile_id: ProfileId,
     pub name: String,
     pub created_at: OffsetDateTime,
     pub last_used_at: Option<OffsetDateTime>,
@@ -22,20 +25,26 @@ pub struct ApiKey {
 /// Why [`create`] stored nothing.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// The user already holds [`MAX_PER_USER`] tokens.
+    /// The account already holds [`MAX_PER_USER`] tokens over all its profiles.
     TooMany,
-    /// The user is gone, or their password changed after the requesting session was issued.
+    /// The account or the profile is gone, the profile is not the account's, or the password
+    /// changed after the requesting session was issued.
     StaleSession,
 }
 
-/// Stores a token for a session that was issued at `session_version`. Under a lock on the
-/// user's row it checks that version is still current (a password change bumps it and revokes
-/// all tokens, so a revoked session must not mint one afterwards), then the cap, then inserts.
-/// Concurrent creates are serialised by the lock and cannot overshoot the cap.
+/// Stores a token of `profile` for a session of `account` issued at `session_version`. Under a
+/// lock on the ACCOUNT row it checks that version is still current (a password change bumps it
+/// and revokes all tokens, so a revoked session must not mint one afterwards) and that the
+/// profile still belongs to the account (holding the profile row `FOR SHARE`, so a concurrent
+/// profile delete waits and cascades the new token), then the account-wide cap, then inserts.
+/// Concurrent creates from any of the account's profiles are serialised by that one lock and
+/// cannot overshoot the cap. Lock order: account row, then profile row.
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &PgPool,
     id: Uuid,
-    user: Uuid,
+    account: AccountId,
+    profile: ProfileId,
     session_version: i32,
     name: &str,
     key_hash: &[u8; 32],
@@ -44,16 +53,30 @@ pub async fn create(
     let mut tx = pool.begin().await?;
     let current = sqlx::query_scalar!(
         "SELECT token_version FROM users WHERE id = $1 FOR UPDATE",
-        user
+        account.into_uuid()
     )
     .fetch_optional(&mut *tx)
     .await?;
     if current != Some(session_version) {
         return Ok(Err(Refused::StaleSession));
     }
+    // FOR SHARE holds the profile until commit: a concurrent profile delete waits and then
+    // takes the new token with it, instead of the insert failing on the dropped foreign key.
+    let owned = sqlx::query_scalar!(
+        "SELECT 1 AS one FROM profiles pr WHERE pr.id = $1 AND pr.user_id = $2 FOR SHARE",
+        profile.into_uuid(),
+        account.into_uuid()
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !owned {
+        return Ok(Err(Refused::StaleSession));
+    }
     let held = sqlx::query_scalar!(
-        r#"SELECT count(*) AS "count!" FROM api_keys WHERE user_id = $1"#,
-        user
+        r#"SELECT count(*) AS "count!" FROM api_keys k
+           JOIN profiles pr ON pr.id = k.profile_id WHERE pr.user_id = $1"#,
+        account.into_uuid()
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -62,11 +85,11 @@ pub async fn create(
     }
     let key = sqlx::query_as!(
         ApiKey,
-        r#"INSERT INTO api_keys (id, user_id, name, key_hash, secret_enc)
+        r#"INSERT INTO api_keys (id, profile_id, name, key_hash, secret_enc)
            VALUES ($1, $2, $3, $4, $5)
-           RETURNING id, user_id, name, created_at, last_used_at"#,
+           RETURNING id, profile_id AS "profile_id: ProfileId", name, created_at, last_used_at"#,
         id,
-        user,
+        profile.into_uuid(),
         name,
         key_hash.as_slice(),
         secret_enc
@@ -77,69 +100,86 @@ pub async fn create(
     Ok(Ok(key))
 }
 
-/// The user's tokens, newest first.
-pub async fn list_for_user(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<ApiKey>> {
+/// The profile's tokens, newest first.
+pub async fn list_for_profile(pool: &PgPool, profile: ProfileId) -> sqlx::Result<Vec<ApiKey>> {
     sqlx::query_as!(
         ApiKey,
-        r#"SELECT id, user_id, name, created_at, last_used_at
-           FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC, id DESC"#,
-        user
+        r#"SELECT id, profile_id AS "profile_id: ProfileId", name, created_at, last_used_at
+           FROM api_keys WHERE profile_id = $1 ORDER BY created_at DESC, id DESC"#,
+        profile.into_uuid()
     )
     .fetch_all(pool)
     .await
 }
 
-/// Revokes one of the user's tokens. False if it does not exist or belongs to someone else.
-pub async fn delete_owned(pool: &PgPool, id: Uuid, user: Uuid) -> sqlx::Result<bool> {
+/// Revokes one of the profile's tokens. False if it does not exist or belongs to another
+/// profile (a sibling's included).
+pub async fn delete_owned(pool: &PgPool, id: Uuid, profile: ProfileId) -> sqlx::Result<bool> {
     let done = sqlx::query!(
-        "DELETE FROM api_keys WHERE id = $1 AND user_id = $2",
+        "DELETE FROM api_keys WHERE id = $1 AND profile_id = $2",
         id,
-        user
+        profile.into_uuid()
     )
     .execute(pool)
     .await?;
     Ok(done.rows_affected() > 0)
 }
 
-/// A token's id and its owner.
+/// A token's id, its profile (and that profile's kind) and that profile's account.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyOwner {
     pub key_id: Uuid,
+    pub profile: ProfileId,
+    pub profile_kind: ProfileKind,
     pub user: User,
 }
 
-/// Finds the token with this SHA-256 and the user it belongs to.
+fn kind(stored: &str) -> sqlx::Result<ProfileKind> {
+    stored.parse().map_err(|e| sqlx::Error::Decode(Box::new(e)))
+}
+
+/// Finds the token with this SHA-256, its profile and the account that profile belongs to.
 pub async fn find_by_hash(pool: &PgPool, hash: &[u8; 32]) -> sqlx::Result<Option<KeyOwner>> {
     let row = sqlx::query!(
-        r#"SELECT k.id AS key_id,
+        r#"SELECT k.id AS key_id, k.profile_id, pr.kind,
                   u.id, u.username, u.password_hash, u.role, u.onboarding_complete,
                   u.token_version, u.created_at
-           FROM api_keys k JOIN users u ON u.id = k.user_id
+           FROM api_keys k
+           JOIN profiles pr ON pr.id = k.profile_id
+           JOIN users u ON u.id = pr.user_id
            WHERE k.key_hash = $1"#,
         hash.as_slice()
     )
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|r| KeyOwner {
-        key_id: r.key_id,
-        user: User {
-            id: r.id,
-            username: r.username,
-            password_hash: r.password_hash,
-            role: r.role,
-            onboarding_complete: r.onboarding_complete,
-            token_version: r.token_version,
-            created_at: r.created_at,
-        },
-    }))
+    row.map(|r| {
+        Ok(KeyOwner {
+            key_id: r.key_id,
+            profile: ProfileId::new(r.profile_id),
+            profile_kind: kind(&r.kind)?,
+            user: User {
+                id: r.id,
+                username: r.username,
+                password_hash: r.password_hash,
+                role: r.role,
+                onboarding_complete: r.onboarding_complete,
+                token_version: r.token_version,
+                created_at: r.created_at,
+            },
+        })
+    })
+    .transpose()
 }
 
-/// The encrypted secrets of the user's tokens, oldest first (at most [`MAX_PER_USER`]).
-pub async fn secrets_for_user(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<(Uuid, Vec<u8>)>> {
+/// The encrypted secrets of the profile's tokens, oldest first (at most [`MAX_PER_USER`]).
+pub async fn secrets_for_profile(
+    pool: &PgPool,
+    profile: ProfileId,
+) -> sqlx::Result<Vec<(Uuid, Vec<u8>)>> {
     let rows = sqlx::query!(
-        "SELECT id, secret_enc FROM api_keys WHERE user_id = $1
+        "SELECT id, secret_enc FROM api_keys WHERE profile_id = $1
          ORDER BY created_at ASC, id ASC LIMIT $2",
-        user,
+        profile.into_uuid(),
         MAX_PER_USER
     )
     .fetch_all(pool)
@@ -147,19 +187,31 @@ pub async fn secrets_for_user(pool: &PgPool, user: Uuid) -> sqlx::Result<Vec<(Uu
     Ok(rows.into_iter().map(|r| (r.id, r.secret_enc)).collect())
 }
 
-/// Records that the token was just used.
-/// The user named `username` (case-insensitive) and their token secrets, in ONE query that runs
-/// the same way whether or not the user exists: token+salt auth must not tell a client, by
-/// round trips, which usernames exist. An unknown user gives `(None, [])`.
+/// One token's encrypted secret and the profile it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeySecret {
+    pub id: Uuid,
+    pub profile: ProfileId,
+    pub profile_kind: ProfileKind,
+    pub secret_enc: Vec<u8>,
+}
+
+/// The account named `username` (case-insensitive) and the token secrets of ALL its profiles
+/// (at most [`MAX_PER_USER`], oldest first), in ONE query that runs the same way whether or not
+/// the account exists: token+salt auth must not tell a client, by round trips, which usernames
+/// exist. An unknown user gives `(None, [])`. Each secret names its profile, so the matched
+/// key says which profile signs in.
 pub async fn user_with_secrets(
     pool: &PgPool,
     username: &str,
-) -> sqlx::Result<(Option<User>, Vec<(Uuid, Vec<u8>)>)> {
+) -> sqlx::Result<(Option<User>, Vec<KeySecret>)> {
     let rows = sqlx::query!(
         r#"SELECT u.id, u.username, u.password_hash, u.role, u.onboarding_complete,
                   u.token_version, u.created_at,
-                  k.id AS "key_id?", k.secret_enc AS "secret_enc?"
-           FROM users u LEFT JOIN api_keys k ON k.user_id = u.id
+                  k.id AS "key_id?", k.profile_id AS "profile_id?", pr.kind AS "profile_kind?",
+                  k.secret_enc AS "secret_enc?"
+           FROM users u
+           LEFT JOIN (api_keys k JOIN profiles pr ON pr.id = k.profile_id) ON pr.user_id = u.id
            WHERE lower(u.username) = lower($1)
            ORDER BY k.created_at ASC, k.id ASC
            LIMIT $2"#,
@@ -179,11 +231,27 @@ pub async fn user_with_secrets(
     });
     let secrets = rows
         .into_iter()
-        .filter_map(|r| Some((r.key_id?, r.secret_enc?)))
-        .collect();
+        .filter_map(|r| {
+            Some((
+                r.key_id?,
+                ProfileId::new(r.profile_id?),
+                r.profile_kind?,
+                r.secret_enc?,
+            ))
+        })
+        .map(|(id, profile, stored, secret_enc)| {
+            Ok(KeySecret {
+                id,
+                profile,
+                profile_kind: kind(&stored)?,
+                secret_enc,
+            })
+        })
+        .collect::<sqlx::Result<Vec<_>>>()?;
     Ok((user, secrets))
 }
 
+/// Records that the token was just used.
 pub async fn touch(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
     sqlx::query!("UPDATE api_keys SET last_used_at = now() WHERE id = $1", id)
         .execute(pool)
@@ -191,11 +259,17 @@ pub async fn touch(pool: &PgPool, id: Uuid) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// Revokes every token of the user. `users::set_password` calls this in its own transaction;
-/// call it directly only alongside another change that must revoke them.
-pub async fn delete_all_for_user(conn: &mut PgConnection, user: Uuid) -> sqlx::Result<u64> {
-    let done = sqlx::query!("DELETE FROM api_keys WHERE user_id = $1", user)
-        .execute(conn)
-        .await?;
+/// Revokes every token of every profile of the account. `users::set_password` calls this in
+/// its own transaction; call it directly only alongside another change that must revoke them.
+pub async fn delete_all_for_account(
+    conn: &mut PgConnection,
+    account: AccountId,
+) -> sqlx::Result<u64> {
+    let done = sqlx::query!(
+        "DELETE FROM api_keys k USING profiles pr WHERE pr.id = k.profile_id AND pr.user_id = $1",
+        account.into_uuid()
+    )
+    .execute(conn)
+    .await?;
     Ok(done.rows_affected())
 }

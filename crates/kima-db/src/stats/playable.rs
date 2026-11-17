@@ -1,3 +1,4 @@
+use kima_core::profile::ProfileId;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -16,7 +17,7 @@ pub struct PlayableRow {
 
 pub async fn playable_slice(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     slice: &str,
     decade: f64,
     limit: i64,
@@ -31,17 +32,17 @@ pub async fn playable_slice(
                 listen_rows(period, false)
             );
             sqlx::query_as(&sql)
-                .bind(user)
+                .bind(profile)
                 .bind(limit)
                 .fetch_all(pool)
                 .await
         }
         "never" => {
             let sql = format!(
-                "{select} FROM tracks t {joins} WHERE NOT EXISTS (SELECT 1 FROM plays p WHERE p.track_id=t.id AND p.user_id=$1) ORDER BY random() LIMIT $2"
+                "{select} FROM tracks t {joins} WHERE NOT EXISTS (SELECT 1 FROM plays p WHERE p.track_id=t.id AND p.profile_id=$1) ORDER BY random() LIMIT $2"
             );
             sqlx::query_as(&sql)
-                .bind(user)
+                .bind(profile)
                 .bind(limit)
                 .fetch_all(pool)
                 .await

@@ -4,6 +4,7 @@
 //! (`kima_podcast::cache`, Task 12) is served first, without asking the host; a miss streams from
 //! the host and queues one background download (D-214). `KIMA_NET_DENY_REAL=1`.
 
+use kima_core::profile::ProfileId;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -291,7 +292,10 @@ async fn stream_token_in_query_is_accepted(pool: PgPool) {
     ));
     let state: AppState = common::state(pool.clone()).with_net(net);
     let (user, _) = common::user_with_token(&state, "podder").await;
-    let stream_token = state.jwt.issue_stream(user.id, user.token_version);
+    let stream_token =
+        state
+            .jwt
+            .issue_stream(user.account(), user.main_profile(), user.token_version);
     let (podcast, episode) = seed(&pool, format!("{}/ep.mp3", host.url()), None).await;
     let server = axum_test::TestServer::new(kima_api::router(state)).unwrap();
     server
@@ -328,10 +332,10 @@ async fn the_route_releases_its_audio_permit_once_the_response_completes(pool: P
 // Cache first (`podcasts.ts:933-1015`, D-214): a cached copy is served without asking the host,
 // a miss streams from the host and queues the episode's download once.
 
-/// The jobs queued for `episode`'s download: (state, payload user).
+/// The jobs queued for `episode`'s download: (state, payload profile).
 async fn download_jobs(pool: &PgPool, episode: Uuid) -> Vec<(String, String)> {
     sqlx::query_as(
-        "SELECT state, payload ->> 'user' FROM jobs
+        "SELECT state, payload ->> 'profile' FROM jobs
          WHERE queue = $1 AND payload ->> 'key' = $2 ORDER BY created_at",
     )
     .bind(kima_podcast::cache::QUEUE)
@@ -363,7 +367,7 @@ async fn cache_episode(env: &Env, data_dir: &std::path::Path, episode: Uuid, dat
     std::fs::write(dir.join(format!("{episode}.audio")), data).unwrap();
     podcasts::upsert_download(
         &env.state.pool,
-        env.user,
+        ProfileId::new(env.user),
         episode,
         &format!("podcast-audio/{episode}.audio"),
         data.len() as f64 / 1024.0 / 1024.0,

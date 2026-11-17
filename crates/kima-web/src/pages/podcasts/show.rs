@@ -51,7 +51,7 @@ fn is_admin(ctx: &Ctx) -> Computed<bool> {
     let me = load(bind!(ctx, async move {
         ctx.client.get::<MeResponse>("/api/auth/me").await
     }));
-    me.map(|state| matches!(state, vertigo::Resource::Ready(me) if me.role == "admin"))
+    me.map(|state| matches!(state, vertigo::Resource::Ready(me) if crate::auth::is_admin(&me)))
 }
 
 /// A label badge that follows `label` (an admin's change shows at once).

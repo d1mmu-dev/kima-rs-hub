@@ -1,3 +1,4 @@
+use kima_core::profile::ProfileId;
 use kima_db::podcasts::{self, NewShow};
 use kima_db::users::{self, Registration};
 use kima_podcast::refresh;
@@ -36,7 +37,9 @@ async fn competing_sweepers_skip_locked_and_retry_after_failure(pool: PgPool) {
     )
     .await
     .unwrap();
-    podcasts::subscribe(&pool, user.id, show.id).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(user.id), show.id)
+        .await
+        .unwrap();
     sqlx::query("UPDATE podcasts SET last_refreshed = now() - interval '2 hours' WHERE id = $1")
         .bind(show.id)
         .execute(&pool)
@@ -166,7 +169,9 @@ async fn sweep_running_job_is_not_duplicated_green(pool: PgPool) {
     )
     .await
     .unwrap();
-    podcasts::subscribe(&pool, user.id, show.id).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(user.id), show.id)
+        .await
+        .unwrap();
     sqlx::query("UPDATE podcasts SET last_refreshed = now() - interval '2 hours' WHERE id = $1")
         .bind(show.id)
         .execute(&pool)
@@ -231,7 +236,9 @@ async fn sweep_running_job_is_not_duplicated_green(pool: PgPool) {
     )
     .await
     .unwrap();
-    podcasts::subscribe(&pool, user.id, other.id).await.unwrap();
+    podcasts::subscribe(&pool, ProfileId::new(user.id), other.id)
+        .await
+        .unwrap();
     sqlx::query("UPDATE podcasts SET last_refreshed = now() - interval '2 hours' WHERE id = $1")
         .bind(other.id)
         .execute(&pool)

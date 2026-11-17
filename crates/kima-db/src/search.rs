@@ -1,6 +1,7 @@
 //! Library search over the `search` tsvector columns (`simple` config, unaccented). Tracks
 //! flagged missing are excluded, and so are albums and artists with no present track.
 
+use kima_core::profile::ProfileId;
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -102,7 +103,7 @@ pub struct PodcastSearchRow {
 
 pub async fn podcasts(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     query: &str,
     limit: i64,
     offset: i64,
@@ -111,7 +112,7 @@ pub async fn podcasts(
         "SELECT p.id, p.title, p.author, p.description, p.image_url, p.episode_count,
                 {} AS ai_label, {} AS ai_label_source
          FROM podcasts p
-         JOIN podcast_subscriptions s ON s.podcast_id = p.id AND s.user_id = $1
+         JOIN podcast_subscriptions s ON s.podcast_id = p.id AND s.profile_id = $1
          WHERE p.search @@ $2::tsquery
          ORDER BY ts_rank(p.search, $2::tsquery) DESC, lower(p.title) ASC, p.id ASC
          LIMIT $3 OFFSET $4",
@@ -119,7 +120,7 @@ pub async fn podcasts(
         crate::podcasts::show_source_sql("p"),
     );
     sqlx::query_as(&sql)
-        .bind(user)
+        .bind(profile)
         .bind(query)
         .bind(limit)
         .bind(offset)
@@ -144,7 +145,7 @@ pub struct EpisodeSearchRow {
 
 pub async fn episodes(
     pool: &PgPool,
-    user: Uuid,
+    profile: ProfileId,
     query: &str,
     limit: i64,
     offset: i64,
@@ -154,7 +155,7 @@ pub async fn episodes(
                 e.published_at, e.duration, e.audio_url, {} AS ai_label, {} AS ai_label_source
          FROM podcast_episodes e
          JOIN podcasts p ON p.id = e.podcast_id
-         JOIN podcast_subscriptions s ON s.podcast_id = p.id AND s.user_id = $1
+         JOIN podcast_subscriptions s ON s.podcast_id = p.id AND s.profile_id = $1
          WHERE e.search @@ $2::tsquery
          ORDER BY ts_rank(e.search, $2::tsquery) DESC, e.published_at DESC, e.id ASC
          LIMIT $3 OFFSET $4",
@@ -162,7 +163,7 @@ pub async fn episodes(
         crate::podcasts::episode_source_sql("e", "p"),
     );
     sqlx::query_as(&sql)
-        .bind(user)
+        .bind(profile)
         .bind(query)
         .bind(limit)
         .bind(offset)

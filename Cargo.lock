@@ -2740,6 +2740,7 @@ dependencies = [
  "http-body-util",
  "httpdate",
  "image",
+ "jsonwebtoken",
  "kima-api-types",
  "kima-core",
  "kima-db",
@@ -2789,6 +2790,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.21",
  "time",
@@ -3040,7 +3042,10 @@ dependencies = [
 name = "kima-test-support"
 version = "0.1.0"
 dependencies = [
+ "kima-core",
+ "kima-db",
  "lofty",
+ "uuid",
 ]
 
 [[package]]
@@ -3050,6 +3055,7 @@ dependencies = [
  "kima-api-types",
  "serde",
  "serde_json",
+ "uuid",
  "vertigo",
 ]
 

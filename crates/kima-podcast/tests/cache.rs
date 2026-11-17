@@ -3,6 +3,7 @@
 //! data directory via the real [`kima_podcast::cache`] + `kima_db::podcasts` code against the
 //! real (isolated, migrated) database.
 
+use kima_core::profile::ProfileId;
 use std::sync::Arc;
 
 use kima_core::identify::IdentifySwitch;
@@ -108,7 +109,9 @@ async fn downloads_and_caches_a_real_episode(pool: PgPool) {
     let user = user(&pool, "ana").await;
 
     assert!(cache::cached_path(&c, episode).await.is_none());
-    cache::download(&c, episode, user).await.unwrap();
+    cache::download(&c, episode, ProfileId::new(user))
+        .await
+        .unwrap();
 
     let cached = cache::cached_path(&c, episode).await.expect("now cached");
     assert_eq!(std::fs::read(&cached).unwrap(), mp3);
@@ -142,7 +145,9 @@ async fn keeps_a_valid_cache_and_drops_one_whose_file_no_longer_matches(pool: Pg
     let data_dir = tmp.path().join("data");
     let c = ctx(&pool, &data_dir, &host.url());
     let ana = user(&pool, "ana").await;
-    cache::download(&c, episode, ana).await.unwrap();
+    cache::download(&c, episode, ProfileId::new(ana))
+        .await
+        .unwrap();
     let cached = cache::cached_path(&c, episode).await.unwrap();
 
     // The feed's declared length does not judge the cache (only the download's own size does).
@@ -177,7 +182,7 @@ async fn keeps_nothing_from_a_download_cut_short_of_the_hosts_content_length(poo
     let data_dir = tmp.path().join("data");
     let c = ctx(&pool, &data_dir, &host.url());
 
-    let err = cache::download(&c, episode, Uuid::now_v7())
+    let err = cache::download(&c, episode, ProfileId::new(Uuid::now_v7()))
         .await
         .unwrap_err();
     assert!(
@@ -329,7 +334,7 @@ async fn aborts_a_download_of_unknown_length_at_the_size_cap(pool: PgPool) {
     };
 
     let started = std::time::Instant::now();
-    let err = cache::download_with_limits(&c, episode, Uuid::now_v7(), limits)
+    let err = cache::download_with_limits(&c, episode, ProfileId::new(Uuid::now_v7()), limits)
         .await
         .unwrap_err();
     assert!(
@@ -358,7 +363,7 @@ async fn aborts_a_download_that_trickles_past_its_deadline(pool: PgPool) {
     };
 
     let started = std::time::Instant::now();
-    let err = cache::download_with_limits(&c, episode, Uuid::now_v7(), limits)
+    let err = cache::download_with_limits(&c, episode, ProfileId::new(Uuid::now_v7()), limits)
         .await
         .unwrap_err();
     assert!(matches!(err, CacheError::TimedOut(_)), "{err:?}");
@@ -387,7 +392,7 @@ async fn caps_a_download_whose_declared_length_is_above_the_ceiling(pool: PgPool
         ..DownloadLimits::default()
     };
 
-    let err = cache::download_with_limits(&c, episode, Uuid::now_v7(), limits)
+    let err = cache::download_with_limits(&c, episode, ProfileId::new(Uuid::now_v7()), limits)
         .await
         .unwrap_err();
     assert!(
@@ -416,7 +421,7 @@ async fn aborts_a_body_longer_than_its_declared_content_length(pool: PgPool) {
         ..DownloadLimits::default()
     };
 
-    let err = cache::download_with_limits(&c, episode, Uuid::now_v7(), limits)
+    let err = cache::download_with_limits(&c, episode, ProfileId::new(Uuid::now_v7()), limits)
         .await
         .unwrap_err();
     assert!(
@@ -439,7 +444,7 @@ async fn dropping_a_download_midway_leaves_no_temp_file(pool: PgPool) {
 
     let task = tokio::spawn({
         let c = c.clone();
-        async move { cache::download(&c, episode, Uuid::now_v7()).await }
+        async move { cache::download(&c, episode, ProfileId::new(Uuid::now_v7())).await }
     });
     wait_for_temp_file(&data_dir, 1, None).await;
     task.abort();
@@ -523,12 +528,12 @@ async fn two_concurrent_attempts_publish_one_complete_file(pool: PgPool) {
 
     let first = tokio::spawn({
         let c = c.clone();
-        async move { cache::download(&c, episode, user).await }
+        async move { cache::download(&c, episode, ProfileId::new(user)).await }
     });
     let first_file = wait_for_temp_file(&data_dir, half, None).await;
     let second = tokio::spawn({
         let c = c.clone();
-        async move { cache::download(&c, episode, user).await }
+        async move { cache::download(&c, episode, ProfileId::new(user)).await }
     });
     wait_for_temp_file(&data_dir, half, Some(first_file)).await;
 
@@ -590,7 +595,9 @@ async fn cached_path_hides_a_file_while_its_download_job_is_pending(pool: PgPool
     .await
     .unwrap();
     let user = Uuid::now_v7();
-    cache::enqueue_download(&pool, episode, user).await.unwrap();
+    cache::enqueue_download(&pool, episode, ProfileId::new(user))
+        .await
+        .unwrap();
     assert!(cache::cached_path(&c, episode).await.is_none());
 }
 
@@ -598,12 +605,16 @@ async fn cached_path_hides_a_file_while_its_download_job_is_pending(pool: PgPool
 async fn download_is_queued_once_per_episode(pool: PgPool) {
     let episode = Uuid::now_v7();
     let user = Uuid::now_v7();
-    let first = cache::enqueue_download(&pool, episode, user).await.unwrap();
+    let first = cache::enqueue_download(&pool, episode, ProfileId::new(user))
+        .await
+        .unwrap();
     assert!(first.is_some());
-    let second = cache::enqueue_download(&pool, episode, user).await.unwrap();
+    let second = cache::enqueue_download(&pool, episode, ProfileId::new(user))
+        .await
+        .unwrap();
     assert_eq!(second, None);
     // A different episode gets its own job.
-    let other = cache::enqueue_download(&pool, Uuid::now_v7(), user)
+    let other = cache::enqueue_download(&pool, Uuid::now_v7(), ProfileId::new(user))
         .await
         .unwrap();
     assert!(other.is_some());
@@ -616,7 +627,7 @@ async fn download_is_queued_once_per_episode(pool: PgPool) {
 async fn download_is_not_queued_again_while_one_runs(pool: PgPool) {
     let episode = Uuid::now_v7();
     let user = Uuid::now_v7();
-    let first = cache::enqueue_download(&pool, episode, user)
+    let first = cache::enqueue_download(&pool, episode, ProfileId::new(user))
         .await
         .unwrap()
         .expect("a fresh job");
@@ -629,7 +640,9 @@ async fn download_is_not_queued_again_while_one_runs(pool: PgPool) {
         vec![first]
     );
     assert_eq!(
-        cache::enqueue_download(&pool, episode, user).await.unwrap(),
+        cache::enqueue_download(&pool, episode, ProfileId::new(user))
+            .await
+            .unwrap(),
         None
     );
     // Once it is done, a later play may queue the episode again.
@@ -639,7 +652,7 @@ async fn download_is_not_queued_again_while_one_runs(pool: PgPool) {
             .unwrap()
     );
     assert!(
-        cache::enqueue_download(&pool, episode, user)
+        cache::enqueue_download(&pool, episode, ProfileId::new(user))
             .await
             .unwrap()
             .is_some()
@@ -711,7 +724,7 @@ async fn cleanup_deletes_only_downloads_untouched_for_30_days(pool: PgPool) {
     let user = user(&pool, "ana").await;
     podcasts::upsert_download(
         &pool,
-        user,
+        ProfileId::new(user),
         old_ep,
         &format!("podcast-audio/{old_ep}.audio"),
         1.0,
@@ -720,7 +733,7 @@ async fn cleanup_deletes_only_downloads_untouched_for_30_days(pool: PgPool) {
     .unwrap();
     podcasts::upsert_download(
         &pool,
-        user,
+        ProfileId::new(user),
         fresh_ep,
         &format!("podcast-audio/{fresh_ep}.audio"),
         1.0,
@@ -828,7 +841,7 @@ async fn cleanup_removes_orphaned_temp_files_older_than_a_day(pool: PgPool) {
     let legacy = write(format!("{}.tmp", Uuid::now_v7()), true);
     let fresh = write(format!("{}.{}.tmp", Uuid::now_v7(), Uuid::now_v7()), false);
     let busy_episode = Uuid::now_v7();
-    cache::enqueue_download(&pool, busy_episode, Uuid::now_v7())
+    cache::enqueue_download(&pool, busy_episode, ProfileId::new(Uuid::now_v7()))
         .await
         .unwrap()
         .expect("a fresh job");

@@ -34,6 +34,167 @@ use axum_test::TestServer;
 use kima_db::PgPool;
 use serde_json::{Value, json};
 
+struct SyntheticText;
+impl kima_ident::stages::embedding::TextEmbedder for SyntheticText {
+    fn embed<'a>(
+        &'a self,
+        _ctx: &'a kima_ident::IdentCtx,
+        text: &'a str,
+    ) -> kima_ident::stages::embedding::TextEmbeddingFuture<'a> {
+        Box::pin(async move {
+            use kima_ident::stages::embedding::TextEmbeddingError;
+            match text {
+                "timeout" => std::future::pending().await,
+                "error" => Err(TextEmbeddingError::Inference(
+                    "private inference detail".into(),
+                )),
+                _ => {
+                    assert_eq!(text, "rain");
+                    let mut v = [0.0; 512];
+                    v[0] = 1.0;
+                    Ok(v)
+                }
+            }
+        })
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn text_search_limits_shape_no_cutoff_and_errors(pool: PgPool) {
+    let first = mapped(&pool, "Search title", [0.0; 3]).await;
+    sqlx::query(
+        "UPDATE tracks SET display_title='Edited',track_no=7,duration_secs=123 WHERE id=$1",
+    )
+    .bind(first.track)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE albums SET image_path='synthetic-cover' WHERE id=$1")
+        .bind(first.album)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for i in 0..104 {
+        let s = mapped(&pool, &format!("Search {i}"), [0.0; 3]).await;
+        let mut v = vec![0.0f32; 512];
+        v[0] = -1.0;
+        sqlx::query("UPDATE track_embeddings SET embedding=$2::real[]::vector WHERE track_id=$1")
+            .bind(s.track)
+            .bind(v)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let mut state = common::state(pool.clone());
+    state.vibe_text_embedder = Arc::new(SyntheticText);
+    let (_, token) = common::user_with_token(&state, "searcher").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    for (limit, count) in [
+        (json!(null), 20),
+        (json!(200), 100),
+        (json!(1), 1),
+        (json!(0), 20),
+        (json!(-9), 1),
+        (json!("3junk"), 3),
+    ] {
+        let res = srv
+            .post("/api/vibe/search")
+            .authorization_bearer(&token)
+            .json(&json!({"query":"  rain  ","limit":limit}))
+            .await;
+        res.assert_status_ok();
+        let data: Value = res.json();
+        assert_eq!(data["query"], "rain");
+        let tracks = data["tracks"].as_array().unwrap();
+        assert_eq!(tracks.len(), count);
+        assert_eq!(tracks[0]["id"], first.track.to_string());
+        assert_eq!(tracks[0]["trackNo"], 7);
+        assert_eq!(tracks[0]["displayTitle"], "Edited");
+        assert_eq!(tracks[0]["duration"], 123);
+        assert_eq!(tracks[0]["album"]["coverUrl"], first.album.to_string());
+        if count > 1 {
+            assert_eq!(tracks[1]["similarity"], 0.0);
+            assert_eq!(tracks[1]["distance"], 2.0);
+        }
+        let _: kima_api_types::vibe::SearchResponse = serde_json::from_value(data).unwrap();
+    }
+    for (query, status, body) in [
+        (
+            "error",
+            500,
+            json!({"error":"Failed to search tracks by vibe"}),
+        ),
+        (
+            "timeout",
+            504,
+            json!({"error":"Text embedding service unavailable","message":"The CLAP analyzer service did not respond in time"}),
+        ),
+    ] {
+        let res = srv
+            .post("/api/vibe/search")
+            .authorization_bearer(&token)
+            .json(&json!({"query":query}))
+            .await;
+        assert_eq!(res.status_code().as_u16(), status);
+        assert_eq!(res.json::<Value>(), body);
+    }
+    sqlx::query("DROP TABLE track_embeddings CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let res = srv
+        .post("/api/vibe/search")
+        .authorization_bearer(&token)
+        .json(&json!({"query":"rain"}))
+        .await;
+    res.assert_status_internal_server_error();
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"error":"Failed to search tracks by vibe"})
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn text_search_validates_query_and_reports_real_model_unavailable(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "searcher").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    srv.post("/api/vibe/search")
+        .json(&json!({"query":"rain"}))
+        .await
+        .assert_status_unauthorized();
+    for query in [
+        json!(null),
+        json!(7),
+        json!(" x "),
+        json!(""),
+        json!("a".repeat(501)),
+    ] {
+        let message = if query.as_str().is_some_and(|s| s.len() > 500) {
+            "Query must be at most 500 characters"
+        } else {
+            "Query must be at least 2 characters"
+        };
+        let res = srv
+            .post("/api/vibe/search")
+            .authorization_bearer(&token)
+            .json(&json!({"query":query}))
+            .await;
+        res.assert_status_bad_request();
+        assert_eq!(res.json::<Value>(), json!({"error":message}));
+    }
+    let res = srv
+        .post("/api/vibe/search")
+        .authorization_bearer(&token)
+        .json(&json!({"query":"rain"}))
+        .await;
+    res.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"error":"Text embedding service unavailable","message":"The CLAP text model is not available"})
+    );
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn map_empty_library_200_empty_and_routes_require_auth(pool: PgPool) {
     let state = common::state(pool);
@@ -316,7 +477,8 @@ async fn library_global_reads_allow_nonmain_profiles_without_personal_data_or_fe
     use kima_core::profile::ProfileKind;
     use kima_db::profiles::{self, NewProfile};
     mapped(&pool, "Global", [0.0; 3]).await;
-    let state = common::state(pool);
+    let mut state = common::state(pool);
+    state.vibe_text_embedder = Arc::new(SyntheticText);
     let (admin, main) = common::user_with_token(&state, "admin").await;
     let (other, other_main) = common::user_with_token(&state, "other").await;
     let mut tokens = vec![main, other_main];
@@ -364,6 +526,23 @@ async fn library_global_reads_allow_nonmain_profiles_without_personal_data_or_fe
             }
         }
         srv.get(path).await.assert_status_unauthorized();
+    }
+    let mut expected_search = None;
+    for token in &tokens {
+        let res = srv
+            .post("/api/vibe/search")
+            .authorization_bearer(token)
+            .json(&json!({"query":"rain"}))
+            .await;
+        res.assert_status_ok();
+        let data: Value = res.json();
+        assert_eq!(data["tracks"].as_array().unwrap().len(), 1);
+        assert!(!data.to_string().contains("Secret"));
+        if let Some(expected) = &expected_search {
+            assert_eq!(&data, expected);
+        } else {
+            expected_search = Some(data);
+        }
     }
     let features = srv
         .get("/api/system/features")

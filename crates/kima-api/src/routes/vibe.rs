@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use kima_api_types::vibe::{Computing, MapResponse, MapTrack, MoodShare, MoodSummary, TrackMood};
 use kima_db::vibe::{moods::MoodSnapshot, read};
@@ -18,6 +18,99 @@ pub fn routes() -> Router<AppState> {
         .route("/vibe/map", get(map))
         .route("/vibe/mood-summary", get(summary))
         .route("/vibe/mood/{track_id}", get(mood))
+        .route("/vibe/search", post(search))
+}
+
+async fn search(
+    State(state): State<AppState>,
+    _user: AuthUser,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Response, ApiError> {
+    let query = body
+        .get("query")
+        .and_then(|q| q.as_str())
+        .unwrap_or_default();
+    if query.trim().encode_utf16().count() < 2 {
+        return Err(ApiError::BadRequest(
+            "Query must be at least 2 characters".into(),
+        ));
+    }
+    if query.encode_utf16().count() > 500 {
+        return Err(ApiError::BadRequest(
+            "Query must be at most 500 characters".into(),
+        ));
+    }
+    let ctx = state.ident_ctx();
+    let vector = match embedding::vibe_embed_text(&ctx,query.trim(),state.vibe_text_embedder.as_ref()).await {
+        Ok(v) => v,
+        Err(embedding::TextEmbeddingError::Unavailable(_)) => return Ok((StatusCode::SERVICE_UNAVAILABLE,Json(serde_json::json!({"error":"Text embedding service unavailable","message":"The CLAP text model is not available"}))).into_response()),
+        Err(embedding::TextEmbeddingError::Timeout) => return Ok((StatusCode::GATEWAY_TIMEOUT,Json(serde_json::json!({"error":"Text embedding service unavailable","message":"The CLAP analyzer service did not respond in time"}))).into_response()),
+        Err(e) => return Err(failure("Failed to search tracks by vibe",e)),
+    };
+    let rows = kima_db::vibe::search::search_tracks_by_embedding(
+        &state.pool,
+        &vector,
+        parse_limit(body.get("limit")),
+        ctx.config.vibe.exact_max,
+    )
+    .await
+    .map_err(|e| failure("Failed to search tracks by vibe", e))?;
+    let titles = read::edited_titles(&state.pool, &rows.iter().map(|r| r.id).collect::<Vec<_>>())
+        .await
+        .map_err(|e| failure("Failed to search tracks by vibe", e))?;
+    let tracks = rows
+        .into_iter()
+        .map(|r| kima_api_types::vibe::SearchTrack {
+            id: r.id.to_string(),
+            title: r.title,
+            display_title: titles.get(&r.id).cloned().flatten(),
+            duration: r.duration,
+            track_no: r.track_no,
+            distance: r.distance,
+            similarity: (1.0 - r.distance).max(0.0),
+            album: kima_api_types::vibe::SearchAlbum {
+                id: r.album_id.to_string(),
+                title: r.album_title,
+                cover_url: r.album_has_cover.then(|| r.album_id.to_string()),
+            },
+            artist: kima_api_types::vibe::SearchArtist {
+                id: r.artist_id.to_string(),
+                name: r.artist_name,
+            },
+        })
+        .collect();
+    Ok(Json(kima_api_types::vibe::SearchResponse {
+        query: query.trim().to_owned(),
+        tracks,
+    })
+    .into_response())
+}
+
+/// Upstream parseInt(raw, 10) || 20, clamped to [1,100].
+fn parse_limit(raw: Option<&serde_json::Value>) -> usize {
+    let text = match raw {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        _ => return 20,
+    };
+    let text = text.trim_start();
+    let negative = text.starts_with('-');
+    let unsigned = text.strip_prefix(['-', '+']).unwrap_or(text);
+    let digits: String = unsigned
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return 20;
+    }
+    let n = digits.parse::<u64>().unwrap_or(u64::MAX);
+    if n == 0 {
+        20
+    } else if negative {
+        1
+    } else {
+        n.min(100) as usize
+    }
 }
 
 fn failure(message: &'static str, error: impl std::fmt::Debug) -> ApiError {

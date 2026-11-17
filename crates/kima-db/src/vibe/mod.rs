@@ -9,6 +9,7 @@ pub mod moods;
 pub mod path;
 pub mod rank;
 pub mod read;
+pub mod search;
 pub mod state;
 
 pub use eligible::{ELIGIBLE, MATCHING_SOUND, SoundIdentity};

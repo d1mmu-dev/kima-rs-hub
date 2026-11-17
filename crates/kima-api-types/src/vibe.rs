@@ -54,3 +54,37 @@ pub struct TrackMood {
 pub struct Computing {
     pub computing: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchResponse {
+    pub query: String,
+    pub tracks: Vec<SearchTrack>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchTrack {
+    pub id: String,
+    pub title: String,
+    pub display_title: Option<String>,
+    pub duration: i32,
+    pub track_no: i32,
+    pub distance: f64,
+    pub similarity: f64,
+    pub album: SearchAlbum,
+    pub artist: SearchArtist,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchAlbum {
+    pub id: String,
+    pub title: String,
+    pub cover_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchArtist {
+    pub id: String,
+    pub name: String,
+}

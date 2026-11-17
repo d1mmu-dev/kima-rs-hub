@@ -50,7 +50,7 @@ fn migrator_without(version: i64) -> Migrator {
         migrations: std::borrow::Cow::Owned(
             kima_db::MIGRATOR
                 .iter()
-                .filter(|m| m.version != version)
+                .filter(|m| m.version != version && !(version == 40 && m.version == 41))
                 .cloned()
                 .collect(),
         ),
@@ -527,8 +527,8 @@ async fn name_must_be_trimmed_and_1_to_50(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn down_script_restores_pre_profile_schema(pool: PgPool) {
     at_0039_with_seed(&pool).await;
-    // 0060's rollback must retain the independently applied 0040 tables and phase check.
-    migrator_upto(40).run(&pool).await.unwrap();
+    // 0060's rollback must retain both independent M5 migrations and their index options.
+    migrator_upto(41).run(&pool).await.unwrap();
     let schema_before_profiles = schema_fingerprint(&pool).await;
     let rows_0039 = snapshot(&pool, "user_id").await;
     kima_db::MIGRATOR.run(&pool).await.unwrap();
@@ -578,7 +578,7 @@ async fn down_script_restores_pre_profile_schema(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 40);
+    assert_eq!(version, 41);
 
     // And up again from there.
     kima_db::MIGRATOR.run(&pool).await.unwrap();

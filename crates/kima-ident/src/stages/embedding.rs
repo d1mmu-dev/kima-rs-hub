@@ -294,6 +294,41 @@ pub enum TextEmbeddingError {
     Invalid(String),
     /// The blocking worker panicked or was cancelled.
     Worker(String),
+    /// The interactive vibe search exceeded its 15-second inference budget.
+    Timeout,
+}
+
+/// Interactive text embedding deadline, including lazy model initialization. This does not
+/// normalize again: `embed_text` already returns a unit vector. Blocking inference retains
+/// its runtime/session reservation even if the waiting request times out.
+pub async fn vibe_embed_text(
+    ctx: &IdentCtx,
+    text: &str,
+    provider: &dyn TextEmbedder,
+) -> Result<[f32; 512], TextEmbeddingError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        provider.embed(ctx, text),
+    )
+    .await
+    .map_err(|_| TextEmbeddingError::Timeout)?
+}
+
+pub type TextEmbeddingFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<[f32; 512], TextEmbeddingError>> + Send + 'a>,
+>;
+
+/// Injection boundary for deterministic synthetic tests; production always uses the
+/// verified native text encoder below, never a fabricated embedding or an env override.
+pub trait TextEmbedder: Send + Sync {
+    fn embed<'a>(&'a self, ctx: &'a IdentCtx, text: &'a str) -> TextEmbeddingFuture<'a>;
+}
+
+pub struct NativeTextEmbedder;
+impl TextEmbedder for NativeTextEmbedder {
+    fn embed<'a>(&'a self, ctx: &'a IdentCtx, text: &'a str) -> TextEmbeddingFuture<'a> {
+        Box::pin(embed_text(ctx, text))
+    }
 }
 
 /// L2-normalizes a raw text-encoder output; refuses zero-norm and non-finite vectors.

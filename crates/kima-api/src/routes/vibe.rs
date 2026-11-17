@@ -53,6 +53,18 @@ async fn search(
         ));
     }
     let ctx = state.ident_ctx();
+    // D-182: without music-space vectors there is nothing to rank against (e.g. an
+    // `hf_audio` library); search needs no feel probe, so a missing probe does not block it.
+    if !vibe_assets::music_vectors_possible(&ctx)
+        .await
+        .map_err(|e| failure("Failed to search tracks by vibe", e))?
+    {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"Vibe search needs the music CLAP model"})),
+        )
+            .into_response());
+    }
     let vector = match embedding::vibe_embed_text(&ctx,query.trim_matches(ecmascript_whitespace),state.vibe_text_embedder.as_ref()).await {
         Ok(v) => v,
         Err(embedding::TextEmbeddingError::Unavailable(_)) => return Ok((StatusCode::SERVICE_UNAVAILABLE,Json(serde_json::json!({"error":"Text embedding service unavailable","message":"The CLAP text model is not available"}))).into_response()),
@@ -143,6 +155,20 @@ async fn snapshot(state: &AppState) -> sqlx::Result<Option<Arc<MoodSnapshot>>> {
         .map(Some)
 }
 
+/// Spec §4.4: without the feel probe the map is off, so stale layout rows are not served.
+async fn available_map(state: &AppState) -> sqlx::Result<read::MapRead> {
+    if !vibe_assets::initialize(&state.ident_ctx())
+        .await
+        .is_ok_and(|a| a.probe.is_some())
+    {
+        return Ok(read::MapRead {
+            rows: vec![],
+            computed_at: None,
+        });
+    }
+    read::read_map(&state.pool).await
+}
+
 async fn pending(state: &AppState) -> sqlx::Result<bool> {
     let Some(ctx) = &state.ident else {
         return Ok(false);
@@ -154,10 +180,7 @@ async fn pending(state: &AppState) -> sqlx::Result<bool> {
     if !assets.as_ref().is_ok_and(|a| a.probe.is_some()) {
         return Ok(false);
     }
-    let sound_available = embedding::cached_status(ctx).is_some_and(|s| {
-        s.capabilities.get(&kima_ml::Capability::ClapAudioEmbedding)
-            == Some(&kima_ml::CapabilityStatus::Available)
-    });
+    let sound_available = vibe_assets::matching_audio_available(ctx);
     read::layout_pending(&state.pool, sound_available).await
 }
 
@@ -171,9 +194,7 @@ async fn map(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     const ERROR: &str = "Failed to read the vibe map";
-    let read = read::read_map(&state.pool)
-        .await
-        .map_err(|e| failure(ERROR, e))?;
+    let read = available_map(&state).await.map_err(|e| failure(ERROR, e))?;
     if read.rows.is_empty() && pending(&state).await.map_err(|e| failure(ERROR, e))? {
         return Ok(computing());
     }
@@ -279,9 +300,7 @@ async fn map(
 
 async fn summary(State(state): State<AppState>, _user: AuthUser) -> Result<Response, ApiError> {
     const ERROR: &str = "Failed to read the mood summary";
-    let read = read::read_map(&state.pool)
-        .await
-        .map_err(|e| failure(ERROR, e))?;
+    let read = available_map(&state).await.map_err(|e| failure(ERROR, e))?;
     if read.rows.is_empty() && pending(&state).await.map_err(|e| failure(ERROR, e))? {
         return Ok(computing());
     }

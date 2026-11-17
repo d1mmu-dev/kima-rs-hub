@@ -171,6 +171,53 @@ fn assets_now(ctx: &IdentCtx) -> Arc<VibeAssets> {
     loaded
 }
 
+/// Whether the compiled native audio encoder produces the matching vector space
+/// (`MATCHING_SOUND`). The current `hf_audio` checkpoint does not, so an available `hf_audio`
+/// encoder never makes music layouts or the vibe feature possible.
+pub fn native_audio_is_matching_sound() -> bool {
+    use kima_ml::onnx::OnnxModel;
+    let sound = kima_db::vibe::MATCHING_SOUND;
+    OnnxModel::ClapAudio.artifact_id().as_str() == sound.model_id
+        && OnnxModel::ClapAudio.expected_sha256() == sound.model_sha256
+        && super::embedding::PIPELINE_VERSION == sound.pipeline_version
+}
+
+/// The native audio capability is available and embeds into the matching vector space.
+pub fn matching_audio_available(ctx: &IdentCtx) -> bool {
+    native_audio_is_matching_sound()
+        && super::embedding::cached_status(ctx).is_some_and(|s| {
+            s.capabilities.get(&Capability::ClapAudioEmbedding)
+                == Some(&CapabilityStatus::Available)
+        })
+}
+
+/// Music-space vectors exist or can be produced: matching audio is available, or at least
+/// one eligible vector is stored. Independent of the probe, which only the formula needs.
+pub async fn music_vectors_possible(ctx: &IdentCtx) -> sqlx::Result<bool> {
+    if matching_audio_available(ctx) {
+        return Ok(true);
+    }
+    sqlx::query_scalar(&format!(
+        "SELECT EXISTS(SELECT 1 FROM {})",
+        *kima_db::vibe::ELIGIBLE
+    ))
+    .fetch_one(&ctx.pool)
+    .await
+}
+
+/// M5 spec §5.8: `vibeEmbeddings` = CLAP not disabled, a verified feel probe, and matching
+/// audio or stored eligible vectors. Missing assets are capability failures, never startup
+/// failures; text and mood heads are not prerequisites of the similarity capability.
+pub async fn vibe_embeddings(ctx: &IdentCtx) -> sqlx::Result<bool> {
+    if ctx.config.embedding.disabled {
+        return Ok(false);
+    }
+    if !initialize(ctx).await.is_ok_and(|a| a.probe.is_some()) {
+        return Ok(false);
+    }
+    music_vectors_possible(ctx).await
+}
+
 /// The cached result, without loading anything.
 pub fn cached(ctx: &IdentCtx) -> Option<Arc<VibeAssets>> {
     ctx.embedding_runtime

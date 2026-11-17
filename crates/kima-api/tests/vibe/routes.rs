@@ -104,7 +104,9 @@ async fn matching_reads_are_library_global_for_all_profile_kinds(pool: PgPool) {
         .authorization_bearer(&tokens[0])
         .await
         .json::<Value>();
-    assert_eq!(features["vibeEmbeddings"], false);
+    // Task 18: verified probe + eligible rows make the §5.8 predicate true; reads above
+    // never depended on it.
+    assert_eq!(features["vibeEmbeddings"], true);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
@@ -179,7 +181,7 @@ async fn add_takes_cap_places_but_subtract_does_not(pool: PgPool) {
     );
 }
 
-async fn matching_library(pool: &PgPool, count: usize) -> Vec<Seeded> {
+pub(super) async fn matching_library(pool: &PgPool, count: usize) -> Vec<Seeded> {
     let mut rows = Vec::new();
     for n in 0..count {
         let name = format!("Matching {n}");

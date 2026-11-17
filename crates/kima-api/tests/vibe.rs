@@ -1,5 +1,7 @@
-//! M5 Task 13: real-router contract tests; all vectors/heads are synthetic.
+//! M5 real-router contract tests; all vectors/heads are synthetic.
 mod common;
+#[path = "vibe/degradation.rs"]
+mod degradation;
 #[path = "vibe/routes.rs"]
 mod route_contracts;
 
@@ -168,6 +170,8 @@ async fn text_search_limits_shape_no_cutoff_and_errors(pool: PgPool) {
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn text_search_validates_query_and_reports_real_model_unavailable(pool: PgPool) {
+    // One eligible music vector, so the missing text model (not D-182) answers.
+    mapped(&pool, "Eligible", [0.0; 3]).await;
     let state = common::state(pool);
     let (_, token) = common::user_with_token(&state, "searcher").await;
     let srv = TestServer::new(kima_api::router(state)).unwrap();
@@ -483,7 +487,7 @@ async fn map_filters_missing_wrong_model_and_stale_rows(pool: PgPool) {
     .await
     .unwrap();
     sqlx::query("INSERT INTO track_clap_readings (track_id,embedded_at,instrumentalness,acousticness,valence_raw,arousal_raw) SELECT track_id,created_at-interval '1 second',0.3,0.4,0.75,0.6 FROM track_embeddings WHERE track_id=$1").bind(current.track).execute(&pool).await.unwrap();
-    let state = common::state(pool);
+    let state = with_assets(common::state(pool), true, false);
     let (_, token) = common::user_with_token(&state, "listener").await;
     let srv = TestServer::new(kima_api::router(state)).unwrap();
     let res = srv.get("/api/vibe/map").authorization_bearer(&token).await;
@@ -578,7 +582,8 @@ async fn library_global_reads_allow_nonmain_profiles_without_personal_data_or_fe
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn read_errors_keep_endpoint_specific_upstream_messages(pool: PgPool) {
-    let state = common::state(pool.clone());
+    // Spec §4.4: the map needs the feel probe; without it stale layouts are hidden.
+    let state = with_assets(common::state(pool.clone()), true, false);
     let (_, token) = common::user_with_token(&state, "listener").await;
     sqlx::query("DROP TABLE matching_map")
         .execute(&pool)
@@ -675,7 +680,8 @@ async fn map_shape_one_scale_sorted_rows_and_readings(pool: PgPool) {
     let b = mapped(&pool, "B", [4.0, 6.0, 10.0]).await;
     sqlx::query("INSERT INTO track_clap_readings (track_id,embedded_at,instrumentalness,acousticness,valence_raw,arousal_raw) SELECT track_id,created_at,0.3,0.4,0.75,0.6 FROM track_embeddings WHERE track_id=$1")
         .bind(a.track).execute(&pool).await.unwrap();
-    let state = common::state(pool);
+    // Spec §4.4: the map needs the feel probe; without it stale layouts are hidden.
+    let state = with_assets(common::state(pool), true, false);
     let (_, token) = common::user_with_token(&state, "listener").await;
     let srv = TestServer::new(kima_api::router(state)).unwrap();
     let res = srv.get("/api/vibe/map").authorization_bearer(&token).await;
@@ -724,7 +730,8 @@ async fn map_shape_one_scale_sorted_rows_and_readings(pool: PgPool) {
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn map_gzip_cache_tracks_content_not_just_layout_version(pool: PgPool) {
     let s = mapped(&pool, "Before", [0.0; 3]).await;
-    let state = common::state(pool.clone());
+    // Spec §4.4: the map needs the feel probe; without it stale layouts are hidden.
+    let state = with_assets(common::state(pool.clone()), true, false);
     let (_, token) = common::user_with_token(&state, "listener").await;
     let srv = TestServer::new(kima_api::router(state)).unwrap();
     let first = srv

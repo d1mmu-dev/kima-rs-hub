@@ -1,5 +1,7 @@
 //! M5 Task 13: real-router contract tests; all vectors/heads are synthetic.
 mod common;
+#[path = "vibe/routes.rs"]
+mod route_contracts;
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn map_negotiates_case_insensitive_quality_wildcard_and_identity(pool: kima_db::PgPool) {

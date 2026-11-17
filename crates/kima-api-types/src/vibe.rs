@@ -88,3 +88,61 @@ pub struct SearchArtist {
     pub id: String,
     pub name: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchTrack {
+    pub id: String,
+    pub title: String,
+    pub display_title: Option<String>,
+    pub duration: i32,
+    pub distance: f64,
+    pub similarity: f64,
+    pub album: SearchAlbum,
+    pub artist: SearchArtist,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimilarResponse {
+    pub source_track_id: String,
+    pub tracks: Vec<MatchTrack>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlchemyResponse {
+    pub tracks: Vec<MatchTrack>,
+}
+
+/// Upstream LibraryTrack is flat here, unlike matching/search responses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathTrack {
+    pub id: String,
+    pub title: String,
+    pub display_title: Option<String>,
+    pub duration: i32,
+    pub album_id: String,
+    pub album_title: String,
+    pub album_cover_url: Option<String>,
+    pub artist_id: String,
+    pub artist_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathMetadata {
+    pub total_tracks: usize,
+    pub embedding_distance: f64,
+    pub average_step_size: f64,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathResponse {
+    pub start_track: PathTrack,
+    pub end_track: PathTrack,
+    pub path: Vec<PathTrack>,
+    pub metadata: PathMetadata,
+}

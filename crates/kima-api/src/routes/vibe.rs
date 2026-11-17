@@ -20,6 +20,12 @@ pub fn routes() -> Router<AppState> {
         .route("/vibe/mood-summary", get(summary))
         .route("/vibe/mood/{track_id}", get(mood))
         .route("/vibe/search", post(search))
+        .route(
+            "/vibe/similar/{track_id}",
+            get(super::vibe_matching::similar),
+        )
+        .route("/vibe/alchemy", post(super::vibe_matching::alchemy))
+        .route("/vibe/path", post(super::vibe_matching::song_path))
 }
 
 async fn search(
@@ -93,7 +99,7 @@ async fn search(
 }
 
 /// Upstream parseInt(raw, 10) || 20, clamped to [1,100].
-fn parse_limit(raw: Option<&serde_json::Value>) -> usize {
+pub(super) fn parse_limit(raw: Option<&serde_json::Value>) -> usize {
     let text = match raw {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Number(n)) => n.to_string(),
@@ -119,7 +125,7 @@ fn parse_limit(raw: Option<&serde_json::Value>) -> usize {
     }
 }
 
-fn failure(message: &'static str, error: impl std::fmt::Debug) -> ApiError {
+pub(super) fn failure(message: &'static str, error: impl std::fmt::Debug) -> ApiError {
     tracing::error!(?error, message, "Vibe read failed");
     ApiError::Failed(message)
 }

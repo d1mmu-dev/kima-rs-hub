@@ -24,7 +24,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M9 | kima-web część 1 (logowanie, biblioteka, player, playlisty, ustawienia, SSR) | ✅ (wygląd 1:1 otwarty) |
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
 | **M-PROF** | **Profile w koncie (Netflix)** | ✅ na `main`; ręczne logowanie właściciela odłożone do wdrożenia |
-| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–14 zaimplementowane lokalnie; Task 14 gotowy do przeglądu, odbiór real-model otwarty |
+| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–15 zaimplementowane lokalnie; Task 15 i Minor recall czekają na przegląd, odbiór real-model otwarty |
 | M5b | Mixy, radio, „co nowego” | ⏳ ~1 tydz. |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
 | M6b | Audiobooki (Audiobookshelf) | ⏳ ~1 tydz., po M7 |
@@ -51,6 +51,8 @@ Decyzje właściciela (2026-11-14): awatary z 12 presetów; kilka profili dzieci
 Ręczne sprawdzenie istniejącego konta właściciela odłożone do wdrożenia (nie PASS); ścisły smoke referencyjnego frontendu odłożony do M10. Testy wymagające prywatnych modeli pozostają poza zweryfikowanym zakresem.
 
 ## M5 — punkt integracyjny
+
+**Najnowszy etap — Task 15 (2026-11-17):** zaimplementowane i lokalnie zweryfikowane similar/alchemy/path: dokładne błędy i kolejność walidacji, limity, caps i skala wyników, edytowane tytuły, płaskie DTO ścieżki. Globalne odczyty identyczne dla main/kids/standard dwóch kont, auth obowiązkowy, flagi nadal wyłączone. DTO porównane z interfejsami TypeScript referencji bez zmian frontendu. **247 PASS / 0 FAIL / 4 ignored** w wybranych niezdublowanych testach API/DTO/DB/ident/vibe-core (nie pełny runtime workspace). Workspace all-target check, stable Clippy plain+pg-publish, fmt, SQLx prepare check, pin/profile keys i diff check: PASS. D-193 opisuje UUID/nienumeryczne długości/native covers. Przegląd implementacji Task 14: 0 Critical/Important; osobny Minor normalizacji recall `0732404` i Task 15 wymagają niezależnego przeglądu. Real-model recall pozostaje **NIEURUCHOMIONY**, zgodny music checkpoint nadal niedostępny. Brak push/merge/wdrożenia; Task 16–20 nierozpoczęte. Poniższe akapity to historia wcześniejszych etapów.
 
 Lokalna gałąź zachowuje Task 0–12 oraz profile i podcasty z `main`. Dwie kolejności aktualizacji migracji 0040/0060, świeża baza i rollback profili: zielone; oryginalne sumy wszystkich 40 migracji bez zmian. Wybrane 17 zestawów DB/ident/API: **247 PASS, 0 FAIL, 2 ignored**. Workspace check i stable Clippy (także pg-publish), SQLx prepare check, fmt, pin i klucze profili: PASS. To nie pełny odbiór M5: pełny runtime workspace, CI i prawdziwy model pozostają otwarte. Integracja zaakceptowana przez niezależny przegląd bez Critical/Important.
 
@@ -83,6 +85,8 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 - Każdy etap: TDD, niezależny przegląd (0 Critical/Important), pełne bramki, zielone CI przed merge.
 
 ## Historia etapów (najnowsze na górze)
+
+- 2026-11-17: M5 Task 15 lokalnie gotowy do przeglądu: similar/alchemy/path, 247 PASS / 0 FAIL / 4 ignored, bramki kompilacji i statyczne zielone; real-model i hosted CI nadal otwarte, bez wdrożenia.
 
 - 2026-11-15: M-PROF backend gotowy na gałęzi (Task 1–9); decyzja o prywatności nazw profili.
 - 2026-11-14: **M6a na `main`** (CI zielone): fixtures, flaga `podcasts`, cache odcinków z limitami, naprawa cache okładek.

@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rand.workspace = true
 flate2 = "1"
 sha2.workspace = true
 md-5.workspace = true

@@ -94,6 +94,7 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 
 ## Historia etapów (najnowsze na górze)
 
+- 2026-11-18: M5 Task 18 po przeglądzie (0 Critical/Important): 8 uwag Minor poprawionych lokalnie (test tożsamości audio dla 202, utwardzony harness E2E: piny modeli przed bazą, KIMA_NET_DENY_REAL, pusta baza, sprzątanie po panice; pliki tokenizera przypięte w readings_real, skrypt Pythona bez assert, spec §5.8 i D-182 uzgodnione); bez wdrożenia, Task 19 nierozpoczęty.
 - 2026-11-17: M5 Task 18 lokalnie gotowy do przeglądu: predykat vibeEmbeddings, macierz degradacji §4.4, harness real-model E2E (nieuruchomiony), proweniencja tokenizera; 296 PASS / 0 FAIL / 8 ignored, bramki statyczne zielone; bez wdrożenia.
 - 2026-11-17: M5 Task 15 lokalnie gotowy do przeglądu: similar/alchemy/path, 247 PASS / 0 FAIL / 4 ignored, bramki kompilacji i statyczne zielone; real-model i hosted CI nadal otwarte, bez wdrożenia.
 

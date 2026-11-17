@@ -137,7 +137,7 @@ Body `{query, limit?}`. `query` missing/non-string/`trim().length < 2` -> 400 `Q
 | `POST /api/enrichment/rerun` (M-SYNC-B Task 14, `control::Step`) | Steps `analysis`, `vectors`, `moods`, `similarity` become real; the clear matrix is upstream's `STEP_CLEARS` [V `services/enrichmentRestart.ts:34-52`]. |
 | Similar artists (library re-rank) | `kima_ident::similar::rerank`: §9.4. |
 | `getSimilarSongs(2)` | §2 item 6. |
-| `GET /api/system/features` | `vibeEmbeddings` true iff the matching model + probe are available **or** (upstream rule) `DISABLE_CLAP` is not set and either the analyzer runs or any `track_embeddings` row exists [V `featureDetection.ts:checkCLAP`]. kima-rs rule: `!DISABLE_CLAP && (audio capability available || any eligible-model embedding exists)`; exact route wiring is M4's, M5 only supplies the predicate. |
+| `GET /api/system/features` | Upstream: `vibeEmbeddings` true iff `DISABLE_CLAP` is not set and the analyzer script exists (`existsSync(CLAP_ANALYZER_PATH)`), its heartbeat is fresh or any `track_embeddings` row exists [V `featureDetection.ts:checkCLAP`]. kima-rs rule (D-182): `!DISABLE_CLAP && verified feel probe && (native audio available with the `MATCHING_SOUND` identity || any eligible-model embedding exists)`; the probe is required, an available `hf_audio` encoder never counts. M5 supplies the predicate (`vibe_assets::vibe_embeddings`); the route only reports it. |
 
 ## 6. The matching formula
 

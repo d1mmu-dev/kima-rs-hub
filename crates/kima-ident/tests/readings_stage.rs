@@ -60,9 +60,13 @@ async fn embedded(pool: &PgPool) -> uuid::Uuid {
 async fn readings_wait_for_text_model(pool: PgPool) {
     let (ctx, _dir) = context(&pool);
     embedded(&pool).await;
+    // The compiled text model is the music checkpoint's (D-194), but this context has no
+    // provisioned model directory: the native pass waits for the text model, writing nothing.
     assert!(
-        NativeTextEmbedder.readings_identity().is_none(),
-        "current hf encoders cannot score music vectors"
+        NativeTextEmbedder
+            .readings_identity()
+            .is_some_and(|i| i.sound == MATCHING_SOUND),
+        "the native text encoder is associated with the music vectors"
     );
     assert_eq!(
         readings::run_pass(&ctx, &CancellationToken::new())

@@ -137,14 +137,21 @@ fn missing_heads_disable_only_moods() {
 
 #[test]
 fn unpinned_asset_is_unavailable_with_a_reason() {
+    // Compiled table (D-194): the feel probe is pinned to the upstream bytes, so a synthetic
+    // probe is a hash mismatch; the mood heads are unpinned, so they are never read.
     let (p, h) = (probe_bytes(), heads_bytes());
     let dir = dir_with(Some(&p), Some(&h));
     let a = load(Some(dir.path()), &VibePins::compiled());
-    let (_, message) = failure(&a, Capability::VibeAssets);
+    assert_eq!(
+        failure(&a, Capability::VibeAssets).0,
+        FailureCategory::HashMismatch
+    );
+    let (category, message) = failure(&a, Capability::VibeMoodHeads);
+    assert_eq!(category, FailureCategory::Missing);
     assert!(message.contains("no SHA-256 pin"), "{message}");
     assert!(
-        a.probe.is_none(),
-        "an unpinned file is never parsed, even when it looks right"
+        a.probe.is_none() && a.heads.is_none(),
+        "an unpinned or mismatched file is never parsed, even when it looks right"
     );
 }
 

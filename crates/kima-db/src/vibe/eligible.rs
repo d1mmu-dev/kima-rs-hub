@@ -8,10 +8,10 @@ use std::sync::LazyLock;
 /// pipeline_version`). Vectors under any other identity are invisible to the engine.
 ///
 /// This is the one place to change when the embedding checkpoint changes. The values are the music checkpoint
-/// `laion-clap-music-onnx-v1` (`music_audio.onnx`) that upstream's probe and heads were fitted on, as the M5 design
-/// expects the M4 follow-up to name it; they are NOT what M4 writes today (`hf_audio`, `clap-audio-v1`), so a library
-/// embedded by today's M4 has no eligible track until the checkpoint swap lands. The model id and pipeline strings
-/// are unconfirmed until then.
+/// `laion-clap-music-onnx-v1` (`music_audio.onnx`) that upstream's probe and heads were fitted on, and they are exactly
+/// what the native embedding stage publishes (`kima_ml::onnx::OnnxModel::ClapAudio` id and pin,
+/// `kima_ident::stages::embedding::PIPELINE_VERSION`; a kima-ident test asserts the equality). Vectors M4 wrote with the
+/// general model (`hf_audio`, `clap-audio-v1`) are never relabelled and stay ineligible until re-embedded (D-194).
 pub const MATCHING_SOUND: SoundIdentity = SoundIdentity {
     model_id: "music_audio",
     model_sha256: [

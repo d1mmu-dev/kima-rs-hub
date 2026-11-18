@@ -344,72 +344,138 @@ fn musicnn_core_rejects_wrong_model_id_or_hash() {
     );
 }
 
+fn synthetic(id: &'static str, bytes: &[u8]) -> VerifiedBytes {
+    clap_fixture(ArtifactId::from_static(id), bytes.into())
+}
+
+const MEL: usize = 1001 * 64;
+
 #[test]
-fn synthetic_model_runs_batched_variable_time() {
-    let artifact = clap_fixture(
-        ArtifactId::from_static("synthetic-clap"),
-        include_bytes!("../../tests/fixtures/synthetic_clap.onnx")
-            .as_slice()
-            .into(),
-    );
-    let model = ClapAudioSession::from_trusted_bytes(&artifact, 1, Some(1)).unwrap();
-    let input = vec![2.0; 2 * 3 * 64];
-    let out = model.infer(&input, 2, 3).unwrap();
-    assert_eq!(out, vec![[2.0; 512]; 2]);
+fn synthetic_music_audio_graph_runs_batched_full_windows() {
+    let model = ClapAudioSession::from_trusted_bytes(
+        &synthetic(
+            "synthetic-clap",
+            include_bytes!("../../tests/fixtures/synthetic_clap.onnx"),
+        ),
+        1,
+        Some(1),
+    )
+    .unwrap();
+    model.check_signature().unwrap();
+    let mut input = vec![2.0; 2 * MEL];
+    input[MEL..].fill(4.0);
+    let out = model.infer(&input, 2).unwrap();
+    assert_eq!(out, vec![[2.0; 512], [4.0; 512]]);
 }
 
 #[test]
-fn text_synthetic_model_runs_batched_variable_sequence() {
-    let artifact = clap_fixture(
-        ArtifactId::from_static("synthetic-clap-text"),
-        include_bytes!("../../tests/fixtures/synthetic_clap_text.onnx")
-            .as_slice()
-            .into(),
-    );
-    let model = ClapTextSession::from_trusted_bytes(&artifact, 1, Some(1)).unwrap();
-    let ids: Vec<i64> = vec![2, 2, 2, 2, 2, 2];
-    let out = model.infer(&ids, 2, 3).unwrap();
-    assert_eq!(out, vec![[2.0; 512]; 2]);
+fn audio_signature_check_refuses_a_wrong_output_width() {
+    let model = ClapAudioSession::from_trusted_bytes(
+        &synthetic(
+            "synthetic-clap-bad",
+            include_bytes!("../../tests/fixtures/synthetic_clap_bad_shape.onnx"),
+        ),
+        1,
+        Some(1),
+    )
+    .unwrap();
+    assert!(model.check_signature().is_err());
+    // The general-model synthetic text graph has no `mel` input at all.
+    let text = ClapAudioSession::from_trusted_bytes(
+        &synthetic(
+            "synthetic-clap-text",
+            include_bytes!("../../tests/fixtures/synthetic_clap_text.onnx"),
+        ),
+        1,
+        Some(1),
+    )
+    .unwrap();
+    assert!(text.check_signature().is_err());
+}
+
+#[test]
+fn synthetic_music_text_graph_receives_the_attention_mask() {
+    let model = ClapTextSession::from_trusted_bytes(
+        &synthetic(
+            "synthetic-clap-text",
+            include_bytes!("../../tests/fixtures/synthetic_clap_text.onnx"),
+        ),
+        1,
+        Some(1),
+    )
+    .unwrap();
+    model.check_signature().unwrap();
+    let ids = vec![2_i64; 2 * 77];
+    let mut mask = vec![0_i64; 2 * 77];
+    mask[..77].fill(1); // first prompt: every token attended
+    mask[77..77 + 7].fill(1); // second prompt: 7 real tokens, 70 padding
+    let out = model.infer(&ids, &mask, 2).unwrap();
+    assert_eq!(out[0], [2.0; 512]);
+    assert!((out[1][0] - 2.0 * 7.0 / 77.0).abs() < 1e-6, "{}", out[1][0]);
+}
+
+#[test]
+fn text_signature_check_refuses_wrong_graphs() {
+    for (id, bytes) in [
+        (
+            "synthetic-clap-text-bad",
+            include_bytes!("../../tests/fixtures/synthetic_clap_text_bad_shape.onnx").as_slice(),
+        ),
+        (
+            "synthetic-clap",
+            include_bytes!("../../tests/fixtures/synthetic_clap.onnx").as_slice(),
+        ),
+    ] {
+        let model = ClapTextSession::from_trusted_bytes(&synthetic(id, bytes), 1, Some(1)).unwrap();
+        assert!(model.check_signature().is_err(), "{id}");
+    }
 }
 
 #[test]
 fn text_rejects_invalid_inputs_and_outputs() {
+    let full = vec![1_i64; 77];
     for bytes in [
         include_bytes!("../../tests/fixtures/synthetic_clap_text_bad_shape.onnx").as_slice(),
         include_bytes!("../../tests/fixtures/synthetic_clap_text_nonfinite.onnx").as_slice(),
     ] {
-        let artifact = clap_fixture(
-            ArtifactId::from_static("synthetic-clap-text-bad"),
-            bytes.into(),
-        );
-        let model = ClapTextSession::from_trusted_bytes(&artifact, 1, Some(1)).unwrap();
-        assert!(model.infer(&[1], 1, 1).is_err());
+        let model = ClapTextSession::from_trusted_bytes(
+            &synthetic("synthetic-clap-text-bad", bytes),
+            1,
+            Some(1),
+        )
+        .unwrap();
+        assert!(model.infer(&full, &full, 1).is_err());
     }
-    let artifact = clap_fixture(
-        ArtifactId::from_static("synthetic-clap-text"),
-        include_bytes!("../../tests/fixtures/synthetic_clap_text.onnx")
-            .as_slice()
-            .into(),
-    );
-    let model = ClapTextSession::from_trusted_bytes(&artifact, 1, Some(1)).unwrap();
-    assert!(model.infer(&[], 0, 1).is_err());
-    assert!(model.infer(&[1], 1, 2).is_err());
+    let model = ClapTextSession::from_trusted_bytes(
+        &synthetic(
+            "synthetic-clap-text",
+            include_bytes!("../../tests/fixtures/synthetic_clap_text.onnx"),
+        ),
+        1,
+        Some(1),
+    )
+    .unwrap();
+    assert!(model.infer(&full, &full, 1).is_ok());
+    assert!(model.infer(&[], &[], 0).is_err());
+    // Every prompt is padded to exactly 77 tokens, as upstream's tokenizer call does.
+    assert!(model.infer(&[1; 76], &[1; 76], 1).is_err());
+    assert!(model.infer(&[1; 78], &[1; 78], 1).is_err());
+    let batch = MAX_CLAP_TEXT_BATCH + 1;
     assert!(
         model
-            .infer(
-                &vec![1; 77 * (MAX_CLAP_TEXT_BATCH + 1)],
-                MAX_CLAP_TEXT_BATCH + 1,
-                77
-            )
+            .infer(&vec![1; 77 * batch], &vec![1; 77 * batch], batch)
             .is_err()
     );
-    assert!(model.infer(&vec![1; 78], 1, 78).is_err());
-    assert!(model.infer(&[-1], 1, 1).is_err());
-    assert!(
-        model
-            .infer(&[crate::text_tokenizer::CLAP_TEXT_VOCAB_SIZE as i64], 1, 1)
-            .is_err()
-    );
+    // Mask and ids must agree in length; mask values are 0 or 1.
+    assert!(model.infer(&full, &full[..76], 1).is_err());
+    let mut mask = full.clone();
+    mask[3] = 2;
+    assert!(model.infer(&full, &mask, 1).is_err());
+    let mut ids = full.clone();
+    ids[0] = -1;
+    assert!(model.infer(&ids, &full, 1).is_err());
+    ids[0] = crate::text_tokenizer::CLAP_TEXT_VOCAB_SIZE as i64;
+    assert!(model.infer(&ids, &full, 1).is_err());
 }
 
 #[test]
@@ -418,22 +484,55 @@ fn rejects_invalid_inputs_and_outputs() {
         include_bytes!("../../tests/fixtures/synthetic_clap_bad_shape.onnx").as_slice(),
         include_bytes!("../../tests/fixtures/synthetic_clap_nonfinite.onnx").as_slice(),
     ] {
-        let artifact = clap_fixture(ArtifactId::from_static("synthetic-clap-bad"), bytes.into());
-        let model = ClapAudioSession::from_trusted_bytes(&artifact, 1, Some(1)).unwrap();
-        assert!(model.infer(&vec![1.0; 64], 1, 1).is_err());
+        let model = ClapAudioSession::from_trusted_bytes(
+            &synthetic("synthetic-clap-bad", bytes),
+            1,
+            Some(1),
+        )
+        .unwrap();
+        assert!(model.infer(&vec![1.0; MEL], 1).is_err());
     }
-    let artifact = clap_fixture(
-        ArtifactId::from_static("synthetic-clap"),
-        include_bytes!("../../tests/fixtures/synthetic_clap.onnx")
-            .as_slice()
-            .into(),
-    );
-    let model = ClapAudioSession::from_trusted_bytes(&artifact, 1, Some(1)).unwrap();
-    assert!(model.infer(&[], 0, 1).is_err());
-    assert!(model.infer(&vec![1.0; 64], 1, 2).is_err());
-    assert!(model.infer(&vec![1.0; 64], 6, 1).is_err());
-    assert!(model.infer(&vec![1.0; 64], 1, 1002).is_err());
-    let mut input = vec![0.0; 64];
+    let model = ClapAudioSession::from_trusted_bytes(
+        &synthetic(
+            "synthetic-clap",
+            include_bytes!("../../tests/fixtures/synthetic_clap.onnx"),
+        ),
+        1,
+        Some(1),
+    )
+    .unwrap();
+    assert!(model.infer(&[], 0).is_err());
+    // Exactly 1001 frames of 64 bands per window: no shorter or longer windows.
+    assert!(model.infer(&vec![1.0; MEL - 64], 1).is_err());
+    assert!(model.infer(&vec![1.0; MEL + 64], 1).is_err());
+    assert!(model.infer(&vec![1.0; 6 * MEL], 6).is_err());
+    let mut input = vec![0.0; MEL];
     input[0] = f32::NAN;
-    assert!(model.infer(&input, 1, 1).is_err());
+    assert!(model.infer(&input, 1).is_err());
+}
+
+#[test]
+fn clap_pins_are_the_music_checkpoint_export() {
+    // kima-hub c7527577 services/audio-analyzer-clap/Dockerfile pins, reproduced byte-exact
+    // from music_audioset_epoch_15_esc_90.14.pt by upstream export_music_onnx.py.
+    let audio = OnnxModel::ClapAudio.descriptor();
+    assert_eq!(
+        (audio.id.as_str(), audio.basename),
+        ("music_audio", "music_audio.onnx")
+    );
+    assert_eq!(
+        audio.expected_sha256,
+        parse_hex_32("ab1bf5eba067b246198c630f153f774e8f1c3169b3924d4d6a4dc247bd73de97")
+    );
+    assert!(audio.max_bytes >= 280_685_720);
+    let text = OnnxModel::ClapText.descriptor();
+    assert_eq!(
+        (text.id.as_str(), text.basename),
+        ("music_text", "music_text.onnx")
+    );
+    assert_eq!(
+        text.expected_sha256,
+        parse_hex_32("6dbba074b27f8973d84c5c7ae9acd0b9139a6cd9dd82bea6e87954dc3b835956")
+    );
+    assert!(text.max_bytes >= 501_433_023);
 }

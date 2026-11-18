@@ -25,10 +25,11 @@ normalization includes an epsilon; synthetic binary64 parity does not establish 
 
 ## Real-model gate — IMPLEMENTED, NOT RUN
 
-No model download, conversion, private-asset provisioning or owner-library access was authorized
-or performed. Today's native `hf_audio`/`text_model` adapters are not the music checkpoint:
-the production readings gate refuses them even if a directory is named like a music model.
-Real execution needs M4's native music audio/text/tokenizer and pipeline swap first. Trusted
+No owner-library access was authorized or performed. Since D-194 (2026-11-18) the native
+adapters are the music checkpoint (`music_audio`/`music_text`, prompts padded to 77 with an
+attention mask) and `NativeTextEmbedder` reports the music association; the production readings
+gate still refuses any other identity even if a directory is named like a music model. Real
+execution now waits only for 20 real tracks, the private Python reference and authorization. Trusted
 music-text SHA-256 comes from pinned upstream `services/audio-analyzer-clap/Dockerfile:15,36`,
 not from downloaded bytes: `6dbba074b27f8973d84c5c7ae9acd0b9139a6cd9dd82bea6e87954dc3b835956`.
 The native text call still verifies its compiled model/tokenizer pins and uses Task 14's 15-second deadline.

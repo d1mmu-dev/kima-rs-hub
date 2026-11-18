@@ -167,7 +167,8 @@ impl Default for AnalysisConfig {
 /// bounded session pool, independent of [`IdentConfig::fingerprinting`] and MusicBrainz.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingConfig {
-    /// Directory holding the verified `hf_audio.onnx` artifact. `None` disables the
+    /// Directory holding the verified music CLAP files (`music_audio.onnx`, `music_text.onnx`,
+    /// `tokenizer.json`). `None` disables the
     /// `ClapAudioEmbedding` capability, without claiming work.
     pub model_dir: Option<PathBuf>,
     /// Explicit operator override that skips model loading.

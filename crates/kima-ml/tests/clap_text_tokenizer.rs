@@ -65,7 +65,9 @@ fn private_real_tokenizer_matches_python_reference() {
     use kima_ml::{onnx::OnnxModel, verify_artifact};
     let _ = OnnxModel::ClapText; // documents the sibling pinned text model id
     let artifact = verify_artifact(
-        std::path::Path::new("/home/dimmu/.hermes/cache/scratch/clap-text-tokenizer"),
+        &std::path::PathBuf::from(
+            std::env::var("KIMA_CLAP_MODEL_DIR").expect("KIMA_CLAP_MODEL_DIR must be set"),
+        ),
         &kima_ml::text_tokenizer::descriptor(),
     )
     .expect("pinned tokenizer.json must verify");

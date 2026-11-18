@@ -550,13 +550,17 @@ async fn global_snapshot_failure_halts_batch_and_releases_unstarted_claims() {
             .unwrap()
             .is_available(kima_ml::Capability::ClapTextEmbedding)
     );
-    // A fresh process context revalidates repaired infrastructure; no live reload.
+    // A fresh process context revalidates repaired infrastructure; no live reload. A restart
+    // is a new process, so the old context's sessions (and their admission reservations) go
+    // first: the music export's audio + text estimates leave no room for a second audio runtime.
+    let config = ctx.config.embedding.clone();
+    drop(ctx);
     let restarted = ident_ctx_with_embedding(
         &pool,
         &root,
         common::dead_bases(),
         IdentifySwitch::new(false, true),
-        ctx.config.embedding.clone(),
+        config,
     );
     let next = embedding::run_batch(&restarted, &CancellationToken::new())
         .await

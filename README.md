@@ -148,15 +148,18 @@ dependent answers, where `<step>` is one of upstream's six: `identification`, `a
   point `MUSICBRAINZ_BASE_URL` at a local MusicBrainz mirror.
 - Fingerprinting uses half the CPU cores by default; set `KIMA_FINGERPRINT_WORKERS` to change that.
 
-## Vibe engine (M5, not yet enabled)
+## Vibe engine (M5)
 
 The upstream vibe engine is ported (matching formula, library state, map layout, learned moods, similar
 tracks, alchemy, song path, text search, CLAP zero-shot readings, similar-artist re-rank and Subsonic
-`getSimilarSongs`/`getSimilarSongs2`), but it stays **off** in practice until two things exist: the music CLAP
-checkpoint (`laion-clap-music-onnx-v1`) from the M4 follow-up, and the private assets below with their SHA-256
-pins compiled in. Until then `/api/system/features` answers `"vibeEmbeddings": false`, nothing is eligible, and
-the routes degrade as spec §4.4 and D-182 describe; the server starts normally. The engine is tested on
-synthetic vectors only; real-model acceptance (end-to-end, readings parity, text-search recall) has not been run.
+`getSimilarSongs`/`getSimilarSongs2`). It runs on the native music CLAP checkpoint (`laion-clap-music-onnx-v1`:
+`music_audio.onnx`, `music_text.onnx` and RoBERTa's `tokenizer.json` in `KIMA_CLAP_MODEL_DIR`, SHA-256-pinned; D-194)
+and the private feel probe below. Without them `/api/system/features` answers `"vibeEmbeddings": false`, nothing is
+eligible, and the routes degrade as spec §4.4 and D-182 describe; the server starts normally. The model files are
+not distributed (noncommercial, private): the Docker image and CI do not contain them. Vectors written by M4's
+general CLAP model are kept but never used; re-embed them with the enrichment re-run from the `vectors` step (D-194).
+A real-model end-to-end run on 30 generated tracks passed (`docs/testing/vibe-e2e.md`); the 20-real-track parity and
+recall gates have not been run.
 
 Endpoints (signed in, any profile; library-global): `GET /api/vibe/map` (202 while a first layout is pending,
 gzip when accepted), `GET /api/vibe/mood-summary`, `GET /api/vibe/mood/:trackId`, `GET /api/vibe/similar/:trackId`,
@@ -174,8 +177,8 @@ gets parsed. Missing, unpinned or mismatching files never stop startup; they tur
 
 Take the files from the pinned upstream commit itself (no mirrors), and compare their SHA-256 with the
 values above, which were computed from that commit's Git objects. The pin table compiled into kima-rs
-(`crates/kima-ident/src/stages/vibe_assets.rs`, `VibePins::compiled`) is still empty, so even correct files
-are reported unavailable until a reviewed commit fills in the pins. The MusicBrainz genre list
+(`crates/kima-ident/src/stages/vibe_assets.rs`, `VibePins::compiled`) pins `feel_probe.json`; `mood_heads.json`
+stays unpinned, so it is never read and the moods report unavailable until its licences are cleared. The MusicBrainz genre list
 (`mbGenres.json`, CC0) is bundled in `crates/kima-vibe/assets/`.
 
 ## Podcasts

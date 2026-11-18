@@ -257,26 +257,35 @@ async fn degradation_missing_mood_heads_only_turns_moods_off(pool: PgPool) {
     assert_eq!(features["vibeEmbeddings"], true);
 }
 
-/// §4.3: a library embedded only by the current `hf_audio` checkpoint has zero eligible tracks;
-/// assets present do not change that, and the hf_audio identity never counts as music audio.
+/// §4.3 / D-194: a library embedded only by M4's general checkpoint (`hf_audio`, its pinned
+/// bytes `37df17af…`, pipeline `clap-audio-v1`) has zero eligible tracks after the music swap;
+/// assets present do not change that, and the old rows are never relabelled.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn degradation_hf_audio_library_has_no_vibe_engine(pool: PgPool) {
-    use kima_ml::onnx::OnnxModel;
-    assert!(!vibe_assets::native_audio_is_matching_sound());
+    const M4_GENERAL_SHA256: &str =
+        "37df17afb9881569c4f50e5b691167aa54586418059701a74a54934514969972";
+    let m4_sha: Vec<u8> = (0..32)
+        .map(|i| u8::from_str_radix(&M4_GENERAL_SHA256[i * 2..i * 2 + 2], 16).unwrap())
+        .collect();
     let s = seed(&pool, Seed::new("hf", "hf", None, "hf")).await;
     let mut v = vec![0.0f32; 512];
     v[0] = 1.0;
     sqlx::query("INSERT INTO track_embeddings (track_id,file_generation,model_id,model_sha256,pipeline_version,embedding) VALUES ($1,0,$2,$3,$4,$5::real[]::vector)")
         .bind(s.track)
-        .bind(OnnxModel::ClapAudio.artifact_id().as_str())
-        .bind(OnnxModel::ClapAudio.expected_sha256().to_vec())
-        .bind(kima_ident::stages::embedding::PIPELINE_VERSION)
+        .bind("hf_audio")
+        .bind(&m4_sha)
+        .bind("clap-audio-v1")
         .bind(v)
         .execute(&pool)
         .await
         .unwrap();
     lay_out(&pool).await;
-    let client = Client::new(synthetic_text(with_assets(common::state(pool), true, true))).await;
+    let client = Client::new(synthetic_text(with_assets(
+        common::state(pool.clone()),
+        true,
+        true,
+    )))
+    .await;
     assert_eq!(
         client.get(&format!("/api/vibe/similar/{}", s.track)).await,
         (404, no_similar())
@@ -292,6 +301,18 @@ async fn degradation_hf_audio_library_has_no_vibe_engine(pool: PgPool) {
     assert_eq!((status, map["trackCount"].clone()), (200, json!(0)));
     let (_, features) = client.get("/api/system/features").await;
     assert_eq!(features["vibeEmbeddings"], false);
+    let (model_id, sha, pipeline): (String, Vec<u8>, String) = sqlx::query_as(
+        "SELECT model_id, model_sha256, pipeline_version FROM track_embeddings WHERE track_id = $1",
+    )
+    .bind(s.track)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (model_id.as_str(), sha, pipeline.as_str()),
+        ("hf_audio", m4_sha, "clap-audio-v1"),
+        "the general-model row stays as written"
+    );
 }
 
 /// Missing or unprovisioned vibe assets never stop the server: the `vibe_assets::initialize`

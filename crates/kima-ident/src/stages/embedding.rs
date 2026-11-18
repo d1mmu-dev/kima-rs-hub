@@ -21,7 +21,7 @@ use std::sync::Arc;
 use kima_db::ml::{self, Provenance};
 use kima_db::stages::{self, Claim, Stage};
 use kima_ml::audio::decode_clap_auto;
-use kima_ml::clap::{ClapMelFrontend, aggregate_window_embeddings, prepare_window};
+use kima_ml::clap::{MusicClapMel, aggregate_window_embeddings, prepare_window};
 use kima_ml::onnx::{ClapAudioSession, OnnxModel};
 use kima_ml::{
     Capability, CapabilityConfig, CapabilityEvaluationReport, CapabilityStatus,
@@ -41,13 +41,17 @@ pub const BATCH: i64 = 20;
 pub const SOURCE: &str = "clap";
 /// A fixed pipeline identity: bumped whenever the preprocessing/aggregation here changes
 /// in a way that invalidates stored vectors, independent of the model's own identity.
-pub const PIPELINE_VERSION: &str = "clap-audio-v1";
+/// `clap-music-audio-v1` = upstream c7527577's music recipe (five 10 s windows, libsoxr HQ to
+/// 48 kHz, laion_clap int16 round trip and log-mel via [`MusicClapMel`], per-window then mean
+/// L2 normalisation). The M4 general-model pipeline wrote `clap-audio-v1`; those rows are never
+/// relabelled (D-194).
+pub const PIPELINE_VERSION: &str = "clap-music-audio-v1";
 
 /// A loaded, bounded CLAP audio session plus the mel frontend and the fixed provenance of
 /// this model+pipeline combination. Built once and cached on [`IdentCtx`].
 pub struct EmbeddingRuntime {
     session: ClapAudioSession,
-    mel: ClapMelFrontend,
+    mel: MusicClapMel,
     provenance: Provenance,
 }
 
@@ -79,7 +83,7 @@ fn load(
     );
     let runtime = built.map(|session| EmbeddingRuntime {
         session,
-        mel: ClapMelFrontend::new(),
+        mel: MusicClapMel::new(),
         provenance: Provenance {
             model_id: OnnxModel::ClapAudio.artifact_id().as_str().to_owned(),
             model_sha256: OnnxModel::ClapAudio.expected_sha256(),
@@ -332,8 +336,8 @@ pub struct NativeTextEmbedder;
 impl TextEmbedder for NativeTextEmbedder {
     fn readings_identity(&self) -> Option<super::readings::PromptIdentity> {
         let sound = kima_db::vibe::MATCHING_SOUND;
-        // M4's current hf_audio/text_model pair is NOT the music checkpoint. Keep this
-        // closed until the verified native audio AND text exports/pipeline are replaced.
+        // Fail closed unless the compiled audio identity, the music text graph and its pin
+        // all name the music checkpoint (one association, checked here by code).
         if OnnxModel::ClapAudio.artifact_id().as_str() != sound.model_id
             || OnnxModel::ClapAudio.expected_sha256() != sound.model_sha256
             || PIPELINE_VERSION != sound.pipeline_version
@@ -369,13 +373,13 @@ fn embed_text_blocking(
     text: &str,
 ) -> Result<[f32; kima_ml::clap::CLAP_EMBEDDING_DIM], TextEmbeddingError> {
     let runtime = text_runtime_now(ctx).map_err(TextEmbeddingError::Unavailable)?;
-    let ids = runtime
+    let (ids, mask) = runtime
         .tokenizer
-        .encode(text)
+        .encode_padded(text)
         .map_err(|e| TextEmbeddingError::Tokenize(e.to_string()))?;
     let outputs = runtime
         .session
-        .infer(&ids, 1, ids.len())
+        .infer(&ids, &mask, 1)
         .map_err(|e| TextEmbeddingError::Inference(e.to_string()))?;
     let raw = outputs
         .first()
@@ -872,10 +876,7 @@ fn compute_embedding(
         for frame in &frames {
             flat.extend_from_slice(frame);
         }
-        let outputs = runtime
-            .session
-            .infer(&flat, 1, frames.len())
-            .map_err(|e| e.to_string())?;
+        let outputs = runtime.session.infer(&flat, 1).map_err(|e| e.to_string())?;
         let mut vector = [0f32; kima_ml::clap::CLAP_EMBEDDING_DIM];
         vector.copy_from_slice(&outputs[0]);
         window_embeddings.push(vector);
@@ -1463,12 +1464,12 @@ mod tests {
             status["capabilities"]["clap_audio_embedding"]["errors"][0]["category"],
             "missing"
         );
-        std::fs::write(dir.path().join("hf_audio.onnx"), b"changed").unwrap();
+        std::fs::write(dir.path().join("music_audio.onnx"), b"changed").unwrap();
         let second = super::initialize(&ctx).await.unwrap();
         assert_eq!(first, second);
         let mut restarted = ctx.clone();
         restarted.embedding_runtime = Default::default();
-        std::fs::write(dir.path().join("text_model.onnx"), b"corrupt").unwrap();
+        std::fs::write(dir.path().join("music_text.onnx"), b"corrupt").unwrap();
         let after_restart = super::initialize(&restarted).await.unwrap();
         assert_eq!(
             serde_json::to_value(&after_restart).unwrap()["capabilities"]["clap_text_embedding"]["errors"]
@@ -1613,16 +1614,24 @@ mod tests {
         }
     }
 
-    const PRIVATE_TEXT_DIR: &str = "/home/dimmu/.cache/kima-models/m4-approved-private/xenova/onnx";
-    const PRIVATE_AUDIO_DIR: &str = "/home/dimmu/.hermes/cache/scratch/clap-private-export";
+    /// The private music CLAP model directory (`KIMA_CLAP_MODEL_DIR`: `music_audio.onnx`,
+    /// `music_text.onnx`, `tokenizer.json`).
+    fn private_model_dir() -> std::path::PathBuf {
+        let dir = std::path::PathBuf::from(
+            std::env::var("KIMA_CLAP_MODEL_DIR").expect("KIMA_CLAP_MODEL_DIR must be set"),
+        );
+        assert!(dir.is_absolute(), "KIMA_CLAP_MODEL_DIR must be absolute");
+        dir
+    }
 
     /// Builds a scratch model directory from private artifacts (hard link, else copy).
     /// Panics when an artifact is absent: these tests run only via `--ignored`, so a missing
     /// model is a failure to report, never a silent pass.
-    fn private_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
+    fn private_dir(files: &[&str]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        for (src_dir, name) in files {
-            let src = std::path::Path::new(src_dir).join(name);
+        let src_dir = private_model_dir();
+        for name in files {
+            let src = src_dir.join(name);
             assert!(src.is_file(), "private artifact missing: {}", src.display());
             let dst = dir.path().join(name);
             if std::fs::hard_link(&src, &dst).is_err() {
@@ -1656,11 +1665,7 @@ mod tests {
             mpsc,
         };
 
-        let models = private_dir(&[
-            (PRIVATE_TEXT_DIR, "tokenizer.json"),
-            (PRIVATE_TEXT_DIR, "text_model.onnx"),
-            (PRIVATE_AUDIO_DIR, "hf_audio.onnx"),
-        ]);
+        let models = private_dir(&["tokenizer.json", "music_text.onnx", "music_audio.onnx"]);
         for drop_caller in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let snapshots = tempfile::tempdir().unwrap();
@@ -1803,6 +1808,24 @@ mod tests {
                 matches!(run_embedding_blocking(&ctx, other.path(), Path::new("input.wav")), EmbedOutcome::Snapshot(f) if halts_batch(&f))
             );
             assert_eq!(cached_status(&ctx).unwrap(), at_detection);
+            // A restart is a new process: the old process's sessions and their admission
+            // reservations are gone. Release them before the fresh context loads; the music
+            // export's estimated audio + text reservations leave no room in the process-wide
+            // budget for a second audio runtime next to the old one.
+            drop(
+                ctx.embedding_runtime
+                    .runtime
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
+            drop(
+                ctx.embedding_runtime
+                    .text_runtime
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
             let mut restarted = ctx.clone();
             restarted.embedding_runtime = Default::default();
             assert_eq!(
@@ -1831,11 +1854,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "private noncommercial CLAP models + trusted ORT_DYLIB_PATH required"]
     async fn private_models_audio_and_text_both_available_and_text_embeds() {
-        let dir = private_dir(&[
-            (PRIVATE_TEXT_DIR, "tokenizer.json"),
-            (PRIVATE_TEXT_DIR, "text_model.onnx"),
-            (PRIVATE_AUDIO_DIR, "hf_audio.onnx"),
-        ]);
+        let dir = private_dir(&["tokenizer.json", "music_text.onnx", "music_audio.onnx"]);
         let ctx = ctx_with(cfg(&dir));
         let report = super::initialize(&ctx).await.unwrap();
         assert_eq!(
@@ -1865,10 +1884,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "private noncommercial CLAP models + trusted ORT_DYLIB_PATH required"]
     async fn private_models_corrupt_tokenizer_leaves_audio_available() {
-        let dir = private_dir(&[
-            (PRIVATE_TEXT_DIR, "text_model.onnx"),
-            (PRIVATE_AUDIO_DIR, "hf_audio.onnx"),
-        ]);
+        let dir = private_dir(&["music_text.onnx", "music_audio.onnx"]);
         std::fs::write(dir.path().join("tokenizer.json"), b"{}").unwrap();
         let report = super::initialize(&ctx_with(cfg(&dir))).await.unwrap();
         assert_eq!(
@@ -1884,10 +1900,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "private noncommercial CLAP models + trusted ORT_DYLIB_PATH required"]
     async fn private_models_missing_audio_leaves_text_available() {
-        let dir = private_dir(&[
-            (PRIVATE_TEXT_DIR, "tokenizer.json"),
-            (PRIVATE_TEXT_DIR, "text_model.onnx"),
-        ]);
+        let dir = private_dir(&["tokenizer.json", "music_text.onnx"]);
         let ctx = ctx_with(cfg(&dir));
         let report = super::initialize(&ctx).await.unwrap();
         assert!(matches!(
@@ -1899,5 +1912,24 @@ mod tests {
             &kima_ml::CapabilityStatus::Available
         );
         assert!(super::embed_text(&ctx, "rain").await.is_ok());
+    }
+
+    /// Readings (zero-shot prompts) are associated with the music checkpoint by code: the
+    /// pinned music text graph and tokenizer next to the matching audio identity.
+    #[test]
+    fn native_text_embedder_is_associated_with_the_music_checkpoint() {
+        use super::TextEmbedder;
+        let identity = super::NativeTextEmbedder
+            .readings_identity()
+            .expect("the compiled text model is the music checkpoint's");
+        assert_eq!(identity.sound, kima_db::vibe::MATCHING_SOUND);
+        assert_eq!(
+            identity.text_sha256,
+            super::super::readings::MUSIC_TEXT_SHA256
+        );
+        assert_eq!(
+            identity.tokenizer_sha256,
+            kima_ml::text_tokenizer::descriptor().expected_sha256
+        );
     }
 }

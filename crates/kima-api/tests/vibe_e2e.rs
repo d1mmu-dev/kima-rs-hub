@@ -4,9 +4,10 @@
 //! audio embedding -> the coordinator's embedding, mood and similarity phases -> `similar`,
 //! `alchemy`, `path`, `search`, `map`, `mood-summary` and `mood` answer through `kima_api::router`.
 //!
-//! IMPLEMENTED, NOT RUN. It needs the M4 music-checkpoint swap (the native encoder must be
-//! `MATCHING_SOUND`, not today's `hf_audio`), private SHA-256-pinned vibe assets and an
-//! explicitly authorized isolated database. It never skips: every missing prerequisite (including
+//! It needs the private music CLAP export (the native encoder is `MATCHING_SOUND`; D-194), the
+//! private SHA-256-pinned feel probe (the mood heads stay unpinned and must be absent: moods
+//! degrade independently) and an explicitly authorized isolated database. It never skips: every
+//! missing prerequisite (including
 //! the SHA-256 of every CLAP model file and the snapshot/reflink setup) panics before any database
 //! connection. No downloads, no owner library. The throwaway database it creates is dropped on
 //! success and when the test body panics, and only that database; a cleanup panic never hides the
@@ -15,7 +16,8 @@
 //!
 //! Required environment:
 //! - `KIMA_CLAP_MODEL_DIR`: absolute directory with the verified native music audio/text export.
-//! - `KIMA_VIBE_ASSET_DIR`: absolute directory with the pinned `feel_probe.json`/`mood_heads.json`.
+//! - `KIMA_VIBE_ASSET_DIR`: absolute directory with the pinned `feel_probe.json` (mood heads are
+//!   unpinned, so they never load; the run proves similarity works while moods are unavailable).
 //! - `ORT_DYLIB_PATH`: trusted ONNX Runtime library.
 //! - `DATABASE_URL` (127.0.0.1, not the development port) and `PGDATABASE` naming the same
 //!   empty database, plus `KIMA_VIBE_E2E_AUTHORIZED_DATABASE` equal to it (explicit consent).
@@ -84,8 +86,13 @@ fn prerequisites(lookup: &dyn Fn(&str) -> Option<String>) -> Prerequisites {
     verify_model_dir(&model_dir);
     let assets = vibe_assets::load(Some(&asset_dir), &vibe_assets::VibePins::compiled());
     assert!(
-        assets.probe.is_some() && assets.heads.is_some(),
-        "vibe assets must verify against the compiled SHA-256 pins: {:?}",
+        assets.probe.is_some(),
+        "the feel probe must verify against the compiled SHA-256 pin: {:?}",
+        assets.report
+    );
+    assert!(
+        assets.heads.is_none(),
+        "mood heads are blocked (unpinned) and must not load: {:?}",
         assets.report
     );
     Prerequisites {
@@ -372,10 +379,10 @@ async fn insert_track(pool: &PgPool, n: usize) -> Uuid {
 }
 
 #[test]
-fn prerequisites_fail_closed_when_environment_is_unset_or_checkpoint_is_wrong() {
+fn prerequisites_fail_closed_when_environment_is_unset_or_models_are_missing() {
     let empty = |_: &str| None;
     assert!(std::panic::catch_unwind(|| prerequisites(&empty)).is_err());
-    // Everything else present: today's hf_audio encoder must still refuse to run.
+    // Everything else present but the model directory holds no pinned music files: refuse.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("ort.so");
     std::fs::write(&file, b"not a runtime").unwrap();
@@ -395,7 +402,10 @@ fn prerequisites_fail_closed_when_environment_is_unset_or_checkpoint_is_wrong() 
         .cloned()
         .or_else(|| refusal.downcast_ref::<&str>().map(|s| (*s).to_owned()))
         .unwrap();
-    assert!(message.contains("hf_audio is forbidden"), "{message}");
+    assert!(
+        message.contains("does not verify against its pin"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -484,7 +494,7 @@ async fn a_failing_cleanup_never_replaces_the_body_panic() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs the M4 native music checkpoint, pinned private vibe assets and an authorized isolated database; NOT RUN"]
+#[ignore = "needs the private music CLAP export, the pinned private feel probe and an authorized isolated database"]
 async fn real_music_clap_vibe_end_to_end_on_thirty_generated_tracks() {
     let pre = prerequisites(&|key| std::env::var(key).ok());
     // Library, snapshot store and its reflink/mount check are settled before any database exists.
@@ -547,7 +557,13 @@ async fn run_end_to_end(
     ctx.config.embedding = embedding_config;
     embedding::initialize(&ctx).await.unwrap();
     let assets = vibe_assets::initialize(&ctx).await.unwrap();
-    assert!(assets.probe.is_some() && assets.heads.is_some());
+    assert!(assets.probe.is_some() && assets.heads.is_none());
+    assert!(assets.report.is_available(kima_ml::Capability::VibeAssets));
+    assert!(
+        !assets
+            .report
+            .is_available(kima_ml::Capability::VibeMoodHeads)
+    );
     assert!(vibe_assets::matching_audio_available(&ctx));
 
     let mut embedded = 0;
@@ -574,6 +590,34 @@ async fn run_end_to_end(
     assert_eq!(
         mapped, TRACKS as i64,
         "the similarity phase laid out every track"
+    );
+    let count = |table: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let music_vectors: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*) FROM {}",
+        *kima_db::vibe::ELIGIBLE
+    ))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (count("track_embeddings").await, music_vectors),
+        (TRACKS as i64, TRACKS as i64),
+        "every vector carries the matching music identity"
+    );
+    // Native music text: zero-shot readings run without the mood heads; moods stay off.
+    assert_eq!(count("track_clap_readings").await, TRACKS as i64);
+    assert_eq!(
+        count("track_moods").await,
+        0,
+        "no mood heads, no mood scores"
     );
 
     let state = state.with_ident(ctx);
@@ -607,8 +651,11 @@ async fn run_end_to_end(
     let (status, summary) = get("/api/vibe/mood-summary".into()).await;
     assert_eq!(status, 200, "{summary}");
     let (status, mood) = get(format!("/api/vibe/mood/{}", ids[25])).await;
-    assert_eq!(status, 200);
-    assert!(mood["dominantMood"].is_string());
+    assert_eq!(
+        (status, mood["dominantMood"].clone()),
+        (200, json!(kima_vibe::moods::UNANALYZED)),
+        "moods degrade independently while similarity works"
+    );
     for (path, body) in [
         ("/api/vibe/search", json!({"query":"a bright sine tone"})),
         ("/api/vibe/alchemy", json!({"add":[ids[0], ids[1]]})),

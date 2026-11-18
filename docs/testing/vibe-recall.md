@@ -2,9 +2,9 @@
 
 **Implemented, not executed.** Ordinary `vibe_recall` tests are explicitly synthetic
 infrastructure/logic checks, not real-model acceptance. Task 14 Step 3 stays open.
-The current native audio encoder is still `hf_audio`; the engine's
-`MATCHING_SOUND` names the music checkpoint. The real harness intentionally rejects
-that mismatch **before connecting**. Do not relabel embeddings, edit the manifest
+Since D-194 (2026-11-18) the native audio encoder is the music checkpoint and equals the
+engine's `MATCHING_SOUND`; the real harness still rejects any checkpoint mismatch **before
+connecting**. Real execution waits for an owner-approved isolated copy of real embeddings. Do not relabel embeddings, edit the manifest
 to bypass this, substitute a synthetic encoder, or count an ignored test as a pass.
 
 ## Prerequisites and permission

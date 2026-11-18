@@ -1,19 +1,18 @@
-//! Tokenizer adapter for the CLAP text model, matching the exact upstream
-//! encoding contract pinned at `kima-hub` commit
-//! `12faf1cd34ff53054221818b0ccde58b8e9b0020`
-//! (`services/audio-analyzer-clap/onnx_backend.py`):
+//! Tokenizer adapter for the music CLAP text model (`music_text.onnx`), matching the
+//! upstream encoding contract at `kima-hub` commit
+//! `c7527577d925b20f5adf410c7fd4e0c8ac250f69`
+//! (`services/audio-analyzer-clap/music_clap_onnx.py`, `MusicClapText.tokens`):
 //!
-//! `transformers.RobertaTokenizer.from_pretrained('roberta-base')` called
-//! per-prompt with `padding=False, truncation=True, max_length=77`
-//! (`TEXT_MAX_LENGTH`). The verified text ONNX graph accepts only int64
-//! `input_ids [batch, sequence]` and has **no** `attention_mask` input, so
-//! upstream never pads: each prompt is encoded alone at its own
-//! (truncated) length.
+//! `transformers.RobertaTokenizer.from_pretrained('roberta-base')` called with
+//! `padding='max_length', truncation=True, max_length=77` (`TEXT_MAX_LENGTH`, laion_clap
+//! `hook.py:64-72`). The music text graph takes int64 `input_ids` and `attention_mask`, so every
+//! prompt is padded with `<pad>` to 77 ids and the mask marks the real tokens
+//! ([`ClapTextTokenizer::encode_padded`]). The general M4 text graph took unpadded ids only;
+//! [`ClapTextTokenizer::encode`] keeps that truncated, unpadded encoding as the first step.
 //!
 //! This adapter uses the `tokenizers` crate (the same Rust implementation
 //! backing HuggingFace's "fast" Python tokenizers) to load the pinned
-//! `tokenizer.json` directly, guaranteeing byte-for-byte parity with the
-//! Python reference instead of reimplementing RoBERTa BPE by hand.
+//! `tokenizer.json` directly, instead of reimplementing RoBERTa BPE by hand.
 
 use crate::{ArtifactDescriptor, ArtifactId, VerifiedBytes};
 
@@ -26,7 +25,7 @@ pub const TOKENIZER_BASENAME: &str = "tokenizer.json";
 pub const TOKENIZER_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Upstream's fixed prompt truncation length (`TEXT_MAX_LENGTH` in
-/// `onnx_backend.py`), counting the `<s>`/`</s>` special tokens.
+/// `music_clap_onnx.py`), counting the `<s>`/`</s>` special tokens.
 pub const CLAP_TEXT_MAX_TOKENS: usize = 77;
 
 /// RoBERTa-base special token ids, pinned at the same tokenizer revision.
@@ -87,8 +86,8 @@ pub enum TokenizerError {
 
 /// Pure-Rust tokenizer adapter loading a hash-pinned `tokenizer.json` and
 /// encoding prompts to int64 token ids matching upstream's exact
-/// truncation/special-token behavior, with no padding and no
-/// `attention_mask` (the pinned ONNX text graph takes only `input_ids`).
+/// truncation/special-token behavior; [`ClapTextTokenizer::encode_padded`] adds the
+/// music graph's padding and attention mask.
 pub struct ClapTextTokenizer {
     inner: tokenizers::Tokenizer,
 }
@@ -120,15 +119,15 @@ impl ClapTextTokenizer {
                 stride: 0,
             }))
             .map_err(|e| TokenizerError::Configure(e.to_string()))?;
-        // Upstream never pads (no attention_mask input): each prompt keeps
-        // its own true, truncated length.
+        // Padding is applied explicitly by `encode_padded` (pad id and mask
+        // checked by tests), not by the tokenizer.json's own padding config.
         inner.with_padding(None);
 
         Ok(Self { inner })
     }
 
     /// Encode one prompt to int64 token ids: `<s> ... </s>`, truncated to
-    /// at most [`CLAP_TEXT_MAX_TOKENS`] total tokens, never padded.
+    /// at most [`CLAP_TEXT_MAX_TOKENS`] total tokens, not padded.
     pub fn encode(&self, text: &str) -> Result<Vec<i64>, TokenizerError> {
         let len = text.chars().count();
         if len > MAX_INPUT_CHARS {
@@ -142,6 +141,30 @@ impl ClapTextTokenizer {
             .encode(text, true)
             .map_err(|e| TokenizerError::Encode(e.to_string()))?;
         Ok(encoding.get_ids().iter().map(|&id| i64::from(id)).collect())
+    }
+}
+
+/// Pad one truncated encoding to [`CLAP_TEXT_MAX_TOKENS`] ids with [`CLAP_TEXT_PAD_ID`] and
+/// return it with its attention mask (1 for each real token, 0 for padding), as
+/// `padding='max_length'` does. Empty or over-length encodings are refused.
+pub fn pad_to_max_length(ids: &[i64]) -> Result<(Vec<i64>, Vec<i64>), TokenizerError> {
+    if ids.is_empty() || ids.len() > CLAP_TEXT_MAX_TOKENS {
+        return Err(TokenizerError::Encode(format!(
+            "encoding of {} tokens cannot be padded to {CLAP_TEXT_MAX_TOKENS}",
+            ids.len()
+        )));
+    }
+    let mut padded = ids.to_vec();
+    padded.resize(CLAP_TEXT_MAX_TOKENS, CLAP_TEXT_PAD_ID);
+    let mut mask = vec![1_i64; ids.len()];
+    mask.resize(CLAP_TEXT_MAX_TOKENS, 0);
+    Ok((padded, mask))
+}
+
+impl ClapTextTokenizer {
+    /// The music text graph's input: [`Self::encode`], then [`pad_to_max_length`].
+    pub fn encode_padded(&self, text: &str) -> Result<(Vec<i64>, Vec<i64>), TokenizerError> {
+        pad_to_max_length(&self.encode(text)?)
     }
 }
 

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 /// `ClapTextEmbedding`'s real readiness contract lives in
 /// `OnnxModel::requirements_by_capability`, which now lists both
 /// `text_tokenizer::descriptor()` (tokenizer.json) and
-/// `OnnxModel::ClapText.descriptor()` (text_model.onnx). This generic test
+/// `OnnxModel::ClapText.descriptor()` (music_text.onnx). This generic test
 /// only re-confirms that `evaluate_capabilities` requires *every*
 /// descriptor registered for a capability, which is what makes that
 /// two-artifact readiness gate work.

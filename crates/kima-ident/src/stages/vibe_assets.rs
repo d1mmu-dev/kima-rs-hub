@@ -9,7 +9,8 @@
 //! the server boots.
 //!
 //! Rights (owner decision Q3, 2026-11-05): `feelProbe.json` is CC BY-NC and the mood heads' training-data licences
-//! are unchecked, so neither is in Git; the pins below stay `None` until the owner provisions the files.
+//! are unchecked, so neither is in Git. The feel probe is pinned (provisioned privately, D-194); the mood heads stay
+//! unpinned (`None`) and therefore unavailable until their licences are cleared.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -41,14 +42,22 @@ pub struct VibePins {
 }
 
 impl VibePins {
-    /// The pin table compiled into the server. The hashes are filled in when the owner provisions the files
-    /// (Q3); tests inject their own table.
+    /// The pin table compiled into the server; tests inject their own table.
+    ///
+    /// `feel_probe`: SHA-256 of upstream kima-hub c7527577 `backend/src/services/matching/feelProbe.json`
+    /// (25 710 bytes, fitted on `laion-clap-music-onnx-v1`, `modelSha256` = the `music_audio.onnx` pin), equal to the
+    /// git blob content and to the privately provisioned copy. `mood_heads`: no pin, blocked until the owner clears
+    /// the training-data licences (Q3); an unpinned asset is never read.
     pub fn compiled() -> Self {
         Self {
             feel_probe: AssetPin {
                 id: "vibe-feel-probe",
                 basename: "feel_probe.json",
-                sha256: None,
+                sha256: Some([
+                    0x13, 0x70, 0x7b, 0x51, 0x07, 0xa5, 0x91, 0xd2, 0xc7, 0xd5, 0xca, 0x7c, 0x14,
+                    0x30, 0x05, 0x47, 0x7d, 0xb4, 0x1d, 0x5c, 0xec, 0x18, 0xec, 0xed, 0x78, 0xa9,
+                    0x50, 0x39, 0x02, 0x04, 0x4e, 0x2d,
+                ]),
                 max_bytes: 1 << 20,
             },
             mood_heads: AssetPin {
@@ -172,8 +181,9 @@ fn assets_now(ctx: &IdentCtx) -> Arc<VibeAssets> {
 }
 
 /// Whether the compiled native audio encoder produces the matching vector space
-/// (`MATCHING_SOUND`). The current `hf_audio` checkpoint does not, so an available `hf_audio`
-/// encoder never makes music layouts or the vibe feature possible.
+/// (`MATCHING_SOUND`): the music checkpoint `music_audio` with pipeline `clap-music-audio-v1`.
+/// Any other compiled identity (such as M4's general `hf_audio`) never makes music layouts or the
+/// vibe feature possible.
 pub fn native_audio_is_matching_sound() -> bool {
     use kima_ml::onnx::OnnxModel;
     let sound = kima_db::vibe::MATCHING_SOUND;
@@ -280,17 +290,92 @@ mod tests {
     fn matching_audio_needs_the_matching_identity_and_an_available_encoder() {
         let available = report(CapabilityStatus::Available);
         assert!(matching_audio_given(true, Some(&available)));
-        // Today's compiled encoder is hf_audio: available, but the wrong identity.
-        assert!(!native_audio_is_matching_sound());
-        assert!(!matching_audio_given(
+        // The compiled encoder is the music checkpoint, so an available encoder counts.
+        assert!(matching_audio_given(
             native_audio_is_matching_sound(),
             Some(&available)
         ));
+        // Any other identity never does, available or not.
         assert!(!matching_audio_given(false, Some(&available)));
         assert!(!matching_audio_given(true, None));
         let unavailable = CapabilityEvaluationReport {
             capabilities: BTreeMap::new(),
         };
         assert!(!matching_audio_given(true, Some(&unavailable)));
+    }
+
+    /// One code contract, not two guessed names: the vectors the embedding stage publishes
+    /// (artifact id, pinned bytes, pipeline) are exactly the identity every vibe read accepts.
+    #[test]
+    fn the_native_encoder_publishes_the_matching_sound_identity() {
+        use kima_ml::onnx::OnnxModel;
+        let sound = kima_db::vibe::MATCHING_SOUND;
+        assert_eq!(OnnxModel::ClapAudio.artifact_id().as_str(), sound.model_id);
+        assert_eq!(OnnxModel::ClapAudio.expected_sha256(), sound.model_sha256);
+        assert_eq!(
+            super::super::embedding::PIPELINE_VERSION,
+            sound.pipeline_version
+        );
+        assert!(native_audio_is_matching_sound());
+        // The general M4 identity it replaces stays outside the engine.
+        assert_ne!(sound.model_id, "hf_audio");
+        assert_ne!(sound.pipeline_version, "clap-audio-v1");
+    }
+
+    /// The feel probe is pinned to the exact upstream c7527577 `feelProbe.json` bytes (private,
+    /// CC BY-NC, never in Git); the mood heads stay unpinned until their licences are cleared.
+    #[test]
+    fn compiled_pins_pin_the_feel_probe_and_keep_mood_heads_blocked() {
+        let pins = VibePins::compiled();
+        let hex: String = pins
+            .feel_probe
+            .sha256
+            .expect("feel probe pinned")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex,
+            "13707b5107a591d2c7d5ca7c143005477db41d5cec18eced78a9503902044e2d"
+        );
+        assert!(pins.feel_probe.max_bytes >= 25_710);
+        assert_eq!(pins.mood_heads.sha256, None, "mood heads remain blocked");
+    }
+
+    /// Whatever file sits in the asset directory, unpinned mood heads are never read: the
+    /// capability reports provisioning pending while a pinned probe still loads.
+    #[test]
+    fn unpinned_mood_heads_stay_unavailable_next_to_a_verified_probe() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let probe = synthetic_probe();
+        std::fs::write(dir.path().join("feel_probe.json"), &probe).unwrap();
+        std::fs::write(dir.path().join("mood_heads.json"), b"{}").unwrap();
+        let mut pins = VibePins::compiled();
+        pins.feel_probe.sha256 = Some(Sha256::digest(&probe).into());
+        let assets = load(Some(dir.path()), &pins);
+        assert!(assets.probe.is_some());
+        assert!(assets.heads.is_none());
+        assert!(assets.report.is_available(Capability::VibeAssets));
+        match assets.report.status(Capability::VibeMoodHeads) {
+            CapabilityStatus::Unavailable { errors } => {
+                assert!(
+                    errors[0].message.contains("provisioning pending"),
+                    "{errors:?}"
+                )
+            }
+            other => panic!("mood heads must be unavailable: {other:?}"),
+        }
+    }
+
+    fn synthetic_probe() -> Vec<u8> {
+        let axis =
+            |bias: f64| serde_json::json!({"alpha": 1.0, "bias": bias, "weights": vec![0.01; 512]});
+        serde_json::to_vec(&serde_json::json!({
+            "model": "laion-clap-music-onnx-v1",
+            "valence": axis(0.1),
+            "arousal": axis(-0.1),
+        }))
+        .unwrap()
     }
 }

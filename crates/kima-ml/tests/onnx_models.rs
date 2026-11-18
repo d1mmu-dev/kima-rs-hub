@@ -106,8 +106,8 @@ fn test_model_session_registry() {
     for head in MusiCnnHead::all() {
         registry.insert(make_session(head.basename()));
     }
-    registry.insert(make_session("hf_audio"));
-    registry.insert(make_session("text_model"));
+    registry.insert(make_session("music_audio"));
+    registry.insert(make_session("music_text"));
 
     let musicnn = registry
         .build_musicnn()

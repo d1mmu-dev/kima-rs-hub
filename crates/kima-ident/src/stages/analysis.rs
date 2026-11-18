@@ -120,6 +120,8 @@ async fn run_claim_stopping(
     // Atomically capture the stable input for this worker's exact claim, then keep
     // the analysis claim alive across the blocking compute and the finishing
     // future by sharing a single `Arc`.
+    // The ledger claim carries the reported-failure count `record_for` needs for the retry cap.
+    let ledger = claim.clone();
     let (path_str, claim) = match analysis_claim::analysis_input_for_worker(
         &ctx.pool,
         claim.track_id,
@@ -139,21 +141,24 @@ async fn run_claim_stopping(
     ));
     let claim_for_compute = Arc::clone(&claim);
     let claim_for_finish = Arc::clone(&claim);
-    let outcome = compute_then_finish(
-        cancel,
-        permits,
-        move || {
-            compute_and_publish(
-                &ctx_blocking,
-                claim_for_compute.as_ref(),
-                availability,
-                &root,
-                path.as_path(),
-            )
-        },
-        |outcome| async move { finish_outcome(ctx, claim_for_finish.as_ref(), outcome).await },
-    )
-    .await;
+    let outcome =
+        compute_then_finish(
+            cancel,
+            permits,
+            move || {
+                compute_and_publish(
+                    &ctx_blocking,
+                    claim_for_compute.as_ref(),
+                    availability,
+                    &root,
+                    path.as_path(),
+                )
+            },
+            |outcome| async move {
+                finish_outcome(ctx, &ledger, claim_for_finish.as_ref(), outcome).await
+            },
+        )
+        .await;
 
     match outcome {
         Ok(Some(result)) => result,
@@ -525,12 +530,20 @@ impl AnalysisRuntime {
 /// Code of a snapshot attempt that found every slot taken for the whole wait.
 const SNAPSHOT_BUSY: &str = "SNAPSHOT_BUSY";
 
-/// Finalise a claim's outcome.
+/// Finalise a claim's outcome. `ledger` is the stage claim as taken (its `attempts` decide whether a failure is
+/// retried or terminal, `RETRY_CAP`); `claim` the worker's fenced snapshot of it.
 async fn finish_outcome(
     ctx: &super::IdentCtx,
+    ledger: &Claim,
     claim: &AnalysisClaim,
     outcome: Result<AnalysisPublishReport, StageFailure>,
 ) -> sqlx::Result<ClaimResult> {
+    let ledger = Claim {
+        track_id: claim.track_id,
+        stage: Stage::Analysis,
+        started_at: claim.started_at,
+        ..ledger.clone()
+    };
     match outcome {
         Ok(report) => {
             let evidence = evidence(
@@ -540,19 +553,7 @@ async fn finish_outcome(
                 report.musicnn.is_some(),
             );
             let mut conn = ctx.pool.acquire().await?;
-            let done = db_stages::report_done(
-                &mut conn,
-                &Claim {
-                    track_id: claim.track_id,
-                    stage: Stage::Analysis,
-                    started_at: claim.started_at,
-                    attempts: 0,
-                    redelivered: 0,
-                },
-                SOURCE,
-                &evidence,
-            )
-            .await?;
+            let done = db_stages::report_done(&mut conn, &ledger, SOURCE, &evidence).await?;
             Ok(if done {
                 ClaimResult::Done
             } else {
@@ -561,43 +562,12 @@ async fn finish_outcome(
         }
         // Every snapshot slot stayed taken: give the claim back (due now, no attempt).
         Err(StageFailure::Infrastructure(f)) if f.code == SNAPSHOT_BUSY => {
-            db_stages::release(
-                &ctx.pool,
-                &[Claim {
-                    track_id: claim.track_id,
-                    stage: Stage::Analysis,
-                    started_at: claim.started_at,
-                    attempts: 0,
-                    redelivered: 0,
-                }],
-            )
-            .await?;
+            db_stages::release(&ctx.pool, std::slice::from_ref(&ledger)).await?;
             Ok(ClaimResult::Stale)
         }
         Err(failure) => {
-            let record = record_for(
-                &Claim {
-                    track_id: claim.track_id,
-                    stage: Stage::Analysis,
-                    started_at: claim.started_at,
-                    attempts: 0,
-                    redelivered: 0,
-                },
-                &failure,
-                OffsetDateTime::now_utc(),
-            );
-            let accepted = db_stages::report_failure(
-                &ctx.pool,
-                &Claim {
-                    track_id: claim.track_id,
-                    stage: Stage::Analysis,
-                    started_at: claim.started_at,
-                    attempts: 0,
-                    redelivered: 0,
-                },
-                &record,
-            )
-            .await?;
+            let record = record_for(&ledger, &failure, OffsetDateTime::now_utc());
+            let accepted = db_stages::report_failure(&ctx.pool, &ledger, &record).await?;
             Ok(closed(accepted))
         }
     }

@@ -59,6 +59,9 @@ serde_json = "1"
 sha2 = "0.11"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "time", "json"] }
 symphonia = { version = "0.6", features = ["all"] }
+# Ogg Opus decoding (Symphonia has no Opus codec): libopus 1.6 built from the vendored
+# source by `opusic-sys` and linked statically (`bundled`, needs cmake at build time).
+symphonia-adapter-libopus = { version = "0.3", default-features = false, features = ["bundled"] }
 tempfile = "3"
 thiserror = "2"
 httpdate = "1"
@@ -132,6 +135,14 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.symphonia-metadata]
+opt-level = 3
+
+# Opus decode (D-251): the adapter's per-packet glue and libopus itself (`opusic-sys` builds it with
+# CMake, whose build type follows this package's opt-level: Debug at 0).
+[profile.dev.package.symphonia-adapter-libopus]
+opt-level = 3
+
+[profile.dev.package.opusic-sys]
 opt-level = 3
 
 [profile.dev.package.rustfft]

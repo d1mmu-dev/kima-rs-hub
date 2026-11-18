@@ -36,6 +36,9 @@ RUN vertigo build kima-web --dest-dir /srv/kima/web \
  && ls -l /srv/kima/web
 
 FROM rust:1-bookworm AS backend
+# cmake: opusic-sys builds the vendored libopus (Opus decoding, D-251) and links it statically.
+RUN apt-get update && apt-get install -y --no-install-recommends cmake \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=soxr-runtime /opt/kima/soxr /opt/kima/soxr
 ENV LIBRARY_PATH=/opt/kima/soxr/lib
 ENV LD_LIBRARY_PATH=/opt/kima/soxr/lib
@@ -43,6 +46,11 @@ WORKDIR /src
 COPY . .
 ENV SQLX_OFFLINE=true
 RUN cargo build --release -p kima-server
+# libopus is BSD-3-Clause: its copyright notice travels with the binary (native/opus/README.md).
+RUN set -e; copying="$(find /usr/local/cargo/registry/src -path '*/opusic-sys-*/opus/COPYING')"; \
+    test "$(printf '%s\n' "$copying" | wc -l)" = 1; \
+    install -D -m 0644 "$copying" /opt/kima/notices/libopus/COPYING; \
+    install -D -m 0644 native/opus/README.md /opt/kima/notices/libopus/README.md
 
 # Postgres 17 + pgvector on Debian bookworm; adds the kima binary and the kima-web build.
 FROM pgvector/pgvector:pg17 AS runtime
@@ -56,6 +64,7 @@ RUN chown -R root:root /opt/kima && chmod -R a-w /opt/kima/ort /opt/kima/soxr
 ENV ORT_DYLIB_PATH=/opt/kima/ort/libonnxruntime.so.1.22.0
 ENV LD_LIBRARY_PATH=/opt/kima/soxr/lib
 COPY --from=backend /src/target/release/kima /usr/local/bin/kima
+COPY --from=backend /opt/kima/notices /opt/kima/notices
 COPY --from=web /srv/kima/web /srv/kima/web
 COPY docker/entrypoint.sh /usr/local/bin/kima-entrypoint
 RUN chmod +x /usr/local/bin/kima-entrypoint

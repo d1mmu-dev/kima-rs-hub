@@ -13,6 +13,7 @@ rustfft = "6.4.1"
 serde.workspace = true
 sha2.workspace = true
 symphonia.workspace = true
+symphonia-adapter-libopus.workspace = true
 thiserror.workspace = true
 tokenizers.workspace = true
 tracing.workspace = true

@@ -277,6 +277,53 @@ async fn real_audio_to_real_clap_inference_to_isolated_pgvector() {
     db.cleanup().await;
 }
 
+/// D-251: an Ogg Opus track (synthetic stereo tones, `crates/kima-ml/tests/fixtures/generate_opus_fixture.sh`) is
+/// decoded through libopus from its snapshot and embedded by the real model.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs isolated Postgres + KIMA_CLAP_MODEL_DIR; run with --ignored"]
+async fn ogg_opus_track_is_embedded_from_its_snapshot() {
+    let model_dir = model_dir();
+    let db = isolated_db().await;
+    let pool = db.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../kima-ml/tests/fixtures/tone_stereo_3s.opus");
+    std::fs::create_dir_all(root.join("music")).unwrap();
+    std::fs::copy(&fixture, root.join("music/tone.opus")).unwrap();
+    let track_id = common::track(&pool, "music/tone.opus", 3).await;
+    let ctx = ident_ctx_with_embedding(
+        &pool,
+        &root,
+        common::dead_bases(),
+        IdentifySwitch::new(false, true),
+        embedding_config(model_dir, &root),
+    );
+
+    let report = embedding::run_batch(&ctx, &CancellationToken::new())
+        .await
+        .expect("embedding batch should succeed");
+    let row = stage_row(&pool, track_id).await;
+    assert_eq!(
+        (report.claimed, report.done, report.failed),
+        (1, 1, 0),
+        "{row:?}"
+    );
+    let provenance = Provenance {
+        model_id: OnnxModel::ClapAudio.artifact_id().as_str().to_owned(),
+        model_sha256: OnnxModel::ClapAudio.expected_sha256(),
+        pipeline_version: PIPELINE_VERSION.to_owned(),
+    };
+    let persisted = ml::embedding(&pool, track_id, &provenance)
+        .await
+        .expect("querying embedding should succeed")
+        .expect("embedding row must exist for track");
+    assert_eq!(persisted.len(), 512);
+    let norm: f32 = persisted.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!((norm - 1.0).abs() < 1e-3, "unit norm, was {norm}");
+    db.cleanup().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs isolated Postgres + KIMA_CLAP_MODEL_DIR; run with --ignored"]
 async fn coordinator_cycle_runs_real_embedding_e2e() {

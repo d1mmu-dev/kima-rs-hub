@@ -15,7 +15,7 @@ use crate::api::client::load;
 use crate::icons::icon;
 use crate::route::Route;
 use crate::style::BRAND_GRADIENT;
-use crate::ui::{Ctx, flag, plural};
+use crate::ui::{Ctx, flag, flag_now, plural};
 
 /// Polls a scan job once a second for at most this many seconds.
 const SCAN_POLL_SECS: u32 = 600;
@@ -45,6 +45,45 @@ fn is_podcasts(route: &Route) -> bool {
 
 fn is_playlists(route: &Route) -> bool {
     matches!(route, Route::Playlists | Route::Playlist { .. })
+}
+
+fn is_vibe(route: &Route) -> bool {
+    matches!(route, Route::Vibe { .. })
+}
+
+/// The player's "match this vibe" (upstream `VibeToggleButton`): shown only while the server reports
+/// `vibeEmbeddings`, disabled without a library track. It opens the vibe page on the current track's
+/// matches instead of replacing the queue at once (D-250); the page's "Match Vibe" does that.
+fn vibe_button(ctx: &Ctx) -> DomNode {
+    let enabled = load(bind!(ctx, async move {
+        crate::api::vibe::features(&ctx.client).await
+    }))
+    .map(|state| matches!(state, Resource::Ready(f) if f.vibe_embeddings));
+    let current = ctx.player.current();
+    let state = Computed::from(move |c| (enabled.get(c), current.get(c).map(|item| item.id)));
+    state.render_value(bind!(ctx, |(on, current): (bool, Option<String>)| {
+        if !on {
+            return dom! { <span /> };
+        }
+        let track = current.filter(|id| crate::player::episode_ids(id).is_none());
+        let class = if track.is_some() {
+            "transition-all duration-200 hover:scale-110 text-[var(--text-secondary)] hover:text-brand"
+        } else {
+            "transition-all duration-200 text-[var(--text-muted)] cursor-not-allowed"
+        };
+        let disabled = flag_now(track.is_none());
+        let open = bind!(ctx, |_| {
+            if let Some(id) = &track {
+                ctx.router.set(Route::Vibe { track: Some(id.clone()) });
+            }
+        });
+        dom! {
+            <button class={class} disabled={disabled} on_click={open}
+                aria-label="Match this vibe" title="match this vibe - find similar sounding tracks">
+                {icon("audio-waveform", "w-4 h-4")}
+            </button>
+        }
+    }))
 }
 
 /// The current route as a computed value.
@@ -84,7 +123,7 @@ pub fn frame(ctx: &Ctx, page: DomNode) -> DomNode {
                 </main>
                 {side_panel(ctx, panel_open)}
             </div>
-            {ctx.player.desktop_bar()}
+            {ctx.player.desktop_bar(vibe_button(ctx))}
             {ctx.player.mobile_mini()}
             {bottom_nav(route)}
             {toast}
@@ -399,6 +438,12 @@ fn sidebar(ctx: &Ctx, route: Computed<Route>) -> DomNode {
         "Podcasts",
         route.map(|r| is_podcasts(&r)),
     );
+    let vibe_nav = nav_item(
+        Route::Vibe { track: None }.to_string(),
+        "05",
+        "Vibe",
+        route.map(|r| is_vibe(&r)),
+    );
     let stack = playlist_stack(ctx, route);
     dom! {
         <aside class="w-64 bg-[var(--bg-primary)] flex flex-col overflow-hidden relative z-(--z-raised) rounded-lg tablet:hidden">
@@ -412,6 +457,7 @@ fn sidebar(ctx: &Ctx, route: Computed<Route>) -> DomNode {
                     {search}
                     {playlists_nav}
                     {podcasts_nav}
+                    {vibe_nav}
                 </div>
                 <div class="mt-4 mb-4 border-t-2 border-white/10"></div>
             </nav>
@@ -627,6 +673,12 @@ fn bottom_nav(route: Computed<Route>) -> DomNode {
         "library",
         route.map(|r| is_collection(&r)),
     );
+    let vibe = bottom_nav_item(
+        Route::Vibe { track: None }.to_string(),
+        "Vibe",
+        "orbit",
+        route.map(|r| is_vibe(&r)),
+    );
     let search = bottom_nav_item(
         Route::Search.to_string(),
         "Search",
@@ -649,6 +701,7 @@ fn bottom_nav(route: Computed<Route>) -> DomNode {
         <nav class="fixed bottom-0 left-0 right-0 z-(--z-nav) bg-black border-t border-white/10 min-[1025px]:hidden" role="navigation" aria-label="Main navigation">
             <div class="flex items-center justify-around" style="height: var(--nav-h);">
                 {collection}
+                {vibe}
                 {search}
                 {playlists}
                 {podcasts}

@@ -4,7 +4,8 @@
 //!
 //! Every answer is untrusted. A source that fails keeps what was stored (it never records
 //! "none") and, for MusicBrainz, Wikidata and the similar-artist sources, fails the run: the
-//! artist is `failed`, due again on the next cycle (upstream's job completes), and
+//! artist is `failed`, due again after [`identity::SOURCE_RETRY_WAIT`] (upstream's job
+//! completes and the next cycle, at most one idle backoff later, queues it again), and
 //! `unresolvable` at the [`FAILURE_CAP`]-th failure in a row; a source that only waits on its
 //! rate limit leaves the artist `pending` without counting a failure. A run over its time cap
 //! ([`ARTIST_TIMEOUT`]) also fails, but waits out [`identity::FAILED_RETRY_GRACE`] first.

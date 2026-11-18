@@ -1382,19 +1382,35 @@ async fn wikidata_image_is_downloaded_and_stored(pool: PgPool) {
     );
 }
 
+/// Seconds from now to the artist's `enrichment_retry_at`, `None` when it has none.
+async fn retry_in(pool: &PgPool, artist: Uuid) -> Option<f64> {
+    sqlx::query_scalar(
+        "SELECT extract(epoch FROM enrichment_retry_at - now())::float8 FROM artists WHERE id = $1",
+    )
+    .bind(artist)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 /// Upstream `artistEnrichment.ts`: a source that does not answer (an outage, a timeout:
 /// `musicbrainzFailed`, `wikidataFailed`, `similarFetchFailed`) records `failedArtistStatus`
-/// and the job completes, so the next cycle (`unifiedEnrichment.ts` cleans completed jobs at
-/// once) asks again; every try counts toward `STAGE_RETRY_CAP` and the fourth is
-/// `unresolvable`. One artist batch per cycle, so a down source is asked once per cycle.
+/// and the job completes; the artist is queued again by the first cycle after that, which
+/// comes at most one idle backoff (`ENRICHMENT_IDLE_INTERVAL_MS`, 60 s) later. kima-rs makes
+/// that upper bound the retry time (D-254): due again 60 s after the try, every try counting
+/// toward `STAGE_RETRY_CAP`, the fourth `unresolvable`.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn an_unanswered_source_is_asked_again_next_cycle_until_the_cap(pool: PgPool) {
+async fn an_unanswered_source_is_asked_again_after_a_minute_until_the_cap(pool: PgPool) {
+    assert_eq!(
+        identity::SOURCE_RETRY_WAIT,
+        std::time::Duration::from_secs(60)
+    );
     let a = seed(&pool, "Perturbator", "Dangerous Days").await;
     set_mbid(&pool, a, M, "search").await;
     let w = World::default().status(&mb_artist_url(M, "aliases"), 500);
     let f = fx(&pool, w, World::default()).await;
 
-    for (cycle, want) in [
+    for (try_no, want) in [
         (1, "failed"),
         (2, "failed"),
         (3, "failed"),
@@ -1403,16 +1419,32 @@ async fn an_unanswered_source_is_asked_again_next_cycle_until_the_cap(pool: PgPo
         let report = artist::run_batch(&f.ctx, &CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!(report.claimed, 1, "cycle {cycle} asks again");
+        assert_eq!(report.claimed, 1, "try {try_no} is due");
         let r = row(&pool, a).await;
         assert_eq!(
             (r.status.as_str(), r.failures),
-            (want, cycle),
-            "cycle {cycle}"
+            (want, try_no),
+            "try {try_no}"
         );
         assert_eq!(r.last_error_code.as_deref(), Some("HTTP_500"));
+        if want == "unresolvable" {
+            assert_eq!(retry_in(&pool, a).await, None);
+            break;
+        }
+        let due = retry_in(&pool, a).await.expect("a retry time");
+        assert!((55.0..=60.0).contains(&due), "try {try_no}: {due}");
+        let report = artist::run_batch(&f.ctx, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(report.claimed, 0, "try {try_no}: not due before the minute");
+        set(
+            &pool,
+            a,
+            "enrichment_retry_at = now() - interval '1 second'",
+        )
+        .await;
     }
-    assert_eq!(f.asked().len(), 4, "one try per cycle: {:?}", f.asked());
+    assert_eq!(f.asked().len(), 4, "one request per try: {:?}", f.asked());
     let report = artist::run_batch(&f.ctx, &CancellationToken::new())
         .await
         .unwrap();

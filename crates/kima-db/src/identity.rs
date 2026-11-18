@@ -326,10 +326,16 @@ pub struct ArtistForEnrichment {
 /// How long a `failed` artist waits before it is claimed again when its run hit the whole-run
 /// time cap or left album covers to retry ([`ArtistWrite::retry_grace`],
 /// [`defer_completed_artist`]): upstream `FAILED_JOB_RETRY_GRACE_MS`, 15 min, the time a
-/// thrown run's failed job holds its id. A run whose source did not answer is due again at
-/// once, as upstream's completed job. The writers use the same 15 minutes as an SQL interval,
+/// thrown run's failed job holds its id. A run whose source did not answer waits only
+/// [`SOURCE_RETRY_WAIT`]. The writers use the same 15 minutes as an SQL interval,
 /// on the database clock (`artists.enrichment_retry_at`).
 pub const FAILED_RETRY_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// How long a `failed` artist whose source did not answer (an outage, a timeout, a 5xx; not a
+/// rate limit, which leaves it `pending`) waits before it is claimed again: upstream's idle
+/// backoff (`ENRICHMENT_IDLE_INTERVAL_MS`, 60 s), the longest its completed job waits for the
+/// next cycle to queue it again (D-254). The writer uses the same 60 s as an SQL interval.
+pub const SOURCE_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Claims up to `n` artists for enrichment (spec §10.5): `pending`, `failed` and due
 /// (`enrichment_retry_at` unset or passed), or `unresolvable` and last tried over 7 days ago,
@@ -478,7 +484,7 @@ pub struct ArtistWrite {
     /// The artist's `musicbrainz` genres: `Set` replaces them (top first), `Clear` deletes them.
     pub mb_genres: Change<Vec<String>>,
     /// A `failed` status waits out [`FAILED_RETRY_GRACE`] before it is claimed again (the
-    /// whole-run time cap); otherwise a `failed` artist is due on the next cycle.
+    /// whole-run time cap); otherwise a `failed` artist waits [`SOURCE_RETRY_WAIT`].
     pub retry_grace: bool,
 }
 
@@ -537,8 +543,10 @@ pub async fn save_artist_outcome_in(
     let updated = sqlx::query_scalar!(
         r#"UPDATE artists SET
                enrichment_status = $2, enrichment_failures = $3, last_enriched_at = now(),
-               enrichment_retry_at = CASE WHEN $2 = 'failed' AND $17
-                                          THEN now() + interval '15 minutes' END,
+               enrichment_retry_at = CASE WHEN $2 = 'failed'
+                                          THEN now() + CASE WHEN $17 THEN interval '15 minutes'
+                                                            ELSE interval '60 seconds' END
+                                     END,
                last_error = CASE $4 WHEN 'keep' THEN last_error WHEN 'set' THEN $5 ELSE NULL END,
                last_error_code = CASE $4 WHEN 'keep' THEN last_error_code WHEN 'set' THEN $6
                                          ELSE NULL END,

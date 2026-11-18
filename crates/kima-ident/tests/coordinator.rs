@@ -860,10 +860,12 @@ async fn paused_similar_sources_end_the_artists_phase(pool: PgPool) {
 }
 
 /// D-254 (upstream `artistEnrichment.ts`/`unifiedEnrichment.ts`): a source outage fails the
-/// run, the artist is asked again on the next cycle, one try per cycle, and each try counts
-/// toward the cap of 4; it supersedes review I1's 15 min grace between tries.
+/// run and the artist is asked again by the first cycle at least a minute later (upstream's
+/// idle backoff, the slowest it re-queues a completed job); each try counts toward the cap of
+/// 4. The cycles in between leave it alone, so a down source cannot run it to the cap in a few
+/// back-to-back cycles.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn an_outage_is_retried_once_per_cycle_until_the_cap(pool: PgPool) {
+async fn an_outage_is_retried_once_a_minute_until_the_cap(pool: PgPool) {
     let id = "66666666-0000-4000-8000-000000000009";
     // Wikidata is not recorded: the replay answers 599, a failure.
     let mut entries = artist_answers("Flaky", id);
@@ -879,9 +881,25 @@ async fn an_outage_is_retried_once_per_cycle_until_the_cap(pool: PgPool) {
     ctx.config.fingerprinting = false;
     let (a, _) = pending_artist(&pool, "a.wav", "Flaky", id, None).await;
 
+    let make_due = || async {
+        sqlx::query(
+            "UPDATE artists SET enrichment_retry_at = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    };
     for tries in 1..=3 {
         cycle(&ctx).await;
         assert_eq!(artist_row(&pool, a).await, ("failed".to_string(), tries));
+        cycle(&ctx).await;
+        assert_eq!(
+            artist_row(&pool, a).await,
+            ("failed".to_string(), tries),
+            "the next cycle comes before the minute"
+        );
+        make_due().await;
     }
     cycle(&ctx).await;
     assert_eq!(artist_row(&pool, a).await, ("unresolvable".to_string(), 4));

@@ -669,8 +669,15 @@ fn legend(s: &Scene) -> DomNode {
         })
         .collect();
     let total = format!("{} tracks", s.map.track_count);
+    // On phones and tablets the track panel is a bottom sheet over the legend: hide the legend meanwhile.
+    let class = s.selected.map(|selected| {
+        format!(
+            "absolute z-(--z-scene) left-3 bottom-3 max-w-[min(30rem,calc(100%-25rem))] tablet:max-w-[calc(100%-1.5rem)] tablet:bottom-[var(--mini-clearance)]{}",
+            if selected.is_some() { " tablet:hidden" } else { "" }
+        )
+    });
     dom! {
-        <div class="absolute z-(--z-scene) left-3 bottom-3 max-w-[min(30rem,calc(100%-25rem))] tablet:max-w-[calc(100%-1.5rem)] tablet:bottom-[var(--mini-clearance)]">
+        <div class={class}>
             <div class="flex flex-wrap gap-1.5" role="group" aria-label="Moods in your library">{..chips}</div>
             <p class="mt-2"><span class="shrink-0 text-[11px] tabular-nums text-white/60">{total}</span></p>
         </div>
@@ -730,7 +737,7 @@ fn panel(s: &Scene) -> DomNode {
                     </button>
                 </div>
                 {moods}
-                <div class="mt-4 grid grid-cols-3 gap-2">
+                <div class="mt-4 grid grid-cols-2 gap-2">
                     <button aria-label="Play this track" class={ACTION_PLAY} on_click={play}>
                         {icon("play", "h-3.5 w-3.5 fill-current")}"Play"
                     </button>

@@ -169,6 +169,24 @@ never run automatically; use it only when you want that.
 A real-model end-to-end run on 30 generated tracks passed (`docs/testing/vibe-e2e.md`); the 20-real-track parity and
 recall gates have not been run.
 
+**CLAP audio speed (D-252).** Unset values are chosen from the CPU cores and the provider; out-of-range values or
+combinations that cannot be admitted stop the server with the allowed range in the message.
+
+| Variable | Default | Range / meaning |
+|---|---|---|
+| `KIMA_ONNX_PROVIDER` | `cpu` | `cpu` or `cuda`; `cuda` needs a CUDA build of ONNX Runtime 1.22 at `ORT_DYLIB_PATH` and falls back to the CPU (logged with `ML capability status`) when CUDA cannot create or run a warm-up inference |
+| `KIMA_CUDA_DEVICE_ID` | 0 | GPU ordinal (CUDA only) |
+| `KIMA_CUDA_LIB_DIR` | unset | absolute directory with the CUDA 12 / cuDNN 9 libraries to preload (CUDA only) |
+| `KIMA_CUDA_MEM_LIMIT_MIB` | unlimited | per-session CUDA memory limit, 1..=1048576 (CUDA only; with `cpu` these three are ignored with a warning) |
+| `KIMA_CLAP_POOL_SIZE` | CPU 1, CUDA 2 | audio ONNX sessions, 1..=8 |
+| `KIMA_CLAP_INTRA_THREADS` | CPU cores/8 (1..=4), CUDA 1 | threads per audio session, 1..=16; pool × threads at most 48 |
+| `KIMA_EMBEDDING_WORKERS` | CPU cores/8 (1..=4), CUDA cores/4 (2..=8) | tracks decoded and embedded at once, 1..=20 |
+| `KIMA_ONNX_HOST_BUDGET_MIB` | 4096 | host-memory estimate for all ONNX sessions, 1..=65536; each CPU audio session needs ~1100 MiB, the text session ~1940 MiB |
+| `KIMA_SNAPSHOT_MAX_CONCURRENT` | embedding + analysis workers | input snapshots at once; workers beyond it wait for a slot |
+
+If CUDA falls back to the CPU, the CPU defaults apply. A CUDA error while embedding (for example another program took
+the GPU memory) turns audio embedding off until a restart without using up any track's attempts.
+
 Endpoints (signed in, any profile; library-global): `GET /api/vibe/map` (202 while a first layout is pending,
 gzip when accepted), `GET /api/vibe/mood-summary`, `GET /api/vibe/mood/:trackId`, `GET /api/vibe/similar/:trackId`,
 `POST /api/vibe/alchemy`, `POST /api/vibe/path`, `POST /api/vibe/search`. Enrichment gains the `mood` and

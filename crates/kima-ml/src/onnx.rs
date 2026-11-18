@@ -1,9 +1,12 @@
 //! ONNX runtime session management and model loading.
 
+mod provider;
 mod resources;
 #[cfg(test)]
 mod tests;
+pub use provider::{ActiveProvider, ExecutionProvider, PoolShape, ProviderConfig};
 use resources::ResourceReservation;
+pub use resources::{MAX_HOST_BUDGET_BYTES, MAX_THREAD_SLOTS, set_host_budget_bytes};
 
 use ort::session::Session;
 use std::collections::BTreeMap;
@@ -356,6 +359,17 @@ impl ClapAudioSession {
         pool_size: usize,
         threads: Option<usize>,
     ) -> Result<Self, OnnxError> {
+        Self::from_verified_bytes_on(artifact, pool_size, threads, &ProviderConfig::cpu())
+    }
+
+    /// [`Self::from_verified_bytes`] on the requested provider; CUDA failures fall back to the
+    /// CPU (see [`Self::provider`]). Hash pin and graph signature are checked either way.
+    pub fn from_verified_bytes_on(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+        provider: &ProviderConfig,
+    ) -> Result<Self, OnnxError> {
         use sha2::{Digest, Sha256};
         let expected = OnnxModel::ClapAudio.descriptor();
         if artifact.id() != expected.id
@@ -367,19 +381,43 @@ impl ClapAudioSession {
                 message: "CLAP audio artifact does not match the pinned model".into(),
             });
         }
-        let model = Self::from_trusted_bytes(artifact, pool_size, threads)?;
+        let model = Self::from_trusted_bytes_on(artifact, pool_size, threads, provider)?;
         model.check_signature()?;
         Ok(model)
     }
 
+    #[cfg(test)]
     fn from_trusted_bytes(
         artifact: &VerifiedBytes,
         pool_size: usize,
         threads: Option<usize>,
     ) -> Result<Self, OnnxError> {
+        Self::from_trusted_bytes_on(artifact, pool_size, threads, &ProviderConfig::cpu())
+    }
+
+    fn from_trusted_bytes_on(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+        provider: &ProviderConfig,
+    ) -> Result<Self, OnnxError> {
+        // One zero window per CUDA session: proves the EP can allocate and run the graph.
+        let warmup = |session: &mut Session| {
+            run_clap_audio(session, &vec![0.0; CLAP_MEL_FRAMES * 64], 1).map(drop)
+        };
         Ok(Self {
-            pool: BoundedSessionPool::from_verified_bytes(artifact, pool_size, threads)?,
+            pool: BoundedSessionPool::build(artifact, pool_size, threads, provider, Some(&warmup))?,
         })
+    }
+
+    /// Provider the sessions run on (after any CUDA fallback).
+    pub fn provider(&self) -> &ActiveProvider {
+        self.pool.provider()
+    }
+
+    /// Number of pooled sessions.
+    pub fn capacity(&self) -> usize {
+        self.pool.capacity()
     }
 
     /// The graph signature the music export declares (read from the verified graph, not
@@ -415,49 +453,57 @@ impl ClapAudioSession {
                 "invalid CLAP input shape or non-finite value".into(),
             ));
         }
-        self.pool.with_session(|session| {
-            let tensor = ort::value::Tensor::from_array((
-                [batch, 1, CLAP_MEL_FRAMES, 64],
-                input.to_vec().into_boxed_slice(),
-            ))
-            .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let output_buffer = ort::value::Tensor::from_array((
-                [batch, 512],
-                vec![0.0_f32; batch * 512].into_boxed_slice(),
-            ))
-            .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            // Selecting a fetch does not guarantee ORT prunes unrelated graph
-            // nodes; the pinned graph and bounded inputs remain essential.
-            let options = ort::session::run_options::RunOptions::new()
-                .map_err(|e| OnnxError::Inference(e.to_string()))?
-                .with_outputs(
-                    ort::session::run_options::OutputSelector::no_default()
-                        .with("embedding")
-                        .preallocate("embedding", output_buffer),
-                );
-            let outputs = session
-                .run_with_options(ort::inputs!["mel" => tensor], &options)
-                .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let output = outputs
-                .get("embedding")
-                .ok_or_else(|| OnnxError::Inference("missing CLAP output".into()))?;
-            let (shape, values) = output
-                .try_extract_tensor::<f32>()
-                .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            if shape.as_ref() != [batch as i64, 512] || values.iter().any(|x| !x.is_finite()) {
-                return Err(OnnxError::Inference(
-                    "invalid CLAP output shape or non-finite value".into(),
-                ));
-            }
-            values
-                .chunks_exact(512)
-                .map(|v| {
-                    v.try_into()
-                        .map_err(|_| OnnxError::Inference("invalid CLAP output length".into()))
-                })
-                .collect()
-        })
+        self.pool
+            .with_session(|session| run_clap_audio(session, input, batch))
     }
+}
+
+/// One CLAP audio run on a checked-out session; inputs were validated by the caller.
+fn run_clap_audio(
+    session: &mut Session,
+    input: &[f32],
+    batch: usize,
+) -> Result<Vec<[f32; 512]>, OnnxError> {
+    let tensor = ort::value::Tensor::from_array((
+        [batch, 1, CLAP_MEL_FRAMES, 64],
+        input.to_vec().into_boxed_slice(),
+    ))
+    .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let output_buffer = ort::value::Tensor::from_array((
+        [batch, 512],
+        vec![0.0_f32; batch * 512].into_boxed_slice(),
+    ))
+    .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    // Selecting a fetch does not guarantee ORT prunes unrelated graph
+    // nodes; the pinned graph and bounded inputs remain essential.
+    let options = ort::session::run_options::RunOptions::new()
+        .map_err(|e| OnnxError::Inference(e.to_string()))?
+        .with_outputs(
+            ort::session::run_options::OutputSelector::no_default()
+                .with("embedding")
+                .preallocate("embedding", output_buffer),
+        );
+    let outputs = session
+        .run_with_options(ort::inputs!["mel" => tensor], &options)
+        .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let output = outputs
+        .get("embedding")
+        .ok_or_else(|| OnnxError::Inference("missing CLAP output".into()))?;
+    let (shape, values) = output
+        .try_extract_tensor::<f32>()
+        .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    if shape.as_ref() != [batch as i64, 512] || values.iter().any(|x| !x.is_finite()) {
+        return Err(OnnxError::Inference(
+            "invalid CLAP output shape or non-finite value".into(),
+        ));
+    }
+    values
+        .chunks_exact(512)
+        .map(|v| {
+            v.try_into()
+                .map_err(|_| OnnxError::Inference("invalid CLAP output length".into()))
+        })
+        .collect()
 }
 
 /// Maximum prompts accepted per CLAP text inference call, matching the bounded
@@ -478,6 +524,17 @@ impl ClapTextSession {
         pool_size: usize,
         threads: Option<usize>,
     ) -> Result<Self, OnnxError> {
+        Self::from_verified_bytes_on(artifact, pool_size, threads, &ProviderConfig::cpu())
+    }
+
+    /// [`Self::from_verified_bytes`] on the requested provider (CUDA falls back to the CPU).
+    /// The server keeps the text encoder on the CPU; this exists for the CUDA parity gate.
+    pub fn from_verified_bytes_on(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+        provider: &ProviderConfig,
+    ) -> Result<Self, OnnxError> {
         use sha2::{Digest, Sha256};
         let expected = OnnxModel::ClapText.descriptor();
         if artifact.id() != expected.id
@@ -489,11 +546,23 @@ impl ClapTextSession {
                 message: "CLAP text artifact does not match the pinned model".into(),
             });
         }
-        let model = Self::from_trusted_bytes(artifact, pool_size, threads)?;
+        // One minimal padded prompt (`<s>` `</s>`, then `<pad>`) per CUDA session.
+        let warmup = |session: &mut Session| {
+            let tokens = crate::text_tokenizer::CLAP_TEXT_MAX_TOKENS;
+            let mut ids = vec![crate::text_tokenizer::CLAP_TEXT_PAD_ID; tokens];
+            let mut mask = vec![0; tokens];
+            (ids[0], ids[1]) = (0, 2);
+            (mask[0], mask[1]) = (1, 1);
+            run_clap_text(session, &ids, &mask, 1).map(drop)
+        };
+        let model = Self {
+            pool: BoundedSessionPool::build(artifact, pool_size, threads, provider, Some(&warmup))?,
+        };
         model.check_signature()?;
         Ok(model)
     }
 
+    #[cfg(test)]
     fn from_trusted_bytes(
         artifact: &VerifiedBytes,
         pool_size: usize,
@@ -502,6 +571,11 @@ impl ClapTextSession {
         Ok(Self {
             pool: BoundedSessionPool::from_verified_bytes(artifact, pool_size, threads)?,
         })
+    }
+
+    /// Provider the sessions run on (after any CUDA fallback).
+    pub fn provider(&self) -> &ActiveProvider {
+        self.pool.provider()
     }
 
     /// The music text export's declared signature: int64 `input_ids` and `attention_mask`
@@ -570,55 +644,63 @@ impl ClapTextSession {
                 ));
             }
         }
-        self.pool.with_session(|session| {
-            let ids = ort::value::Tensor::from_array((
-                [batch, sequence],
-                input_ids.to_vec().into_boxed_slice(),
-            ))
-            .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let mask = ort::value::Tensor::from_array((
-                [batch, sequence],
-                attention_mask.to_vec().into_boxed_slice(),
-            ))
-            .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let output_buffer = ort::value::Tensor::from_array((
-                [batch, 512],
-                vec![0.0_f32; batch * 512].into_boxed_slice(),
-            ))
-            .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let options = ort::session::run_options::RunOptions::new()
-                .map_err(|e| OnnxError::Inference(e.to_string()))?
-                .with_outputs(
-                    ort::session::run_options::OutputSelector::no_default()
-                        .with("embedding")
-                        .preallocate("embedding", output_buffer),
-                );
-            let outputs = session
-                .run_with_options(
-                    ort::inputs!["input_ids" => ids, "attention_mask" => mask],
-                    &options,
-                )
-                .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let output = outputs
-                .get("embedding")
-                .ok_or_else(|| OnnxError::Inference("missing CLAP text output".into()))?;
-            let (shape, values) = output
-                .try_extract_tensor::<f32>()
-                .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            if shape.as_ref() != [batch as i64, 512] || values.iter().any(|x| !x.is_finite()) {
-                return Err(OnnxError::Inference(
-                    "invalid CLAP text output shape or non-finite value".into(),
-                ));
-            }
-            values
-                .chunks_exact(512)
-                .map(|v| {
-                    v.try_into()
-                        .map_err(|_| OnnxError::Inference("invalid CLAP text output length".into()))
-                })
-                .collect()
-        })
+        self.pool
+            .with_session(|session| run_clap_text(session, input_ids, attention_mask, batch))
     }
+}
+
+/// One CLAP text run on a checked-out session; inputs were validated by the caller.
+fn run_clap_text(
+    session: &mut Session,
+    input_ids: &[i64],
+    attention_mask: &[i64],
+    batch: usize,
+) -> Result<Vec<[f32; 512]>, OnnxError> {
+    let sequence = crate::text_tokenizer::CLAP_TEXT_MAX_TOKENS;
+    let ids =
+        ort::value::Tensor::from_array(([batch, sequence], input_ids.to_vec().into_boxed_slice()))
+            .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let mask = ort::value::Tensor::from_array((
+        [batch, sequence],
+        attention_mask.to_vec().into_boxed_slice(),
+    ))
+    .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let output_buffer = ort::value::Tensor::from_array((
+        [batch, 512],
+        vec![0.0_f32; batch * 512].into_boxed_slice(),
+    ))
+    .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let options = ort::session::run_options::RunOptions::new()
+        .map_err(|e| OnnxError::Inference(e.to_string()))?
+        .with_outputs(
+            ort::session::run_options::OutputSelector::no_default()
+                .with("embedding")
+                .preallocate("embedding", output_buffer),
+        );
+    let outputs = session
+        .run_with_options(
+            ort::inputs!["input_ids" => ids, "attention_mask" => mask],
+            &options,
+        )
+        .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let output = outputs
+        .get("embedding")
+        .ok_or_else(|| OnnxError::Inference("missing CLAP text output".into()))?;
+    let (shape, values) = output
+        .try_extract_tensor::<f32>()
+        .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    if shape.as_ref() != [batch as i64, 512] || values.iter().any(|x| !x.is_finite()) {
+        return Err(OnnxError::Inference(
+            "invalid CLAP text output shape or non-finite value".into(),
+        ));
+    }
+    values
+        .chunks_exact(512)
+        .map(|v| {
+            v.try_into()
+                .map_err(|_| OnnxError::Inference("invalid CLAP text output length".into()))
+        })
+        .collect()
 }
 
 /// Typed MusiCNN core backbone inference over a bounded pool of verified sessions.
@@ -955,6 +1037,7 @@ pub struct BoundedSessionPool {
     sessions: Arc<Mutex<Vec<Session>>>,
     condvar: Arc<Condvar>,
     capacity: usize,
+    provider: ActiveProvider,
     _reservation: ResourceReservation,
     #[cfg(test)]
     wait_observer: Option<std::sync::mpsc::Sender<()>>,
@@ -985,34 +1068,125 @@ impl BoundedSessionPool {
         pool_size: usize,
         intra_threads: Option<usize>,
     ) -> Result<Self, OnnxError> {
-        let threads = validate_resources(pool_size, intra_threads)?;
-        let reservation =
-            ResourceReservation::acquire(pool_size, threads, artifact.as_bytes().len())?;
+        Self::from_verified_bytes_on(artifact, pool_size, intra_threads, &ProviderConfig::cpu())
+    }
 
+    /// Builds every session on `provider`. When CUDA is requested and any CUDA step fails
+    /// (library preload, EP registration, session creation), all CUDA sessions are dropped,
+    /// the CUDA reservation is released and the whole pool is built on the CPU instead:
+    /// [`Self::provider`] is then [`ActiveProvider::CpuFallback`] with the first error.
+    pub fn from_verified_bytes_on(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        intra_threads: Option<usize>,
+        provider: &ProviderConfig,
+    ) -> Result<Self, OnnxError> {
+        Self::build(artifact, pool_size, intra_threads, provider, None)
+    }
+
+    /// [`Self::from_verified_bytes_on`]; `warmup` runs once on every CUDA session before the
+    /// pool is accepted, and its failure is a CUDA failure (whole-pool CPU fallback). The CPU
+    /// fallback uses [`ProviderConfig::cpu_fallback`] when set.
+    fn build(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        intra_threads: Option<usize>,
+        provider: &ProviderConfig,
+        warmup: Option<&Warmup>,
+    ) -> Result<Self, OnnxError> {
+        let threads = validate_resources(pool_size, intra_threads)?;
         initialize_runtime()?;
+        let mut active = ActiveProvider::Cpu;
+        let (mut pool_size, mut threads) = (pool_size, threads);
+        if provider.provider == ExecutionProvider::Cuda {
+            match Self::build_sessions(artifact, pool_size, threads, Some(provider), warmup) {
+                Ok((sessions, reservation)) => {
+                    return Ok(Self::assemble(
+                        artifact,
+                        sessions,
+                        reservation,
+                        ActiveProvider::Cuda {
+                            device_id: provider.cuda_device_id,
+                        },
+                    ));
+                }
+                Err(error) => {
+                    let reason = error.to_string();
+                    tracing::warn!(
+                        artifact = %artifact.id(),
+                        %reason,
+                        "CUDA execution provider unavailable; falling back to CPU"
+                    );
+                    active = ActiveProvider::CpuFallback { reason };
+                    if let Some(shape) = provider.cpu_fallback {
+                        pool_size = shape.pool_size;
+                        threads = validate_resources(shape.pool_size, shape.intra_threads)?;
+                    }
+                }
+            }
+        }
+        let (sessions, reservation) =
+            Self::build_sessions(artifact, pool_size, threads, None, None)?;
+        Ok(Self::assemble(artifact, sessions, reservation, active))
+    }
+
+    fn build_sessions(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: usize,
+        cuda: Option<&ProviderConfig>,
+        warmup: Option<&Warmup>,
+    ) -> Result<(Vec<Session>, ResourceReservation), OnnxError> {
+        let reservation = ResourceReservation::acquire_for(
+            pool_size,
+            threads,
+            artifact.as_bytes().len(),
+            cuda.is_some(),
+        )?;
+        if let Some(dir) = cuda.and_then(|c| c.cuda_lib_dir.as_deref()) {
+            provider::preload_cuda(dir).map_err(OnnxError::SessionBuilder)?;
+        }
         let mut sessions = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            let builder = bounded_session_builder(threads)?;
-
-            let session = builder
+            let builder = session_builder(threads, cuda)?;
+            let mut session = builder
                 .commit_from_memory(artifact.as_bytes())
                 .map_err(|e| OnnxError::SessionInit {
                     id: artifact.id(),
                     message: e.to_string(),
                 })?;
-
+            if let (Some(_), Some(warmup)) = (cuda, warmup) {
+                warmup(&mut session).map_err(|e| OnnxError::SessionInit {
+                    id: artifact.id(),
+                    message: format!("CUDA warm-up inference failed: {e}"),
+                })?;
+            }
             sessions.push(session);
         }
+        Ok((sessions, reservation))
+    }
 
-        Ok(Self {
+    fn assemble(
+        artifact: &VerifiedBytes,
+        sessions: Vec<Session>,
+        reservation: ResourceReservation,
+        provider: ActiveProvider,
+    ) -> Self {
+        let capacity = sessions.len();
+        Self {
             id: artifact.id(),
             sessions: Arc::new(Mutex::new(sessions)),
             condvar: Arc::new(Condvar::new()),
-            capacity: pool_size,
+            capacity,
+            provider,
             _reservation: reservation,
             #[cfg(test)]
             wait_observer: None,
-        })
+        }
+    }
+
+    pub fn provider(&self) -> &ActiveProvider {
+        &self.provider
     }
 
     pub fn id(&self) -> &ArtifactId {
@@ -1059,13 +1233,22 @@ impl BoundedSessionPool {
     }
 }
 
-/// Fixed CPU policy: 1 thread by default, never ORT's machine-sized auto pool.
+/// One inference run on a freshly created CUDA session (see [`BoundedSessionPool::build`]).
+type Warmup = dyn Fn(&mut Session) -> Result<(), OnnxError>;
+
+/// Largest session pool accepted per artifact.
+pub const MAX_POOL_SIZE: usize = 8;
+/// Largest intra-op thread count accepted per session.
+pub const MAX_INTRA_THREADS: usize = 16;
+
+/// Explicit CPU policy: 1 thread by default, never ORT's machine-sized auto pool.
+/// The process-wide admission budget still bounds the totals.
 fn validate_resources(pool_size: usize, threads: Option<usize>) -> Result<usize, OnnxError> {
     let threads = threads.unwrap_or(1);
-    if !(1..=4).contains(&pool_size) || !(1..=4).contains(&threads) {
-        return Err(OnnxError::SessionBuilder(
-            "pool size and intra threads must each be in 1..=4".into(),
-        ));
+    if !(1..=MAX_POOL_SIZE).contains(&pool_size) || !(1..=MAX_INTRA_THREADS).contains(&threads) {
+        return Err(OnnxError::SessionBuilder(format!(
+            "pool size must be in 1..={MAX_POOL_SIZE} and intra threads in 1..={MAX_INTRA_THREADS}"
+        )));
     }
     Ok(threads)
 }
@@ -1073,18 +1256,40 @@ fn validate_resources(pool_size: usize, threads: Option<usize>) -> Result<usize,
 fn bounded_session_builder(
     threads: usize,
 ) -> Result<ort::session::builder::SessionBuilder, OnnxError> {
-    Session::builder()
+    session_builder(threads, None)
+}
+
+/// CPU-only builder, or a CUDA builder that fails instead of silently registering nothing
+/// (`error_on_failure`), so the caller can fall back explicitly. CUDA sessions keep the CPU
+/// EP for nodes CUDA does not implement, as ORT always does.
+fn session_builder(
+    threads: usize,
+    cuda: Option<&ProviderConfig>,
+) -> Result<ort::session::builder::SessionBuilder, OnnxError> {
+    use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider};
+    let cpu = CPUExecutionProvider::default()
+        .with_arena_allocator(false)
+        .build();
+    let builder = Session::builder()
         .and_then(|builder| builder.with_intra_threads(threads))
         .and_then(|builder| builder.with_inter_threads(1))
         .and_then(|builder| builder.with_parallel_execution(false))
-        .and_then(|builder| {
-            builder.with_execution_providers([
-                ort::execution_providers::CPUExecutionProvider::default()
-                    .with_arena_allocator(false)
-                    .build(),
-            ])
-        })
-        .map_err(|e| OnnxError::SessionBuilder(e.to_string()))
+        .map_err(|e| OnnxError::SessionBuilder(e.to_string()))?;
+    let result = match cuda {
+        None => builder.with_execution_providers([cpu]),
+        Some(config) => {
+            let mut ep = CUDAExecutionProvider::default()
+                .with_device_id(config.cuda_device_id)
+                .with_arena_extend_strategy(
+                    ort::execution_providers::ArenaExtendStrategy::SameAsRequested,
+                );
+            if let Some(limit) = config.cuda_mem_limit_bytes {
+                ep = ep.with_memory_limit(limit);
+            }
+            builder.with_execution_providers([ep.build().error_on_failure(), cpu])
+        }
+    };
+    result.map_err(|e| OnnxError::SessionBuilder(e.to_string()))
 }
 
 /// Initialize only a separately provisioned, administrator-trusted runtime.

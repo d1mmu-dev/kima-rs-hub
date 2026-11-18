@@ -2996,6 +2996,7 @@ dependencies = [
  "kima-ident",
  "kima-jobs",
  "kima-library",
+ "kima-ml",
  "kima-net",
  "kima-podcast",
  "kima-subsonic",

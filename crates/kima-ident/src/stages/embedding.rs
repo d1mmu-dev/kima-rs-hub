@@ -51,17 +51,35 @@ pub const PIPELINE_VERSION: &str = "clap-music-audio-v1";
 /// this model+pipeline combination. Built once and cached on [`IdentCtx`].
 pub struct EmbeddingRuntime {
     session: ClapAudioSession,
+    provider: kima_ml::onnx::ActiveProvider,
+    /// Blocking workers for this provider: `EmbeddingConfig::workers`, or the CPU fallback's
+    /// workers when CUDA was requested and the pool runs on the CPU.
+    workers: usize,
     mel: MusicClapMel,
     provenance: Provenance,
 }
 
+/// Seconds a blocking worker waits for an input-snapshot slot before giving its claim back.
+/// Well below the claim lease ([`super::CLAIM_LEASE`]), so a waiting claim never lapses.
+pub const SNAPSHOT_SLOT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Loads (verifies + opens) the CLAP audio session from `model_dir`, reporting the result
 /// as a [`CapabilityEvaluationReport`] exactly like process startup would: a missing or
-/// hash-mismatched artifact becomes `Unavailable`, never a panic or crash.
+/// hash-mismatched artifact becomes `Unavailable`, never a panic or crash. When CUDA falls
+/// back to the CPU, the pool is built with `config.cpu_fallback`'s shape and the runtime
+/// uses its worker count.
 fn load(
     model_dir: &Path,
-    pool_size: usize,
+    config: &crate::EmbeddingConfig,
 ) -> (CapabilityEvaluationReport, Option<EmbeddingRuntime>) {
+    let mut provider = config.provider.clone();
+    if let Some(fallback) = config.cpu_fallback {
+        provider.cpu_fallback = Some(kima_ml::onnx::PoolShape {
+            pool_size: fallback.pool_size,
+            intra_threads: Some(fallback.intra_threads),
+        });
+    }
+    let (pool_size, intra_threads) = (config.pool_size.max(1), config.intra_threads);
     let mut built: Option<ClapAudioSession> = None;
     let mut requirements = BTreeMap::new();
     requirements.insert(
@@ -74,14 +92,23 @@ fn load(
         &requirements,
         |cap, bytes| {
             if cap == Capability::ClapAudioEmbedding {
-                built = Some(ClapAudioSession::from_verified_bytes(
-                    &bytes, pool_size, None,
+                built = Some(ClapAudioSession::from_verified_bytes_on(
+                    &bytes,
+                    pool_size,
+                    intra_threads,
+                    &provider,
                 )?);
             }
             Ok::<(), kima_ml::onnx::OnnxError>(())
         },
     );
     let runtime = built.map(|session| EmbeddingRuntime {
+        provider: session.provider().clone(),
+        workers: match (session.provider(), config.cpu_fallback) {
+            (kima_ml::onnx::ActiveProvider::CpuFallback { .. }, Some(fallback)) => fallback.workers,
+            _ => config.workers,
+        }
+        .max(1),
         session,
         mel: MusicClapMel::new(),
         provenance: Provenance {
@@ -156,7 +183,7 @@ fn initialize_config(
             vec![OnnxModel::ClapAudio.artifact_id()],
         ));
     };
-    let (report, runtime) = load(model_dir, config.pool_size.max(1));
+    let (report, runtime) = load(model_dir, config);
     runtime.map(Arc::new).ok_or(report)
 }
 
@@ -203,12 +230,9 @@ fn initialize_text_config(
                 );
             } else {
                 session = Some(
-                    kima_ml::onnx::ClapTextSession::from_verified_bytes(
-                        &bytes,
-                        config.pool_size.max(1),
-                        None,
-                    )
-                    .map_err(|e| e.to_string())?,
+                    // One session: interactive, and the host budget holds the audio pool too.
+                    kima_ml::onnx::ClapTextSession::from_verified_bytes(&bytes, 1, None)
+                        .map_err(|e| e.to_string())?,
                 );
             }
             Ok::<(), String>(())
@@ -234,6 +258,32 @@ fn text_runtime_now(ctx: &IdentCtx) -> Result<Arc<TextRuntime>, CapabilityEvalua
     let result = initialize_text_config(&ctx.config.embedding);
     *slot = Some(result.clone());
     result
+}
+
+/// Execution provider of the loaded audio encoder (`None` before initialization or when the
+/// capability is not available). Reported next to the capability status at startup.
+pub fn audio_provider(ctx: &IdentCtx) -> Option<kima_ml::onnx::ActiveProvider> {
+    ctx.embedding_runtime
+        .runtime
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|runtime| runtime.provider.clone())
+}
+
+/// Blocking embedding workers of the loaded runtime (the CPU fallback's when CUDA fell
+/// back); the configured count before the runtime is loaded.
+pub fn effective_workers(ctx: &IdentCtx) -> usize {
+    ctx.embedding_runtime
+        .runtime
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map_or(ctx.config.embedding.workers.max(1), |runtime| {
+            runtime.workers
+        })
 }
 
 /// Read the cached capability report without loading a model. Includes whichever of the
@@ -568,7 +618,7 @@ pub async fn run_batch_until(
     if claims.is_empty() {
         return Ok(BatchReport::default());
     }
-    let workers = ctx.config.embedding.workers;
+    let workers = effective_workers(ctx);
     // The first global snapshot failure fires `stopper`: no further claim starts, the ones
     // not started go back to `pending`, and the phase stops (`BatchReport::halted`).
     let stopper = stop.child_token();
@@ -616,11 +666,7 @@ async fn run_claim_stopping(
     let permits = ctx
         .embedding_runtime
         .workers
-        .get_or_init(|| {
-            Arc::new(tokio::sync::Semaphore::new(
-                ctx.config.embedding.workers.max(1),
-            ))
-        })
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(effective_workers(ctx))))
         .clone();
     let outcome = compute_then_finish(
         cancel,
@@ -649,15 +695,17 @@ async fn run_claim_stopping(
                     ));
                     fail(ctx, claim, &f).await
                 }
-                EmbedOutcome::InferenceError(e) => {
-                    let f = StageFailure::Inference(kima_net::Failure::new("INFERENCE_ERROR", e));
-                    fail(ctx, claim, &f).await
-                }
-                EmbedOutcome::Snapshot(f) => {
+                EmbedOutcome::Classified(f) => {
                     if halts_batch(&f) {
                         stopper.cancel();
                     }
                     fail(ctx, claim, &f).await
+                }
+                // Backpressure: no attempt is consumed, nothing is latched; the claim is due
+                // again at once and the batch goes on.
+                EmbedOutcome::SnapshotBusy => {
+                    stages::release(pool, std::slice::from_ref(claim)).await?;
+                    Ok(ClaimResult::Stale)
                 }
                 EmbedOutcome::DecodeError(e) => {
                     let f = StageFailure::Transient(kima_net::Failure::new(
@@ -712,11 +760,13 @@ where
 /// the async half above never has to touch ONNX/decode types directly.
 enum EmbedOutcome {
     Computed(Box<kima_ml::clap::ClapEmbedding>, Provenance),
-    InferenceError(String),
     Blocked(Vec<(Capability, CapabilityStatus)>),
     DecodeError(kima_ml::audio::AudioError),
-    /// Snapshot creation or reopen failed; already classified for `record_for`.
-    Snapshot(StageFailure),
+    /// Snapshot creation or reopen, or CUDA inference failed; already classified for
+    /// `record_for` (and latched when global, see [`latching_outcome`]).
+    Classified(StageFailure),
+    /// Every snapshot slot stayed taken for [`SNAPSHOT_SLOT_WAIT`]: the claim goes back.
+    SnapshotBusy,
 }
 
 /// Classifies a snapshot failure for the stage. Constant per-file failures are terminal
@@ -740,29 +790,68 @@ pub(crate) fn snapshot_failure(error: &kima_ml::input_snapshot::SnapshotError) -
         C::Infrastructure => {
             StageFailure::Infrastructure(kima_net::Failure::new("SNAPSHOT_UNAVAILABLE", detail))
         }
+        // Normally released before it gets here ([`EmbedOutcome::SnapshotBusy`]); as a
+        // failure it costs no attempt and never halts or latches ([`halts_batch`]).
+        C::Busy => StageFailure::Infrastructure(kima_net::Failure::new(SNAPSHOT_BUSY, detail)),
     }
 }
+
+/// Error code of [`kima_ml::input_snapshot::SnapshotClass::Busy`]: backpressure, never global.
+const SNAPSHOT_BUSY: &str = "SNAPSHOT_BUSY";
+/// Error code of a failed CUDA inference: the provider, not the track (see [`compute_failure`]).
+pub const CUDA_INFERENCE_UNAVAILABLE: &str = "CUDA_INFERENCE_UNAVAILABLE";
 
 /// A failure of the shared snapshot setup (directory, mount, reflink, quota, disk): every
 /// further claim of the batch would fail the same way, so the phase stops instead of
 /// closing the whole library as `INFRASTRUCTURE`.
 pub(crate) fn halts_batch(failure: &StageFailure) -> bool {
-    matches!(failure, StageFailure::Infrastructure(_))
+    matches!(failure, StageFailure::Infrastructure(f) if f.code != SNAPSHOT_BUSY)
 }
 
 /// Latch at worker detection, not in the cancellable async finish/publication path.
 /// A detached blocking worker still shares this audio-only, first-cause state.
-fn snapshot_outcome(ctx: &IdentCtx, failure: StageFailure) -> EmbedOutcome {
+fn latching_outcome(ctx: &IdentCtx, failure: StageFailure) -> EmbedOutcome {
     if halts_batch(&failure) {
+        let what = match &failure {
+            StageFailure::Infrastructure(f) if f.code == CUDA_INFERENCE_UNAVAILABLE => {
+                "CUDA inference failed"
+            }
+            _ => "audio snapshot infrastructure failed",
+        };
         ctx.embedding_runtime
             .audio_infrastructure_failure
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_or_insert_with(|| format!(
-                "audio snapshot infrastructure failed: {failure:?}; repair the snapshot setup and restart to revalidate (no live reload)"
+                "{what}: {failure:?}; repair the setup and restart to revalidate (no live reload)"
             ));
     }
-    EmbedOutcome::Snapshot(failure)
+    EmbedOutcome::Classified(failure)
+}
+
+/// Why computing a track vector failed.
+#[derive(Debug)]
+enum ComputeError {
+    /// Window preparation or the mel front end rejected this track's audio.
+    Preprocess(String),
+    /// The ONNX session failed to run.
+    Inference(String),
+}
+
+/// A CPU inference failure is about this track (`INFERENCE_ERROR`, bounded retries). On a
+/// CUDA session the input is a fixed-shape, finite mel batch that the load-time warm-up
+/// already ran, so a failure is the provider's (device memory, driver, kernels): it is
+/// infrastructure, costs no attempt, halts the batch and is latched until restart, where
+/// the warm-up decides between CUDA and the CPU fallback again.
+fn compute_failure(provider: &kima_ml::onnx::ActiveProvider, error: ComputeError) -> StageFailure {
+    match error {
+        ComputeError::Inference(message) if provider.is_cuda() => StageFailure::Infrastructure(
+            kima_net::Failure::new(CUDA_INFERENCE_UNAVAILABLE, message),
+        ),
+        ComputeError::Inference(message) | ComputeError::Preprocess(message) => {
+            StageFailure::Inference(kima_net::Failure::new("INFERENCE_ERROR", message))
+        }
+    }
 }
 
 /// Opens the configured private snapshot directory. Every failure here is infrastructure
@@ -956,16 +1045,21 @@ fn run_embedding_blocking(ctx: &IdentCtx, root: &Path, path: &Path) -> EmbedOutc
     if let Some(ext) = path_extension(path) {
         hint.with_extension(&ext);
     }
-    let snapshot = match snapshot_store(ctx).and_then(|store| store.create(root, path)) {
+    let snapshot = match snapshot_store(ctx)
+        .and_then(|store| store.create_waiting(root, path, SNAPSHOT_SLOT_WAIT))
+    {
         Ok(snapshot) => snapshot,
-        Err(error) => return snapshot_outcome(ctx, snapshot_failure(&error)),
+        Err(error) if error.class() == kima_ml::input_snapshot::SnapshotClass::Busy => {
+            return EmbedOutcome::SnapshotBusy;
+        }
+        Err(error) => return latching_outcome(ctx, snapshot_failure(&error)),
     };
     let reopen_error = std::cell::RefCell::new(None);
     let open = || -> Result<Box<dyn MediaSource>, kima_ml::audio::AudioError> {
         match snapshot.open() {
             Ok(file) => Ok(Box::new(file)),
             Err(error) => {
-                *reopen_error.borrow_mut() = Some(snapshot_outcome(
+                *reopen_error.borrow_mut() = Some(latching_outcome(
                     ctx,
                     StageFailure::Infrastructure(kima_net::Failure::new(
                         "SNAPSHOT_UNAVAILABLE",
@@ -986,7 +1080,7 @@ fn run_embedding_blocking(ctx: &IdentCtx, root: &Path, path: &Path) -> EmbedOutc
     };
     match compute_embedding(&runtime, &windows, rate) {
         Ok(embedding) => EmbedOutcome::Computed(Box::new(embedding), runtime.provenance.clone()),
-        Err(error) => EmbedOutcome::InferenceError(error),
+        Err(error) => latching_outcome(ctx, compute_failure(&runtime.provider, error)),
     }
 }
 
@@ -995,21 +1089,25 @@ fn compute_embedding(
     runtime: &EmbeddingRuntime,
     windows: &[Vec<f32>],
     rate: u32,
-) -> Result<kima_ml::clap::ClapEmbedding, String> {
+) -> Result<kima_ml::clap::ClapEmbedding, ComputeError> {
+    let preprocess = |e: &dyn std::fmt::Display| ComputeError::Preprocess(e.to_string());
     let mut window_embeddings = Vec::with_capacity(windows.len());
     for window in windows {
-        let prepared = prepare_window(window, rate).map_err(|e| e.to_string())?;
-        let frames = runtime.mel.compute(&prepared).map_err(|e| e.to_string())?;
+        let prepared = prepare_window(window, rate).map_err(|e| preprocess(&e))?;
+        let frames = runtime.mel.compute(&prepared).map_err(|e| preprocess(&e))?;
         let mut flat = Vec::with_capacity(frames.len() * 64);
         for frame in &frames {
             flat.extend_from_slice(frame);
         }
-        let outputs = runtime.session.infer(&flat, 1).map_err(|e| e.to_string())?;
+        let outputs = runtime
+            .session
+            .infer(&flat, 1)
+            .map_err(|e| ComputeError::Inference(e.to_string()))?;
         let mut vector = [0f32; kima_ml::clap::CLAP_EMBEDDING_DIM];
         vector.copy_from_slice(&outputs[0]);
         window_embeddings.push(vector);
     }
-    finish_audio_vector(&window_embeddings)
+    finish_audio_vector(&window_embeddings).map_err(ComputeError::Preprocess)
 }
 
 /// The track vector from the per-window model outputs, exactly as the pipeline label says: L2 per window
@@ -1334,6 +1432,7 @@ mod tests {
                 false,
                 true,
             ),
+            (C::Busy, "SNAPSHOT_BUSY", "INCONCLUSIVE", false, true),
         ];
         for (class, code, error_class, counts, retried) in cases {
             let e =
@@ -1451,13 +1550,54 @@ mod tests {
             "no space",
         ));
         assert!(super::halts_batch(&infra));
+        let cuda = super::StageFailure::Infrastructure(kima_net::Failure::new(
+            super::CUDA_INFERENCE_UNAVAILABLE,
+            "out of memory",
+        ));
+        assert!(super::halts_batch(&cuda));
         for f in [
+            // Every snapshot slot taken: backpressure, never a global failure.
+            super::StageFailure::Infrastructure(kima_net::Failure::new("SNAPSHOT_BUSY", "busy")),
             super::StageFailure::FileMissing("gone".into()),
             super::StageFailure::Permanent(kima_net::Failure::new("SNAPSHOT_TOO_LARGE", "big")),
             super::StageFailure::Transient(kima_net::Failure::new("DECODE_ERROR", "bad")),
             super::StageFailure::Inference(kima_net::Failure::new("INFERENCE_ERROR", "bad")),
         ] {
             assert!(!super::halts_batch(&f), "{f:?}");
+        }
+    }
+
+    /// A CUDA session's run-time failure is the provider's (no attempt, halts and latches);
+    /// on the CPU, or before inference, it stays this track's bounded `INFERENCE_ERROR`.
+    #[test]
+    fn cuda_inference_failures_are_infrastructure_cpu_ones_are_per_track() {
+        use kima_ml::onnx::ActiveProvider;
+        let now = time::OffsetDateTime::now_utc();
+        let claim = claim_with_attempts(3);
+        let cuda = ActiveProvider::Cuda { device_id: 0 };
+        let fallback = ActiveProvider::CpuFallback { reason: "x".into() };
+        let f = super::compute_failure(&cuda, super::ComputeError::Inference("oom".into()));
+        assert!(super::halts_batch(&f), "{f:?}");
+        let rec = super::record_for(&claim, &f, now);
+        assert_eq!(rec.code, super::CUDA_INFERENCE_UNAVAILABLE);
+        assert!(
+            !rec.count_attempt,
+            "the provider's failure never burns an attempt"
+        );
+        assert!(rec.retry_at.is_some());
+        for (provider, error) in [
+            (
+                &ActiveProvider::Cpu,
+                super::ComputeError::Inference("bad".into()),
+            ),
+            (&fallback, super::ComputeError::Inference("bad".into())),
+            (&cuda, super::ComputeError::Preprocess("non-finite".into())),
+        ] {
+            let f = super::compute_failure(provider, error);
+            assert!(!super::halts_batch(&f), "{f:?}");
+            let rec = super::record_for(&claim, &f, now);
+            assert_eq!(rec.code, "INFERENCE_ERROR");
+            assert!(rec.count_attempt);
         }
     }
 
@@ -1916,7 +2056,7 @@ mod tests {
                                 Path::new("input.wav"),
                             );
                             assert!(
-                                matches!(&outcome, EmbedOutcome::Snapshot(f) if halts_batch(f))
+                                matches!(&outcome, EmbedOutcome::Classified(f) if halts_batch(f))
                             );
                             detected_tx.send(()).unwrap();
                             release_rx
@@ -2002,7 +2142,7 @@ mod tests {
             let other = tempfile::tempdir_in("/dev/shm").unwrap();
             std::fs::write(other.path().join("input.wav"), b"not audio").unwrap();
             assert!(
-                matches!(run_embedding_blocking(&ctx, other.path(), Path::new("input.wav")), EmbedOutcome::Snapshot(f) if halts_batch(&f))
+                matches!(run_embedding_blocking(&ctx, other.path(), Path::new("input.wav")), EmbedOutcome::Classified(f) if halts_batch(&f))
             );
             assert_eq!(cached_status(&ctx).unwrap(), at_detection);
             // A restart is a new process: the old process's sessions and their admission
@@ -2076,6 +2216,53 @@ mod tests {
             .map(|(a, b)| f64::from(*a) * f64::from(*b))
             .sum();
         assert!(cos < 0.999, "distinct prompts must not collapse: cos={cos}");
+    }
+
+    /// CUDA requested on a runtime without it (the CPU ORT build): the pool falls back with
+    /// the CPU's parallelism, not the CUDA one (two one-thread sessions and eight workers),
+    /// so the text encoder still fits the host budget.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "private noncommercial CLAP models + CPU-only ORT_DYLIB_PATH required"]
+    async fn private_models_cuda_fallback_uses_cpu_parallelism_and_keeps_text() {
+        use kima_ml::onnx::ExecutionProvider::{Cpu, Cuda};
+        let dir = private_dir(&["tokenizer.json", "music_text.onnx", "music_audio.onnx"]);
+        let cuda = crate::EmbeddingParallelism::resolve(Cuda, 32, None, None, None);
+        let cpu = crate::EmbeddingParallelism::resolve(Cpu, 32, None, None, None);
+        assert_ne!(cuda, cpu);
+        let mut config = cfg(&dir);
+        config.pool_size = cuda.pool_size;
+        config.intra_threads = Some(cuda.intra_threads);
+        config.workers = cuda.workers;
+        config.cpu_fallback = Some(cpu);
+        config.provider = kima_ml::onnx::ProviderConfig {
+            provider: Cuda,
+            ..Default::default()
+        };
+        let ctx = ctx_with(config);
+        let report = super::initialize(&ctx).await.unwrap();
+        assert!(
+            report.is_available(kima_ml::Capability::ClapAudioEmbedding),
+            "{report:?}"
+        );
+        assert!(
+            report.is_available(kima_ml::Capability::ClapTextEmbedding),
+            "{report:?}"
+        );
+        assert!(
+            matches!(
+                super::audio_provider(&ctx),
+                Some(kima_ml::onnx::ActiveProvider::CpuFallback { .. })
+            ),
+            "{:?}",
+            super::audio_provider(&ctx)
+        );
+        let runtime = super::runtime_now(&ctx).unwrap();
+        assert_eq!(runtime.session.capacity(), cpu.pool_size);
+        assert_eq!(super::effective_workers(&ctx), cpu.workers);
+        let text = super::embed_text(&ctx, "a calm piano melody")
+            .await
+            .unwrap();
+        assert!(text.iter().all(|x| x.is_finite()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

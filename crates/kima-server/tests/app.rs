@@ -62,6 +62,7 @@ fn config(frontend: Option<&Path>, origins: &[&str]) -> Config {
         acoustid_disabled: false,
         acoustid_client_key: None,
         fanart_api_key: None,
+        clap_runtime: Default::default(),
     }
 }
 

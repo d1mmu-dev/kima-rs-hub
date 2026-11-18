@@ -130,17 +130,92 @@ async fn main() -> anyhow::Result<()> {
         data_dir: config.data_dir.clone(),
         ignore: state.library.ignore.clone(),
     };
+    let clap = &config.clap_runtime;
+    if let Some(mib) = clap.host_budget_mib {
+        kima_ml::onnx::set_host_budget_bytes(mib * 1024 * 1024);
+    }
+    let ignored = clap.ignored_cuda_settings();
+    if !ignored.is_empty() {
+        warn!(
+            ?ignored,
+            "CUDA settings have no effect with KIMA_ONNX_PROVIDER=cpu"
+        );
+    }
+    let provider = match clap.provider {
+        kima_core::config::OnnxProvider::Cpu => kima_ml::onnx::ExecutionProvider::Cpu,
+        kima_core::config::OnnxProvider::Cuda => kima_ml::onnx::ExecutionProvider::Cuda,
+    };
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let resolve = |provider| {
+        kima_ident::EmbeddingParallelism::resolve(
+            provider,
+            cores,
+            clap.pool_size,
+            clap.intra_threads,
+            clap.workers,
+        )
+    };
+    let parallelism = resolve(provider);
+    // A CUDA request that falls back runs with the CPU's parallelism (the CUDA shape does not
+    // fit the CPU host budget).
+    let cpu_fallback = (provider == kima_ml::onnx::ExecutionProvider::Cuda)
+        .then(|| resolve(kima_ml::onnx::ExecutionProvider::Cpu));
+    let analysis = kima_ident::AnalysisConfig {
+        model_dir: config.musicnn_model_dir.clone(),
+        disabled: config.disable_musicnn,
+        ..Default::default()
+    };
+    // Every embedding and analysis worker holds one input snapshot while it decodes.
+    let max_workers = parallelism
+        .workers
+        .max(cpu_fallback.map_or(0, |p| p.workers));
+    let snapshot_concurrent = kima_ident::snapshot_concurrency(
+        config.snapshot_max_concurrent,
+        max_workers,
+        analysis.workers,
+    );
+    if snapshot_concurrent < max_workers + analysis.workers {
+        warn!(
+            snapshot_concurrent,
+            embedding_workers = max_workers,
+            analysis_workers = analysis.workers,
+            "KIMA_SNAPSHOT_MAX_CONCURRENT is below the worker count; workers wait for snapshot slots"
+        );
+    }
+    info!(
+        ?provider,
+        ?parallelism,
+        ?cpu_fallback,
+        snapshot_concurrent,
+        "CLAP audio runtime configuration"
+    );
     let mut embedding = kima_ident::EmbeddingConfig {
         model_dir: config.clap_model_dir.clone(),
+        pool_size: parallelism.pool_size,
+        intra_threads: Some(parallelism.intra_threads),
+        workers: parallelism.workers,
+        cpu_fallback,
+        provider: kima_ml::onnx::ProviderConfig {
+            provider,
+            cuda_device_id: clap.cuda_device_id.unwrap_or(0),
+            cuda_lib_dir: clap.cuda_lib_dir.clone(),
+            // Bounded to 1 TiB by the configuration, so this never overflows on 64-bit.
+            cuda_mem_limit_bytes: clap
+                .cuda_mem_limit_mib
+                .map(|mib| {
+                    usize::try_from(mib * 1024 * 1024)
+                        .context("KIMA_CUDA_MEM_LIMIT_MIB does not fit this platform")
+                })
+                .transpose()?,
+            cpu_fallback: None,
+        },
         disabled: config.disable_clap,
         snapshot_dir: config.snapshot_dir.clone(),
         snapshot_limits: kima_ident::SnapshotLimits {
             max_bytes: config
                 .snapshot_max_bytes
                 .unwrap_or(kima_ident::SnapshotLimits::default().max_bytes),
-            max_concurrent: config
-                .snapshot_max_concurrent
-                .unwrap_or(kima_ident::SnapshotLimits::default().max_concurrent),
+            max_concurrent: snapshot_concurrent,
         },
         ..Default::default()
     };
@@ -183,11 +258,7 @@ async fn main() -> anyhow::Result<()> {
             fanart_env_key: state.fanart_env_key.clone(),
             artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
             embedding,
-            analysis: kima_ident::AnalysisConfig {
-                model_dir: config.musicnn_model_dir.clone(),
-                disabled: config.disable_musicnn,
-                ..Default::default()
-            },
+            analysis,
             vibe: kima_ident::VibeConfig {
                 asset_dir: config.vibe_asset_dir.clone(),
                 exact_max: config.vibe_exact_max,
@@ -203,7 +274,12 @@ async fn main() -> anyhow::Result<()> {
     let clap_status = kima_ident::stages::embedding::initialize(&ident_ctx)
         .await
         .context("initializing CLAP blocking worker")?;
-    info!(capabilities = ?clap_status.capabilities, "ML capability status");
+    info!(
+        capabilities = ?clap_status.capabilities,
+        clap_audio_provider = ?kima_ident::stages::embedding::audio_provider(&ident_ctx),
+        clap_audio_workers = kima_ident::stages::embedding::effective_workers(&ident_ctx),
+        "ML capability status"
+    );
     // The vibe assets are optional: a missing or unpinned file turns the dependent capability off, never the server.
     let vibe = kima_ident::stages::vibe_assets::initialize(&ident_ctx)
         .await

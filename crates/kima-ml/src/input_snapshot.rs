@@ -27,9 +27,10 @@ use std::{
     io::{self, Read, Seek, SeekFrom},
     path::{Component, Path},
     sync::{
-        Arc,
+        Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 #[cfg(target_os = "linux")]
@@ -73,9 +74,14 @@ pub enum SnapshotClass {
     /// mismatch). A property of this one file, not of the setup: the stage retries it with a
     /// bounded attempt budget instead of re-queuing it forever, and other files are unaffected.
     Unreadable,
-    /// Everything else: quota, concurrency limit, missing or foreign snapshot directory,
-    /// wrong mount, no reflink support, read-only or full filesystem, `EAGAIN`, procfs trouble.
-    /// Retrying later can help; the input itself is not at fault.
+    /// Every concurrency slot of this store stayed taken ([`SnapshotLimits::max_concurrent`],
+    /// `QuotaExceeded`). Backpressure, not a fault: the setup works and slots free up as other
+    /// attempts finish, so callers wait ([`SnapshotStore::create_waiting`]) or give the work
+    /// back without consuming an attempt; it never disables the stage.
+    Busy,
+    /// Everything else: quota, missing or foreign snapshot directory, wrong mount, no reflink
+    /// support, read-only or full filesystem, `EAGAIN`, procfs trouble. Retrying later can
+    /// help; the input itself is not at fault.
     Infrastructure,
 }
 
@@ -134,11 +140,24 @@ impl From<io::Error> for SnapshotError {
     }
 }
 
+/// The store's concurrency slots: a lock-free counter plus a condition variable that wakes
+/// [`SnapshotStore::create_waiting`] callers when a slot is released.
+#[derive(Default)]
+struct Slots {
+    active: AtomicUsize,
+    lock: Mutex<()>,
+    freed: Condvar,
+}
+
 /// Owns one concurrency slot; the slot is released when the last holder drops.
-struct SlotInner(Arc<AtomicUsize>);
+struct SlotInner(Arc<Slots>);
 impl Drop for SlotInner {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.0.active.fetch_sub(1, Ordering::AcqRel);
+        // Taking the lock orders this wake-up after a waiter's failed `reserve` (it holds the
+        // lock from that check until it sleeps), so no release is missed.
+        drop(self.0.lock.lock().unwrap_or_else(|e| e.into_inner()));
+        self.0.freed.notify_all();
     }
 }
 
@@ -149,13 +168,47 @@ impl Drop for SlotInner {
 /// postdates this crate's pinned MSRV (`rust-version = "1.85"` at the workspace root); keep
 /// `fetch_update` and silence the lint rather than raise the MSRV for a rename-only change.
 #[allow(deprecated)]
-fn reserve(active: &Arc<AtomicUsize>, max: usize) -> Option<Arc<SlotInner>> {
-    active
+fn reserve(slots: &Arc<Slots>, max: usize) -> Option<Arc<SlotInner>> {
+    slots
+        .active
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n < max).then_some(n + 1)
         })
         .ok()
-        .map(|_| Arc::new(SlotInner(active.clone())))
+        .map(|_| Arc::new(SlotInner(slots.clone())))
+}
+
+/// [`reserve`], sleeping until a slot is released or `wait` has passed.
+fn reserve_waiting(slots: &Arc<Slots>, max: usize, wait: Duration) -> Option<Arc<SlotInner>> {
+    if let Some(slot) = reserve(slots, max) {
+        return Some(slot);
+    }
+    let deadline = Instant::now() + wait;
+    let mut guard = slots.lock.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if let Some(slot) = reserve(slots, max) {
+            return Some(slot);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        guard = slots
+            .freed
+            .wait_timeout(guard, left)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
+    }
+}
+
+fn busy() -> SnapshotError {
+    SnapshotError::new(
+        SnapshotClass::Busy,
+        io::Error::new(
+            io::ErrorKind::QuotaExceeded,
+            "too many concurrent input snapshots",
+        ),
+    )
 }
 
 pub struct InputSnapshot {
@@ -203,7 +256,7 @@ pub struct SnapshotStore {
     #[cfg(target_os = "linux")]
     dir: OwnedFd,
     limits: SnapshotLimits,
-    active: Arc<AtomicUsize>,
+    slots: Arc<Slots>,
 }
 
 fn invalid(msg: &'static str) -> io::Error {
@@ -576,7 +629,7 @@ mod linux {
             Ok(Self {
                 dir: fd,
                 limits,
-                active: Arc::new(AtomicUsize::new(0)),
+                slots: Arc::default(),
             })
         }
 
@@ -600,8 +653,21 @@ mod linux {
 
         /// Snapshot `relative` (normal components only) beneath `root` into the private
         /// directory. Fails closed; never copies.
+        /// Fails with [`SnapshotClass::Busy`] at once when every slot is taken.
         pub fn create(&self, root: &Path, relative: &Path) -> Result<InputSnapshot, SnapshotError> {
             self.create_with(root, relative, Seams::real())
+        }
+
+        /// [`Self::create`], but waits up to `wait` for a concurrency slot (released when
+        /// another snapshot's last descriptor closes) before answering
+        /// [`SnapshotClass::Busy`]. Blocking: call it from a blocking worker.
+        pub fn create_waiting(
+            &self,
+            root: &Path,
+            relative: &Path,
+            wait: Duration,
+        ) -> Result<InputSnapshot, SnapshotError> {
+            self.create_inner(root, relative, Seams::real(), Some(wait))
         }
 
         pub(super) fn create_with(
@@ -609,6 +675,16 @@ mod linux {
             root: &Path,
             relative: &Path,
             seams: Seams<'_>,
+        ) -> Result<InputSnapshot, SnapshotError> {
+            self.create_inner(root, relative, seams, None)
+        }
+
+        fn create_inner(
+            &self,
+            root: &Path,
+            relative: &Path,
+            seams: Seams<'_>,
+            wait: Option<Duration>,
         ) -> Result<InputSnapshot, SnapshotError> {
             if !root.is_absolute() || has_parent_dir(root) {
                 return Err(invalid("expected absolute root without '..'").into());
@@ -624,12 +700,12 @@ mod linux {
                 ));
             }
             // Reserve a slot first; it is released on every exit path.
-            let slot = reserve(&self.active, self.limits.max_concurrent).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::QuotaExceeded,
-                    "too many concurrent input snapshots",
-                )
-            })?;
+            let max = self.limits.max_concurrent;
+            let slot = match wait {
+                None => reserve(&self.slots, max),
+                Some(wait) => reserve_waiting(&self.slots, max, wait),
+            }
+            .ok_or_else(busy)?;
 
             let root_fd = open_dir_pinned(root)?;
             seams.step(Step::RootOpened);
@@ -749,6 +825,14 @@ impl SnapshotStore {
     pub fn create(&self, _root: &Path, _relative: &Path) -> Result<InputSnapshot, SnapshotError> {
         Err(unsupported().into())
     }
+    pub fn create_waiting(
+        &self,
+        _root: &Path,
+        _relative: &Path,
+        _wait: Duration,
+    ) -> Result<InputSnapshot, SnapshotError> {
+        Err(unsupported().into())
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -761,7 +845,7 @@ impl InputSnapshot {
 impl SnapshotStore {
     /// Currently live snapshots (and attempts in flight).
     pub fn active(&self) -> usize {
-        self.active.load(Ordering::Acquire)
+        self.slots.active.load(Ordering::Acquire)
     }
 }
 
@@ -1357,7 +1441,8 @@ mod tests {
         let first = f.store.create(f.lib.path(), "ok".as_ref()).unwrap();
         let e = f.store.create(f.lib.path(), "ok".as_ref()).err().unwrap();
         assert_eq!(e.kind(), io::ErrorKind::QuotaExceeded);
-        assert_eq!(e.class(), SnapshotClass::Infrastructure);
+        assert_eq!(e.class(), SnapshotClass::Busy);
+        assert!(!e.class().is_permanent());
         assert_eq!(f.store.active(), 1);
         drop(first);
         assert_eq!(f.store.active(), 0);
@@ -1366,15 +1451,15 @@ mod tests {
 
     #[test]
     fn slot_reservation_never_exceeds_the_limit_under_contention() {
-        let active = Arc::new(AtomicUsize::new(0));
+        let slots = Arc::new(Slots::default());
         let peak = Arc::new(AtomicUsize::new(0));
         let threads: Vec<_> = (0..8)
             .map(|_| {
-                let (active, peak) = (active.clone(), peak.clone());
+                let (slots, peak) = (slots.clone(), peak.clone());
                 std::thread::spawn(move || {
                     for _ in 0..2000 {
-                        if let Some(slot) = reserve(&active, 2) {
-                            peak.fetch_max(active.load(Ordering::Acquire), Ordering::AcqRel);
+                        if let Some(slot) = reserve(&slots, 2) {
+                            peak.fetch_max(slots.active.load(Ordering::Acquire), Ordering::AcqRel);
                             drop(slot);
                         }
                     }
@@ -1385,7 +1470,80 @@ mod tests {
             t.join().unwrap();
         }
         assert!(peak.load(Ordering::Acquire) <= 2);
-        assert_eq!(active.load(Ordering::Acquire), 0);
+        assert_eq!(slots.active.load(Ordering::Acquire), 0);
+    }
+
+    /// More concurrent callers than slots: every waiting caller gets a slot as soon as one is
+    /// released, the limit is never exceeded and nobody fails.
+    #[test]
+    fn waiting_reservations_all_succeed_with_more_callers_than_slots() {
+        let slots = Arc::new(Slots::default());
+        let peak = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (slots, peak) = (slots.clone(), peak.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        let slot = reserve_waiting(&slots, 2, Duration::from_secs(30))
+                            .expect("a slot frees up well within the wait");
+                        peak.fetch_max(slots.active.load(Ordering::Acquire), Ordering::AcqRel);
+                        std::thread::sleep(Duration::from_micros(200));
+                        drop(slot);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert!(peak.load(Ordering::Acquire) <= 2);
+        assert_eq!(slots.active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn waiting_reservation_gives_up_after_the_wait() {
+        let slots = Arc::new(Slots::default());
+        let held = reserve(&slots, 1).unwrap();
+        let start = Instant::now();
+        assert!(reserve_waiting(&slots, 1, Duration::from_millis(50)).is_none());
+        assert!(start.elapsed() >= Duration::from_millis(50));
+        drop(held);
+        assert!(reserve_waiting(&slots, 1, Duration::ZERO).is_some());
+    }
+
+    /// The real store: a caller blocked on a full store proceeds once the holder's last
+    /// descriptor closes; without waiting it would answer `Busy`.
+    #[test]
+    fn create_waiting_proceeds_when_a_snapshot_is_released() {
+        let f = reflink_fixture!(SnapshotLimits {
+            max_bytes: 1024,
+            max_concurrent: 1,
+        });
+        std::fs::write(f.lib.path().join("a"), b"1234").unwrap();
+        let first = f.store.create(f.lib.path(), "a".as_ref()).unwrap();
+        let reader = first.open().unwrap();
+        drop(first);
+        assert_eq!(
+            f.store
+                .create(f.lib.path(), "a".as_ref())
+                .err()
+                .unwrap()
+                .class(),
+            SnapshotClass::Busy,
+            "the open descriptor still holds the slot"
+        );
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                f.store
+                    .create_waiting(f.lib.path(), "a".as_ref(), Duration::from_secs(30))
+                    .map(|_| ())
+                    .map_err(|e| e.class())
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            drop(reader);
+            assert_eq!(waiter.join().unwrap(), Ok(()));
+        });
+        assert_eq!(f.store.active(), 0);
     }
 
     #[test]

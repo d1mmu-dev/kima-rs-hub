@@ -595,3 +595,67 @@ fn clap_pins_are_the_music_checkpoint_export() {
     );
     assert!(text.max_bytes >= 501_433_023);
 }
+
+fn identity_artifact(id: &'static str) -> (tempfile::TempDir, VerifiedBytes) {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("synthetic.onnx"), MINIMAL_IDENTITY_ONNX).unwrap();
+    let artifact = crate::verify_artifact(
+        dir.path(),
+        &ArtifactDescriptor {
+            id: ArtifactId::from_static(id),
+            basename: "synthetic.onnx",
+            expected_sha256: Sha256::digest(MINIMAL_IDENTITY_ONNX).into(),
+            max_bytes: MINIMAL_IDENTITY_ONNX.len() as u64,
+        },
+    )
+    .unwrap();
+    (dir, artifact)
+}
+
+#[test]
+fn unusable_cuda_falls_back_to_a_working_cpu_pool() {
+    let (_dir, artifact) = identity_artifact("synthetic-cuda-fallback");
+    let provider = ProviderConfig {
+        provider: ExecutionProvider::Cuda,
+        cuda_lib_dir: Some("/nonexistent-kima-cuda-lib-dir".into()),
+        ..ProviderConfig::default()
+    };
+    let pool =
+        BoundedSessionPool::from_verified_bytes_on(&artifact, 2, Some(1), &provider).unwrap();
+    assert_eq!(pool.capacity(), 2);
+    match pool.provider() {
+        ActiveProvider::CpuFallback { reason } => {
+            assert!(reason.contains("nonexistent-kima-cuda-lib-dir"), "{reason}")
+        }
+        other => panic!("expected CPU fallback, got {other:?}"),
+    }
+    let out = pool
+        .with_session(|session| {
+            let tensor =
+                ort::value::Tensor::from_array(([1usize], vec![3.5_f32].into_boxed_slice()))
+                    .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let outputs = session
+                .run(ort::inputs![tensor])
+                .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            Ok(outputs[0].try_extract_tensor::<f32>().unwrap().1.to_vec())
+        })
+        .unwrap();
+    assert_eq!(out, vec![3.5]);
+}
+
+#[test]
+fn cpu_pool_reports_cpu_and_accepts_the_widened_limits() {
+    let (_dir, artifact) = identity_artifact("synthetic-widened");
+    let pool = BoundedSessionPool::from_verified_bytes(&artifact, MAX_POOL_SIZE, Some(2)).unwrap();
+    assert_eq!(pool.provider(), &ActiveProvider::Cpu);
+    assert_eq!(pool.capacity(), MAX_POOL_SIZE);
+    drop(pool);
+    assert!(
+        BoundedSessionPool::from_verified_bytes(&artifact, MAX_POOL_SIZE + 1, Some(1)).is_err()
+    );
+    assert!(
+        BoundedSessionPool::from_verified_bytes(&artifact, 1, Some(MAX_INTRA_THREADS + 1)).is_err()
+    );
+    assert!(BoundedSessionPool::from_verified_bytes(&artifact, 0, Some(1)).is_err());
+}

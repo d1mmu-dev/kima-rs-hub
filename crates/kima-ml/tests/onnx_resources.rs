@@ -1,5 +1,7 @@
 mod common;
-use kima_ml::onnx::{BoundedSessionPool, MINIMAL_IDENTITY_ONNX, OnnxModelConsumer};
+use kima_ml::onnx::{
+    BoundedSessionPool, MAX_INTRA_THREADS, MAX_POOL_SIZE, MINIMAL_IDENTITY_ONNX, OnnxModelConsumer,
+};
 use kima_ml::{ArtifactId, ModelConsumer};
 
 fn fixture() -> kima_ml::VerifiedBytes {
@@ -11,7 +13,7 @@ fn fixture() -> kima_ml::VerifiedBytes {
 
 #[test]
 fn thread_counts_are_nonzero_and_bounded() {
-    for threads in [0, 5, usize::MAX] {
+    for threads in [0, MAX_INTRA_THREADS + 1, usize::MAX] {
         assert!(
             OnnxModelConsumer::new()
                 .with_intra_threads(threads)
@@ -32,7 +34,9 @@ fn thread_counts_are_nonzero_and_bounded() {
 #[test]
 fn pool_size_has_a_small_upper_bound() {
     assert!(BoundedSessionPool::from_verified_bytes(&fixture(), 0, Some(1)).is_err());
-    assert!(BoundedSessionPool::from_verified_bytes(&fixture(), 5, Some(1)).is_err());
+    assert!(
+        BoundedSessionPool::from_verified_bytes(&fixture(), MAX_POOL_SIZE + 1, Some(1)).is_err()
+    );
 }
 
 #[test]

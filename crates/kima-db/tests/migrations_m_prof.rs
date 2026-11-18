@@ -574,11 +574,18 @@ async fn down_script_restores_pre_profile_schema(pool: PgPool) {
     sqlx::raw_sql(DOWN_0060).execute(&pool).await.unwrap();
     assert_eq!(schema_fingerprint(&pool).await, schema_before_profiles);
     assert_eq!(snapshot(&pool, "user_id").await, rows_0039);
-    let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(version, 41);
+    // Only 0060 is undone; migrations after it (0061 reopens stage rows, no schema) stay applied.
+    let versions: Vec<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let expected: Vec<i64> = kima_db::MIGRATOR
+        .iter()
+        .map(|m| m.version)
+        .filter(|&v| v != 60)
+        .collect();
+    assert_eq!(versions, expected);
 
     // And up again from there.
     kima_db::MIGRATOR.run(&pool).await.unwrap();

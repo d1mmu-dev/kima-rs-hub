@@ -999,6 +999,9 @@ async fn vibe_inputs_settle_when_embedding_and_analysis_do(pool: PgPool) {
     // A terminal failure is settled (nothing is waiting for it).
     reput(&pool, t, "embedding", "failed", "NULL", Some("DAMAGED")).await;
     assert!(enrichment::vibe_inputs(&pool, true).await.unwrap().settled);
+    // Likewise an analysis row whose retries are exhausted (D-251: undecodable codecs).
+    reput(&pool, t, "analysis", "failed", "NULL", Some("INCONCLUSIVE")).await;
+    assert!(enrichment::vibe_inputs(&pool, true).await.unwrap().settled);
 }
 
 /// A podcast refresh failure must be counted and listed by the same control-plane routes a

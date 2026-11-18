@@ -2,7 +2,8 @@
 //!
 //! A track seed with current matching data (verified feel probe, built matching state, an
 //! eligible `MATCHING_SOUND` vector) is ranked by the vibe formula (`rank_matches`, as
-//! `/api/vibe/similar`). Every other seed takes upstream's artist-based path
+//! `/api/vibe/similar`); a short ranking is never topped up. Every other seed, and an eligible
+//! seed whose ranking is empty (owner, Q8 option 1), takes upstream's artist-based path
 //! (`routes/subsonic/search.ts:350-405`): the seed's (album) artist plus its stored similar
 //! artists that are in the library, random order, `count` songs.
 
@@ -535,6 +536,147 @@ fixture_test!(vibe_needs_the_probe_and_a_track_seed, |pool| {
         .unwrap();
     let ids = both(&server, &[("id", &track_id(2).to_string())]).await;
     assert_eq!(set(&ids), tracks(&[1, 3, 4, 5, 6, 7, 8, 9]));
+});
+
+fixture_test!(vibe_seed_with_empty_ranking_falls_back, |pool| {
+    // Owner decision Q8 option 1: the seed keeps its eligible vector (and the built state),
+    // but nothing else is eligible, so the vibe ranking is empty: artist-based answer.
+    embed_fixture(&pool, MATCHING_SOUND.model_id).await;
+    let seed = track_id(1);
+    sqlx::query("DELETE FROM track_embeddings WHERE track_id <> $1")
+        .bind(seed)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(ranked(&pool, seed, 500).await.is_empty());
+    let server = app(state(pool.clone(), true));
+    let ids = both(&server, &[("id", &seed.to_string())]).await;
+    assert_eq!(set(&ids), tracks(&BEATLES));
+});
+
+fixture_test!(vibe_short_ranking_is_not_topped_up, |pool| {
+    // Partial analysis: only La Roux and the seed have vectors. The short ranking is the whole
+    // answer; no artist-based songs are added to reach `count`.
+    embed_fixture(&pool, MATCHING_SOUND.model_id).await;
+    let seed = track_id(1);
+    let la_roux: Vec<Uuid> = LA_ROUX.iter().map(|&n| track_id(n)).collect();
+    sqlx::query("DELETE FROM track_embeddings WHERE track_id <> $1 AND track_id <> ALL($2)")
+        .bind(seed)
+        .bind(&la_roux)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let expected = ranked(&pool, seed, 500).await;
+    assert!(!expected.is_empty() && expected.len() < 50, "{expected:?}");
+    let server = app(state(pool.clone(), true));
+    let seed = seed.to_string();
+    for (endpoint, key) in ENDPOINTS {
+        for params in [
+            vec![("id", seed.as_str())],
+            vec![("id", &seed), ("count", "500")],
+        ] {
+            let ids = songs(&alice(&server, endpoint, &params).await, key);
+            assert_eq!(ids, expected, "{endpoint} {params:?}");
+        }
+    }
+});
+
+fixture_test!(
+    vibe_caps_count_the_seed_two_per_album_four_per_artist,
+    |pool| {
+        // The seed (track 1, Abbey Road, The Beatles) takes one of its album's two places and one
+        // of its artist's four, as `/api/vibe/similar` counts it.
+        embed_fixture(&pool, MATCHING_SOUND.model_id).await;
+        let server = app(state(pool, true));
+        let abbey_road = tracks(&[2, 3, 4, 5]);
+        let beatles = tracks(&BEATLES);
+        for (endpoint, key) in ENDPOINTS {
+            let ids = songs(
+                &alice(
+                    &server,
+                    endpoint,
+                    &[("id", &track_id(1).to_string()), ("count", "500")],
+                )
+                .await,
+                key,
+            );
+            let same_album = ids.iter().filter(|id| abbey_road.contains(*id)).count();
+            let same_artist = ids.iter().filter(|id| beatles.contains(*id)).count();
+            assert_eq!(same_album, 1, "{endpoint} {ids:?}");
+            assert_eq!(same_artist, 3, "{endpoint} {ids:?}");
+        }
+    }
+);
+
+fixture_test!(vibe_ids_match_the_http_api_similar_route, |pool| {
+    embed_fixture(&pool, MATCHING_SOUND.model_id).await;
+    let state = state(pool.clone(), true);
+    let server = app(state.clone());
+    let admin_user = kima_db::users::find_by_id(&pool, ADMIN_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    let jwt = state.jwt.issue_access(
+        admin_user.account(),
+        admin_user.main_profile(),
+        &admin_user.username,
+        &admin_user.role,
+        admin_user.token_version,
+    );
+    let api = TestServer::new(kima_api::router(state)).unwrap();
+    for seed in [track_id(1), track_id(10), track_id(14)] {
+        for limit in ["1", "5", "20", "50"] {
+            let res = api
+                .get(&format!("/api/vibe/similar/{seed}"))
+                .add_query_param("limit", limit)
+                .authorization_bearer(&jwt)
+                .await;
+            res.assert_status_ok();
+            let body = res.json::<Value>();
+            let http: Vec<String> = body["tracks"]
+                .as_array()
+                .unwrap_or_else(|| panic!("no tracks in {body}"))
+                .iter()
+                .map(|t| t["id"].as_str().unwrap().to_owned())
+                .collect();
+            assert!(!http.is_empty());
+            for (endpoint, key) in ENDPOINTS {
+                let ids = songs(
+                    &alice(
+                        &server,
+                        endpoint,
+                        &[("id", &seed.to_string()), ("count", limit)],
+                    )
+                    .await,
+                    key,
+                );
+                assert_eq!(ids, http, "{endpoint} seed={seed} limit={limit}");
+            }
+        }
+    }
+});
+
+fixture_test!(vibe_path_database_failure_is_error_0, |pool| {
+    // The seed is eligible, so the vibe path runs and its read fails; the artist-based path
+    // (which never reads `matching_feel`) must not hide the failure (`/api/vibe/similar`: 500).
+    embed_fixture(&pool, MATCHING_SOUND.model_id).await;
+    let server = app(state(pool.clone(), true));
+    sqlx::query("ALTER TABLE matching_feel RENAME TO matching_feel_broken")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (endpoint, _) in ENDPOINTS {
+        let res = alice(&server, endpoint, &[("id", &track_id(1).to_string())]).await;
+        assert_eq!(res["status"], "failed", "{endpoint} {res}");
+        assert_eq!(res["error"]["code"], 0, "{endpoint} {res}");
+    }
+    // The vibe path runs (and fails) before the artist-based one, for every kind of seed, while
+    // the probe and the state exist: an album or artist id does not hide the failure either.
+    for id in [album_id(3), artist_id(2)] {
+        let res = alice(&server, "getSimilarSongs", &[("id", &id.to_string())]).await;
+        assert_eq!(res["status"], "failed", "{id} {res}");
+        assert_eq!(res["error"]["code"], 0, "{id} {res}");
+    }
 });
 
 fixture_test!(vibe_list_is_library_global_with_the_callers_stars, |pool| {

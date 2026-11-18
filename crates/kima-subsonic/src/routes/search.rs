@@ -267,9 +267,10 @@ async fn get_top_songs(
 /// `getSimilarSongs`: a track seed with current matching data (verified feel probe, built
 /// matching state, an eligible `MATCHING_SOUND` vector) is ranked by the vibe formula, seed
 /// excluded, as `/api/vibe/similar` (owner decision Q8, D-190). Any other seed (album, artist,
-/// or a track without matching data) takes upstream's artist-based path: random present songs
-/// of the seed's artist and its stored similar artists in the library. An id naming nothing
-/// answers the empty element.
+/// or a track without matching data), and an eligible seed whose ranking is empty, takes
+/// upstream's artist-based path: random present songs of the seed's artist and its stored
+/// similar artists in the library. A non-empty ranking shorter than `count` is the whole
+/// answer (never topped up). An id naming nothing answers the empty element.
 async fn similar_songs(
     name: &'static str,
     user: SubsonicUser,
@@ -285,8 +286,10 @@ async fn similar_songs(
     let songs = match ids::parse(raw, &[]) {
         None => Vec::new(),
         Some(id) => match vibe_ranked(&app, id, count).await? {
-            Some(ranked) => subsonic::tracks_by_ids(&app.pool, profile, &ranked).await?,
-            None => artist_based(&app.pool, profile, id, count).await?,
+            Some(ranked) if !ranked.is_empty() => {
+                subsonic::tracks_by_ids(&app.pool, profile, &ranked).await?
+            }
+            _ => artist_based(&app.pool, profile, id, count).await?,
         },
     };
     Ok(Answer::node(
@@ -295,7 +298,8 @@ async fn similar_songs(
 }
 
 /// The vibe ranking for a track seed, best first; `None` when the seed has no current matching
-/// data (no probe, no state, not a track, or no eligible vector).
+/// data (no probe, no state, not a track, or no eligible vector). `Some` may be empty (nothing
+/// else eligible); the caller falls back then.
 async fn vibe_ranked(
     app: &AppState,
     seed: Uuid,
@@ -338,13 +342,17 @@ async fn artist_based(
         .unwrap_or_default();
     entries.sort_by(|a, b| b.r#match.total_cmp(&a.r#match));
     let mut artists = vec![artist];
-    for found in similar::resolve(pool, &entries, entries.len()).await? {
-        if artists.len() > MAX_SIMILAR_ARTISTS {
+    let in_library = similar::resolve(pool, &entries, entries.len())
+        .await?
+        .into_iter()
+        .filter(|found| found.in_library)
+        .filter_map(|found| found.id.parse::<Uuid>().ok());
+    for id in in_library {
+        // The seed's artist plus at most MAX_SIMILAR_ARTISTS others.
+        if artists.len() == 1 + MAX_SIMILAR_ARTISTS {
             break;
         }
-        if let (true, Ok(id)) = (found.in_library, found.id.parse::<Uuid>())
-            && !artists.contains(&id)
-        {
+        if !artists.contains(&id) {
             artists.push(id);
         }
     }

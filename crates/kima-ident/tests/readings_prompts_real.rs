@@ -34,6 +34,13 @@ async fn every_reading_prompt_is_upstreams_and_embeds_like_upstream_python() {
         reference["upstream"],
         "c7527577d925b20f5adf410c7fd4e0c8ac250f69"
     );
+    // The reference parsed the prompts from exactly upstream's analyzer.py at that commit (sha256 of
+    // `git show c7527577:services/audio-analyzer-clap/analyzer.py`), not from a local or later copy.
+    assert_eq!(
+        reference["analyzer_sha256"],
+        "3f8d494b7321ca9ea245cdc3208f68d6ac753c0d49f0cc79d69730a047c03b26",
+        "reference generated from another analyzer.py"
+    );
     println!("python reference versions: {}", reference["versions"]);
 
     // Text parity: the same 8 groups in the same order, the same 3 prompts each, byte for byte.

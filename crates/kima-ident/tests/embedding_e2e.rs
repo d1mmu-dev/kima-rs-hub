@@ -957,3 +957,102 @@ async fn old_general_vectors_are_reembedded_on_the_music_checkpoint_once_availab
     drop(ctx);
     db.cleanup().await;
 }
+
+/// D-194: the transition is latched as finished only when nothing is left. A row another writer holds is skipped
+/// (`SKIP LOCKED`), reported as `remaining`, and retried on the next call; once it is released the pass reopens it
+/// and only then completes. A latch set while a held row was still unreopened would never reopen it in this
+/// process.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs isolated Postgres + KIMA_CLAP_MODEL_DIR; run with --ignored"]
+async fn a_held_old_vector_row_keeps_the_transition_open_until_it_is_reopened() {
+    let model_dir = model_dir();
+    let db = isolated_db().await;
+    let pool = db.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let tracks = tracks_with_audio(&pool, &root, 2).await;
+    let general = Provenance {
+        model_id: "hf_audio".into(),
+        model_sha256: [0x37; 32],
+        pipeline_version: "clap-audio-v1".into(),
+    };
+    let music = Provenance {
+        model_id: OnnxModel::ClapAudio.artifact_id().as_str().to_owned(),
+        model_sha256: OnnxModel::ClapAudio.expected_sha256(),
+        pipeline_version: PIPELINE_VERSION.to_owned(),
+    };
+    seed_done(&pool, tracks[0], &general, 0).await;
+    seed_done(&pool, tracks[1], &general, 1).await;
+    let held_vector = vector_row(&pool, tracks[0]).await;
+    let status = |t: uuid::Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT status FROM track_stages WHERE track_id = $1 AND stage = 'embedding'",
+            )
+            .bind(t)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let mut ctx = ident_ctx_with_embedding(
+        &pool,
+        &root,
+        common::dead_bases(),
+        IdentifySwitch::new(false, false),
+        embedding_config(model_dir, &root),
+    );
+    ctx.config.fingerprinting = false;
+    let (cancel, stop) = (CancellationToken::new(), CancellationToken::new());
+    let pass = || embedding::reopen_unmatched_vectors(&ctx, &cancel, &stop);
+
+    // Another writer holds the first old row's stage lock.
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query(
+        "SELECT 1 FROM track_stages WHERE track_id = $1 AND stage = 'embedding' FOR UPDATE",
+    )
+    .bind(tracks[0])
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+    assert_eq!(
+        pass().await.unwrap(),
+        embedding::VectorTransition::Partial {
+            reopened: 1,
+            remaining: 1
+        }
+    );
+    assert_eq!(
+        (status(tracks[0]).await, status(tracks[1]).await),
+        ("done".to_owned(), "pending".to_owned())
+    );
+    // Not latched: the next pass looks again (and still finds the row held).
+    assert_eq!(
+        pass().await.unwrap(),
+        embedding::VectorTransition::Partial {
+            reopened: 0,
+            remaining: 1
+        }
+    );
+    holder.rollback().await.unwrap();
+
+    // Released: the next pass reopens it, and only now completes.
+    assert_eq!(
+        pass().await.unwrap(),
+        embedding::VectorTransition::Complete { reopened: 1 }
+    );
+    assert_eq!(status(tracks[0]).await, "pending");
+    assert_eq!(ml::unmatched_embeddings(&pool, &music).await.unwrap(), 0);
+    assert_eq!(
+        vector_row(&pool, tracks[0]).await,
+        held_vector,
+        "the old vector stays until its replacement is upserted"
+    );
+    assert_eq!(
+        pass().await.unwrap(),
+        embedding::VectorTransition::AlreadyComplete
+    );
+    drop(ctx);
+    db.cleanup().await;
+}

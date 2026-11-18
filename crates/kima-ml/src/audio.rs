@@ -2,11 +2,13 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use rubato::{FftFixedInOut, Resampler};
 use sha2::{Digest, Sha256};
 use symphonia::core::audio::sample::Sample;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
@@ -24,6 +26,17 @@ pub const MAX_SAMPLE_RATE: u32 = 192_000;
 
 /// Maximum supported channels (up to 8 channels, e.g. 7.1 surround).
 pub const MAX_CHANNELS: u32 = 8;
+
+/// Symphonia's codecs plus Opus through libopus (`symphonia-adapter-libopus`): Symphonia has no
+/// Opus decoder, and upstream decodes Opus with ffmpeg (analysis) and libsndfile/libopus (CLAP).
+/// The adapter applies the OpusHead pre-skip and the Ogg demuxer's end trim (final granule
+/// position), so a track decodes to exactly its 48 kHz frame count, as upstream's decoders do.
+static CODECS: LazyLock<CodecRegistry> = LazyLock::new(|| {
+    let mut registry = CodecRegistry::new();
+    symphonia::default::register_enabled_codecs(&mut registry);
+    registry.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
+    registry
+});
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecodedAudio {
@@ -225,7 +238,7 @@ fn decode_pass(
         return Err(AudioError::UnsupportedChannels(channels));
     }
 
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = CODECS
         .make_audio_decoder(audio_params, &AudioDecoderOptions::default())
         .map_err(|e| AudioError::CorruptAudio(e.to_string()))?;
 

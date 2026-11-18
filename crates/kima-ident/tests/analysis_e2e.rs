@@ -463,7 +463,56 @@ async fn stale_file_generation_rejects_publication_and_claim_is_not_done() {
     db.cleanup().await;
 }
 
-// ---- 4. Retry cap: an undecodable file stops being retried after RETRY_CAP attempts ---------
+// ---- 4. Ogg Opus (D-251): the stage decodes it through libopus, from its snapshot ----------
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs isolated Postgres; run with --ignored"]
+async fn ogg_opus_track_is_analysed_from_its_snapshot() {
+    let db = isolated_db().await;
+    let pool = db.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    // Synthetic stereo tones (crates/kima-ml/tests/fixtures/generate_opus_fixture.sh).
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../kima-ml/tests/fixtures/tone_stereo_3s.opus");
+    std::fs::create_dir_all(root.join("music")).unwrap();
+    std::fs::copy(&fixture, root.join("music/tone.opus")).unwrap();
+    let track_id = common::track(&pool, "music/tone.opus", 3).await;
+
+    let ctx = ident_ctx_with_embedding_and_analysis(
+        &pool,
+        &root,
+        common::dead_bases(),
+        IdentifySwitch::new(false, true),
+        embedding_config_for_analysis(&root),
+        analysis_config(None),
+    );
+    let report = analysis::run_batch(&ctx, &CancellationToken::new())
+        .await
+        .expect("analysis batch should succeed");
+    let row = analysis_stage_row(&pool, track_id).await;
+    assert_eq!(
+        (report.claimed, report.done, report.failed),
+        (1, 1, 0),
+        "{row:?}"
+    );
+    let (status, source, error_code, _) = row.expect("stage row must exist");
+    assert_eq!(status, "done");
+    assert_eq!(source.as_deref(), Some(SOURCE));
+    assert!(error_code.is_none());
+    let stored = kima_db::analysis::analysis(&pool, track_id)
+        .await
+        .expect("querying analysis should succeed")
+        .expect("analysis row must exist for track");
+    assert!(
+        stored.loudness.is_some(),
+        "DSP loudness from the decoded Opus"
+    );
+
+    db.cleanup().await;
+}
+
+// ---- 5. Retry cap: an undecodable file stops being retried after RETRY_CAP attempts ---------
 
 /// A file no decoder reads fails INCONCLUSIVE like any decode error; after the fourth reported failure the row is
 /// terminal (no `next_attempt_at`), exactly as for the embedding stage, so the vibe steps that wait for analysis

@@ -34,7 +34,7 @@ jobs:
       # No test reaches the real network: kima-net panics on any host but this machine.
       KIMA_NET_DENY_REAL: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       # The input-snapshot tests need FICLONE, which the runner's ext4 lacks; they fail loudly
       # without it (docs/m4-input-snapshots.md). Give them a real reflink filesystem (loop XFS,
@@ -126,7 +126,7 @@ jobs:
       SQLX_OFFLINE: "true"
       KIMA_NET_DENY_REAL: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # kima-web builds on stable and nightly (see crates/kima-web/README.md); nightly keeps parity with dev.
       - uses: dtolnay/rust-toolchain@nightly
         with:

@@ -6,9 +6,9 @@ ported to the Rust language.
 Kima is a self-hosted music server. kima-rs replaces the Node/TypeScript backend and the Python analyzers with a single Rust
 `kima` binary plus Postgres, and replaces the upstream Next.js frontend with `kima-web`, a Rust/WASM
 frontend (vertigo) that `kima` renders on the server. `kima-web` is the only frontend: no Next.js or Node
-runs in the Docker image, the production server or CI. The `frontend/` directory (the upstream Next.js app)
-is a temporary visual/functional reference for the comparison tooling (`tools/run-kima-web-visual.sh`) and is
-deleted in M10. The target look is the upstream kima-hub v1.12.3 UI (after the M-SYNC milestone); `kima-web`
+runs in the Docker image, the production server or CI. The repository does not bundle the upstream Next.js app
+(removed 2026-11-18, D-180): visual/functional comparisons use an external, freshly pulled kima-hub checkout
+(`tools/prepare-kima-hub-reference.sh`, `tools/run-kima-web-visual.sh`, configured by `KIMA_HUB_REFERENCE`). The target look is the upstream kima-hub v1.12.3 UI (after the M-SYNC milestone); `kima-web`
 does not match it yet, see [`crates/kima-web/README.md`](crates/kima-web/README.md). Every difference from upstream is logged in
 [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md). Licensed under GPL-3.0-only, like upstream.
 
@@ -22,7 +22,7 @@ login, kima-rs now scans and watches a music folder, shows it as Artist, then Ye
 browse, search, stream (with transcodes), keep playlists and resume playback. An admin can also
 preview and apply a tidy on-disk layout. Music apps that speak Subsonic/OpenSubsonic can connect
 with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Identification and the album
-autotagger and CLAP/analysis plumbing are built. Podcasts (M6a) are served, see [Podcasts](#podcasts);
+autotagger and CLAP/analysis plumbing are built. Podcasts (M6a) are served, see [Podcasts](#podcasts); the vibe engine (M5) is ported but not enabled until the music CLAP checkpoint and its private assets exist, see [Vibe engine](#vibe-engine-m5-not-yet-enabled);
 private-model inference acceptance, audiobooks (M6b) and integrations are still open. See
 `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` for what comes next.
 
@@ -129,11 +129,10 @@ artist photos, biographies, similar artists and genres, album cover fallbacks an
 Progress shows under Settings > Library Tools; new files are picked up as they arrive. Identification
 itself only fills the database; the separate autotagger can write tags when explicitly configured.
 
-Admins can `POST /api/enrichment/rerun` with `{"step":"identification"}` or
-`{"step":"artists"}` to reset that step and its dependent answers; the reply includes
-`artists`, `tracks`, `vectors` and `message`. The other recognized steps (`analysis`,
-`vectors`, `moods`, `similarity`) currently return 409 without a reset; an unknown step returns
-400. This is a partial implementation of the upstream six-step route (D-112).
+Admins can `POST /api/enrichment/rerun` with `{"step":"<step>"}` to reset that step and its
+dependent answers, where `<step>` is one of upstream's six: `identification`, `artists`, `analysis`,
+`vectors`, `moods`, `similarity` (the clear matrix is upstream's, D-188); the reply includes
+`artists`, `tracks`, `vectors` and `message`, and an unknown step returns 400 (D-112).
 
 - **Switch it off.** `KIMA_IDENTIFY=off` stops every outbound lookup for the whole server. An admin can
   also turn "Auto enrich metadata" off in Settings > Artwork; the environment switch wins and
@@ -148,6 +147,47 @@ Admins can `POST /api/enrichment/rerun` with `{"step":"identification"}` or
   Tagged files cost nothing, and later runs reuse a cache. Progress survives restarts. For a large library
   point `MUSICBRAINZ_BASE_URL` at a local MusicBrainz mirror.
 - Fingerprinting uses half the CPU cores by default; set `KIMA_FINGERPRINT_WORKERS` to change that.
+
+## Vibe engine (M5)
+
+The upstream vibe engine is ported (matching formula, library state, map layout, learned moods, similar
+tracks, alchemy, song path, text search, CLAP zero-shot readings, similar-artist re-rank and Subsonic
+`getSimilarSongs`/`getSimilarSongs2`). It runs on the native music CLAP checkpoint (`laion-clap-music-onnx-v1`:
+`music_audio.onnx`, `music_text.onnx` and RoBERTa's `tokenizer.json` in `KIMA_CLAP_MODEL_DIR`, SHA-256-pinned; D-194)
+and the private feel probe below. Without them `/api/system/features` answers `"vibeEmbeddings": false`, nothing is
+eligible, and the routes degrade as spec §4.4 and D-182 describe; the server starts normally. The model files are
+not distributed (noncommercial, private): the Docker image and CI do not contain them.
+
+**Vectors from M4's general CLAP model** are never used by the vibe engine. Once the music model is available (checked
+at startup; models added later count after a restart), enrichment re-embeds those tracks by itself, without deleting
+anything: each old vector is kept until its replacement is written, and the library's similarity and mood state stay
+as they are while the tracks are re-embedded (D-194). The enrichment re-run from the `vectors` step
+(`POST /api/enrichment/rerun {"step":"vectors"}`) is a different, destructive tool: it deletes every stored vector,
+including correct music vectors, together with the similarity and mood state, and re-embeds the whole library. It is
+never run automatically; use it only when you want that.
+
+A real-model end-to-end run on 30 generated tracks passed (`docs/testing/vibe-e2e.md`); the 20-real-track parity and
+recall gates have not been run.
+
+Endpoints (signed in, any profile; library-global): `GET /api/vibe/map` (202 while a first layout is pending,
+gzip when accepted), `GET /api/vibe/mood-summary`, `GET /api/vibe/mood/:trackId`, `GET /api/vibe/similar/:trackId`,
+`POST /api/vibe/alchemy`, `POST /api/vibe/path`, `POST /api/vibe/search`. Enrichment gains the `mood` and
+`similarity` phases, `moods`/`similarity` progress and the real re-run steps (D-188). Differences: D-181–D-193.
+
+**Assets.** Two files go into the directory named by `KIMA_VIBE_ASSET_DIR`, each opened without following
+symlinks, size-bounded and checked against a SHA-256 compiled into the server; the verified bytes are what
+gets parsed. Missing, unpinned or mismatching files never stop startup; they turn off only what depends on them:
+
+| File | Upstream source (v1.12.3, `c7527577`) | SHA-256 of that upstream file | Turns on | Rights |
+|---|---|---|---|---|
+| `feel_probe.json` | `backend/src/services/matching/feelProbe.json` (25 710 bytes) | `13707b5107a591d2c7d5ca7c143005477db41d5cec18eced78a9503902044e2d` | `vibe_assets`: the formula, similar/alchemy/path, map and mood summary, `vibeEmbeddings` (text search needs only the music text model and stored music vectors) | CC BY-NC (derived from DEAM), separate from the GPL code: private, noncommercial use; not in this repository |
+| `mood_heads.json` | `backend/src/services/moods/moodHeads.json` (238 610 bytes) | `335edd4dfe57b3683440367cf0effceec94ad9f5b6dfc36ddafab93dcd427110` | `vibe_mood_heads`: the 22 learned moods, mood summary | No licence statement; training-data licences not checked. Not used until they are (owner decision Q3) |
+
+Take the files from the pinned upstream commit itself (no mirrors), and compare their SHA-256 with the
+values above, which were computed from that commit's Git objects. The pin table compiled into kima-rs
+(`crates/kima-ident/src/stages/vibe_assets.rs`, `VibePins::compiled`) pins `feel_probe.json`; `mood_heads.json`
+stays unpinned, so it is never read and the moods report unavailable until its licences are cleared. The MusicBrainz genre list
+(`mbGenres.json`, CC0) is bundled in `crates/kima-vibe/assets/`.
 
 ## Podcasts
 
@@ -227,7 +267,7 @@ New in kima-rs:
 | `KIMA_DATA_DIR` | `/data` | State directory. Holds `secrets.json` (mode 0600), which stores the generated secrets. |
 | `KIMA_WEB_BUILD_DIR` | unset (set to `/srv/kima/web` in the Docker image) | `vertigo build` output of `kima-web`. Setting it turns on the embedded server-side rendering of the web UI; unset means the server serves the API only. |
 | `KIMA_WEB_SSR_PORT` | `3031` | Loopback port of the embedded SSR server (never exposed). |
-| `KIMA_FRONTEND_DIR` | unset | Directory of a legacy static export (Next.js era). Not set in the image and no longer produced by any build; removed with `frontend/` in M10. |
+| `KIMA_FRONTEND_DIR` | unset | Directory of a legacy static export (Next.js era). Not set in the image and no longer produced by any build (the bundled Next.js app was removed in 2026-11, D-180); the server option itself is unchanged. |
 | `KIMA_BIND_HOST` | `0.0.0.0` | Address to bind. |
 | `KIMA_WATCH_MODE` | `auto` | Library watching: `auto` (native events, fall back to polling), `poll` or `off`. |
 | `KIMA_WATCH_POLL_SECS` | `60` | Poll interval in seconds (must be > 0) for `poll` mode and the `auto` fallback. |
@@ -246,6 +286,8 @@ New in kima-rs:
 | `KIMA_NET_DENY_REAL` | unset | `1` makes any outbound request to a host other than this machine panic. Set in CI so no test reaches the network. |
 | `KIMA_TRANSCODE_CACHE_MB` | `2048` | Size cap of the transcode cache under `KIMA_DATA_DIR`, in MB. |
 | `KIMA_ARTWORK_CACHE_MB` | `512` | Size cap of the cover-art cache under `KIMA_DATA_DIR/artwork`, in MB. The oldest albums are dropped first. `0` means nothing is kept, so every request rebuilds. |
+| `KIMA_VIBE_ASSET_DIR` | unset | Directory with the private vibe assets `feel_probe.json` and `mood_heads.json` (see [Vibe engine](#vibe-engine-m5-not-yet-enabled)). Unset, missing or unpinned files turn off only the vibe capabilities. |
+| `KIMA_VIBE_EXACT_MAX` | `200000` | Vibe text search scans exactly up to this many eligible tracks and uses the HNSW index above it (D-184). A whole number; `0` always uses the index; anything else stops startup. |
 
 Keep `secrets.json` (or the two secret variables) safe: losing it makes stored encrypted settings
 unreadable. A corrupt file stops startup rather than being replaced.

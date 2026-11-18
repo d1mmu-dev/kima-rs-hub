@@ -2734,6 +2734,7 @@ dependencies = [
  "axum",
  "axum-test",
  "base64 0.22.1",
+ "flate2",
  "form_urlencoded",
  "futures",
  "hex",
@@ -2747,13 +2748,17 @@ dependencies = [
  "kima-ident",
  "kima-jobs",
  "kima-library",
+ "kima-ml",
  "kima-net",
  "kima-podcast",
  "kima-test-support",
+ "kima-vibe",
  "lofty",
  "md-5 0.11.0",
+ "rand 0.8.8",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",
@@ -2772,6 +2777,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "time",
  "uuid",
 ]
@@ -2802,7 +2808,10 @@ dependencies = [
 name = "kima-db"
 version = "0.1.0"
 dependencies = [
+ "futures",
+ "hex",
  "kima-core",
+ "kima-vibe",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2828,6 +2837,8 @@ dependencies = [
  "kima-ml",
  "kima-net",
  "kima-test-support",
+ "kima-vibe",
+ "libc",
  "md-5 0.11.0",
  "pathfinding",
  "percent-encoding",
@@ -2835,6 +2846,7 @@ dependencies = [
  "rusty-chromaprint",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "symphonia",
  "tempfile",
@@ -3020,9 +3032,11 @@ dependencies = [
  "kima-ident",
  "kima-jobs",
  "kima-library",
+ "kima-ml",
  "kima-net",
  "kima-podcast",
  "kima-test-support",
+ "kima-vibe",
  "md-5 0.11.0",
  "quick-xml",
  "rand 0.8.8",
@@ -3046,6 +3060,17 @@ dependencies = [
  "kima-db",
  "lofty",
  "uuid",
+]
+
+[[package]]
+name = "kima-vibe"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -1,0 +1,158 @@
+{
+  "synthetic": [
+    {
+      "seed": 1,
+      "expected": [
+        0.001,
+        1.0,
+        0.99,
+        0.997
+      ]
+    },
+    {
+      "seed": 7,
+      "expected": [
+        0.001,
+        0.999,
+        0.989,
+        0.997
+      ]
+    },
+    {
+      "seed": 23,
+      "expected": [
+        0.0,
+        1.0,
+        0.99,
+        0.995
+      ]
+    },
+    {
+      "seed": 49,
+      "expected": [
+        0.393,
+        0.787,
+        0.81,
+        0.899
+      ]
+    },
+    {
+      "seed": 101,
+      "expected": [
+        0.0,
+        1.0,
+        0.999,
+        1.0
+      ]
+    }
+  ],
+  "provenance": "c7527577:services/audio-analyzer-clap/analyzer.py; independent stdlib math transcription",
+  "source_sha256": "3f8d494b7321ca9ea245cdc3208f68d6ac753c0d49f0cc79d69730a047c03b26",
+  "groups": {
+    "vocal": [
+      "music with singing vocals",
+      "song with a singer",
+      "vocal music with lyrics"
+    ],
+    "instrumental": [
+      "instrumental music without vocals",
+      "instrumental track with no singing",
+      "music without any vocals or singing"
+    ],
+    "acoustic": [
+      "soft acoustic guitar and piano music",
+      "unplugged unamplified intimate performance",
+      "gentle stripped-back acoustic recording"
+    ],
+    "electronic": [
+      "heavily produced studio track with electric instruments",
+      "distorted electric guitar and amplified drums",
+      "polished pop production with layered synths and effects"
+    ],
+    "happy": [
+      "happy cheerful uplifting music",
+      "joyful bright positive song",
+      "feel good upbeat music"
+    ],
+    "sad": [
+      "sad melancholic somber music",
+      "dark gloomy depressing song",
+      "sorrowful mournful music"
+    ],
+    "high_energy": [
+      "intense energetic powerful music",
+      "loud fast aggressive song",
+      "high energy driving music"
+    ],
+    "low_energy": [
+      "calm relaxing peaceful music",
+      "soft quiet gentle song",
+      "mellow soothing ambient music"
+    ]
+  },
+  "prompt_text_sha256": "59fd7be24b1b32ff31f383bfb8c8aa2d5cd8e54402e85ee01d9245d7e6e3c1ea",
+  "softmax": [
+    [
+      0,
+      0,
+      0.5
+    ],
+    [
+      0.3,
+      0.2,
+      0.8175744761936437
+    ],
+    [
+      -0.4,
+      0.1,
+      0.0005527786369235996
+    ],
+    [
+      1,
+      -1,
+      0.9999999999999064
+    ],
+    [
+      -1,
+      1,
+      9.357622968839299e-14
+    ],
+    [
+      0.123,
+      0.12,
+      0.5112481019468549
+    ]
+  ],
+  "platt": [
+    [
+      -2,
+      0.0,
+      0.0
+    ],
+    [
+      -0.3,
+      0.097,
+      0.04
+    ],
+    [
+      0,
+      0.562,
+      0.504
+    ],
+    [
+      0.1,
+      0.746,
+      0.747
+    ],
+    [
+      0.5,
+      0.988,
+      0.995
+    ],
+    [
+      2,
+      1.0,
+      1.0
+    ]
+  ]
+}

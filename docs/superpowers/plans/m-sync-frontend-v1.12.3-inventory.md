@@ -1,5 +1,8 @@
 # M-SYNC Task 19: legacy `frontend/` refreshed to v1.12.3 — path inventory
 
+> **Superseded (owner, 2026-11-18):** the bundled `frontend/` was removed from the repository; references to it below are historical. The visual/functional reference is an external upstream kima-hub checkout, pulled with `--ff-only` before each comparison (`tools/prepare-kima-hub-reference.sh`, SHA recorded), and every M10 visual/functional acceptance criterion stays in force (D-180).
+
+
 Reference: upstream v1.12.3 `c7527577d925b20f5adf410c7fd4e0c8ac250f69`, fork base `12faf1cd34ff53054221818b0ccde58b8e9b0020`.
 The podcast slice before this refresh is described in `m-sync-frontend-podcast-inventory.md`; this file covers
 the whole tree after the refresh. `frontend/` stays a comparison reference only (no production, dev or CI path;

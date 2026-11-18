@@ -9,6 +9,7 @@ pub mod media;
 pub mod range;
 mod routes;
 pub mod state;
+pub mod vibe_cache;
 
 pub use routes::router;
 pub use state::{AppState, LibraryServices};

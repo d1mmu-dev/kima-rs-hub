@@ -1,7 +1,7 @@
 //! The shared styling layer: one stylesheet, ported from the legacy Next.js frontend's design tokens.
 //!
 //! `assets/kima-base.css` holds the tokens and global rules (colours, type roles, motion, the media grid, the
-//! page column, ...) copied from `frontend/app/globals.css`; `tools/gen-kima-web-css.mjs` compiles it with
+//! page column, ...) copied from upstream kima-hub `frontend/app/globals.css`; `tools/gen-kima-web-css.mjs` compiles it with
 //! Tailwind v4 into `assets/kima.css`, scanning this crate's sources for class names. The compiled file is
 //! checked in, so building kima-web needs neither Node nor Tailwind. Views then use the same utility classes
 //! as the legacy components (`class="flex items-center gap-3 ..."`), hover/focus states included.
@@ -15,7 +15,7 @@ const CSS: &str = include_str!("../assets/kima.css");
 const FONT: &[u8] = include_bytes!("../assets/fonts/montserrat-latin.woff2");
 const MARK: &[u8] = include_bytes!("../assets/kima.webp");
 
-/// The logo's gradient (`frontend/lib/brandGradient.ts`), amber at the top to azure at the bottom.
+/// The logo's gradient (upstream kima-hub `frontend/lib/brandGradient.ts`), amber at the top to azure at the bottom.
 pub const BRAND_GRADIENT: &str = "linear-gradient(180deg, #fca506 2%, #fdac15 9%, #fdb530 17%, #fcb253 24%, #f69472 31%, #e86690 39%, #cd45aa 46%, #a633c2 54%, #7731d2 61%, #483ad9 69%, #234ed9 76%, #0e6bd3 83%, #0583cd 91%, #0191c9 98%)";
 
 /// Standard base64 (RFC 4648, padded).

@@ -32,7 +32,9 @@ use tracing::{info, warn};
 use crate::IdentCtx;
 use crate::artist;
 use crate::events::ProgressEvents;
-use crate::stages::{BatchReport, analysis, embedding, fingerprint, recording};
+use crate::stages::moods::MoodPass;
+use crate::stages::similarity::SimilarityPass;
+use crate::stages::{BatchReport, analysis, embedding, fingerprint, moods, recording, similarity};
 
 /// The coordinator's job queue (concurrency 1).
 pub const QUEUE: &str = "enrich";
@@ -123,7 +125,13 @@ pub struct CycleReport {
     pub ran: bool,
     pub fingerprint: BatchReport,
     pub embedding: BatchReport,
+    /// `embedding` rows the D-194 transition reopened this cycle (stored vectors not from the music checkpoint).
+    pub reopened_vectors: u64,
     pub analysis: BatchReport,
+    /// The mood step: `claimed = done =` scores written (it has no per-track rows to claim).
+    pub moods: BatchReport,
+    /// The similarity step: `claimed = done =` tracks that got feel or a map place.
+    pub similarity: BatchReport,
     pub artists: BatchReport,
     pub tracks: BatchReport,
     /// Batches that ended in a database error (recorded as `last_error`, retried next cycle).
@@ -133,14 +141,17 @@ pub struct CycleReport {
 }
 
 impl CycleReport {
-    /// Whether any item was claimed.
+    /// Whether any item was claimed, or the D-194 transition reopened rows (the next cycle embeds them).
     pub fn any_work(&self) -> bool {
         self.fingerprint.claimed
             + self.embedding.claimed
             + self.analysis.claimed
+            + self.moods.claimed
+            + self.similarity.claimed
             + self.artists.claimed
             + self.tracks.claimed
             > 0
+            || self.reopened_vectors > 0
     }
 }
 
@@ -198,16 +209,27 @@ pub async fn run_cycle(
             analysis_phase(ctx, cancel, &stop, &ann),
             network_phases(ctx, cancel, &stop, &ann)
         );
+        // The library-wide steps read what the phases above made, so they follow them (spec 9.1).
+        let vibe = vibe_phases(ctx, cancel, &stop, &ann).await;
         stop.cancel(); // ends the watcher
-        (fp, emb, an, net)
+        (fp, emb, an, net, vibe)
     };
-    let ((fp, emb, an, net), ()) = tokio::join!(phases, watch_state(pool, cancel, &stop));
+    let ((fp, emb, an, net, vibe), ()) = tokio::join!(phases, watch_state(pool, cancel, &stop));
     report.fingerprint = fp.report;
     report.embedding = emb.report;
+    report.reopened_vectors = emb.reopened;
     report.analysis = an.report;
+    report.moods = vibe.moods.report;
+    report.similarity = vibe.similarity.report;
     report.artists = net.artists.report;
     report.tracks = net.tracks.report;
-    report.errors = fp.errors + emb.errors + an.errors + net.artists.errors + net.tracks.errors;
+    report.errors = fp.errors
+        + emb.errors
+        + an.errors
+        + vibe.moods.errors
+        + vibe.similarity.errors
+        + net.artists.errors
+        + net.tracks.errors;
     if cancel.is_cancelled() {
         return Err(JobError::Retry("enrichment cycle cancelled".into()));
     }
@@ -286,6 +308,8 @@ async fn watch_state(pool: &PgPool, cancel: &CancellationToken, stop: &Cancellat
 struct PhaseOutcome {
     report: BatchReport,
     errors: usize,
+    /// Embedding only: rows the D-194 transition reopened.
+    reopened: u64,
 }
 
 /// Whether a phase goes on to another batch.
@@ -294,7 +318,7 @@ fn go_on(cancel: &CancellationToken, stop: &CancellationToken) -> bool {
 }
 
 /// Logs and records a batch's database error; the phase ends and the next cycle retries.
-async fn batch_failed(ctx: &IdentCtx, phase: Phase, e: sqlx::Error) {
+async fn batch_failed(ctx: &IdentCtx, phase: Phase, e: impl std::fmt::Display) {
     warn!(error = %e, phase = phase.as_str(), "enrichment batch failed; retrying next cycle");
     // A sqlx error names the statement's failure, never a bound value, so no secret reaches
     // `last_error`.
@@ -345,13 +369,23 @@ impl<'a> Announcer<'a> {
 /// changed, or the batch claimed work and the status moved (a run starting). A failure is
 /// logged only.
 async fn mark(ctx: &IdentCtx, ann: &Announcer<'_>, phase: Phase, b: BatchReport) {
-    let changed = b.done + b.failed > 0;
+    mark_counts(ctx, ann, phase, b.done + b.failed > 0, b.claimed).await;
+}
+
+/// [`mark`] from the bare facts: whether counts changed, and how many items were claimed.
+async fn mark_counts(
+    ctx: &IdentCtx,
+    ann: &Announcer<'_>,
+    phase: Phase,
+    changed: bool,
+    claimed: usize,
+) {
     let _guard = ann.mark_lock.lock().await;
     if let Err(error) = enrichment::set_phase(&ctx.pool, Some(phase), changed).await {
         warn!(%error, "recording the enrichment phase failed");
         return;
     }
-    if !changed && b.claimed == 0 {
+    if !changed && claimed == 0 {
         return;
     }
     match enrichment::state(&ctx.pool).await {
@@ -401,6 +435,11 @@ async fn fingerprint_phase(
 /// `network_may_run`/`ctx.net` (the MusicBrainz switch), per the owner's 2026-11-04
 /// decision. Joined alongside `fingerprint_phase` and `network_phases` in `run_cycle`, so
 /// it keeps claiming even while MusicBrainz network phases are paused or disabled.
+///
+/// First the D-194 checkpoint transition ([`embedding::reopen_unmatched_vectors`]): only while the music audio
+/// capability is available, bounded, never waiting on another writer, and done for this process once nothing is
+/// left; the batches below then embed what it reopened. A failure is recorded like a batch error and the batches
+/// still run.
 async fn embedding_phase(
     ctx: &IdentCtx,
     cancel: &CancellationToken,
@@ -408,6 +447,19 @@ async fn embedding_phase(
     ann: &Announcer<'_>,
 ) -> PhaseOutcome {
     let mut out = PhaseOutcome::default();
+    match embedding::reopen_unmatched_vectors(ctx, cancel, stop).await {
+        Ok(transition) => {
+            out.reopened = transition.reopened();
+            if out.reopened > 0 {
+                // The embedding counts changed (rows went back to pending): announce it.
+                mark_counts(ctx, ann, Phase::Embedding, true, 0).await;
+            }
+        }
+        Err(e) => {
+            out.errors += 1;
+            batch_failed(ctx, Phase::Embedding, e).await;
+        }
+    }
     let mut marked = false;
     while go_on(cancel, stop) {
         match embedding::run_batch_until(ctx, cancel, stop).await {
@@ -461,6 +513,121 @@ async fn analysis_phase(
                 batch_failed(ctx, Phase::Analysis, e).await;
                 break;
             }
+        }
+    }
+    out
+}
+
+/// What the mood and similarity phases did.
+#[derive(Default)]
+struct VibeOutcome {
+    moods: PhaseOutcome,
+    similarity: PhaseOutcome,
+}
+
+/// Steps 3c-3d (upstream `executeMoodPhase`, `executeSimilarityPhase`): the learned moods, then the matching state
+/// and the vibe map. Library-wide passes with no per-track rows; each waits until nothing that feeds it is still
+/// being made (`VibeInputs::settled`: embedding and analysis open, working or retrying). A failure is logged and
+/// recorded and never stops the cycle: the moods failing does not keep similarity from running, as upstream.
+/// An unavailable asset (no mood heads, no feel probe) turns only its own step off.
+async fn vibe_phases(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    stop: &CancellationToken,
+    ann: &Announcer<'_>,
+) -> VibeOutcome {
+    let mut out = VibeOutcome::default();
+    if !go_on(cancel, stop) {
+        return out;
+    }
+    let inputs = match enrichment::vibe_inputs(&ctx.pool, true).await {
+        Ok(i) => i,
+        Err(e) => {
+            out.moods.errors += 1;
+            batch_failed(ctx, Phase::Mood, e).await;
+            return out;
+        }
+    };
+    if !inputs.settled {
+        tracing::debug!(
+            "moods and similarity wait: analysis or sound vectors are still being made"
+        );
+        return out;
+    }
+    out.moods = mood_phase(ctx, cancel, stop, ann).await;
+    if go_on(cancel, stop) {
+        // The one-time layout also waits for the artist genres the formula reads.
+        out.similarity = similarity_phase(ctx, cancel, ann, inputs.artists_owed == 0).await;
+    }
+    out
+}
+
+async fn mood_phase(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    stop: &CancellationToken,
+    ann: &Announcer<'_>,
+) -> PhaseOutcome {
+    let mut out = PhaseOutcome::default();
+    if !go_on(cancel, stop) {
+        return out;
+    }
+    let result = tokio::select! { biased;
+        () = cancel.cancelled() => return out,
+        () = stop.cancelled() => return out,
+        result = moods::run_pass_with(ctx, &embedding::NativeTextEmbedder, cancel) => result,
+    };
+    match result {
+        Ok(MoodPass::Unavailable) => {
+            tracing::debug!("mood heads unavailable; the mood step is off")
+        }
+        Ok(MoodPass::Ran { build, .. }) => {
+            let n = usize::try_from(build.scored).unwrap_or(usize::MAX);
+            let b = BatchReport {
+                claimed: n,
+                done: n,
+                ..BatchReport::default()
+            };
+            mark(ctx, ann, Phase::Mood, b).await;
+            out.report += b;
+        }
+        Err(e) => {
+            out.errors += 1;
+            batch_failed(ctx, Phase::Mood, e).await;
+        }
+    }
+    out
+}
+
+async fn similarity_phase(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    ann: &Announcer<'_>,
+    genres_settled: bool,
+) -> PhaseOutcome {
+    let mut out = PhaseOutcome::default();
+    // A cancelled cycle (shutdown) leaves a layout to finish or stop on its own; the server stops it explicitly.
+    let pass = tokio::select! {
+        () = cancel.cancelled() => return out,
+        pass = similarity::run_pass(ctx, genres_settled) => pass,
+    };
+    match pass {
+        Ok(SimilarityPass::Unavailable) => {
+            tracing::debug!("feel probe unavailable; the similarity step is off");
+        }
+        Ok(ran) => {
+            let n = ran.worked();
+            let b = BatchReport {
+                claimed: n,
+                done: n,
+                ..BatchReport::default()
+            };
+            mark(ctx, ann, Phase::Similarity, b).await;
+            out.report += b;
+        }
+        Err(e) => {
+            out.errors += 1;
+            batch_failed(ctx, Phase::Similarity, e).await;
         }
     }
     out

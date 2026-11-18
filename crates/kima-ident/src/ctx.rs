@@ -32,6 +32,17 @@ pub struct EmbeddingRuntimeState {
     pub(crate) root_check: Mutex<Option<(PathBuf, Option<String>)>>,
     /// First global snapshot failure, latched until restart; never affects text.
     pub(crate) audio_infrastructure_failure: Mutex<Option<String>>,
+    /// The vibe engine's private assets (feel probe, mood heads), loaded once per process; kept here with the
+    /// other loaded-once model state so no `IdentCtx` constructor changes.
+    pub(crate) vibe_assets: Mutex<Option<Arc<crate::stages::vibe_assets::VibeAssets>>>,
+    /// The mood step's per-process state (the heads, the last full hash, the mood snapshot).
+    pub(crate) vibe_moods: Mutex<Option<Arc<crate::stages::moods::MoodRuntime>>>,
+    pub(crate) vibe_readings: crate::stages::readings::PromptCache,
+    /// The similarity step's per-process state (the feel probe, the single-flight map service).
+    pub(crate) vibe_similarity: Mutex<Option<Arc<crate::stages::similarity::SimilarityRuntime>>>,
+    /// The D-194 transition pass found nothing left to reopen; it is not run again until restart (the audio
+    /// capability it depends on is itself evaluated once per process).
+    pub(crate) vector_transition_complete: std::sync::atomic::AtomicBool,
 }
 
 pub type EmbeddingRuntimeCache = Arc<EmbeddingRuntimeState>;
@@ -101,6 +112,27 @@ pub struct IdentConfig {
     pub embedding: EmbeddingConfig,
     /// The audio analysis stage (M4).
     pub analysis: AnalysisConfig,
+    /// The vibe engine (M5).
+    pub vibe: VibeConfig,
+}
+
+/// Configuration of the vibe engine (M5), parsed once in `kima_core::Config`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VibeConfig {
+    /// `KIMA_VIBE_ASSET_DIR`: directory with the private feel probe and mood-head files. `None` turns the
+    /// `vibe_assets` and `vibe_mood_heads` capabilities off.
+    pub asset_dir: Option<PathBuf>,
+    /// `KIMA_VIBE_EXACT_MAX`: text search scans exactly up to this many eligible tracks, then uses the HNSW index.
+    pub exact_max: u64,
+}
+
+impl Default for VibeConfig {
+    fn default() -> Self {
+        Self {
+            asset_dir: None,
+            exact_max: kima_core::config::DEFAULT_VIBE_EXACT_MAX,
+        }
+    }
 }
 
 /// Configuration for `Stage::Analysis` (M4): the MusiCNN ONNX model directory and
@@ -138,7 +170,8 @@ impl Default for AnalysisConfig {
 /// bounded session pool, independent of [`IdentConfig::fingerprinting`] and MusicBrainz.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbeddingConfig {
-    /// Directory holding the verified `hf_audio.onnx` artifact. `None` disables the
+    /// Directory holding the verified music CLAP files (`music_audio.onnx`, `music_text.onnx`,
+    /// `tokenizer.json`). `None` disables the
     /// `ClapAudioEmbedding` capability, without claiming work.
     pub model_dir: Option<PathBuf>,
     /// Explicit operator override that skips model loading.
@@ -190,6 +223,7 @@ impl std::fmt::Debug for IdentConfig {
                 &self.fanart_env_key.as_ref().map(|_| ".."),
             )
             .field("artist_timeout", &self.artist_timeout)
+            .field("vibe", &self.vibe)
             .finish()
     }
 }
@@ -227,6 +261,7 @@ impl Default for IdentConfig {
             artist_timeout: crate::artist::ARTIST_TIMEOUT,
             embedding: EmbeddingConfig::default(),
             analysis: AnalysisConfig::default(),
+            vibe: VibeConfig::default(),
         }
     }
 }

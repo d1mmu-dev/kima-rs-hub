@@ -103,6 +103,10 @@ pub struct AppState {
     pub progress_memo: Arc<Mutex<Option<(Instant, serde_json::Value)>>>,
     /// Failed password sign-ins, per (client IP, username).
     pub login_limit: Arc<LoginLimiter>,
+    /// The authenticated library-global map's compressed response (one content version).
+    pub vibe_map_cache: Arc<crate::vibe_cache::VibeMapCache>,
+    /// Verified native text inference in production; injectable for synthetic tests only.
+    pub vibe_text_embedder: Arc<dyn kima_ident::stages::embedding::TextEmbedder>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
     password_permits: Arc<AtomicU64>,
 }
@@ -144,6 +148,8 @@ impl AppState {
             ident: None,
             progress_memo: Arc::new(Mutex::new(None)),
             login_limit: Arc::new(LoginLimiter::new()),
+            vibe_map_cache: Arc::default(),
+            vibe_text_embedder: Arc::new(kima_ident::stages::embedding::NativeTextEmbedder),
             password_permits: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -223,6 +229,7 @@ impl AppState {
                 artist_timeout: kima_ident::artist::ARTIST_TIMEOUT,
                 embedding: kima_ident::EmbeddingConfig::default(),
                 analysis: kima_ident::AnalysisConfig::default(),
+                vibe: kima_ident::VibeConfig::default(),
             },
             last_cycle: Default::default(),
             progress_events: self.progress_events.clone(),

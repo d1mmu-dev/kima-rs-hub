@@ -1,6 +1,8 @@
 //! Default CLAP window selection, preparation, and model-independent log-mel.
 //!
 //! Window selection ports `compute_window_offsets` in [upstream analyzer.py](https://github.com/Chevron7Locked/kima-hub/blob/12faf1cd34ff53054221818b0ccde58b8e9b0020/services/audio-analyzer-clap/analyzer.py).
+//! Ported at 12faf1cd (lines 128-164); the function is byte-identical at the current pin c7527577
+//! (`analyzer.py:111-147`), whose music recipe (D-194) uses it unchanged.
 //! Only the default five-window, ten-second configuration is implemented.
 //! Model inference and source verification are outside this module.
 
@@ -9,7 +11,10 @@
 /// Resamples independently with libsoxr HQ, fixes the length using librosa's
 /// ceiling rule, cuts to ten seconds, then tiles whole copies and zero-pads
 /// the remainder, as in upstream `onnx_backend.py` and `clap_mel.py` at
-/// commit 12faf1cd34ff53054221818b0ccde58b8e9b0020. Empty input is an error.
+/// commit 12faf1cd34ff53054221818b0ccde58b8e9b0020. At the current pin c7527577 the music
+/// path loads windows the same way (`analyzer.py:222-243` `_load_window`, unchanged apart from
+/// its return type) and fits them with `music_clap_mel.fit_window` (`onnx_backend.py:119-123`);
+/// its int16 round trip is in [`MusicClapMel`]. Empty input is an error.
 /// Only 8–192 kHz and up to ten seconds of input are accepted.
 pub fn prepare_window(samples: &[f32], rate: u32) -> Result<Vec<f32>, crate::audio::AudioError> {
     use crate::audio::{AudioError, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE};
@@ -386,6 +391,155 @@ impl ClapMelFrontend {
     }
 }
 
+/// laion_clap's int16 round trip of one sample (`training/data.py:93-99`, called by upstream
+/// `music_clap_mel.quantize`): clip to [-1, 1], multiply by 32767 in float32, truncate toward
+/// zero to int16, divide by 32767 in float64 and round to float32.
+pub fn music_quantize(sample: f32) -> f32 {
+    let clipped = sample.clamp(-1.0, 1.0);
+    let truncated = (clipped * 32767.0) as i16;
+    (f64::from(truncated) / 32767.0) as f32
+}
+
+/// Log-mel front end of the music CLAP checkpoint (`music_audio.onnx`, label
+/// `laion-clap-music-onnx-v1`): upstream `music_clap_mel.py` at kima-hub
+/// c7527577d925b20f5adf410c7fd4e0c8ac250f69, itself a copy of laion_clap 1.1.7/torchlibrosa 0.1.0.
+///
+/// [`music_quantize`] every sample, repeat whole copies and zero-fill to 480000 samples, then a
+/// periodic Hann of 1024 with 512 reflected samples on each side, hop 480, a float64 power
+/// spectrum, librosa's float32 Slaney mel bank (64 bands, 50–14000 Hz) and
+/// `10 * log10(max(x, 1e-10))`. Output is 1001 frames of 64 float32 dB values, frame-major.
+///
+/// This is not [`ClapMelFrontend`]: that one is the general `clap-htsat-unfused` recipe (no int16
+/// round trip, complex64 spectrum, float64 filters) and its log-mels are not this model's input.
+pub struct MusicClapMel {
+    fft: std::sync::Arc<dyn rustfft::Fft<f64>>,
+    filters: Box<[[f64; 513]; 64]>,
+    window: [f64; 1024],
+}
+
+impl Default for MusicClapMel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MusicClapMel {
+    pub fn new() -> Self {
+        Self {
+            fft: rustfft::FftPlanner::new().plan_fft_forward(1024),
+            filters: librosa_slaney_mel_f32(),
+            window: std::array::from_fn(|i| {
+                0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / 1024.0).cos()
+            }),
+        }
+    }
+
+    /// One prepared window of at most ten seconds at 48 kHz (see [`prepare_window`], which
+    /// already cuts at the start the way upstream's `crop_start=0` does). Empty, non-finite and
+    /// over-ten-second inputs fail closed.
+    pub fn compute(&self, samples: &[f32]) -> Result<Vec<[f32; 64]>, &'static str> {
+        const LEN: usize = 480_000;
+        if samples.is_empty() {
+            return Err("empty input");
+        }
+        if samples.len() > LEN {
+            return Err("input exceeds ten seconds");
+        }
+        if samples.iter().any(|x| !x.is_finite()) {
+            return Err("non-finite input");
+        }
+        let quantized: Vec<f64> = samples
+            .iter()
+            .map(|&x| f64::from(music_quantize(x)))
+            .collect();
+        let repeated = LEN / quantized.len() * quantized.len();
+        let sample = |index: usize| {
+            if index < repeated {
+                quantized[index % quantized.len()]
+            } else {
+                0.0
+            }
+        };
+        let mut out = Vec::with_capacity(1001);
+        let mut fft = vec![rustfft::num_complex::Complex64::default(); 1024];
+        for frame in 0..1001 {
+            for (i, v) in fft.iter_mut().enumerate() {
+                let pos = frame * 480 + i;
+                let index = if pos < 512 {
+                    512 - pos
+                } else if pos >= LEN + 512 {
+                    2 * LEN + 510 - pos
+                } else {
+                    pos - 512
+                };
+                *v = rustfft::num_complex::Complex64::new(sample(index) * self.window[i], 0.0);
+            }
+            self.fft.process(&mut fft);
+            let power: [f64; 513] =
+                std::array::from_fn(|i| fft[i].re * fft[i].re + fft[i].im * fft[i].im);
+            let bands = std::array::from_fn(|b| {
+                let sum: f64 = power.iter().zip(&self.filters[b]).map(|(p, w)| p * w).sum();
+                (10.0 * sum.max(1e-10).log10()) as f32
+            });
+            if bands.iter().any(|v: &f32| !v.is_finite()) {
+                return Err("non-finite frontend output");
+            }
+            out.push(bands);
+        }
+        Ok(out)
+    }
+}
+
+/// `librosa.filters.mel(sr=48000, n_fft=1024, n_mels=64, fmin=50, fmax=14000)` (librosa 0.11:
+/// Slaney scale, Slaney area norm, `dtype=float32`) widened to float64, reproducing its float64
+/// operation order and both float32 roundings (the triangle, then the in-place area scaling).
+fn librosa_slaney_mel_f32() -> Box<[[f64; 513]; 64]> {
+    const F_SP: f64 = 200.0 / 3.0;
+    let min_log_mel = 1000.0 / F_SP;
+    let logstep = 6.4_f64.ln() / 27.0;
+    let hz_to_mel = |hz: f64| {
+        if hz >= 1000.0 {
+            min_log_mel + (hz / 1000.0).ln() / logstep
+        } else {
+            hz / F_SP
+        }
+    };
+    let mel_to_hz = |mel: f64| {
+        if mel >= min_log_mel {
+            1000.0 * (logstep * (mel - min_log_mel)).exp()
+        } else {
+            F_SP * mel
+        }
+    };
+    // np.linspace(min_mel, max_mel, 66): i * step + start, the last point exactly `stop`.
+    let (start, stop) = (hz_to_mel(50.0), hz_to_mel(14_000.0));
+    let step = (stop - start) / 65.0;
+    let mel_f: [f64; 66] = std::array::from_fn(|i| {
+        mel_to_hz(if i == 65 {
+            stop
+        } else {
+            i as f64 * step + start
+        })
+    });
+    // np.fft.rfftfreq(1024, 1 / 48000).
+    let bin = 1.0 / (1024.0 * (1.0 / 48_000.0));
+    let mut filters = vec![[0.0_f64; 513]; 64];
+    for (i, filter) in filters.iter_mut().enumerate() {
+        let enorm = 2.0 / (mel_f[i + 2] - mel_f[i]);
+        for (k, entry) in filter.iter_mut().enumerate() {
+            let f = k as f64 * bin;
+            let lower = -(mel_f[i] - f) / (mel_f[i + 1] - mel_f[i]);
+            let upper = (mel_f[i + 2] - f) / (mel_f[i + 2] - mel_f[i + 1]);
+            let triangle = lower.min(upper).max(0.0) as f32;
+            *entry = f64::from((f64::from(triangle) * enorm) as f32);
+        }
+    }
+    match filters.into_boxed_slice().try_into() {
+        Ok(b) => b,
+        Err(_) => unreachable!(),
+    }
+}
+
 /// Fixed dimensionality of CLAP audio and text embeddings (512 dimensions).
 pub const CLAP_EMBEDDING_DIM: usize = 512;
 
@@ -545,10 +699,12 @@ pub fn aggregate_window_embeddings(
 /// Pure postprocessing of raw model output vectors for 1 to 5 windows.
 ///
 /// Ports the complete upstream CLAP embedding pipeline:
-/// 1. Each raw window output vector is L2-normalized to unit norm (as in `onnx_backend.embed_clips`).
+/// 1. Each raw window output vector is L2-normalized to unit norm (as in `onnx_backend.embed_clips`,
+///    c7527577 `onnx_backend.py:125-133`, which divides by `norm + 1e-12`; this divides by the norm).
 /// 2. The unit-norm window vectors are aggregated by taking their arithmetic mean across windows
-///    (as in `analyzer.py:366`).
-/// 3. The aggregate vector is L2-normalized to unit norm (as in `analyzer.py:368`).
+///    (c7527577 `analyzer.py:283`; `analyzer.py:366` at 12faf1cd).
+/// 3. The aggregate vector is L2-normalized to unit norm (c7527577 `analyzer.py:284-286`;
+///    `analyzer.py:367-369` at 12faf1cd).
 /// 4. Validates that the resulting vector satisfies the unit-norm guard: `|norm - 1.0| <= 1e-3`.
 ///
 /// Refuses:

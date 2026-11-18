@@ -1139,7 +1139,8 @@ async fn wipe_touches_only_listed_columns(pool: PgPool) {
     let fingerprints = snapshot(&pool, "track_acoustid", "track_id", &[]).await;
     let open_stages = snapshot(
         &pool,
-        "(SELECT * FROM track_stages WHERE NOT (stage = 'recording' AND status IN ('done', 'working'))) ",
+        "(SELECT * FROM track_stages WHERE NOT (stage = 'recording' AND status IN ('done', 'working'))
+          AND stage NOT IN ('analysis', 'embedding')) ",
         "track_id || stage",
         &[],
     )
@@ -1174,7 +1175,7 @@ async fn wipe_touches_only_listed_columns(pool: PgPool) {
     assert_eq!(
         snapshot(
             &pool,
-            "(SELECT * FROM track_stages WHERE NOT (stage = 'recording' AND status IN ('done', 'working')) AND evidence IS DISTINCT FROM '{\"reason\":\"enrichment wiped\"}') ",
+            "(SELECT * FROM track_stages WHERE NOT (stage = 'recording' AND status IN ('done', 'working')) AND evidence IS DISTINCT FROM '{\"reason\":\"enrichment wiped\"}' AND stage NOT IN ('analysis', 'embedding')) ",
             "track_id || stage",
             &[],
         )
@@ -1416,7 +1417,52 @@ async fn wipe_clears_only_musicbrainz_isrc(pool: PgPool) {
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn wipe_never_touches_user_overrides(pool: PgPool) {
     let w = seed(&pool).await;
+    // Main ids equal account ids and cannot catch profile/account mix-ups. Seed both
+    // non-main kinds with their own personal rows before the library-global rerun.
+    let mut owners = vec![w.user];
+    for kind in ["kids", "standard"] {
+        let profile = Uuid::now_v7();
+        sqlx::query("INSERT INTO profiles (id,user_id,name,kind) VALUES ($1,$2,$3,$3)")
+            .bind(profile)
+            .bind(w.user)
+            .bind(kind)
+            .execute(&pool)
+            .await
+            .unwrap();
+        owners.push(profile);
+        exec(
+            &pool,
+            "INSERT INTO plays (id,profile_id,track_id) VALUES (gen_random_uuid(),$1,$2)",
+            &[profile, w.trk],
+        )
+        .await;
+        let playlist = Uuid::now_v7();
+        exec(
+            &pool,
+            "INSERT INTO playlists (id,profile_id,name) VALUES ($1,$2,'Personal')",
+            &[playlist, profile],
+        )
+        .await;
+        exec(&pool,"INSERT INTO playlist_items (id,playlist_id,track_id,sort) VALUES (gen_random_uuid(),$1,$2,0)",&[playlist,w.trk]).await;
+        exec(
+            &pool,
+            "INSERT INTO stars (id,profile_id,track_id) VALUES (gen_random_uuid(),$1,$2)",
+            &[profile, w.trk],
+        )
+        .await;
+    }
+    let mut personal_before = BTreeMap::new();
+    for table in ["plays", "playlists", "playlist_items", "stars"] {
+        personal_before.insert(table, snapshot(&pool, table, "id", &[]).await);
+    }
     control::wipe_and_rerun(&pool).await.unwrap();
+    for (table, before) in personal_before {
+        assert_eq!(
+            snapshot(&pool, table, "id", &[]).await,
+            before,
+            "full personal rows in {table}"
+        );
+    }
     assert_eq!(artist_col(&pool, w.one, "display_name").await, "My Name");
     assert_eq!(artist_col(&pool, w.one, "user_bio").await, "My own words");
     assert_eq!(
@@ -1435,22 +1481,24 @@ async fn wipe_never_touches_user_overrides(pool: PgPool) {
     assert_eq!(alb.get::<Vec<String>, _>("user_genres"), ["mine"]);
     assert_eq!(alb.get::<String, _>("label"), "Label");
     // Playlists, plays and stars stay.
-    for table in ["plays", "playlists", "stars"] {
-        let n: i64 = sqlx::query_scalar(&format!(
-            "SELECT count(*) FROM {table} WHERE profile_id = $1"
-        ))
-        .bind(w.user)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(n, 1, "{table}");
+    for owner in owners {
+        for table in ["plays", "playlists", "stars"] {
+            let n: i64 = sqlx::query_scalar(&format!(
+                "SELECT count(*) FROM {table} WHERE profile_id = $1"
+            ))
+            .bind(owner)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(n, 1, "{table} owner {owner}");
+        }
     }
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM playlist_items WHERE track_id = $1")
         .bind(w.trk)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(n, 1);
+    assert_eq!(n, 3);
 }
 
 /// Upstream "drops the jobs queued for the old questions": kima-rs queues no per-item jobs;
@@ -1463,15 +1511,17 @@ async fn wipe_kicks_one_cycle(pool: PgPool) {
     assert_eq!(queued_cycles(&pool).await, 1);
 }
 
-/// Upstream "leaves analysis and sound vectors ... as they left them": stages that are not
-/// the recording stage are not the wipe's.
+/// Since M5 (D-188), an identification wipe clears analysis and sound vectors too (`Step::clears`): the mood and
+/// similarity steps read them, so a re-run from identification must not leave them stale. `fingerprint` is not an
+/// identification-owned stage (it is not reset by `wipe_in`) and stays exactly as it was.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn wipe_leaves_other_stages_untouched(pool: PgPool) {
+async fn wipe_clears_analysis_and_vectors_leaves_fingerprint(pool: PgPool) {
     let w = seed(&pool).await;
-    let analysis = stage_row(&pool, w.trk, "analysis").await;
     let fp = stage_row(&pool, w.trk, "fingerprint").await;
     control::wipe_and_rerun(&pool).await.unwrap();
-    assert_eq!(stage_row(&pool, w.trk, "analysis").await, analysis);
+    let analysis = stage_row(&pool, w.trk, "analysis").await;
+    assert_eq!(analysis["status"], "pending");
+    assert_eq!(analysis["attempts"], 0);
     assert_eq!(stage_row(&pool, w.trk, "fingerprint").await, fp);
 }
 

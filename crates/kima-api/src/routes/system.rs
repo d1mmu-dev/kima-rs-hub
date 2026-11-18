@@ -15,9 +15,15 @@ pub fn routes() -> Router<AppState> {
 /// `library` is on from M1, everything not yet ported is off, so the frontend hides those
 /// sections (D-030); `stats` is on from M-STATS S1 (D-170).
 async fn features(State(state): State<AppState>, _user: AuthUser) -> Json<Value> {
+    let vibe_embeddings = kima_ident::stages::vibe_assets::vibe_embeddings(&state.ident_ctx())
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(?error, "Vibe feature eligibility unavailable");
+            false
+        });
     Json(json!({
         "musicCNN": false,
-        "vibeEmbeddings": false,
+        "vibeEmbeddings": vibe_embeddings,
         "audiobookshelfEnabled": false,
         "fpcalc": state.fpcalc,
         "library": true,

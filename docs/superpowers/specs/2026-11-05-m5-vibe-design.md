@@ -17,7 +17,7 @@ M5 is **backend only** (kima-db, a new pure-math crate, kima-ident stages, kima-
 3. **The CLAP model is a hard prerequisite, and kima-rs is on the wrong checkpoint.** The feel probe, the 22 mood heads and every stored vector are bound to the label `laion-clap-music-onnx-v1`: LAION-CLAP's music checkpoint (`music_audioset_epoch_15_esc_90.14`, exported as `music_audio.onnx` SHA-256 `ab1bf5eba067b246198c630f153f774e8f1c3169b3924d4d6a4dc247bd73de97`) [V `matching/feelProbe.json` `model`/`modelSha256`, `moods/moodHeads.json` `model`, migration `20261017120000_music_sound_vectors`: vectors under any other label are deleted]. The kima-rs M4 embeds with `hf_audio.onnx` (the `clap-htsat-unfused` export, SHA-256 `37df17af…`, model id `hf_audio`, pipeline `clap-audio-v1`) [V `crates/kima-ml/src/onnx.rs:190-236`, `crates/kima-ident/src/stages/embedding.rs:40,84`]. Applying the probe or the heads to those vectors yields numbers without meaning. The M4 follow-up that D-148 (void since D-160) already names (new checkpoint, new numpy mel front-end, `music_text.onnx`) is therefore **the prerequisite of real-model acceptance**, not of building M5 (§4.3).
 4. **Upstream's text embedding goes through Redis pub/sub to the Python analyzer** (`textEmbeddingBridge.ts`, 15 s timeout, 504 on timeout). kima-rs has an in-process `kima_ident::stages::embedding::embed_text(ctx, text)` (typed errors `TextEmbeddingError::{Unavailable,Tokenize,Inference,Invalid,Worker}`) [V]. The bridge is not ported.
 5. **Public vibe feed** (`/api/public/vibe/*`, 5 routes, live-listening SSE, library export with 8 neighbours per track) is a separate feature behind `KIMA_PUBLIC_VIBE`, depends on M-STATS (`stats/listens`) and on the playback-state live channel, and is called by no kima-hub page [V `routes/publicVibe.ts`, `services/publicLibraryExport.ts`, `services/liveListening.ts`]. It is **split out of M5 core** (Phase E of the plan, owner decision Q2).
-6. **`getSimilarSongs`/`getSimilarSongs2` do not use the vibe engine upstream**: they pick random songs by the seed's artist and its stored similar artists that have library albums (`routes/subsonic/search.ts:350-405` [V]). The M3 spec parked them under "M5 (controller's call C11)" and D-086 says "stub until M5". M5 implements upstream's behaviour, not a vibe-based one (Task 19; D-190).
+6. **`getSimilarSongs`/`getSimilarSongs2` do not use the vibe engine upstream**: they pick random songs by the seed's artist and its stored similar artists that have library albums (`routes/subsonic/search.ts:350-405` [V]). The M3 spec parked them under "M5 (controller's call C11)" and D-086 says "stub until M5". Owner decision Q8 (2026-11-06) supersedes the original parity recommendation: M5 ranks a seed track that has current matching data by the vibe formula and keeps upstream's artist-based pick as the fallback for every other seed and for an eligible seed whose ranking is empty (Task 19; D-190).
 7. **No frontend page calls** `POST /api/analysis/vibe/{start,success,failure}` (analyzer callbacks) [V grep of `frontend/lib/api.ts`, `frontend/**`]. Not ported; M4's in-process stage replaces them.
 
 ## 3. Goals and non-goals
@@ -96,7 +96,7 @@ All routes under `/api/vibe`, `requireAuth` (any signed-in user), `apiLimiter` a
 - `202 {"computing": true}` when no eligible track has a map row **and** the library has present tracks **and** vibe embeddings are possible (kima-rs: CLAP not disabled and the sound model available); otherwise an empty library yields `200` with `tracks: []`.
 - `200 MapResponse`: `{tracks: MapTrack[], trackCount, computedAt (ISO, matching_state.map_updated_at or epoch), moodSignature}`.
 - `MapTrack` = `{id, x, y, z, colour, title, artist, artistId, albumId, coverUrl, dominantMood, moodScore, moods:{<moodField>: rank}, energy|null, valence|null}`. `x,y,z` = `0.5 + (p − centre)/range` with one `range = max axis span || 1` for all three axes; rows ordered by track id. Mood fields are the five client-facing fields of §8.2.
-- `Accept-Encoding: gzip` -> gzipped body with `Vary: Accept-Encoding`; upstream hashes the JSON per request and caches the gzip by that hash [V `vibe.ts:31-47`]. kima-rs keys the cache on `(map_updated_at, mood signature, track count, tracks.updated_at max)` instead (no per-request SHA-1 of ~30 MB); the response bytes are identical in content. **Not verified that nothing else changes a title/cover without bumping these**, so the key also includes `max(tracks.updated_at)` and `max(albums.updated_at)` if the column exists [?] (Task 13 decides after reading the schema; fallback: hash as upstream).
+- `Accept-Encoding: gzip` -> gzipped body with `Vary: Accept-Encoding`; upstream hashes the JSON per request and caches the gzip by that hash [V `vibe.ts:31-47`]. **Task 13 decision:** use the permitted content-hash fallback (SHA-256 instead of SHA-1), serialized/hashed/compressed off-thread and shared under a per-AppState mutex. `tracks.updated_at` exists, but title writes need not update it; albums and artists have no `updated_at`. A version-only key cannot prove freshness for name/title/cover edits. Both encodings set `Vary`; `gzip;q=0` disables compression; the header is negotiated before any read, so 400/406 precede 202; `x-gzip` is not gzip here; no `ETag`/304 (upstream gets them from Express defaults) (D-185); owner decision 2026-11-18: deferred to the M10 vibe-page acceptance gate (§13 M10 row, §16.3), not implemented in M5. The native cover URL token is an album UUID when `image_path` exists, otherwise null, as in the existing library cover-art contract.
 - `energy`/`valence` read `tracks.energy`/`tracks.valence` upstream; kima-rs has neither (§8): `null` unless the M5 CLAP readings table has a value (valence) (D-186/D-187).
 - Errors: 500 `Failed to read the vibe map`.
 
@@ -118,6 +118,10 @@ No id validation (an unknown id is just "no matching data"). `limit` default 20,
 
 ### 5.6 `POST /api/vibe/search`  [V `vibe.ts:272`, `textEmbeddingBridge.ts`]
 
+**Implementation status (2026-11-17):** Task 14 service/API/DTO contracts pass real-router tests. Owner explicitly approved construction200 now based on the synthetic diagnostic plus pinned upstream, superseding the former conditional real-recall trigger. New migration 0041 sets m=16/ef_construction=200 and REINDEXes, preserving historical migrations and the index expression/opclass/predicate. The unchanged strict 5k/20-query ANN gate passed three independent builds (60/60 lists); production search GUCs/fallback are unchanged. Fresh and existing 0040+0060 upgrade preservation is tested. Real music-checkpoint recall remains a separate unmeasured gate: 50 text queries, recall@20 ≥0.95. Approximately 15,000 tracks is the owner's acceptance-planning input, not the actual indexed count or proven quality; no model downloads/licences are assumed. Independent review and full workspace/hosted acceptance remain open.
+
+**Review follow-up:** the real-recall harness is implemented but **NOT RUN** (`docs/testing/vibe-recall.md`); ordinary synthetic harness tests do not close the real-model gate. Its raw ANN path shares production SQL, forbids exact fallback, checks checkpoint/DB identity/current-corpus hash and requires executed HNSW EXPLAIN evidence for every one of 50 predeclared real queries. Matching licensed native assets, the M4 checkpoint swap and authorization for an isolated real-embedding copy remain prerequisites. Query trim and numeric-prefix whitespace now explicitly follow ECMAScript (FEFF included, 0085 excluded), not Rust Unicode whitespace; wire UTF-16 lengths and error statuses remain unchanged.
+
 Body `{query, limit?}`. `query` missing/non-string/`trim().length < 2` -> 400 `Query must be at least 2 characters`; raw `length > 500` -> 400 `Query must be at most 500 characters`; `limit` default 20, max 100. Embed `trim(query)`, rank the nearest tracks by cosine distance, **no similarity floor**, ties by track id. 200 `{query, tracks:[{id,title,displayTitle,duration,trackNo,distance,similarity: max(0, 1-distance),album{id,title,coverUrl},artist{id,name}}]}`. Errors: text embedding timeout -> 504 `{error:"Text embedding service unavailable", message:"The CLAP analyzer service did not respond in time"}`; kima-rs maps `TextEmbeddingError::Unavailable` to **503** `Text embedding service unavailable` with message `The CLAP text model is not available` and keeps 504 for an inference time limit (15 s `tokio::time::timeout`) (D-183); other -> 500 `Failed to search tracks by vibe`.
 
 ### 5.7 `GET /api/vibe/mood/:trackId`  [V `vibe.ts:333`]
@@ -133,7 +137,7 @@ Body `{query, limit?}`. `query` missing/non-string/`trim().length < 2` -> 400 `Q
 | `POST /api/enrichment/rerun` (M-SYNC-B Task 14, `control::Step`) | Steps `analysis`, `vectors`, `moods`, `similarity` become real; the clear matrix is upstream's `STEP_CLEARS` [V `services/enrichmentRestart.ts:34-52`]. |
 | Similar artists (library re-rank) | `kima_ident::similar::rerank`: §9.4. |
 | `getSimilarSongs(2)` | §2 item 6. |
-| `GET /api/system/features` | `vibeEmbeddings` true iff the matching model + probe are available **or** (upstream rule) `DISABLE_CLAP` is not set and either the analyzer runs or any `track_embeddings` row exists [V `featureDetection.ts:checkCLAP`]. kima-rs rule: `!DISABLE_CLAP && (audio capability available || any eligible-model embedding exists)`; exact route wiring is M4's, M5 only supplies the predicate. |
+| `GET /api/system/features` | Upstream: `vibeEmbeddings` true iff `DISABLE_CLAP` is not set and the analyzer script exists (`existsSync(CLAP_ANALYZER_PATH)`), its heartbeat is fresh or any `track_embeddings` row exists [V `featureDetection.ts:checkCLAP`]. kima-rs rule (D-182): `!DISABLE_CLAP && verified feel probe && (native audio available with the `MATCHING_SOUND` identity || any eligible-model embedding exists)`; the probe is required, an available `hf_audio` encoder never counts. M5 supplies the predicate (`vibe_assets::vibe_embeddings`); the route only reports it. |
 
 ## 6. The matching formula
 
@@ -314,6 +318,7 @@ Differences from upstream: uuid keys and FKs; `ON DELETE CASCADE` from `track_em
 
 ### 9.5 Invalidation and rerun
 
+- Checkpoint transition (D-194, owner 2026-11-18): when the music audio capability is `Available` and publishes exactly `MATCHING_SOUND`, the coordinator's embedding phase reopens the `embedding` stage of present tracks whose row is `done` without a matching vector (`ml::reopen_unmatched_embeddings`, bounded chunks, `SKIP LOCKED`). It deletes nothing: the old vector and its derived rows stay until the re-embedding upserts the replacement; `matching_state`/`mood_state` and other stages are not cleared; `working` claims and other statuses are left alone. Unlike the `vectors` re-run below it is automatic and non-destructive.
 - File change / path change: existing `invalidate_track_ml` deletes the embedding; cascade removes feel, map, moods, readings. The next `buildMatching` sees a changed fingerprint (count and hash) and rebuilds; the map keeps every other track's place.
 - Re-run (`control::rerun(step)`), in one transaction, **first** `DELETE FROM matching_state` (so an in-flight map write finds nothing to lock) and `DELETE FROM mood_state`, then step-specific clears, per the matrix in `enrichmentRestart.ts` [V]: `identification|analysis|vectors` clear similarity+moods; `artists` clears similarity only; `moods` clears moods only; `similarity` clears similarity (state, feel, map). "Clearing similarity" = `DELETE FROM matching_state` (+ `matching_map`, `matching_feel`). Tests: the four race tests of `matching.integration.test.ts` (§10).
 
@@ -353,8 +358,19 @@ Only `POST /vibe/search` can use an ANN index. The ranking paths (`similar`, `al
 
 ### 11.3 Decision
 
-- Keep `hnsw (embedding vector_cosine_ops)`; do **not** introduce IVFFlat. Rebuild it with `ef_construction = 200` if Task 14's recall on real vectors is below 0.95@20 at the chosen `ef_search` (a migration then, not now).
-- Text search: `eligible_count <= KIMA_VIBE_EXACT_MAX` (default **200,000**, chosen from the 0.17-0.4 s measured at 100k, not measured at 200k [?]) -> **exact** ordered scan (`ORDER BY (embedding <=> q) + 0, track_id`); above it -> index path as upstream: `SET LOCAL hnsw.ef_search = clamp(2·limit, 100, 1000)`, `hnsw.iterative_scan = relaxed_order`, `hnsw.max_scan_tuples = 40000`, re-sort outside the materialised CTE with `+ 0`, equal distances by id, and fall back to the exact read when the index returns fewer than `limit` [V `textEmbeddingBridge.ts:205-235`, `utils/knn.ts`]. Both paths must give the same top-`limit` on a clustered synthetic set (Task 14 test). D-184.
+**Exact-scan threshold measurement (Task 6, [M]).** `tools/vibe-bench.sh` (example `kima-db/examples/vibe_bench.rs`): run-owned `pgvector/pgvector:pg17` (pgvector 0.8.7), `shared_buffers=1GB`, default `max_parallel_workers_per_gather=2`, 32-core host, random unit 512-d vectors, 5 % of tracks missing, HNSW index dropped (an exact `ORDER BY (embedding <=> q) + 0, track_id LIMIT 20` never uses it), 30 queries after 2 warm-up queries, each with a fresh query vector:
+
+| tracks | eligible | median | p95 | max |
+|---|---|---|---|---|
+| 25,000 | 23,754 | 163 ms | 169 ms | 177 ms |
+| 50,000 | 47,572 | 284 ms | 288 ms | 297 ms |
+| 100,000 | 95,102 | 303 ms | 311 ms | 314 ms |
+| 200,000 | 190,180 | 415 ms | 425 ms | 428 ms |
+
+A second run with `max_parallel_workers_per_gather=8` gave the same at 100k/200k (p95 319/428 ms; 25k/50k noisier, p95 195/399 ms). Growth is sub-linear (the parallel scan only engages above a table-size threshold). **Proposal: keep 200,000** — p95 at 200k is 0.43 s, far under the ~1.0 s rule, so the default is not lowered. It is a measurement on random vectors on one host, not a production guarantee; the embedding time of the query (≈150 ms [?]) is extra.
+
+- Keep `hnsw (embedding vector_cosine_ops)`; do **not** introduce IVFFlat. **Owner decision 2026-11-17:** rebuild now with `m=16, ef_construction=200` through new migration 0041 (ALTER options + transactional REINDEX), based on synthetic construction diagnostics and pinned upstream. This supersedes the original conditional real-recall trigger; it is not a real-model recall measurement. Preserve all previous migration checksums. Real-vector recall@20 ≥0.95 over 50 text queries remains a separate gate on the matching licensed checkpoint and actual eligible library; approximately 15,000 tracks is planning input only.
+- Text search: `eligible_count <= KIMA_VIBE_EXACT_MAX` (default **200,000**, configurable; owner Q6 2026-11-06 asked for a proposal, measured in Task 6 below) -> **exact** ordered scan (`ORDER BY (embedding <=> q) + 0, track_id`); above it -> index path as upstream: `SET LOCAL hnsw.ef_search = clamp(2·limit, 100, 1000)`, `hnsw.iterative_scan = relaxed_order`, `hnsw.max_scan_tuples = 40000`, re-sort outside the materialised CTE with `+ 0`, equal distances by id, and fall back to the exact read when the index returns fewer than `limit` [V `textEmbeddingBridge.ts:205-235`, `utils/knn.ts`]. Both paths must give the same top-`limit` on a clustered synthetic set (Task 14 test). D-184.
 - The 2-stage rank (index shortlist, exact rescore) is **not** done; the exact scan is upstream's behaviour and fits the budget up to ≈300 k tracks (§12.1).
 
 ## 12. Performance budget
@@ -363,10 +379,10 @@ Only `POST /vibe/search` can use an ANN index. The ranking paths (`similar`, `al
 
 | Operation | Budget | Evidence |
 |---|---|---|
-| `similar`, `alchemy` (one exact scored pass + caps) | p95 ≤ 1.0 s | [M] 0.41 s synthetic SQL shape, no real genre join; Task 6 re-measures through the real code |
-| `path` (2-set scored pass + n waypoint scans in Rust) | p95 ≤ 2.0 s | scan once for both sets (as upstream); waypoint scans are `n ≤ 50` passes over a 100k-row in-memory `(id, artist, s0, s1)` vector |
+| `similar`, `alchemy` (one exact scored pass + caps) | p95 ≤ 1.0 s | [M] Task 6 through the real code (`rank_matches`, 95k eligible of 100k, genre term on, 32 cores, default 2 parallel workers): **steady state 0.60-0.71 s** per call (median 0.61-0.63 s over four runs); in 3 of 4 runs the first 2-3 calls after the state build took 1.1-1.2 s (cause not isolated [?]; likely first-touch hint-bit/buffer effects on freshly written rows), so a p95 over 20 calls reads 1.1-1.2 s in those runs and 0.63 s in the clean one — **inside the 1.0 s budget in steady state, over it for the first calls after a bulk write**. The earlier 0.41 s proxy had no genre/bonus join. `top_scores` median 0.56 s; two-set `score_library` (path) median 0.69-0.79 s; state build 33 s (first fill, 95k feel rows), unchanged-library rebuild check 2.3 s |
+| `path` (2-set scored pass + n waypoint scans in Rust) | p95 ≤ 2.0 s | scan once for both sets (as upstream); waypoint scans are `n ≤ 50` passes over a 100k-row in-memory `(id, artist, s0, s1)` vector; [M] Task 7b `generate_song_path` through the real code at 95k eligible: median 0.73 s, p95 0.75 s (5 runs, smooth, default length; the scoring pass alone 0.68 s) |
 | `search` | embed ≤ 150 ms (CPU, [?]) + rank ≤ 0.5 s | [M] 165 ms exact top-20 |
-| `map` read | ≤ 1.5 s (≈30 MB JSON, gzip ≈ 4 MB) | upstream's size comment "tens of megabytes ... compresses ~8x" [V `vibe.ts:27`]; cache gzip keyed by version |
+| `map` read | ≤ 1.5 s (≈30 MB JSON, gzip ≈ 4 MB) | Task 13: 100k synthetic current map rows through the real native router, warm gzip **1.477 s**, identity **1.427 s**, first gzip **2.540 s** (cold compression exceeds the warm-cache target); JSON 34,615,681 bytes / gzip 3,583,153 bytes. Selected hot packages at opt-level 3 in the dev profile, not a release build or socket/browser measurement. Unoptimized run: 8.379 / 4.770 / 3.852 s (first gzip / warm gzip / identity). |
 | `mood-summary`, `mood/:id` | ≤ 100 ms | snapshot in memory |
 | Beyond 300 k tracks | revisit | rank is O(n) SQL per request |
 
@@ -377,8 +393,36 @@ Only `POST /vibe/search` can use an ANN index. The ranking paths (`similar`, `al
 | Feel update | ≤ 60 s for a first fill of 100k | one `INSERT ... SELECT` |
 | State build | ≤ 60 s | holds the state row lock; timeouts as upstream |
 | Mood scoring (22 dot products/vector) + stats | ≤ 120 s first fill | one statement |
-| **First layout** | ≤ 10 min at 100k, 8 cores; hard memory cap 1 GB | n²·512 = 5.1e12 multiply-adds, plus fuzzy graph and 500 epochs. Estimate [?]: Task 8 microbenchmarks the neighbour sweep and fixes the f32/f64 accumulation choice (D-185). Upstream JS does this single-threaded in a worker. |
+| **First layout** | ≤ 10 min at 100k, 8 cores; hard memory cap 1 GB | n²·512 = 5.1e12 multiply-adds, plus fuzzy graph and 500 epochs. Measured (Task 8/9, §12.2): 290 s at 100k on 8 threads, 884 MB peak; f64 kept (no D-185 f32 amendment). Upstream JS does this single-threaded in a worker. |
 | Incremental placement | ≤ 5 s per 100 new tracks | each new track scans the laid-out set |
+
+**Neighbour sweep, measured (Task 8, owner Q7: find out why before choosing a fix).** `crates/kima-vibe/examples/neighbour_bench.rs` (release, 512-d synthetic tracks, 10 per artist, genre bonuses on, 32-core host). A sweep's cost is linear in the rows, so a sample of rows against all N columns is timed and scaled to the full same-set sweep (`time x N / rows`); 8 threads = rayon pool of 8:
+
+| N columns | sampled rows | threads | accumulation | sample time | M pairs/s | full same-set sweep |
+|---|---|---|---|---|---|---|
+| 5,000 | 400 | 8 | f64 | 0.07 s | 27.9 | 1 s |
+| 20,000 | 400 | 8 | f64 | 0.23 s | 35.4 | 11 s |
+| 50,000 | 400 | 8 | f64 | 0.53 s | 38.1 | 66 s |
+| **100,000** | 800 | 8 | **f64** | 1.98 s | 40.4 | **248 s (4.1 min)** |
+| 100,000 | 800 | 8 | f32 | 1.68 s | 47.5 | 210 s (3.5 min) |
+| 100,000 | 800 | 32 | f64 | 1.39 s | 57.6 | 174 s (2.9 min) |
+| 100,000 | 400 | 1 | f64 | 5.65 s | 7.1 | 1412 s (23.5 min) |
+
+Findings: (1) the exact f64 sweep at 100k is **4.1 min on 8 threads**, inside the 10 min budget: no approximation and no f32 (f32 saves only 15 %, so the D-185 f32 amendment is not made). (2) The time is the dot products (single thread 7.3 GFLOP/s of multiply-adds in strict dimension order, the order the bit-exact goldens require); top-k selection is 0.03 ms per row of 20,000 scores (about 0.7 % of the 4 ms per row), genre-bonus builds once per artist. (3) Upstream's own TypeScript on the same shape (`tools/vibe-goldens/bench-neighbours.mjs`, Node 26.7, one thread) does 2.6 M pairs/s = **64.5 min at 100k single-threaded**, so Rust is 2.8x faster per thread before the 5.7x of 8 threads; the sample sizes above under-use the pool (800 rows = 12 chunks), the real 100k-row sweep balances better. (4) Headroom if ever needed, all exact: SIMD across columns (a column-major layout vectorises over j and leaves every pair's summation order unchanged). Still unmeasured: the fuzzy graph and the 500 optimisation epochs (Task 9), so the end-to-end first-layout time at 100k stays [?] until Task 9.
+
+**First layout, end to end, measured (Task 9, closes owner Q7).** `crates/kima-vibe/examples/layout_bench.rs` (release, same synthetic generator as the sweep bench, 8 rayon threads, 32-core host) times each stage after the sweep; the sweep's cache file lets the 100k run be split into bounded chunks. The TypeScript reference is `tools/vibe-goldens/bench-layout.mjs` (upstream's own `layoutLibrary`, Node 26.7, one thread, same data and draw order; the edge counts of both implementations agree exactly: 56,590 / 115,724 / 207,616 at 5k / 10k / 20k).
+
+| N | epochs | 1 sweep (8 thr) | 2 PCA start | 3 fuzzy graph | 4 optimise | 5 colour field | total | peak RSS |
+|---|---|---|---|---|---|---|---|---|
+| 5,000 | 500 | 0.4 s | 1.1 s | <0.1 s | 5.4 s | <0.1 s | 7 s | 46 MB |
+| 10,000 | 500 | 1.8 s | 2.2 s | <0.1 s | 10.8 s | <0.1 s | 15 s | 93 MB |
+| 20,000 | 200 | 7.4 s | 4.0 s | 0.1 s | 8.6 s | 0.1 s | 20 s | 184 MB |
+| 50,000 | 200 | 45.6 s | 10.3 s | 0.2 s | 23.2 s | 0.6 s | 80 s | 445 MB |
+| **100,000** | 200 | **217.2 s** | 22.4 s | 0.5 s (1,638,422 edges) | 48.4 s | 2.0 s | **290 s (4.8 min)** | 884 MB (sweep process), 620 MB (layout process) |
+
+TypeScript, one thread, same inputs (sweep / layout incl. fuzzy graph / colour field / `layoutLibrary` total): 5k 7.8 / 6.9 / 0.3 / 16.2 s; 10k 32.3 / 13.8 / 0.8 / 48.2 s; 20k 127.2 / 11.1 / 3.2 / 145.6 s. Rust single-thread stages against it: optimise 1.3x faster (10.8 vs 13.8 s at 10k), colour field 30x faster at 20k (0.1 vs 3.2 s; the per-query nearest-position scans run over rayon, bit-identical because queries are independent), PCA start about equal (derived for TS as total minus the other stages: ~1.3 s vs 2.2 s at 10k, ~4.1 s vs 4.0 s at 20k; derived, noisy).
+
+Findings: (1) **The first layout at 100k is not slow**: 290 s (4.8 min) on 8 threads against the 10 min budget; no approximation, no f32, no fix is needed, and none is made. (2) Why it costs what it costs: the neighbour sweep is 75 % of it (217 of 290 s; the dot products, see above); the 200-epoch optimisation is 17 % (48 s) and is inherently serial (one shared PRNG stream and in-place moves; parallelising it would change the result, so it stays serial); the PCA start is 8 % (22 s, serial, 13-wide subspace iteration with 544-dim rows); fuzzy graph and colour field together are under 1 %. (3) Upstream's TypeScript on the same data: 145.6 s at 20k single-threaded, of which the sweep is 87 %, and the sweep alone extrapolates to 64.5 min at 100k (Task 8), so the Rust port is faster than the reference at every stage and the ordering of costs is the same. (4) Memory: 884 MB peak in the sweep (the 100k x 512 f64 vectors alone are 410 MB), 620 MB in the layout stages; one process doing both peaks at about the sweep's figure, inside the 1 GB cap but with little headroom (storing the vectors as f32 would halve the dominant term; not done, it would change the arithmetic input). (5) Headroom if ever needed, all exact: SIMD across columns in the sweep (Task 8), a parallel subspace-iteration product (PCA start), neither required. `tests/layout_memory.rs` pins only the layout/colour stages (28 MB peak at 20k, budget 600 MB); the end-to-end figures above come from the benchmark, not a test.
 
 The enrichment cycle must never block on the layout (the cycle awaits it only through the single-flight handle with a status; it proceeds when the task is running). `updateMap` runs every cycle but returns after one count query when the map is complete [V].
 
@@ -390,41 +434,41 @@ The enrichment cycle must never block on the layout (the cycle awaits it only th
 | **M5b** | `mood_state` readings and 22 heads (recipes), `moodTags` writer (needs recipes' `definedCtes`), `UserMoodMix` + `/api/mixes/mood/buckets/*`, `/whats-new/mood-mixes*`, radio row's `vibeEmbeddings` gate, `familiarity.ts`/`nightPlays.ts` which call `matchingContext + topScores/rankMatches` (public `kima_db::vibe` API: `matching_context`, `top_scores`, `rank_matches` must be `pub`), `dropCachedMixes` on mood change (a `MoodsChanged` event). |
 | **M-STATS** | S2 uses `energy/valence/bpm/key/instrumentalness`: take valence/instrumentalness from `track_clap_readings`. `play_audit_ignore` unaffected. |
 | **M7** | `albums.location` -> extend `ELIGIBLE`; Discover songs never scored; Discover recommendations stay outside M5. |
-| **M10 (kima-web)** | Pages and components, with the API calls that feed them [V `frontend/lib/api.ts:2056-2094`]: `app/vibe/page.tsx` (563 lines) + `features/vibe/{map,tabs,TrackPanel,VibeAlchemy,VibeSongPath,useVibeMap,useVibeSearch,MoodLegend,ScenePanel,VibeToolbar}`; `features/library/useLibraryVibe.ts` + `CollectionMasthead.tsx` (mood band, `GET /vibe/mood-summary`); `features/stats/useTrackMood.ts` (`GET /vibe/mood/:id`); sidebar item "vibe" (`components/layout/navItems.ts`); player "match this vibe" (`/vibe/similar`). Map polling on 202. WebGL scene is the large item (outside M5). |
+| **M10 (kima-web)** | Pages and components, with the API calls that feed them [V `frontend/lib/api.ts:2056-2094`]: `app/vibe/page.tsx` (563 lines) + `features/vibe/{map,tabs,TrackPanel,VibeAlchemy,VibeSongPath,useVibeMap,useVibeSearch,MoodLegend,ScenePanel,VibeToolbar}`; `features/library/useLibraryVibe.ts` + `CollectionMasthead.tsx` (mood band, `GET /vibe/mood-summary`); `features/stats/useTrackMood.ts` (`GET /vibe/mood/:id`); sidebar item "vibe" (`components/layout/navItems.ts`); player "match this vibe" (`/vibe/similar`). Map polling on 202. WebGL scene is the large item (outside M5). **Acceptance gate — map `ETag`/304 (D-185, owner 2026-11-18):** before the vibe page is accepted, `GET /api/vibe/map` sends an upstream-compatible weak `ETag` (Express 4 `etag` 1.8.1 form `W/"<length hex>-<SHA-1 base64, 27 chars>"`, computed over the exact bytes sent) and answers a GET whose `If-None-Match` matches (`fresh` 0.5.2 semantics) with 304 and no body, for both the identity and the gzip representation. Regression tests must prove representation correctness (the identity and gzip bodies carry different validators; a gzip validator never produces a 304 for an identity request or the reverse), `Vary: Accept-Encoding` on 200 and 304, encoding negotiation (400/406) still ahead of any read, and a new validator after a content change; the implementer first confirms against `express` 4.22.3 `res.send` which other map statuses (upstream also tags the 202 `{computing:true}` body) carry a validator. A real-browser check shows the vibe page revalidating the map with a conditional request and reusing its cached body on 304. Verified M5 prerequisites (content-hash gzip cache, `Vary`, early negotiation) are not this check; it is not implemented in M5 and has not run. |
 | **M12** | Remote ML supplies vectors only; the `MATCHING_SOUND` identity check rejects mixed fleets (model id + sha + pipeline). |
 | **Public vibe (Phase E / later)** | §2 item 5; refs `routes/publicVibe.ts`, `services/{publicLibraryExport,liveListening}.ts`, `workers/moodSnapshotWorker.ts` (export refresh), D-062. |
 
 ## 14. Divergence rows to reserve
 
-The highest used on `main` is **D-180** (Next.js UI, `docs/DIVERGENCES.md`); `feature/m-sync` holds D-163..D-179 [V grep of both trees]. M5 reserves **D-181 – D-195**. Status of each is `to-decide` or `open` until its task lands; text is drafted in plan Task 20.
+The highest used on `main` is **D-180** (Next.js UI, `docs/DIVERGENCES.md`); `feature/m-sync` holds D-163..D-179 [V grep of both trees]. M5 reserves **D-181 – D-195**. Status of each is `to-decide` or `open` until its task lands; text is drafted in plan Task 20. **Task 20 (2026-11-18):** all thirteen rows D-181–D-193 are written in `docs/DIVERGENCES.md` with an owner-decision status; D-194/D-195 stay reserved and unused.
 
-| ID | Area | Gist |
-|---|---|---|
-| D-181 | Vibe / formula | Rust port; probe id = sha256 of the asset file; `FORMULA_VERSION` own counter; real columns read as f32 not text-parsed f64; SQL scoring kept. |
-| D-182 | Vibe / model gate | `(model_id, model_sha256, pipeline_version)` instead of the `model_version` label; `created_at` is the freshness token; 503 text for "needs the music model". |
-| D-183 | Vibe search | In-process `embed_text` instead of Redis pub/sub; 503 vs 504 mapping. |
-| D-184 | Vibe search | Exact scan up to `KIMA_VIBE_EXACT_MAX`, HNSW + iterative scan above. |
-| D-185 | Vibe map | Native thread + rayon, f32 storage; exact-math port; accumulation choice from Task 8's benchmark; gzip cache key. |
-| D-186 | Moods / eligibility | No `analysisStatus`, `corrupt`, `albums.location`; readings from CLAP only until MusiCNN/DSP; assets outside Git. |
-| D-187 | CLAP readings | Zero-shot readings computed after the fact from the stored vector (upstream: at embedding time). |
-| D-188 | Enrichment | Phases `mood`/`similarity`; progress `moods`; rerun steps real. |
-| D-189 | Similar artists | Re-rank enabled (supersedes the M3 delta 0). |
-| D-190 | Subsonic | `getSimilarSongs(2)` by artist+similar artists, random, as upstream. Amends D-086. |
-| D-191 | Public vibe | Not in M5 core; D-062 stays. |
-| D-192 | Genres | Matching genres from `artist_genres_effective` + `user_genres` (replace), MB-list filter. |
-| D-193 | Validation | UUID checks replace CUID regex; non-numeric `length` ignored. |
+| ID | Area | Gist | Status (Task 20, 2026-11-18) |
+|---|---|---|---|
+| D-181 | Vibe / formula | Rust port; probe id = sha256 of the asset file; `FORMULA_VERSION` own counter; real columns read as f32 not text-parsed f64; SQL scoring kept. | Written (Task 20); accepted; implemented Tasks 1–6; synthetic parity (formula 1e-12, SQL 1e-5) |
+| D-182 | Vibe / model gate | `(model_id, model_sha256, pipeline_version)` instead of the `model_version` label; `created_at` is the freshness token; 503 text for "needs the music model". | Written (Task 18); accepted; real-model E2E NOT RUN |
+| D-183 | Vibe search | In-process `embed_text` instead of Redis pub/sub; 503 vs 504 mapping. | Written (Task 14); accepted |
+| D-184 | Vibe search | Exact scan up to `KIMA_VIBE_EXACT_MAX`, HNSW + iterative scan above. | Written (Task 14); accepted (Q6 200000, construction200 owner-approved); real recall NOT RUN |
+| D-185 | Vibe map | Native thread + rayon, f32 storage; exact-math port; accumulation choice from Task 8's benchmark; gzip cache key. | Written (Task 13); accepted |
+| D-186 | Moods / eligibility | No `analysisStatus`, `corrupt`, `albums.location`; readings from CLAP only until MusiCNN/DSP; assets outside Git. | Written (Task 20); accepted (Q1/Q3); asset pins absent |
+| D-187 | CLAP readings | Zero-shot readings computed after the fact from the stored vector (upstream: at embedding time). | Written (Task 17); accepted (Q4); readings parity NOT RUN |
+| D-188 | Enrichment | Phases `mood`/`similarity`; progress `moods`; rerun steps real. | Written (Task 20); accepted (upstream `STEP_CLEARS`; D-112 amended) |
+| D-189 | Similar artists | Re-rank enabled (supersedes the M3 delta 0). | Written (Task 16); accepted |
+| D-190 | Subsonic | `getSimilarSongs(2)` is vibe-based (ranked by the formula from the seed track) instead of upstream's random artist+similar-artist pick; artist-based path kept as fallback when the seed has no eligible embedding or its ranking is empty; a non-empty short ranking is not topped up. Owner decision Q8 (2026-11-06, option 1 for the empty ranking 2026-11-18). Amends D-086. | Written (Task 19); accepted (Q8, option 1); D-086 amended |
+| D-191 | Public vibe | Not in M5 core; D-062 stays. | Written (Task 20); accepted (Q2: Phase E deferred); D-062 amended (unchanged) |
+| D-192 | Genres | Matching genres from `artist_genres_effective` + `user_genres` (replace), MB-list filter. | Written (Task 20); accepted (M-SYNC Q5); D-114 cross-referenced |
+| D-193 | Validation | UUID checks replace CUID regex; non-numeric `length` ignored. | Written (Task 15); accepted |
 
 ## 15. Risks and unverified items
 
 1. **Model checkpoint mismatch (§2.3)** — highest risk; real-model acceptance blocked by the M4 follow-up (Q1).
 2. **Rights of `feelProbe.json` (CC BY-NC) and `moodHeads.json` (unstated training sets)**; M4 is noncommercial, redistribution is not established [?]. Assets stay outside Git; Q3.
-3. **First-layout time at 100k** unmeasured (§12.2). Mitigation: Task 8 benchmark before Task 9; fall back to approximate neighbour candidates only with an owner-approved D-row (it would break the "exact" claim).
+3. **First-layout time at 100k** — closed by measurement (§12.2, Task 9): 290 s on 8 threads, inside the 10 min budget; no approximate candidates, no f32 accumulation. Remaining risk: peak memory 884 MB against the 1 GB cap.
 4. **HNSW recall on real CLAP vectors** unmeasured (§11.2.3).
 5. **`created_at` as freshness token**: if any writer touches `track_embeddings` without rewriting it, `matching_feel` goes stale silently. Test: every upsert path changes `created_at` (D-182).
 6. **`hashtextextended` fingerprint collisions** are a theoretical staleness risk, as upstream.
 7. **Map JSON size** at 100k (≈30 MB uncompressed) in axum: use a streaming gzip body and `Content-Length` from the cache.
 8. **Sqlx offline cache**: new queries need `cargo sqlx prepare --workspace`; the state/rank SQL is dynamic (`unnest` of N bonus columns) and uses `query()` not `query!()`; those paths are tested against a real database only.
-9. **Not verified**: `shipped-reference.json` contents; whether upstream's pure modules run under `tsx` without Prisma (§10); `featureDetection`'s kima-rs wiring (M4); the exact `currentPhase` naming map (`embedding` vs `vibe`); whether `albums.updated_at` exists for the map cache key; pgvector version in production images (the floating `pg17` tag gave 0.8.7 here, CI/Docker should pin).
+9. **Not verified**: `shipped-reference.json` contents; whether upstream's pure modules run under `tsx` without Prisma (§10); `featureDetection`'s kima-rs wiring (M4); the exact `currentPhase` naming map (`embedding` vs `vibe`); whether `albums.updated_at` exists for the map cache key (resolved in Task 13: absent; content-hash fallback selected); pgvector version in production images (the floating `pg17` tag gave 0.8.7 here, CI/Docker should pin).
 
 ## 16. Open questions for the owner
 
@@ -437,3 +481,36 @@ The highest used on `main` is **D-180** (Next.js UI, `docs/DIVERGENCES.md`); `fe
 7. **Q7 Layout cost:** if Task 8 shows > 10 min at 100k, accept (a) a longer background layout, (b) f32 accumulation (D-row), or (c) approximate neighbour candidates (breaks exactness)?
 8. **Q8 `getSimilarSongs`:** upstream's artist-based behaviour (recommended, parity) or a vibe-based improvement (a divergence the frontend would not notice)?
 9. **Q9 Map cache key** (§5.1): accept a version key instead of hashing the JSON (identical bytes in practice, [?] for rare title/cover edits)?
+
+### 16.1 Owner decisions (2026-11-05) and assumptions made while building Phases A-B
+
+Owner: **Q1** build now on synthetic vectors; real-model acceptance waits for M4's checkpoint swap (`kima_db::vibe::MATCHING_SOUND` is the single constant to change). **Q2** M5 = plan phases A-D; Phase E (public vibe feed) is later. **Q3** `feelProbe.json` and `moodHeads.json` stay private outside Git, SHA-256 pinned, loaded from `KIMA_VIBE_ASSET_DIR`; the mood heads are not used or generated before their training-data licences are checked, so moods sit behind the `vibe_mood_heads` capability (unavailable when the file is absent) and are tested with synthetic heads.
+
+Assumptions (everything else follows the plan's recommendation):
+
+1. **`shipped-reference.json` is not copied.** Its four 512-d vectors have the statistics of real embeddings and its scores come from the unlicensed heads; the plan's `moods-reference.json` does not exist and `shipped_reference_scores_to_1e-4` is `#[ignore]` behind `KIMA_VIBE_ASSET_DIR` (Task 11).
+2. **Goldens use Node's type stripping, not `tsx`** (Node 26.7; the pure modules are copied with `.ts` import suffixes, `./worker` stubbed, `gaussian` exported). The pure modules import without Prisma: the spec's [?] is resolved. An extra `ts-golden-library.json` carries the golden inputs.
+3. **Capabilities:** `vibe_assets` = the feel probe (no probe, no formula); `vibe_mood_heads` = the 22 heads. The spec's single `vibe_assets` entry could not express "moods off, similarity on" (section 4.4).
+4. **Migration number 0040** (M-SYNC holds 0029+). The phase check lists all seven phases including `analysis` (0027).
+5. **`MATCHING_SOUND`** uses the spec's expected music-checkpoint strings (`music_audio`, `clap-music-audio-v1`, sha `ab1bf5eb...`); they are unconfirmed until the M4 follow-up. Until then a library embedded by today's M4 has zero eligible tracks. **Confirmed 2026-11-18 (D-194):** the native embedding stage now publishes exactly these values (music export pinned in `OnnxModel::ClapAudio`, `PIPELINE_VERSION = "clap-music-audio-v1"`; equality asserted by a kima-ident test); M4 `hf_audio` rows are never relabelled. Their tracks are re-embedded by the automatic, non-destructive checkpoint transition (§9.5, §16.3, D-194).
+6. **`ELIGIBLE` inlines the identity as SQL literals** (checked to `[A-Za-z0-9._-]`), so it has no bind parameters.
+7. **Ids in `kima-vibe` are strings**; lowercase hyphenated UUID text sorts like the uuid bytes Postgres sorts by.
+8. **The SQL two-window cap equals the walk only when each album belongs to one artist** (true here: a track's artist is its album's artist). `two_window_differs_for_shared_albums` documents the counter-example.
+9. **`pow` is held to 8 ulp only on upstream's domain** (x in [0,60), exponent 0.895...), not on arbitrary exponents.
+10. **serde_json `float_roundtrip`** is required: the default parser was 1 ulp off on a synthetic weight.
+11. **`KIMA_VIBE_EXACT_MAX=0` is valid** and forces the index path; non-numbers are a config error.
+12. **Asset cache lives in `EmbeddingRuntimeState`** (loaded-once model state) so no `IdentCtx` constructor changes.
+13. Task 3 step 3 (EXPLAIN on 10k rows) moves to Task 5, where the feel-join and map-count queries first exist.
+
+### 16.2 Owner decisions (2026-11-06)
+
+- **Q4:** CLAP zero-shot readings (instrumentalness, acousticness, valence/arousal; §8.3) are **in M5** (plan Task 17), not M5b.
+- **Q6:** the owner has no opinion and asked for a proposal. Proposal: `KIMA_VIBE_EXACT_MAX` default **200,000** as specced, configurable. Task 6 measures exact top-20 latency at 25k/50k/100k/200k synthetic vectors on the build host; if exact p95 at 200k exceeds ~1.0 s the default is lowered to the largest measured size under that budget. Numbers and the resulting default are recorded in §11.3.
+- **Q7:** if the first layout at 100k is slow, Task 8 first finds out *why* (profile distance computation vs neighbour search vs optimisation epochs; compare with upstream's algorithm and, if the TS reference runs, its real runtime on the same input), records the findings, then picks the cheapest faithful fix. No approximation is pre-committed. **Closed (Task 9, 2026-11-06):** measured end to end in §12.2 (sweep 75 %, serial optimisation 17 %, PCA start 8 %, rest <1 %); 4.8 min at 100k, so no fix was chosen.
+- **Q8:** `getSimilarSongs`/`getSimilarSongs2` are **vibe-based** (deliberate divergence, D-190). The artist-based path stays as the fallback when the seed track has no eligible embedding. The D-190 row lands in the commit that lands the behaviour (Task 19). **Q8 follow-up (owner, 2026-11-18, option 1):** a seed that has an eligible vector but whose ranking is empty (nothing else eligible) also falls back to the artist-based path; a non-empty ranking shorter than `count` is answered as it is and never topped up.
+- **Q9:** no answer; the plan's recommended option (version key for the map cache) applies.
+
+### 16.3 Owner decisions (2026-11-18)
+
+- **D-194 old-vector transition:** the owner approved an automatic, non-destructive transition instead of the manual-only `vectors` re-run (and instead of upstream's delete-and-re-embed migration): only when the music capability is `Available`, reopen embedding for present tracks without an eligible `MATCHING_SOUND` vector, keep the old row until a successful upsert replaces it, never clear global matching/mood state. Capabilities are evaluated once per process, so models provisioned after startup take effect at the next restart. The destructive `vectors` re-run stays available as an explicit operator action only. Implemented in the separate reviewed slice after the frontend removal (plan "D-194 checkpoint transition"); settled, do not re-ask.
+- **D-185 map `ETag`/304:** upstream gets a weak `ETag` and conditional 304 for `GET /api/vibe/map` implicitly from Express 4; kima-rs sends neither. The owner chose the recommended option 2: defer it to the M10 vibe-page acceptance gate rather than implement it in M5 (previously recorded as an open, undecided follow-up). Gate (also in §13 M10 row, plan Task 13 and the roadmap M10 row): before the vibe page is accepted, `GET /api/vibe/map` sends an upstream-compatible weak `ETag` (Express 4 `etag` 1.8.1 form `W/"<length hex>-<SHA-1 base64, 27 chars>"`, computed over the exact bytes sent) and answers a GET whose `If-None-Match` matches (`fresh` 0.5.2 semantics) with 304 and no body, for both the identity and the gzip representation. Regression tests must prove representation correctness (the identity and gzip bodies carry different validators; a gzip validator never produces a 304 for an identity request or the reverse), `Vary: Accept-Encoding` on 200 and 304, encoding negotiation (400/406) still ahead of any read, and a new validator after a content change; the implementer first confirms against `express` 4.22.3 `res.send` which other map statuses (upstream also tags the 202 `{computing:true}` body) carry a validator. A real-browser check shows the vibe page revalidating the map with a conditional request and reusing its cached body on 304. Verified M5 prerequisites (content-hash gzip cache, `Vary`, early negotiation) are not this check; it is not implemented in M5 and has not run. Settled; do not re-ask.

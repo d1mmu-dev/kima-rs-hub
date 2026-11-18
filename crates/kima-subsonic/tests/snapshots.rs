@@ -865,11 +865,26 @@ snap!(search, |s| {
     .await;
     s.case("getTopSongs", "missing_artist", &alice(&[])).await;
     let track1 = track_id(1).to_string();
-    s.case("getSimilarSongs", "ok", &alice(&[("id", &track1)]))
-        .await;
+    // No vibe data in the fixture: the artist-based path, in random order (D-190).
+    let unordered = Opts {
+        unordered: &["song"],
+        ..NONE
+    };
+    s.case_with(
+        "getSimilarSongs",
+        "ok",
+        &alice(&[("id", &track1)]),
+        unordered,
+    )
+    .await;
     s.case("getSimilarSongs", "missing_id", &alice(&[])).await;
-    s.case("getSimilarSongs2", "ok", &alice(&[("id", &track1)]))
-        .await;
+    s.case_with(
+        "getSimilarSongs2",
+        "ok",
+        &alice(&[("id", &track1)]),
+        unordered,
+    )
+    .await;
     s.case("getGenres", "ok", &alice(&[])).await;
     s.case("getNowPlaying", "nobody", &alice(&[])).await;
 });

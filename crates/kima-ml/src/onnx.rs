@@ -187,8 +187,11 @@ pub enum OnnxModel {
 
 impl OnnxModel {
     pub const CORE_BASENAME: &'static str = "msd-musicnn-1.onnx";
-    pub const CLAP_AUDIO_BASENAME: &'static str = "hf_audio.onnx";
-    pub const CLAP_TEXT_BASENAME: &'static str = "text_model.onnx";
+    /// LAION-CLAP music checkpoint (`music_audioset_epoch_15_esc_90.14.pt`) audio tower, exported by
+    /// kima-hub c7527577 `export_music_onnx.py`; upstream label `laion-clap-music-onnx-v1`.
+    pub const CLAP_AUDIO_BASENAME: &'static str = "music_audio.onnx";
+    /// The same checkpoint's text tower (RoBERTa-base), from the same export.
+    pub const CLAP_TEXT_BASENAME: &'static str = "music_text.onnx";
 
     pub fn all_models() -> Vec<OnnxModel> {
         let mut list = vec![OnnxModel::MusiCnnCore];
@@ -221,8 +224,8 @@ impl OnnxModel {
         match self {
             Self::MusiCnnCore => ArtifactId::from_static("msd-musicnn-1"),
             Self::MusiCnnHead(head) => head.artifact_id(),
-            Self::ClapAudio => ArtifactId::from_static("hf_audio"),
-            Self::ClapText => ArtifactId::from_static("text_model"),
+            Self::ClapAudio => ArtifactId::from_static("music_audio"),
+            Self::ClapText => ArtifactId::from_static("music_text"),
         }
     }
 
@@ -232,11 +235,13 @@ impl OnnxModel {
                 parse_hex_32("d30492af1609b75f47881a326cb402dfea3068f44c9482c5583e93768c1be885")
             }
             Self::MusiCnnHead(head) => head.expected_sha256(),
+            // kima-hub c7527577 services/audio-analyzer-clap/Dockerfile pins (280 685 720 and
+            // 501 433 023 bytes); private reproduction matched both byte-exact.
             Self::ClapAudio => {
-                parse_hex_32("37df17afb9881569c4f50e5b691167aa54586418059701a74a54934514969972")
+                parse_hex_32("ab1bf5eba067b246198c630f153f774e8f1c3169b3924d4d6a4dc247bd73de97")
             }
             Self::ClapText => {
-                parse_hex_32("6df7c51f2d78e236a03f2b816e613d538c815639d13644fe7c2124f439da9648")
+                parse_hex_32("6dbba074b27f8973d84c5c7ae9acd0b9139a6cd9dd82bea6e87954dc3b835956")
             }
         }
     }
@@ -335,8 +340,12 @@ impl SharedSession {
     }
 }
 
-/// Typed CLAP audio inference over a resource-accounted pool of verified sessions.
-/// The caller supplies contiguous [batch, 1, time, 64] log-mel values.
+/// Frames per CLAP log-mel window: ten seconds at 48 kHz, hop 480, centred (`music_clap_mel`).
+pub const CLAP_MEL_FRAMES: usize = 1001;
+
+/// Typed music CLAP audio inference over a resource-accounted pool of verified sessions.
+/// The caller supplies contiguous `[batch, 1, 1001, 64]` log-mel values from
+/// [`crate::clap::MusicClapMel`]; the pinned graph takes exactly 1001 frames.
 pub struct ClapAudioSession {
     pool: BoundedSessionPool,
 }
@@ -359,24 +368,7 @@ impl ClapAudioSession {
             });
         }
         let model = Self::from_trusted_bytes(artifact, pool_size, threads)?;
-        model.pool.with_session(|session| {
-            use ort::{tensor::TensorElementType, value::ValueType};
-            let matches_tensor = |value: &ValueType, dims: &[i64]| {
-                matches!(value, ValueType::Tensor { ty: TensorElementType::Float32, shape, .. } if shape.as_ref() == dims)
-            };
-            if session.inputs.len() != 1
-                || session.inputs[0].name != "input"
-                || !matches_tensor(&session.inputs[0].input_type, &[-1, 1, -1, 64])
-                || session.outputs.len() != 2
-                || session.outputs[0].name != "output"
-                || !matches_tensor(&session.outputs[0].output_type, &[-1, 512])
-                || session.outputs[1].name != "onnx::Shape_9884"
-                || !matches_tensor(&session.outputs[1].output_type, &[-1, -1, -1, -1])
-            {
-                return Err(OnnxError::Inference("invalid pinned CLAP graph signature".into()));
-            }
-            Ok(())
-        })?;
+        model.check_signature()?;
         Ok(model)
     }
 
@@ -390,17 +382,33 @@ impl ClapAudioSession {
         })
     }
 
-    /// Accept 1–5 windows and 1–1001 frames, with 64 bands per frame.
+    /// The graph signature the music export declares (read from the verified graph, not
+    /// assumed from the general model): one float32 input `mel` `[batch, 1, 1001, 64]`, one
+    /// float32 output `embedding` `[batch, 512]`.
+    fn check_signature(&self) -> Result<(), OnnxError> {
+        self.pool.with_session(|session| {
+            use ort::{tensor::TensorElementType, value::ValueType};
+            let matches_tensor = |value: &ValueType, dims: &[i64]| {
+                matches!(value, ValueType::Tensor { ty: TensorElementType::Float32, shape, .. } if shape.as_ref() == dims)
+            };
+            if session.inputs.len() != 1
+                || session.inputs[0].name != "mel"
+                || !matches_tensor(&session.inputs[0].input_type, &[-1, 1, CLAP_MEL_FRAMES as i64, 64])
+                || session.outputs.len() != 1
+                || session.outputs[0].name != "embedding"
+                || !matches_tensor(&session.outputs[0].output_type, &[-1, 512])
+            {
+                return Err(OnnxError::Inference("invalid pinned CLAP graph signature".into()));
+            }
+            Ok(())
+        })
+    }
+
+    /// Accept 1–5 windows of exactly 1001 frames with 64 bands per frame.
     /// Returns raw finite model vectors; normalization is a separate step.
-    pub fn infer(
-        &self,
-        input: &[f32],
-        batch: usize,
-        time: usize,
-    ) -> Result<Vec<[f32; 512]>, OnnxError> {
+    pub fn infer(&self, input: &[f32], batch: usize) -> Result<Vec<[f32; 512]>, OnnxError> {
         if !(1..=crate::clap::MAX_CLAP_WINDOWS).contains(&batch)
-            || !(1..=1001).contains(&time)
-            || batch.checked_mul(time).and_then(|n| n.checked_mul(64)) != Some(input.len())
+            || batch.checked_mul(CLAP_MEL_FRAMES * 64) != Some(input.len())
             || input.iter().any(|x| !x.is_finite())
         {
             return Err(OnnxError::Inference(
@@ -409,7 +417,7 @@ impl ClapAudioSession {
         }
         self.pool.with_session(|session| {
             let tensor = ort::value::Tensor::from_array((
-                [batch, 1, time, 64],
+                [batch, 1, CLAP_MEL_FRAMES, 64],
                 input.to_vec().into_boxed_slice(),
             ))
             .map_err(|e| OnnxError::Inference(e.to_string()))?;
@@ -424,14 +432,14 @@ impl ClapAudioSession {
                 .map_err(|e| OnnxError::Inference(e.to_string()))?
                 .with_outputs(
                     ort::session::run_options::OutputSelector::no_default()
-                        .with("output")
-                        .preallocate("output", output_buffer),
+                        .with("embedding")
+                        .preallocate("embedding", output_buffer),
                 );
             let outputs = session
-                .run_with_options(ort::inputs!["input" => tensor], &options)
+                .run_with_options(ort::inputs!["mel" => tensor], &options)
                 .map_err(|e| OnnxError::Inference(e.to_string()))?;
             let output = outputs
-                .get("output")
+                .get("embedding")
                 .ok_or_else(|| OnnxError::Inference("missing CLAP output".into()))?;
             let (shape, values) = output
                 .try_extract_tensor::<f32>()
@@ -456,11 +464,10 @@ impl ClapAudioSession {
 /// resource policy used elsewhere for ONNX batch sizes.
 pub const MAX_CLAP_TEXT_BATCH: usize = 8;
 
-/// Typed CLAP text inference over a resource-accounted pool of verified
-/// sessions. The caller supplies contiguous int64 `input_ids` already encoded
-/// by [`crate::text_tokenizer::ClapTextTokenizer`]: `[batch, sequence]`, no
-/// `attention_mask` (the pinned real graph accepts none), `sequence` bounded
-/// by [`crate::text_tokenizer::CLAP_TEXT_MAX_TOKENS`].
+/// Typed music CLAP text inference over a resource-accounted pool of verified
+/// sessions. The caller supplies contiguous int64 `input_ids` and `attention_mask`
+/// `[batch, 77]` from [`crate::text_tokenizer::ClapTextTokenizer::encode_padded`]: upstream
+/// (`music_clap_onnx.MusicClapText.tokens`) pads every prompt to 77 tokens and passes the mask.
 pub struct ClapTextSession {
     pool: BoundedSessionPool,
 }
@@ -483,26 +490,7 @@ impl ClapTextSession {
             });
         }
         let model = Self::from_trusted_bytes(artifact, pool_size, threads)?;
-        model.pool.with_session(|session| {
-            use ort::{tensor::TensorElementType, value::ValueType};
-            let matches_tensor = |value: &ValueType, ty: TensorElementType, dims: &[i64]| {
-                matches!(value, ValueType::Tensor { ty: t, shape, .. } if *t == ty && shape.as_ref() == dims)
-            };
-            // No `attention_mask` input: the pinned real graph takes only
-            // `input_ids`, matching upstream's unpadded, single-prompt encoding.
-            if session.inputs.len() != 1
-                || session.inputs[0].name != "input_ids"
-                || !matches_tensor(&session.inputs[0].input_type, TensorElementType::Int64, &[-1, -1])
-                || session.outputs.len() != 1
-                || session.outputs[0].name != "text_embeds"
-                || !matches_tensor(&session.outputs[0].output_type, TensorElementType::Float32, &[-1, 512])
-            {
-                return Err(OnnxError::Inference(
-                    "invalid pinned CLAP text graph signature".into(),
-                ));
-            }
-            Ok(())
-        })?;
+        model.check_signature()?;
         Ok(model)
     }
 
@@ -516,32 +504,81 @@ impl ClapTextSession {
         })
     }
 
-    /// Accept `1..=MAX_CLAP_TEXT_BATCH` prompts, each already tokenized to
-    /// exactly `sequence` int64 ids (`1..=CLAP_TEXT_MAX_TOKENS`), with every
-    /// id a valid RoBERTa vocabulary index. Returns bounded, finite
-    /// `[batch, 512]` text embeddings (unnormalized; normalize separately as
-    /// with the audio path).
+    /// The music text export's declared signature: int64 `input_ids` and `attention_mask`
+    /// `[batch, tokens]` in that order, one float32 output `embedding` `[batch, 512]`.
+    fn check_signature(&self) -> Result<(), OnnxError> {
+        self.pool.with_session(|session| {
+            use ort::{tensor::TensorElementType, value::ValueType};
+            let matches_tensor = |value: &ValueType, ty: TensorElementType, dims: &[i64]| {
+                matches!(value, ValueType::Tensor { ty: t, shape, .. } if *t == ty && shape.as_ref() == dims)
+            };
+            if session.inputs.len() != 2
+                || session.inputs[0].name != "input_ids"
+                || !matches_tensor(&session.inputs[0].input_type, TensorElementType::Int64, &[-1, -1])
+                || session.inputs[1].name != "attention_mask"
+                || !matches_tensor(&session.inputs[1].input_type, TensorElementType::Int64, &[-1, -1])
+                || session.outputs.len() != 1
+                || session.outputs[0].name != "embedding"
+                || !matches_tensor(&session.outputs[0].output_type, TensorElementType::Float32, &[-1, 512])
+            {
+                return Err(OnnxError::Inference(
+                    "invalid pinned CLAP text graph signature".into(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
+    /// Accept `1..=MAX_CLAP_TEXT_BATCH` prompts, each padded to exactly
+    /// [`crate::text_tokenizer::CLAP_TEXT_MAX_TOKENS`] int64 ids (valid RoBERTa vocabulary
+    /// indices) with an equally long 0/1 attention mask. Returns bounded, finite
+    /// `[batch, 512]` text embeddings (unnormalized; normalize separately as with audio).
     pub fn infer(
         &self,
         input_ids: &[i64],
+        attention_mask: &[i64],
         batch: usize,
-        sequence: usize,
     ) -> Result<Vec<[f32; 512]>, OnnxError> {
+        let sequence = crate::text_tokenizer::CLAP_TEXT_MAX_TOKENS;
         if !(1..=MAX_CLAP_TEXT_BATCH).contains(&batch)
-            || !(1..=crate::text_tokenizer::CLAP_TEXT_MAX_TOKENS).contains(&sequence)
             || batch.checked_mul(sequence) != Some(input_ids.len())
+            || attention_mask.len() != input_ids.len()
+            || attention_mask.iter().any(|&m| m != 0 && m != 1)
             || input_ids
                 .iter()
                 .any(|&id| !(0..crate::text_tokenizer::CLAP_TEXT_VOCAB_SIZE as i64).contains(&id))
         {
             return Err(OnnxError::Inference(
-                "invalid CLAP text input shape or out-of-vocabulary id".into(),
+                "invalid CLAP text input shape, mask or out-of-vocabulary id".into(),
             ));
         }
+        // The padded-encoding contract (`encode_padded`, upstream `padding='max_length'`): per prompt a
+        // non-empty run of attended tokens from the start, then only `<pad>` ids with mask 0. Anything else
+        // (no attended token, a hole, a real id in the padding) is not an input the graph was matched on.
+        let pad = crate::text_tokenizer::CLAP_TEXT_PAD_ID;
+        let rows = input_ids
+            .chunks_exact(sequence)
+            .zip(attention_mask.chunks_exact(sequence));
+        for (ids, mask) in rows {
+            let attended = mask.iter().take_while(|&&m| m == 1).count();
+            if attended == 0
+                || mask[attended..].iter().any(|&m| m != 0)
+                || ids[attended..].iter().any(|&id| id != pad)
+            {
+                return Err(OnnxError::Inference(
+                    "CLAP text mask must be a non-empty prefix with <pad> ids behind it".into(),
+                ));
+            }
+        }
         self.pool.with_session(|session| {
-            let tensor = ort::value::Tensor::from_array((
+            let ids = ort::value::Tensor::from_array((
                 [batch, sequence],
                 input_ids.to_vec().into_boxed_slice(),
+            ))
+            .map_err(|e| OnnxError::Inference(e.to_string()))?;
+            let mask = ort::value::Tensor::from_array((
+                [batch, sequence],
+                attention_mask.to_vec().into_boxed_slice(),
             ))
             .map_err(|e| OnnxError::Inference(e.to_string()))?;
             let output_buffer = ort::value::Tensor::from_array((
@@ -553,14 +590,17 @@ impl ClapTextSession {
                 .map_err(|e| OnnxError::Inference(e.to_string()))?
                 .with_outputs(
                     ort::session::run_options::OutputSelector::no_default()
-                        .with("text_embeds")
-                        .preallocate("text_embeds", output_buffer),
+                        .with("embedding")
+                        .preallocate("embedding", output_buffer),
                 );
             let outputs = session
-                .run_with_options(ort::inputs!["input_ids" => tensor], &options)
+                .run_with_options(
+                    ort::inputs!["input_ids" => ids, "attention_mask" => mask],
+                    &options,
+                )
                 .map_err(|e| OnnxError::Inference(e.to_string()))?;
             let output = outputs
-                .get("text_embeds")
+                .get("embedding")
                 .ok_or_else(|| OnnxError::Inference("missing CLAP text output".into()))?;
             let (shape, values) = output
                 .try_extract_tensor::<f32>()
@@ -899,13 +939,13 @@ impl ModelSessionRegistry {
     }
 
     pub fn clap_audio(&self) -> Option<&SharedSession> {
-        self.get(&ArtifactId::from_static("hf_audio"))
-            .or_else(|| self.get(&ArtifactId::from_static("hf_audio.onnx")))
+        self.get(&OnnxModel::ClapAudio.artifact_id())
+            .or_else(|| self.get(&ArtifactId::from_static(OnnxModel::CLAP_AUDIO_BASENAME)))
     }
 
     pub fn clap_text(&self) -> Option<&SharedSession> {
-        self.get(&ArtifactId::from_static("text_model"))
-            .or_else(|| self.get(&ArtifactId::from_static("text_model.onnx")))
+        self.get(&OnnxModel::ClapText.artifact_id())
+            .or_else(|| self.get(&ArtifactId::from_static(OnnxModel::CLAP_TEXT_BASENAME)))
     }
 }
 

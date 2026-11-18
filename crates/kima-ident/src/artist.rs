@@ -431,6 +431,15 @@ async fn gather(ctx: &IdentCtx, a: &ArtistForEnrichment) -> Gathered {
     };
     if similar_ok {
         let list = similar::merge(&lb, &related);
+        let assets = crate::stages::vibe_assets::initialize(ctx).await.ok();
+        let list = similar::rerank(
+            &ctx.pool,
+            assets.as_ref().and_then(|a| a.probe.as_deref()),
+            mbid,
+            &a.name,
+            &list,
+        )
+        .await;
         write.similar = Change::Set(serde_json::to_value(list).unwrap_or_else(|_| json!([])));
     }
 

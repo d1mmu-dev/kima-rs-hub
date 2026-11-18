@@ -1,0 +1,173 @@
+//! Synthetic wire examples, not captured runtime/model fixtures.
+use kima_api_types::vibe::{Computing, MapResponse, MoodSummary, TrackMood};
+use serde_json::{Value, json};
+
+/// The reference TypeScript shapes, extracted once from upstream `frontend/lib/api.ts` (see the fixture's
+/// `source`): the bundled `frontend/` copy is gone, so CI reads the checked-in extraction.
+fn reference() -> Value {
+    serde_json::from_str(include_str!("fixtures/vibe_reference_shapes.json")).unwrap()
+}
+
+fn reference_keys(reference: &Value, name: &str) -> std::collections::BTreeSet<String> {
+    reference["interfaces"][name]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Interface keys as the old in-repo test read them: four-space-indented `key:` lines, `?` dropped,
+/// `trackNo` excluded (/vibe/similar and /vibe/alchemy never send it).
+fn typescript_keys(ts: &str, name: &str) -> std::collections::BTreeSet<String> {
+    ts.split(&format!("interface {name} {{"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("interface {name} missing"))
+        .split("\n}")
+        .next()
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("    "))
+        .filter_map(|line| {
+            line.split_once(':')
+                .map(|(key, _)| key.trim_end_matches('?').to_owned())
+        })
+        .filter(|key| key != "trackNo")
+        .collect()
+}
+
+#[test]
+fn matching_and_path_dtos_match_reference_typescript_fields() {
+    use kima_api_types::vibe::{
+        AlchemyResponse, MatchTrack, PathResponse, PathTrack, SimilarResponse,
+    };
+    use std::collections::BTreeSet;
+    let reference = reference();
+    let track = json!({"id":"track","title":"title","displayTitle":null,"duration":123,"distance":0.25,"similarity":0.75,"album":{"id":"album","title":"album","coverUrl":null},"artist":{"id":"artist","name":"artist"}});
+    let flat = json!({"id":"track","title":"title","displayTitle":"edit","duration":123,"albumId":"album","albumTitle":"album","albumCoverUrl":null,"artistId":"artist","artistName":"artist"});
+    assert_eq!(
+        track
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        reference_keys(&reference, "VibeTrack")
+    );
+    assert_eq!(
+        flat.as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        reference_keys(&reference, "VibePathTrack")
+    );
+    roundtrip::<MatchTrack>(track.clone());
+    roundtrip::<PathTrack>(flat.clone());
+    roundtrip::<SimilarResponse>(json!({"sourceTrackId":"source","tracks":[track.clone()]}));
+    roundtrip::<AlchemyResponse>(json!({"tracks":[track]}));
+    roundtrip::<PathResponse>(
+        json!({"startTrack":flat,"endTrack":flat,"path":[flat],"metadata":{"totalTracks":3,"embeddingDistance":0.5,"averageStepSize":0.1,"mode":"smooth"}}),
+    );
+}
+
+/// Re-derives the fixture from an external, freshly pulled kima-hub checkout (never bundled in this
+/// repository). Run: `KIMA_HUB_REFERENCE=<checkout> cargo test -p kima-api-types --test vibe -- --ignored`
+/// (pull it first, e.g. `tools/prepare-kima-hub-reference.sh --check`). The file is read from the
+/// checkout's HEAD git object, never its working tree, and the reported HEAD SHA is the provenance.
+/// It fails when the TypeScript keys differ, and also when `api.ts` changed at all since the extraction
+/// (SHA-256 differs from the fixture's `source.sha256`): upstream moved, so re-extract deliberately and
+/// record the drift.
+#[test]
+#[ignore = "needs KIMA_HUB_REFERENCE pointing at an external kima-hub checkout"]
+fn reference_fixture_matches_external_checkout() {
+    use sha2::{Digest, Sha256};
+    let root = std::env::var("KIMA_HUB_REFERENCE")
+        .expect("set KIMA_HUB_REFERENCE to an external kima-hub checkout");
+    let git = |args: &[&str]| {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(&root).args(args);
+        // Inherited repository variables must not redirect these reads to another repository.
+        for var in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_COUNT",
+            "GIT_NAMESPACE",
+            "GIT_REPLACE_REF_BASE",
+            "GIT_NO_REPLACE_OBJECTS",
+            "GIT_GRAFT_FILE",
+            "GIT_SHALLOW_FILE",
+        ] {
+            cmd.env_remove(var);
+        }
+        let out = cmd.output().expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?} in {root}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    let head = String::from_utf8(git(&["rev-parse", "HEAD"])).unwrap();
+    let head = head.trim();
+    let bytes = git(&["cat-file", "blob", "HEAD:frontend/lib/api.ts"]);
+    let sha256: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let reference = reference();
+    let source = &reference["source"];
+    eprintln!(
+        "reference {root} HEAD {head}: frontend/lib/api.ts sha256 {sha256} (fixture: {} extracted at {})",
+        source["sha256"], source["extractedAt"]
+    );
+    let ts = String::from_utf8(bytes).unwrap();
+    for name in ["VibeTrack", "VibePathTrack"] {
+        assert_eq!(
+            typescript_keys(&ts, name),
+            reference_keys(&reference, name),
+            "{name} at HEAD {head}"
+        );
+    }
+    for field in reference["fields"].as_array().unwrap() {
+        let field = field.as_str().unwrap();
+        assert!(ts.contains(field), "{field} at HEAD {head}");
+    }
+    assert_eq!(
+        sha256,
+        source["sha256"].as_str().unwrap(),
+        "frontend/lib/api.ts at HEAD {head} differs from the extraction at {}: upstream moved, \
+         re-extract the fixture deliberately and record the drift",
+        source["extractedAt"]
+    );
+}
+
+fn roundtrip<T: serde::de::DeserializeOwned + serde::Serialize>(value: Value) {
+    let dto: T = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(serde_json::to_value(dto).unwrap(), value);
+}
+
+#[test]
+fn map_preserves_upstream_keys_and_nullable_readings() {
+    roundtrip::<MapResponse>(json!({"tracks":[{
+        "id":"synthetic-track","x":0.5,"y":0.25,"z":1.0,"colour":0.4,
+        "title":"Synthetic","artist":"Artist","artistId":"artist","albumId":"album",
+        "coverUrl":null,"dominantMood":"moodHappy","moodScore":0.9,
+        "moods":{"moodHappy":0.9,"moodSad":0.1,"moodRelaxed":0.2,"moodAggressive":0.3,"moodParty":0.4},
+        "energy":null,"valence":0.75}],"trackCount":1,"computedAt":"1970-01-01T00:00:00.000Z","moodSignature":"synthetic"}));
+}
+
+#[test]
+fn mood_summary_detail_and_computing_have_no_personal_fields() {
+    roundtrip::<MoodSummary>(
+        json!({"shares":[{"key":"moodHappy","fraction":0.75},{"key":"neutral","fraction":0.25}],"albums":{"album":"moodHappy"},"artists":{"artist":"moodHappy"}}),
+    );
+    roundtrip::<TrackMood>(json!({"dominantMood":"unanalyzed"}));
+    roundtrip::<Computing>(json!({"computing":true}));
+}

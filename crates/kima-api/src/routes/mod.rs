@@ -25,6 +25,9 @@ mod stats;
 mod stubs;
 mod system;
 mod system_settings;
+mod vibe;
+mod vibe_encoding;
+mod vibe_matching;
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
@@ -49,6 +52,7 @@ pub fn router(state: AppState) -> Router {
         .merge(podcasts::routes())
         .merge(profiles::routes())
         .merge(settings::routes())
+        .merge(vibe::routes())
         .fallback(|| async { ApiError::NotFound("Not found") });
 
     Router::new()

@@ -188,6 +188,10 @@ async fn main() -> anyhow::Result<()> {
                 disabled: config.disable_musicnn,
                 ..Default::default()
             },
+            vibe: kima_ident::VibeConfig {
+                asset_dir: config.vibe_asset_dir.clone(),
+                exact_max: config.vibe_exact_max,
+            },
         },
         last_cycle: Default::default(),
         progress_events: state.progress_events.clone(),
@@ -200,10 +204,18 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("initializing CLAP blocking worker")?;
     info!(capabilities = ?clap_status.capabilities, "ML capability status");
+    // The vibe assets are optional: a missing or unpinned file turns the dependent capability off, never the server.
+    let vibe = kima_ident::stages::vibe_assets::initialize(&ident_ctx)
+        .await
+        .context("loading the vibe assets")?;
+    info!(capabilities = ?vibe.report.capabilities, "vibe asset status");
     let mut registry = kima_server::jobs::Registry::new();
     registry.register_library(library_ctx.clone());
     let state = state.with_ident(ident_ctx.clone());
     registry.register_autotag(ident_ctx.clone());
+    // The mood snapshot follows the statistics between cycles (every 30 s); stopped by the shutdown token.
+    let mood_snapshots =
+        kima_ident::stages::moods::spawn_refresher(ident_ctx.clone(), shutdown.clone());
     registry.register_enrich(ident_ctx);
     let podcast_ctx = kima_podcast::ctx::PodcastCtx {
         pool: pool.clone(),
@@ -284,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
     shutdown.cancel();
     watcher.join().await;
     let _ = scheduler.await;
+    let _ = mood_snapshots.await;
     kima_server::jobs::drain(workers, SHUTDOWN_GRACE).await;
     served?;
     Ok(())

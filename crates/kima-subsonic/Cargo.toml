@@ -36,7 +36,9 @@ base64.workspace = true
 image.workspace = true
 insta.workspace = true
 kima-api.workspace = true
+kima-ml.workspace = true
 kima-net = { workspace = true, features = ["testing"] }
+kima-vibe.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
 kima-test-support = { workspace = true, features = ["profiles"] }

@@ -45,12 +45,12 @@ fn migrator_upto(version: i64) -> Migrator {
     }
 }
 
-fn migrator_of(versions: &[i64]) -> Migrator {
+fn migrator_without(version: i64) -> Migrator {
     Migrator {
         migrations: std::borrow::Cow::Owned(
             kima_db::MIGRATOR
                 .iter()
-                .filter(|m| versions.contains(&m.version))
+                .filter(|m| m.version != version && !(version == 40 && m.version == 41))
                 .cloned()
                 .collect(),
         ),
@@ -525,12 +525,14 @@ async fn name_must_be_trimmed_and_1_to_50(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = false)]
-async fn down_script_restores_0039_schema(pool: PgPool) {
+async fn down_script_restores_pre_profile_schema(pool: PgPool) {
     at_0039_with_seed(&pool).await;
-    let schema_0039 = schema_fingerprint(&pool).await;
+    // 0060's rollback must retain both independent M5 migrations and their index options.
+    migrator_upto(41).run(&pool).await.unwrap();
+    let schema_before_profiles = schema_fingerprint(&pool).await;
     let rows_0039 = snapshot(&pool, "user_id").await;
     kima_db::MIGRATOR.run(&pool).await.unwrap();
-    assert_ne!(schema_fingerprint(&pool).await, schema_0039);
+    assert_ne!(schema_fingerprint(&pool).await, schema_before_profiles);
 
     // A non-main profile owning a row blocks the way back, and nothing changes.
     let admin: Uuid = "00000000-0000-7000-8000-000000000a01".parse().unwrap();
@@ -570,46 +572,88 @@ async fn down_script_restores_0039_schema(pool: PgPool) {
         .await
         .unwrap();
     sqlx::raw_sql(DOWN_0060).execute(&pool).await.unwrap();
-    assert_eq!(schema_fingerprint(&pool).await, schema_0039);
+    assert_eq!(schema_fingerprint(&pool).await, schema_before_profiles);
     assert_eq!(snapshot(&pool, "user_id").await, rows_0039);
     let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 39);
+    assert_eq!(version, 41);
 
     // And up again from there.
     kima_db::MIGRATOR.run(&pool).await.unwrap();
     assert_eq!(snapshot(&pool, "profile_id").await, rows_0039);
 }
 
-/// Gate for the merge with `feature/m5-vibe` (its `0040_vibe_engine.sql`): both upgrade orders
-/// must work with the combined migration set. Skips, saying so, while 0040 is not in the tree.
-#[sqlx::test(migrations = false)]
-async fn combined_order_with_m5_migration(pool: PgPool) {
-    if !kima_db::MIGRATOR.iter().any(|m| m.version == 40) {
-        println!(
-            "SKIP combined_order_with_m5_migration: migration 0040 (feature/m5-vibe) is not in \
-             this tree; the test runs once both branches are combined"
-        );
-        return;
+/// Require the complete embedded set and its original checksums, including both branches.
+async fn assert_combined_migrations(pool: &PgPool) {
+    assert!(kima_db::MIGRATOR.iter().any(|m| m.version == 40));
+    assert!(kima_db::MIGRATOR.iter().any(|m| m.version == 60));
+    let applied: Vec<(i64, Vec<u8>, bool)> =
+        sqlx::query_as("SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    let expected: Vec<_> = kima_db::MIGRATOR
+        .iter()
+        .map(|m| (m.version, m.checksum.to_vec(), true))
+        .collect();
+    assert_eq!(applied, expected);
+    for table in [
+        "matching_feel",
+        "matching_state",
+        "matching_map",
+        "track_moods",
+        "mood_state",
+        "track_clap_readings",
+        "profiles",
+    ] {
+        let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(table)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert!(exists, "missing {table}");
     }
-    // 0039 -> 0060 -> 0040.
+}
+
+/// Each order has its own harness database and independently captured randomized seed.
+#[sqlx::test(migrations = false)]
+async fn combined_order_0039_0060_0040(pool: PgPool) {
     at_0039_with_seed(&pool).await;
     let rows = snapshot(&pool, "user_id").await;
-    migrator_of(&[60]).run(&pool).await.unwrap();
-    kima_db::MIGRATOR.run(&pool).await.unwrap();
+    // Keep every applied migration: a migrator containing only 0060 fails with VersionMissing(1).
+    migrator_without(40).run(&pool).await.unwrap();
     assert_eq!(snapshot(&pool, "profile_id").await, rows);
-
-    // 0039 -> 0040 -> 0060, in a fresh schema of the same database.
-    sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-        .execute(&pool)
+    let absent: bool = sqlx::query_scalar("SELECT to_regclass('matching_state') IS NULL")
+        .fetch_one(&pool)
         .await
         .unwrap();
-    at_0039_with_seed(&pool).await;
-    migrator_upto(40).run(&pool).await.unwrap();
+    assert!(absent, "0040 must not already be applied");
     kima_db::MIGRATOR.run(&pool).await.unwrap();
     assert_eq!(snapshot(&pool, "profile_id").await, rows);
+    assert_combined_migrations(&pool).await;
+}
+
+#[sqlx::test(migrations = false)]
+async fn combined_order_0039_0040_0060(pool: PgPool) {
+    at_0039_with_seed(&pool).await;
+    let rows = snapshot(&pool, "user_id").await;
+    migrator_upto(40).run(&pool).await.unwrap();
+    assert_eq!(snapshot(&pool, "user_id").await, rows);
+    let absent: bool = sqlx::query_scalar("SELECT to_regclass('profiles') IS NULL")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(absent, "0060 must not already be applied");
+    kima_db::MIGRATOR.run(&pool).await.unwrap();
+    assert_eq!(snapshot(&pool, "profile_id").await, rows);
+    assert_combined_migrations(&pool).await;
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn fresh_database_has_combined_migrations(pool: PgPool) {
+    assert_combined_migrations(&pool).await;
 }
 
 /// Moving a profile to another account (or giving it another id) would carry its rows past

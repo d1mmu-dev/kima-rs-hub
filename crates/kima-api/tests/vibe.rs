@@ -1,0 +1,877 @@
+//! M5 real-router contract tests; all vectors/heads are synthetic.
+mod common;
+#[path = "vibe/degradation.rs"]
+mod degradation;
+#[path = "vibe/routes.rs"]
+mod route_contracts;
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn map_negotiates_case_insensitive_quality_wildcard_and_identity(pool: kima_db::PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "encoding").await;
+    let srv = axum_test::TestServer::new(kima_api::router(state)).unwrap();
+    for (value, status, gzip) in [
+        ("gzip;Q=0,*;q=1,identity;q=0", 406, false),
+        ("*;q=1,identity;q=0", 200, true),
+        ("gzip;q=0,identity;q=0", 406, false),
+        ("br,identity;q=0", 406, false),
+        ("gzip;q=bogus", 400, false),
+        ("gzip;q=1.1", 400, false),
+        ("GZip; Q=0.5", 200, true),
+        ("identity", 200, false),
+        // A wildcard at q=0 also excludes identity unless identity is listed (RFC 9110 §12.5.3).
+        ("*;q=0", 406, false),
+        ("*;q=0,identity", 200, false),
+        ("*;q=0,identity;q=0.5", 200, false),
+        ("*;q=0.5,identity;q=0", 200, true),
+        // An explicit identity entry overrides the wildcard; explicit gzip=0 overrides it too.
+        ("identity;q=0,*;q=0", 406, false),
+        ("gzip;q=0,*", 200, false),
+        // An empty field lists nothing: identity stays acceptable.
+        ("", 200, false),
+        // `x-gzip` is an unknown coding here (D-185: upstream's `\bgzip\b` regex would gzip).
+        ("x-gzip", 200, false),
+        ("x-gzip,identity;q=0", 406, false),
+    ] {
+        let res = srv
+            .get("/api/vibe/map")
+            .authorization_bearer(&token)
+            .add_header("accept-encoding", value)
+            .await;
+        assert_eq!(res.status_code().as_u16(), status, "{value}");
+        assert_eq!(
+            res.headers().get("content-encoding").is_some(),
+            gzip,
+            "{value}"
+        );
+    }
+    // No header at all: identity.
+    let res = srv.get("/api/vibe/map").authorization_bearer(&token).await;
+    assert_eq!(res.status_code().as_u16(), 200);
+    assert!(res.headers().get("content-encoding").is_none());
+    // Several header fields combine as one list.
+    for (fields, status, gzip) in [
+        (["identity;q=0", "gzip"], 200, true),
+        (["gzip;q=0", "*;q=0"], 406, false),
+        (["gzip", "gzip;q=0"], 200, false),
+        (["identity", "gzip;q=bogus"], 400, false),
+    ] {
+        let res = srv
+            .get("/api/vibe/map")
+            .authorization_bearer(&token)
+            .add_header("accept-encoding", fields[0])
+            .add_header("accept-encoding", fields[1])
+            .await;
+        assert_eq!(res.status_code().as_u16(), status, "{fields:?}");
+        assert_eq!(
+            res.headers().get("content-encoding").is_some(),
+            gzip,
+            "{fields:?}"
+        );
+    }
+}
+
+/// The header is negotiated before any library or snapshot read: a malformed or unsatisfiable
+/// `Accept-Encoding` is answered even while the layout is still computing (202 otherwise).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn map_rejects_bad_accept_encoding_before_any_library_read(pool: PgPool) {
+    mapped(&pool, "Pending", [0.0; 3]).await;
+    sqlx::query("DELETE FROM matching_map")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = with_assets(common::state(pool), true, false);
+    let (_, token) = common::user_with_token(&state, "precedence").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    for (value, status, body) in [
+        (
+            "gzip;q=bogus",
+            400,
+            json!({"error": "Invalid Accept-Encoding"}),
+        ),
+        (
+            "identity;q=0",
+            406,
+            json!({"error": "No acceptable map encoding"}),
+        ),
+        ("gzip", 202, json!({"computing": true})),
+        ("identity", 202, json!({"computing": true})),
+    ] {
+        let res = srv
+            .get("/api/vibe/map")
+            .authorization_bearer(&token)
+            .add_header("accept-encoding", value)
+            .await;
+        assert_eq!(res.status_code().as_u16(), status, "{value}");
+        assert_eq!(res.json::<Value>(), body, "{value}");
+    }
+}
+
+use axum_test::TestServer;
+use kima_db::PgPool;
+use serde_json::{Value, json};
+
+struct SyntheticText;
+impl kima_ident::stages::embedding::TextEmbedder for SyntheticText {
+    fn embed<'a>(
+        &'a self,
+        _ctx: &'a kima_ident::IdentCtx,
+        text: &'a str,
+    ) -> kima_ident::stages::embedding::TextEmbeddingFuture<'a> {
+        Box::pin(async move {
+            use kima_ident::stages::embedding::TextEmbeddingError;
+            match text {
+                "timeout" => std::future::pending().await,
+                "error" => Err(TextEmbeddingError::Inference(
+                    "private inference detail".into(),
+                )),
+                _ => {
+                    assert_eq!(text, "rain");
+                    let mut v = [0.0; 512];
+                    v[0] = 1.0;
+                    Ok(v)
+                }
+            }
+        })
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn text_search_limits_shape_no_cutoff_and_errors(pool: PgPool) {
+    let first = mapped(&pool, "Search title", [0.0; 3]).await;
+    sqlx::query(
+        "UPDATE tracks SET display_title='Edited',track_no=7,duration_secs=123 WHERE id=$1",
+    )
+    .bind(first.track)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE albums SET image_path='synthetic-cover' WHERE id=$1")
+        .bind(first.album)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for i in 0..104 {
+        let s = mapped(&pool, &format!("Search {i}"), [0.0; 3]).await;
+        let mut v = vec![0.0f32; 512];
+        v[0] = -1.0;
+        sqlx::query("UPDATE track_embeddings SET embedding=$2::real[]::vector WHERE track_id=$1")
+            .bind(s.track)
+            .bind(v)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let mut state = common::state(pool.clone());
+    state.vibe_text_embedder = Arc::new(SyntheticText);
+    let (_, token) = common::user_with_token(&state, "searcher").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    for (limit, count) in [
+        (json!(null), 20),
+        (json!(200), 100),
+        (json!(1), 1),
+        (json!(0), 20),
+        (json!(-9), 1),
+        (json!("3junk"), 3),
+        (json!("\u{feff}3junk"), 3),
+        (json!("\u{feff}+3"), 3),
+        (json!("\u{feff}-3"), 1),
+        (json!("\u{0085}3"), 20),
+        (
+            json!(
+                "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}3tail"
+            ),
+            3,
+        ),
+    ] {
+        let res = srv
+            .post("/api/vibe/search")
+            .authorization_bearer(&token)
+            .json(&json!({"query":"\u{feff}  rain  \u{feff}","limit":limit}))
+            .await;
+        res.assert_status_ok();
+        let data: Value = res.json();
+        assert_eq!(data["query"], "rain");
+        let tracks = data["tracks"].as_array().unwrap();
+        assert_eq!(tracks.len(), count);
+        assert_eq!(tracks[0]["id"], first.track.to_string());
+        assert_eq!(tracks[0]["trackNo"], 7);
+        assert_eq!(tracks[0]["displayTitle"], "Edited");
+        assert_eq!(tracks[0]["duration"], 123);
+        assert_eq!(tracks[0]["album"]["coverUrl"], first.album.to_string());
+        if count > 1 {
+            assert_eq!(tracks[1]["similarity"], 0.0);
+            assert_eq!(tracks[1]["distance"], 2.0);
+        }
+        let _: kima_api_types::vibe::SearchResponse = serde_json::from_value(data).unwrap();
+    }
+    for (query, status, body) in [
+        (
+            "error",
+            500,
+            json!({"error":"Failed to search tracks by vibe"}),
+        ),
+        (
+            "timeout",
+            504,
+            json!({"error":"Text embedding service unavailable","message":"The CLAP analyzer service did not respond in time"}),
+        ),
+    ] {
+        let res = srv
+            .post("/api/vibe/search")
+            .authorization_bearer(&token)
+            .json(&json!({"query":query}))
+            .await;
+        assert_eq!(res.status_code().as_u16(), status);
+        assert_eq!(res.json::<Value>(), body);
+    }
+    sqlx::query("DROP TABLE track_embeddings CASCADE")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let res = srv
+        .post("/api/vibe/search")
+        .authorization_bearer(&token)
+        .json(&json!({"query":"rain"}))
+        .await;
+    res.assert_status_internal_server_error();
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"error":"Failed to search tracks by vibe"})
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn text_search_validates_query_and_reports_real_model_unavailable(pool: PgPool) {
+    // One eligible music vector, so the missing text model (not D-182) answers.
+    mapped(&pool, "Eligible", [0.0; 3]).await;
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "searcher").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    srv.post("/api/vibe/search")
+        .json(&json!({"query":"rain"}))
+        .await
+        .assert_status_unauthorized();
+    for query in [
+        json!(null),
+        json!(7),
+        json!(" x "),
+        json!("\u{feff}a\u{feff}"),
+        json!(""),
+        json!("a".repeat(501)),
+        json!("😀".repeat(251)),
+    ] {
+        let message = if query
+            .as_str()
+            .is_some_and(|s| s.encode_utf16().count() > 500)
+        {
+            "Query must be at most 500 characters"
+        } else {
+            "Query must be at least 2 characters"
+        };
+        let res = srv
+            .post("/api/vibe/search")
+            .authorization_bearer(&token)
+            .json(&json!({"query":query}))
+            .await;
+        res.assert_status_bad_request();
+        assert_eq!(res.json::<Value>(), json!({"error":message}));
+    }
+    for query in [
+        "rain".to_owned(),
+        "😀".into(),
+        "\u{0085}a\u{0085}".into(),
+        "😀".repeat(250),
+    ] {
+        let res = srv
+            .post("/api/vibe/search")
+            .authorization_bearer(&token)
+            .json(&json!({"query":query}))
+            .await;
+        res.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            res.json::<Value>(),
+            json!({"error":"Text embedding service unavailable","message":"The CLAP text model is not available"})
+        );
+    }
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn map_empty_library_200_empty_and_routes_require_auth(pool: PgPool) {
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "listener").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    for path in [
+        "/api/vibe/map",
+        "/api/vibe/mood-summary",
+        "/api/vibe/mood/unknown",
+    ] {
+        srv.get(path).await.assert_status_unauthorized();
+    }
+    let res = srv.get("/api/vibe/map").authorization_bearer(&token).await;
+    res.assert_status_ok();
+    let data: Value = res.json();
+    assert_eq!(data["tracks"], json!([]));
+    assert_eq!(data["trackCount"], 0);
+    assert_eq!(data["computedAt"], "1970-01-01T00:00:00.000Z");
+    assert!(data["moodSignature"].is_string());
+}
+
+use common::library::{Seed, Seeded, seed};
+use kima_db::vibe::MATCHING_SOUND;
+use kima_ident::stages::{
+    moods,
+    vibe_assets::{self, VibeAssets},
+};
+use kima_vibe::{
+    feel_probe::{FeelProbe, ProbeAxis},
+    mood_heads::{MOODS, MoodHead, MoodHeads},
+};
+use std::sync::Arc;
+
+fn probe() -> Arc<FeelProbe> {
+    Arc::new(FeelProbe {
+        model: "synthetic".into(),
+        probe_id: "route-probe".into(),
+        valence: ProbeAxis {
+            alpha: 1.0,
+            bias: 0.5,
+            weights: vec![0.0; 512],
+        },
+        arousal: ProbeAxis {
+            alpha: 1.0,
+            bias: 0.5,
+            weights: vec![0.0; 512],
+        },
+    })
+}
+fn heads() -> Arc<MoodHeads> {
+    Arc::new(MoodHeads {
+        model: "synthetic".into(),
+        dims: 512,
+        version: "route-heads".into(),
+        heads: MOODS
+            .iter()
+            .map(|m| {
+                let mut weights = vec![0.0; 512];
+                if *m == "happy" {
+                    weights[0] = 1.0;
+                }
+                MoodHead { weights, bias: 0.0 }
+            })
+            .collect(),
+    })
+}
+fn with_assets(state: kima_api::AppState, probe: bool, heads_enabled: bool) -> kima_api::AppState {
+    let ctx = state.ident_ctx();
+    vibe_assets::install(
+        &ctx,
+        VibeAssets {
+            probe: probe.then(self::probe),
+            heads: heads_enabled.then(heads),
+            report: kima_ml::CapabilityEvaluationReport {
+                capabilities: Default::default(),
+            },
+        },
+    );
+    state.with_ident(ctx)
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn mood_snapshot_map_summary_and_detail_agree(pool: PgPool) {
+    let happy = mapped(&pool, "Happy", [0.0; 3]).await;
+    let group = seed(
+        &pool,
+        Seed::new("Happy artist", "Happy album", None, "Unmapped"),
+    )
+    .await;
+    sqlx::query("UPDATE tracks SET album_id=$2 WHERE id=$1")
+        .bind(happy.track)
+        .bind(group.album)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for n in 0..5 {
+        let s = mapped(&pool, &format!("Neutral {n}"), [0.0; 3]).await;
+        let mut v = vec![0.0f32; 512];
+        v[1] = 1.0;
+        sqlx::query("UPDATE track_embeddings SET embedding=$2::real[]::vector WHERE track_id=$1")
+            .bind(s.track)
+            .bind(v)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let state = with_assets(common::state(pool.clone()), true, true);
+    let (_, token) = common::user_with_token(&state, "listener").await;
+    moods::run_pass(state.ident.as_ref().unwrap())
+        .await
+        .unwrap();
+    let snap = moods::snapshot(state.ident.as_ref().unwrap()).unwrap();
+    assert_eq!(snap.views[&happy.track].dominant, "moodHappy");
+    let extra = mapped(&pool, "Unscored", [0.0; 3]).await;
+    let srv = TestServer::new(kima_api::router(state.clone())).unwrap();
+    let res = srv.get("/api/vibe/map").authorization_bearer(&token).await;
+    res.assert_status_ok();
+    let data: Value = res.json();
+    assert_eq!(data["moodSignature"], snap.signature);
+    let t = data["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == happy.track.to_string())
+        .unwrap();
+    assert_eq!(t["dominantMood"], "moodHappy");
+    assert_eq!(t["moodScore"], snap.views[&happy.track].score);
+    assert_eq!(t["moods"].as_object().unwrap().len(), 5);
+    assert_eq!(
+        (t["x"].as_f64(), t["y"].as_f64(), t["z"].as_f64()),
+        (Some(0.5), Some(0.5), Some(0.5))
+    );
+    let res = srv
+        .get("/api/vibe/mood-summary")
+        .authorization_bearer(&token)
+        .await;
+    res.assert_status_ok();
+    let summary: Value = res.json();
+    assert_eq!(
+        summary["shares"],
+        json!([{"key":"neutral","fraction":5.0/6.0},{"key":"moodHappy","fraction":1.0/6.0}])
+    );
+    assert_eq!(
+        summary["albums"],
+        json!({group.album.to_string():"moodHappy"})
+    );
+    assert_eq!(
+        summary["artists"],
+        json!({group.artist.to_string():"moodHappy"})
+    );
+    let _: kima_api_types::vibe::MoodSummary = serde_json::from_value(summary).unwrap();
+    for (id, expected) in [
+        (happy.track.to_string(), "moodHappy"),
+        (extra.track.to_string(), "unanalyzed"),
+        ("not-a-uuid".into(), "unanalyzed"),
+    ] {
+        let res = srv
+            .get(&format!("/api/vibe/mood/{id}"))
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+        assert_eq!(res.json::<Value>(), json!({"dominantMood":expected}));
+        let _: kima_api_types::vibe::TrackMood = res.json();
+    }
+    let before = srv
+        .get("/api/vibe/map")
+        .authorization_bearer(&token)
+        .add_header("accept-encoding", "gzip")
+        .await;
+    sqlx::query("UPDATE mood_state SET fingerprint='changed-synthetic-snapshot'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rt = moods::runtime(state.ident.as_ref().unwrap()).await.unwrap();
+    rt.snapshots.refresh(&pool, rt.heads()).await.unwrap();
+    let after = srv
+        .get("/api/vibe/map")
+        .authorization_bearer(&token)
+        .add_header("accept-encoding", "gzip")
+        .await;
+    assert_ne!(
+        before.as_bytes(),
+        after.as_bytes(),
+        "mood signature invalidates gzip"
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn map_and_summary_202_only_while_layout_possible(pool: PgPool) {
+    let s = mapped(&pool, "Pending", [0.0; 3]).await;
+    sqlx::query("DELETE FROM matching_map")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = with_assets(common::state(pool.clone()), true, false);
+    let (_, token) = common::user_with_token(&state, "listener").await;
+    let srv = TestServer::new(kima_api::router(state.clone())).unwrap();
+    for path in ["/api/vibe/map", "/api/vibe/mood-summary"] {
+        let res = srv.get(path).authorization_bearer(&token).await;
+        res.assert_status(axum::http::StatusCode::ACCEPTED);
+        assert_eq!(res.json::<Value>(), json!({"computing":true}));
+    }
+    let mut disabled = state.ident.clone().unwrap();
+    disabled.config.embedding.disabled = true;
+    let srv = TestServer::new(kima_api::router(state.with_ident(disabled))).unwrap();
+    srv.get("/api/vibe/map")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_ok();
+    common::library::mark_missing(&pool, s.track).await;
+    let state = with_assets(common::state(pool), true, false);
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    srv.get("/api/vibe/map")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_ok();
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn edited_titles_preserves_null_empty_and_persons_title(pool: PgPool) {
+    let a = mapped(&pool, "Raw A", [0.0; 3]).await;
+    let b = mapped(&pool, "Raw B", [0.0; 3]).await;
+    let c = mapped(&pool, "Raw C", [0.0; 3]).await;
+    sqlx::query("UPDATE tracks SET display_title='Personal title' WHERE id=$1")
+        .bind(b.track)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tracks SET display_title='' WHERE id=$1")
+        .bind(c.track)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let unknown = uuid::Uuid::now_v7();
+    let titles = kima_db::vibe::read::edited_titles(&pool, &[a.track, b.track, c.track, unknown])
+        .await
+        .unwrap();
+    assert_eq!(titles.len(), 3);
+    assert_eq!(titles[&a.track], None);
+    assert_eq!(titles[&b.track], Some("Personal title".into()));
+    assert_eq!(titles[&c.track], Some(String::new()));
+    assert!(!titles.contains_key(&unknown));
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn map_filters_missing_wrong_model_and_stale_rows(pool: PgPool) {
+    let current = mapped(&pool, "Current", [0.0; 3]).await;
+    let missing = mapped(&pool, "Missing", [1.0; 3]).await;
+    let wrong = mapped(&pool, "Wrong", [2.0; 3]).await;
+    let stale = mapped(&pool, "Stale", [3.0; 3]).await;
+    common::library::mark_missing(&pool, missing.track).await;
+    sqlx::query("UPDATE track_embeddings SET model_id='wrong' WHERE track_id=$1")
+        .bind(wrong.track)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE matching_map SET embedded_at=embedded_at-interval '1 second' WHERE track_id=$1",
+    )
+    .bind(stale.track)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO track_clap_readings (track_id,embedded_at,instrumentalness,acousticness,valence_raw,arousal_raw) SELECT track_id,created_at-interval '1 second',0.3,0.4,0.75,0.6 FROM track_embeddings WHERE track_id=$1").bind(current.track).execute(&pool).await.unwrap();
+    let state = with_assets(common::state(pool), true, false);
+    let (_, token) = common::user_with_token(&state, "listener").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    let res = srv.get("/api/vibe/map").authorization_bearer(&token).await;
+    res.assert_status_ok();
+    let data: Value = res.json();
+    assert_eq!(data["trackCount"], 1);
+    assert_eq!(data["tracks"][0]["id"], current.track.to_string());
+    assert_eq!(data["tracks"][0]["valence"], Value::Null);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn library_global_reads_allow_nonmain_profiles_without_personal_data_or_feature_enablement(
+    pool: PgPool,
+) {
+    use kima_core::profile::ProfileKind;
+    use kima_db::profiles::{self, NewProfile};
+    mapped(&pool, "Global", [0.0; 3]).await;
+    let mut state = common::state(pool);
+    state.vibe_text_embedder = Arc::new(SyntheticText);
+    let (admin, main) = common::user_with_token(&state, "admin").await;
+    let (other, other_main) = common::user_with_token(&state, "other").await;
+    let mut tokens = vec![main, other_main];
+    for (user, kind) in [
+        (&admin, ProfileKind::Kids),
+        (&admin, ProfileKind::Standard),
+        (&other, ProfileKind::Standard),
+    ] {
+        let p = profiles::create(
+            &state.pool,
+            user.account(),
+            NewProfile {
+                name: format!("Secret {kind:?}"),
+                kind,
+                avatar: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokens.push(state.jwt.issue_access(
+            user.account(),
+            p.id,
+            &user.username,
+            &user.role,
+            user.token_version,
+        ));
+    }
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    for path in [
+        "/api/vibe/map",
+        "/api/vibe/mood-summary",
+        "/api/vibe/mood/unknown",
+    ] {
+        let mut expected = None;
+        for token in &tokens {
+            let res = srv.get(path).authorization_bearer(token).await;
+            res.assert_status_ok();
+            let data: Value = res.json();
+            assert!(!data.to_string().contains("Secret"));
+            if let Some(expected) = &expected {
+                assert_eq!(&data, expected);
+            } else {
+                expected = Some(data);
+            }
+        }
+        srv.get(path).await.assert_status_unauthorized();
+    }
+    let mut expected_search = None;
+    for token in &tokens {
+        let res = srv
+            .post("/api/vibe/search")
+            .authorization_bearer(token)
+            .json(&json!({"query":"rain"}))
+            .await;
+        res.assert_status_ok();
+        let data: Value = res.json();
+        assert_eq!(data["tracks"].as_array().unwrap().len(), 1);
+        assert!(!data.to_string().contains("Secret"));
+        if let Some(expected) = &expected_search {
+            assert_eq!(&data, expected);
+        } else {
+            expected_search = Some(data);
+        }
+    }
+    let features = srv
+        .get("/api/system/features")
+        .authorization_bearer(&tokens[0])
+        .await
+        .json::<Value>();
+    assert_eq!(features["vibeEmbeddings"], false);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn read_errors_keep_endpoint_specific_upstream_messages(pool: PgPool) {
+    // Spec §4.4: the map needs the feel probe; without it stale layouts are hidden.
+    let state = with_assets(common::state(pool.clone()), true, false);
+    let (_, token) = common::user_with_token(&state, "listener").await;
+    sqlx::query("DROP TABLE matching_map")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    for (path, message) in [
+        ("/api/vibe/map", "Failed to read the vibe map"),
+        ("/api/vibe/mood-summary", "Failed to read the mood summary"),
+    ] {
+        let res = srv.get(path).authorization_bearer(&token).await;
+        res.assert_status_internal_server_error();
+        assert_eq!(res.json::<Value>(), json!({"error":message}));
+    }
+    // Heads installed, no snapshot yet: this read must build it on demand and map DB errors.
+    let state = with_assets(common::state(pool.clone()), false, true);
+    sqlx::query("DROP TABLE mood_state")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    let res = srv
+        .get("/api/vibe/mood/unknown")
+        .authorization_bearer(&token)
+        .await;
+    res.assert_status_internal_server_error();
+    assert_eq!(
+        res.json::<Value>(),
+        json!({"error":"Failed to read the track's mood"})
+    );
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+#[ignore = "manual 100k synthetic map latency measurement on the isolated verification database"]
+async fn map_100k_synthetic_latency(pool: PgPool) {
+    let group = seed(
+        &pool,
+        Seed::new("Synthetic artist", "Synthetic album", None, "Unmapped"),
+    )
+    .await;
+    // This benchmark's SQLx-owned child needs vectors for eligibility, not an ANN index.
+    sqlx::query("DROP INDEX track_embeddings_cosine_idx")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO tracks (id,album_id,artist_name,title,codec,path,size,mtime,fingerprint) SELECT md5('vibe-bench-'||n)::uuid,$1,'Synthetic artist','Track '||n,'mp3','bench/'||n,1,now(),decode(repeat('01',32),'hex') FROM generate_series(1,100000) n").bind(group.album).execute(&pool).await.unwrap();
+    let mut vector = vec![0.0f32; 512];
+    vector[0] = 1.0;
+    sqlx::query("INSERT INTO track_embeddings (track_id,file_generation,model_id,model_sha256,pipeline_version,embedding) SELECT id,0,$1,$2,$3,$4::real[]::vector FROM tracks WHERE path LIKE 'bench/%'")
+        .bind(MATCHING_SOUND.model_id).bind(MATCHING_SOUND.model_sha256.to_vec()).bind(MATCHING_SOUND.pipeline_version).bind(vector).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO matching_map (track_id,embedded_at,x,y,z,colour,laid_out) SELECT track_id,created_at,(row_number() OVER (ORDER BY track_id)%101)::float8,(row_number() OVER (ORDER BY track_id)%97)::float8,(row_number() OVER (ORDER BY track_id)%89)::float8,0.5,true FROM track_embeddings").execute(&pool).await.unwrap();
+    sqlx::query("ANALYZE").execute(&pool).await.unwrap();
+    let state = common::state(pool);
+    let (_, token) = common::user_with_token(&state, "bench").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    for encoding in ["gzip", "gzip", "identity"] {
+        let started = std::time::Instant::now();
+        let res = srv
+            .get("/api/vibe/map")
+            .authorization_bearer(&token)
+            .add_header("accept-encoding", encoding)
+            .await;
+        let seconds = started.elapsed().as_secs_f64();
+        res.assert_status_ok();
+        println!(
+            "100k map encoding={encoding} seconds={seconds:.6} bytes={}",
+            res.as_bytes().len()
+        );
+        let data: Value = if encoding == "gzip" {
+            serde_json::from_reader(flate2::read::GzDecoder::new(res.as_bytes().as_ref())).unwrap()
+        } else {
+            res.json()
+        };
+        assert_eq!(data["trackCount"], 100000);
+        assert_eq!(data["tracks"].as_array().unwrap().len(), 100000);
+    }
+}
+
+async fn mapped(pool: &PgPool, title: &str, xyz: [f64; 3]) -> Seeded {
+    let s = seed(pool, Seed::new("Map artist", "Map album", None, title)).await;
+    let mut v = vec![0.0f32; 512];
+    v[0] = 1.0;
+    sqlx::query("INSERT INTO track_embeddings (track_id,file_generation,model_id,model_sha256,pipeline_version,embedding) VALUES ($1,0,$2,$3,$4,$5::real[]::vector)")
+        .bind(s.track).bind(MATCHING_SOUND.model_id).bind(MATCHING_SOUND.model_sha256.to_vec()).bind(MATCHING_SOUND.pipeline_version).bind(v)
+        .execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO matching_map (track_id,embedded_at,x,y,z,colour,laid_out) SELECT track_id,created_at,$2,$3,$4,0.4,true FROM track_embeddings WHERE track_id=$1")
+        .bind(s.track).bind(xyz[0]).bind(xyz[1]).bind(xyz[2]).execute(pool).await.unwrap();
+    s
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn map_shape_one_scale_sorted_rows_and_readings(pool: PgPool) {
+    let a = mapped(&pool, "A", [-4.0, 2.0, 8.0]).await;
+    let b = mapped(&pool, "B", [4.0, 6.0, 10.0]).await;
+    sqlx::query("INSERT INTO track_clap_readings (track_id,embedded_at,instrumentalness,acousticness,valence_raw,arousal_raw) SELECT track_id,created_at,0.3,0.4,0.75,0.6 FROM track_embeddings WHERE track_id=$1")
+        .bind(a.track).execute(&pool).await.unwrap();
+    // Spec §4.4: the map needs the feel probe; without it stale layouts are hidden.
+    let state = with_assets(common::state(pool), true, false);
+    let (_, token) = common::user_with_token(&state, "listener").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    let res = srv.get("/api/vibe/map").authorization_bearer(&token).await;
+    res.assert_status_ok();
+    let data: Value = res.json();
+    assert_eq!(data["trackCount"], 2);
+    let tracks = data["tracks"].as_array().unwrap();
+    let mut ids = vec![a.track.to_string(), b.track.to_string()];
+    ids.sort();
+    assert_eq!(
+        tracks
+            .iter()
+            .map(|t| t["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ids
+    );
+    let row = tracks
+        .iter()
+        .find(|t| t["id"] == a.track.to_string())
+        .unwrap();
+    assert_eq!(
+        (row["x"].as_f64(), row["y"].as_f64(), row["z"].as_f64()),
+        (Some(0.0), Some(0.25), Some(0.375))
+    );
+    assert_eq!(row["artist"], "Map artist");
+    assert_eq!(row["albumId"], a.album.to_string());
+    assert_eq!(row["artistId"], a.artist.to_string());
+    assert_eq!(row["title"], "A");
+    assert_eq!(row["energy"], Value::Null);
+    assert_eq!(row["valence"], 0.75);
+    assert_eq!(row["coverUrl"], Value::Null);
+    assert_eq!(row["moods"], json!({}));
+    assert_eq!(row["dominantMood"], "unanalyzed");
+    assert_eq!(row["moodScore"], 0.0);
+    assert_eq!(
+        tracks
+            .iter()
+            .find(|t| t["id"] == b.track.to_string())
+            .unwrap()["valence"],
+        Value::Null
+    );
+    let dto: kima_api_types::vibe::MapResponse = serde_json::from_value(data.clone()).unwrap();
+    assert_eq!(serde_json::to_value(dto).unwrap(), data);
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn map_gzip_cache_tracks_content_not_just_layout_version(pool: PgPool) {
+    let s = mapped(&pool, "Before", [0.0; 3]).await;
+    // Spec §4.4: the map needs the feel probe; without it stale layouts are hidden.
+    let state = with_assets(common::state(pool.clone()), true, false);
+    let (_, token) = common::user_with_token(&state, "listener").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    let first = srv
+        .get("/api/vibe/map")
+        .authorization_bearer(&token)
+        .add_header("accept-encoding", "gzip")
+        .await;
+    first.assert_status_ok();
+    first.assert_header("content-encoding", "gzip");
+    first.assert_header("vary", "Accept-Encoding");
+    first.assert_header("content-type", "application/json; charset=utf-8");
+    let bytes = first.as_bytes().to_vec();
+    let again = srv
+        .get("/api/vibe/map")
+        .authorization_bearer(&token)
+        .add_header("accept-encoding", "gzip")
+        .await;
+    assert_eq!(again.as_bytes(), bytes.as_slice());
+    // Neither update bumps tracks.updated_at, and albums/artists have no updated_at.
+    sqlx::query("UPDATE tracks SET title='After' WHERE id=$1")
+        .bind(s.track)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE albums SET image_path='new-cover.jpg' WHERE id=$1")
+        .bind(s.album)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE artists SET name='Renamed' WHERE id=$1")
+        .bind(s.artist)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let changed = srv
+        .get("/api/vibe/map")
+        .authorization_bearer(&token)
+        .add_header("accept-encoding", "gzip")
+        .await;
+    assert_ne!(changed.as_bytes(), bytes.as_slice());
+    let decoded: Value =
+        serde_json::from_reader(flate2::read::GzDecoder::new(changed.as_bytes().as_ref())).unwrap();
+    assert_eq!(decoded["tracks"][0]["title"], "After");
+    assert_eq!(decoded["tracks"][0]["artist"], "Renamed");
+    assert_eq!(decoded["tracks"][0]["coverUrl"], s.album.to_string());
+    let plain = srv
+        .get("/api/vibe/map")
+        .authorization_bearer(&token)
+        .add_header("accept-encoding", "gzip;q=0")
+        .await;
+    assert!(plain.maybe_header("content-encoding").is_none());
+    assert_eq!(plain.json::<Value>(), decoded);
+    kima_db::vibe::state::build_matching(&pool, &probe())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE matching_state SET map_updated_at='2026-01-02T03:04:05.678Z'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let versioned = srv
+        .get("/api/vibe/map")
+        .authorization_bearer(&token)
+        .add_header("accept-encoding", "gzip")
+        .await;
+    assert_ne!(versioned.as_bytes(), changed.as_bytes());
+    let data: Value =
+        serde_json::from_reader(flate2::read::GzDecoder::new(versioned.as_bytes().as_ref()))
+            .unwrap();
+    assert_eq!(data["computedAt"], "2026-01-02T03:04:05.678Z");
+}

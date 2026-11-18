@@ -1,0 +1,8 @@
+{
+  "_about": "Exact versions of the three direct packages tools/gen-kima-web-css.mjs needs; tools/install-kima-web-css-deps.sh installs them and the generator refuses any other version. They match the upstream kima-hub frontend lockfile at the pin c7527577 (and at 9450c94b). Bump only together with a regenerated crates/kima-web/assets/kima.css.",
+  "packages": {
+    "tailwindcss": "4.2.1",
+    "@tailwindcss/postcss": "4.2.1",
+    "postcss": "8.5.23"
+  }
+}

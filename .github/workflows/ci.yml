@@ -34,7 +34,7 @@ jobs:
       # No test reaches the real network: kima-net panics on any host but this machine.
       KIMA_NET_DENY_REAL: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       # The input-snapshot tests need FICLONE, which the runner's ext4 lacks; they fail loudly
       # without it (docs/m4-input-snapshots.md). Give them a real reflink filesystem (loop XFS,
@@ -106,8 +106,8 @@ jobs:
           }
       - run: DATABASE_URL=postgres://kima:kima@localhost:5433/kima cargo test -p kima-api --test login_limit
       - run: DATABASE_URL=postgres://kima:kima@localhost:5433/kima cargo test -p kima-subsonic --test auth
-  # kima-web is the only frontend (Next.js is in no CI path; `frontend/` stays in the repo only as the
-  # visual reference for tools/run-kima-web-visual.sh until M10 deletes it).
+  # kima-web is the only frontend. Next.js is in no CI path and the repository no longer bundles it: visual
+  # comparisons use an external kima-hub checkout through tools/run-kima-web-visual.sh (D-180).
   kima-web:
     runs-on: ubuntu-latest
     services:
@@ -126,7 +126,7 @@ jobs:
       SQLX_OFFLINE: "true"
       KIMA_NET_DENY_REAL: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # kima-web builds on stable and nightly (see crates/kima-web/README.md); nightly keeps parity with dev.
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -152,15 +152,12 @@ jobs:
       - run: cargo clippy -p kima-web --target wasm32-unknown-unknown -- -D warnings
       - run: cargo test -p kima-web
       # Node is used ONLY here: kima.css is a checked-in Tailwind output, so a stale one must fail. The three
-      # packages are installed in a scratch dir at the versions frontend/package-lock.json pins (the legacy
-      # frontend's install is not needed); the build and runtime paths never use Node.
+      # packages are installed at exact versions in an isolated dir by the same script local runs use; the build
+      # and runtime paths never use Node.
       - name: Stale kima.css guard
         run: |
-          mkdir "$RUNNER_TEMP/tailwind" && cd "$RUNNER_TEMP/tailwind"
-          echo '{"private":true}' > package.json
-          npm install --no-audit --no-fund --save-exact tailwindcss@4.2.1 @tailwindcss/postcss@4.2.1 postcss@8.5.23
-          cd "$GITHUB_WORKSPACE"
-          LEGACY_COPY="$RUNNER_TEMP/tailwind" node tools/gen-kima-web-css.mjs --check
+          tools/install-kima-web-css-deps.sh "$RUNNER_TEMP/tailwind"
+          KIMA_CSS_DEPS="$RUNNER_TEMP/tailwind" node tools/gen-kima-web-css.mjs --check
       - run: cargo install vertigo-cli --version 0.13.4 --locked
       - run: tools/verify-kima-web-build.sh
       # The embedded SSR tests render the real build; a missing build is a failure here, not a skip.

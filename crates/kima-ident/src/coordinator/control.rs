@@ -9,7 +9,7 @@
 
 use kima_db::PgPool;
 use kima_db::enrichment::{self, AcoustidNow, State, Status};
-pub use kima_db::enrichment::{SyncCounts, WipeCounts};
+pub use kima_db::enrichment::{Clears, RerunCounts, SyncCounts, WipeCounts};
 use kima_db::settings_kv::{self, Key};
 
 use tracing::warn;
@@ -123,9 +123,11 @@ pub async fn redecide_everything(ctx: &IdentCtx) -> sqlx::Result<u64> {
     Ok(n)
 }
 
-/// Wipe and re-run (spec §10.7, one transaction); kicks after the commit.
-pub async fn wipe_and_rerun(pool: &PgPool) -> sqlx::Result<WipeCounts> {
-    let counts = enrichment::wipe(pool).await?;
+/// Wipe and re-run (spec §10.7, one transaction); kicks after the commit. Upstream's `wipeEnrichment` is the
+/// re-run from `identification`, so since M5 this is [`rerun`] from [`Step::Identification`]: it clears the analysis,
+/// the sound vectors, the moods and the similarity step too (D-188).
+pub async fn wipe_and_rerun(pool: &PgPool) -> sqlx::Result<RerunCounts> {
+    let counts = enrichment::rerun_clears(pool, Step::Identification.clears()).await?;
     kick(pool).await;
     Ok(counts)
 }
@@ -176,11 +178,26 @@ impl Step {
         Step::ALL.into_iter().find(|s| s.id() == id)
     }
 
-    /// Whether the step can be re-run here: `identification` and `artists` reset what they
-    /// own. `analysis` and `vectors` have stages but no reset yet; the mood and similarity
-    /// steps are M5 (plan Task 14, owner question Q3).
-    pub fn available(self) -> bool {
-        matches!(self, Step::Identification | Step::Artists)
+    /// What a re-run from this step clears (upstream `STEP_CLEARS`, `enrichmentRestart.ts`). The moods read sound
+    /// vectors, so every step that clears vectors clears them too; every step but `moods` clears the similarity
+    /// state and the map, because the formula reads artist genres, analysis and sound vectors, never the moods.
+    pub fn clears(self) -> Clears {
+        let (similarity, moods, recording, artists, analysis, vectors) = match self {
+            Step::Identification => (true, true, true, true, true, true),
+            Step::Artists => (true, false, false, true, false, false),
+            Step::Analysis => (true, true, false, false, true, true),
+            Step::Vectors => (true, true, false, false, false, true),
+            Step::Moods => (false, true, false, false, false, false),
+            Step::Similarity => (true, false, false, false, false, false),
+        };
+        Clears {
+            similarity,
+            moods,
+            recording,
+            artists,
+            analysis,
+            vectors,
+        }
     }
 
     /// `"identification, artists, …"`, for the refusal text.
@@ -191,30 +208,17 @@ impl Step {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RerunError {
-    /// The step's subsystem has no reset here yet.
-    #[error("The {} step is not available yet", .0.id())]
-    Unavailable(Step),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
 
-/// Re-run the enrichment from `step` (upstream `rerunEnrichment`): the step's answers and what
-/// depends on them are cleared in one transaction and worked out again; the coordinator is
-/// kicked after the commit. `identification` is [`wipe_and_rerun`]; `artists` resets only the
-/// artists (`artists` in the counts, `tracks` 0). Answers a person set aside or closed stay.
-pub async fn rerun(pool: &PgPool, step: Step) -> Result<WipeCounts, RerunError> {
-    match step {
-        Step::Identification => Ok(wipe_and_rerun(pool).await?),
-        Step::Artists => {
-            let artists = enrichment::reset_artists(pool).await?;
-            kick(pool).await;
-            Ok(WipeCounts {
-                artists: i64::try_from(artists).unwrap_or(i64::MAX),
-                tracks: 0,
-            })
-        }
-        other => Err(RerunError::Unavailable(other)),
-    }
+/// Re-run the enrichment from `step` (upstream `rerunEnrichment`): the step's answers and everything downstream of
+/// them are cleared in one transaction ([`Step::clears`], lock order in [`enrichment::rerun_clears`]) and worked out
+/// again; the coordinator is kicked after the commit. Answers a person set aside or closed stay.
+pub async fn rerun(pool: &PgPool, step: Step) -> Result<RerunCounts, RerunError> {
+    let counts = enrichment::rerun_clears(pool, step.clears()).await?;
+    kick(pool).await;
+    Ok(counts)
 }
 
 /// Stores `enrichmentConcurrency` clamped to 1..=5, makes it the cached setting at once and

@@ -1,6 +1,8 @@
 //! Default CLAP window selection, preparation, and model-independent log-mel.
 //!
 //! Window selection ports `compute_window_offsets` in [upstream analyzer.py](https://github.com/Chevron7Locked/kima-hub/blob/12faf1cd34ff53054221818b0ccde58b8e9b0020/services/audio-analyzer-clap/analyzer.py).
+//! Ported at 12faf1cd (lines 128-164); the function is byte-identical at the current pin c7527577
+//! (`analyzer.py:111-147`), whose music recipe (D-194) uses it unchanged.
 //! Only the default five-window, ten-second configuration is implemented.
 //! Model inference and source verification are outside this module.
 
@@ -9,7 +11,10 @@
 /// Resamples independently with libsoxr HQ, fixes the length using librosa's
 /// ceiling rule, cuts to ten seconds, then tiles whole copies and zero-pads
 /// the remainder, as in upstream `onnx_backend.py` and `clap_mel.py` at
-/// commit 12faf1cd34ff53054221818b0ccde58b8e9b0020. Empty input is an error.
+/// commit 12faf1cd34ff53054221818b0ccde58b8e9b0020. At the current pin c7527577 the music
+/// path loads windows the same way (`analyzer.py:222-243` `_load_window`, unchanged apart from
+/// its return type) and fits them with `music_clap_mel.fit_window` (`onnx_backend.py:119-123`);
+/// its int16 round trip is in [`MusicClapMel`]. Empty input is an error.
 /// Only 8–192 kHz and up to ten seconds of input are accepted.
 pub fn prepare_window(samples: &[f32], rate: u32) -> Result<Vec<f32>, crate::audio::AudioError> {
     use crate::audio::{AudioError, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE};
@@ -694,10 +699,12 @@ pub fn aggregate_window_embeddings(
 /// Pure postprocessing of raw model output vectors for 1 to 5 windows.
 ///
 /// Ports the complete upstream CLAP embedding pipeline:
-/// 1. Each raw window output vector is L2-normalized to unit norm (as in `onnx_backend.embed_clips`).
+/// 1. Each raw window output vector is L2-normalized to unit norm (as in `onnx_backend.embed_clips`,
+///    c7527577 `onnx_backend.py:125-133`, which divides by `norm + 1e-12`; this divides by the norm).
 /// 2. The unit-norm window vectors are aggregated by taking their arithmetic mean across windows
-///    (as in `analyzer.py:366`).
-/// 3. The aggregate vector is L2-normalized to unit norm (as in `analyzer.py:368`).
+///    (c7527577 `analyzer.py:283`; `analyzer.py:366` at 12faf1cd).
+/// 3. The aggregate vector is L2-normalized to unit norm (c7527577 `analyzer.py:284-286`;
+///    `analyzer.py:367-369` at 12faf1cd).
 /// 4. Validates that the resulting vector satisfies the unit-norm guard: `|norm - 1.0| <= 1e-3`.
 ///
 /// Refuses:

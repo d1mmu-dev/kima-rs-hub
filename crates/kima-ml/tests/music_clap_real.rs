@@ -37,6 +37,38 @@ fn reference() -> Value {
         hex(&OnnxModel::ClapText.expected_sha256()),
         "reference made with another text model"
     );
+    // Provenance of the Python side, printed next to the native results (the native side is this
+    // crate's pinned tokenizer and the trusted ORT_DYLIB_PATH runtime).
+    let versions = value["versions"]
+        .as_object()
+        .expect("reference must record its Python stack versions");
+    for key in [
+        "python",
+        "numpy",
+        "onnxruntime",
+        "transformers",
+        "librosa",
+        "tokenizer",
+    ] {
+        assert!(
+            versions
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|v| !v.is_empty()),
+            "reference lacks the {key} version"
+        );
+    }
+    println!(
+        "python reference: {}; native: tokenizer pin {}, ORT {}",
+        Value::Object(versions.clone()),
+        hex(&text_tokenizer::descriptor().expected_sha256),
+        std::env::var("ORT_DYLIB_PATH").unwrap_or_default()
+    );
+    assert_eq!(
+        value["reading_prompts"].as_array().map(Vec::len),
+        Some(24),
+        "reference must carry upstream's 24 zero-shot reading prompts"
+    );
     value
 }
 
@@ -145,6 +177,17 @@ fn native_music_text_tokens_and_vectors_match_upstream_python() {
         .expect("pinned music text graph loads and has the music signature");
     let cases = reference["text"].as_array().unwrap();
     assert!(cases.len() >= 10);
+    let covered: std::collections::HashSet<&str> = cases
+        .iter()
+        .map(|c| c["prompt"].as_str().unwrap())
+        .collect();
+    for prompt in reference["reading_prompts"].as_array().unwrap() {
+        let prompt = prompt.as_str().unwrap();
+        assert!(
+            covered.contains(prompt),
+            "reading prompt {prompt:?} has no text case"
+        );
+    }
     let mut worst = (1.0_f64, 0.0_f64);
     for case in cases {
         let prompt = case["prompt"].as_str().unwrap();
@@ -175,9 +218,10 @@ fn native_music_text_tokens_and_vectors_match_upstream_python() {
 
 #[test]
 #[ignore = "private noncommercial music CLAP models required"]
-fn the_general_m4_graphs_do_not_load_under_the_music_names() {
-    // A directory holding only the general-model files (or anything else under the music
-    // basenames) fails verification before any session exists: the pins are the music export.
+fn foreign_bytes_under_the_music_names_fail_verification() {
+    // Any other bytes under the music basenames (here a real private file of another kind; the
+    // same holds for M4's general graphs, which are not used here) fail verification before any
+    // session exists, and a missing text graph is reported missing: the pins are the music export.
     let dir = tempfile::tempdir().unwrap();
     let model_dir = env_path("KIMA_CLAP_MODEL_DIR");
     std::fs::copy(

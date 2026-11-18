@@ -552,6 +552,24 @@ impl ClapTextSession {
                 "invalid CLAP text input shape, mask or out-of-vocabulary id".into(),
             ));
         }
+        // The padded-encoding contract (`encode_padded`, upstream `padding='max_length'`): per prompt a
+        // non-empty run of attended tokens from the start, then only `<pad>` ids with mask 0. Anything else
+        // (no attended token, a hole, a real id in the padding) is not an input the graph was matched on.
+        let pad = crate::text_tokenizer::CLAP_TEXT_PAD_ID;
+        let rows = input_ids
+            .chunks_exact(sequence)
+            .zip(attention_mask.chunks_exact(sequence));
+        for (ids, mask) in rows {
+            let attended = mask.iter().take_while(|&&m| m == 1).count();
+            if attended == 0
+                || mask[attended..].iter().any(|&m| m != 0)
+                || ids[attended..].iter().any(|&id| id != pad)
+            {
+                return Err(OnnxError::Inference(
+                    "CLAP text mask must be a non-empty prefix with <pad> ids behind it".into(),
+                ));
+            }
+        }
         self.pool.with_session(|session| {
             let ids = ort::value::Tensor::from_array((
                 [batch, sequence],

@@ -2,14 +2,12 @@
 //! run itself on synthetic signals by `fixtures/music_clap_mel_reference.py`.
 use kima_ml::clap::MusicClapMel;
 
-/// Largest absolute difference in dB tolerated per value (outputs are float32 dB).
-const TOLERANCE_DB: f32 = 1e-3;
-
+/// Every one of the 1001 x 64 float32 dB values must be bit-identical to upstream's (the port reproduces
+/// numpy's operation order; a tolerance would hide a changed rounding step).
 fn check_reference(samples: &[f32], reference: &[u8]) {
     let output = MusicClapMel::new().compute(samples).unwrap();
     assert_eq!(output.len(), 1001);
     assert_eq!(reference.len(), 1001 * 64 * 4);
-    let mut worst = 0.0_f32;
     for (i, (actual, bytes)) in output
         .iter()
         .flatten()
@@ -17,11 +15,14 @@ fn check_reference(samples: &[f32], reference: &[u8]) {
         .enumerate()
     {
         let expected = f32::from_le_bytes(bytes.try_into().unwrap());
-        let error = (actual - expected).abs();
-        worst = worst.max(error);
-        assert!(error < TOLERANCE_DB, "index {i}: {actual} != {expected}");
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "index {i} (frame {}, band {}): {actual:e} != {expected:e}",
+            i / 64,
+            i % 64
+        );
     }
-    println!("maximum absolute error {worst:e} dB");
 }
 
 #[test]
@@ -89,12 +90,15 @@ fn quantize_matches_the_laion_int16_round_trip() {
     assert_eq!(music_quantize(2.0), 1.0);
     assert_eq!(music_quantize(-3.0), -1.0);
     assert_eq!(music_quantize(0.0), 0.0);
-    let x = 0.123_456_7_f32;
-    let expected = (((x * 32767.0) as i16) as f64 / 32767.0) as f32;
-    assert_eq!(music_quantize(x), expected);
-    // Truncation toward zero, not rounding: 0.99999 * 32767 = 32766.67 -> 32766.
-    assert_eq!(music_quantize(0.99999), (32766.0_f64 / 32767.0) as f32);
-    assert_eq!(music_quantize(-0.99999), (-32766.0_f64 / 32767.0) as f32);
+    // Literal expectations, evaluated independently with numpy 2.5.4 on upstream's own expression
+    // `((np.clip(x, -1., 1.) * 32767.).astype(np.int16) / 32767.).astype(np.float32)`:
+    // 0.1234567 * 32767 = 4045.3057 -> 4045 -> 0.12344737.
+    assert_eq!(music_quantize(0.123_456_7).to_bits(), 0x3dfc_d1fa);
+    // Truncation toward zero, not rounding: 0.99999 * 32767 = 32766.67 -> 32766 -> 0.9999695.
+    assert_eq!(music_quantize(0.99999).to_bits(), 0x3f7f_fe00);
+    assert_eq!(music_quantize(-0.99999).to_bits(), 0xbf7f_fe00);
+    // An exact .5 product is truncated too: 0.5 * 32767 = 16383.5 -> 16383 -> 0.49998474.
+    assert_eq!(music_quantize(0.5).to_bits(), 0x3eff_fe00);
 }
 
 #[test]

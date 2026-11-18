@@ -405,10 +405,11 @@ fn synthetic_music_text_graph_receives_the_attention_mask() {
     )
     .unwrap();
     model.check_signature().unwrap();
-    let ids = vec![2_i64; 2 * 77];
+    let mut ids = vec![2_i64; 2 * 77];
     let mut mask = vec![0_i64; 2 * 77];
     mask[..77].fill(1); // first prompt: every token attended
     mask[77..77 + 7].fill(1); // second prompt: 7 real tokens, 70 padding
+    ids[77 + 7..].fill(crate::text_tokenizer::CLAP_TEXT_PAD_ID);
     let out = model.infer(&ids, &mask, 2).unwrap();
     assert_eq!(out[0], [2.0; 512]);
     assert!((out[1][0] - 2.0 * 7.0 / 77.0).abs() < 1e-6, "{}", out[1][0]);
@@ -476,6 +477,64 @@ fn text_rejects_invalid_inputs_and_outputs() {
     assert!(model.infer(&ids, &full, 1).is_err());
     ids[0] = crate::text_tokenizer::CLAP_TEXT_VOCAB_SIZE as i64;
     assert!(model.infer(&ids, &full, 1).is_err());
+}
+
+/// The padded-encoding contract `encode_padded` produces (RoBERTa `padding='max_length'`): per prompt a
+/// contiguous, non-empty run of attended tokens from the start, then only `<pad>` ids with mask 0.
+#[test]
+fn text_mask_must_be_a_non_empty_prefix_with_pad_ids_behind_it() {
+    use crate::text_tokenizer::CLAP_TEXT_PAD_ID as PAD;
+    let model = ClapTextSession::from_trusted_bytes(
+        &synthetic(
+            "synthetic-clap-text",
+            include_bytes!("../../tests/fixtures/synthetic_clap_text.onnx"),
+        ),
+        1,
+        Some(1),
+    )
+    .unwrap();
+    let padded = |real: usize| {
+        let mut ids = vec![PAD; 77];
+        ids[..real].fill(2);
+        let mut mask = vec![0_i64; 77];
+        mask[..real].fill(1);
+        (ids, mask)
+    };
+    for real in [1, 2, 7, 77] {
+        let (ids, mask) = padded(real);
+        assert!(model.infer(&ids, &mask, 1).is_ok(), "{real} real tokens");
+    }
+    // No attended token at all.
+    let (ids, mut mask) = padded(2);
+    mask.fill(0);
+    assert!(model.infer(&ids, &mask, 1).is_err(), "all-zero mask");
+    // A hole, or attention that starts late.
+    let (ids, mut mask) = padded(7);
+    mask[3] = 0;
+    assert!(model.infer(&ids, &mask, 1).is_err(), "non-contiguous mask");
+    let (ids, mut mask) = padded(7);
+    mask[0] = 0;
+    assert!(
+        model.infer(&ids, &mask, 1).is_err(),
+        "mask not from the start"
+    );
+    // A real id behind the attended run.
+    let (mut ids, mask) = padded(7);
+    ids[10] = 2;
+    assert!(
+        model.infer(&ids, &mask, 1).is_err(),
+        "non-pad id in the padding"
+    );
+    // Checked per prompt in a batch: one bad row refuses the batch.
+    let (good_ids, good_mask) = padded(7);
+    let (bad_ids, mut bad_mask) = padded(7);
+    bad_mask.fill(0);
+    let ids = [good_ids.clone(), bad_ids].concat();
+    let mask = [good_mask.clone(), bad_mask].concat();
+    assert!(model.infer(&ids, &mask, 2).is_err(), "bad second row");
+    let ids = [good_ids.clone(), good_ids].concat();
+    let mask = [good_mask.clone(), good_mask].concat();
+    assert!(model.infer(&ids, &mask, 2).is_ok());
 }
 
 #[test]

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use kima_db::ml::{self, Provenance};
 use kima_db::stages::{self, Claim, Stage};
 use kima_ml::audio::decode_clap_auto;
-use kima_ml::clap::{MusicClapMel, aggregate_window_embeddings, prepare_window};
+use kima_ml::clap::{MusicClapMel, postprocess_clap_model_outputs, prepare_window};
 use kima_ml::onnx::{ClapAudioSession, OnnxModel};
 use kima_ml::{
     Capability, CapabilityConfig, CapabilityEvaluationReport, CapabilityStatus,
@@ -990,7 +990,7 @@ fn run_embedding_blocking(ctx: &IdentCtx, root: &Path, path: &Path) -> EmbedOutc
     }
 }
 
-/// Native-rate windows -> CLAP inference -> mean+L2 aggregation.
+/// Native-rate windows -> CLAP inference -> [`finish_audio_vector`].
 fn compute_embedding(
     runtime: &EmbeddingRuntime,
     windows: &[Vec<f32>],
@@ -1009,7 +1009,16 @@ fn compute_embedding(
         vector.copy_from_slice(&outputs[0]);
         window_embeddings.push(vector);
     }
-    aggregate_window_embeddings(&window_embeddings).map_err(|e| e.to_string())
+    finish_audio_vector(&window_embeddings)
+}
+
+/// The track vector from the per-window model outputs, exactly as the pipeline label says: L2 per window
+/// (upstream `onnx_backend.embed_clips`), then the mean, then L2 (`analyzer.py`); see
+/// [`postprocess_clap_model_outputs`].
+fn finish_audio_vector(
+    window_outputs: &[[f32; kima_ml::clap::CLAP_EMBEDDING_DIM]],
+) -> Result<kima_ml::clap::ClapEmbedding, String> {
+    postprocess_clap_model_outputs(window_outputs).map_err(|e| e.to_string())
 }
 
 pub(crate) fn path_extension(path: &Path) -> Option<String> {
@@ -1259,6 +1268,28 @@ mod tests {
         for other in [id, bytes, pipeline] {
             assert!(!super::publishes_matching_sound(&other), "{other:?}");
         }
+    }
+
+    /// Upstream's recipe (`onnx_backend.embed_clips` L2 per window, `analyzer.py` mean then L2): each window is
+    /// normalized before the mean, so a louder (larger-norm) raw window cannot outweigh the others. The music graph
+    /// already ends in a normalization, so on real outputs this only fixes rounding; raw synthetic outputs show it.
+    #[test]
+    fn audio_windows_are_normalized_before_the_mean() {
+        let mut big = [0f32; kima_ml::clap::CLAP_EMBEDDING_DIM];
+        big[0] = 4.0;
+        let mut small = [0f32; kima_ml::clap::CLAP_EMBEDDING_DIM];
+        small[1] = 1.0;
+        let v = super::finish_audio_vector(&[big, small])
+            .unwrap()
+            .into_inner();
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(
+            (v[0] - half).abs() < 1e-6 && (v[1] - half).abs() < 1e-6,
+            "{:?}",
+            &v[..2]
+        );
+        assert!(super::finish_audio_vector(&[]).is_err());
+        assert!(super::finish_audio_vector(&[[0f32; kima_ml::clap::CLAP_EMBEDDING_DIM]]).is_err());
     }
 
     fn claim_with_attempts(attempts: i16) -> kima_db::stages::Claim {

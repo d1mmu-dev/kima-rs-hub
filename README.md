@@ -156,8 +156,16 @@ tracks, alchemy, song path, text search, CLAP zero-shot readings, similar-artist
 `music_audio.onnx`, `music_text.onnx` and RoBERTa's `tokenizer.json` in `KIMA_CLAP_MODEL_DIR`, SHA-256-pinned; D-194)
 and the private feel probe below. Without them `/api/system/features` answers `"vibeEmbeddings": false`, nothing is
 eligible, and the routes degrade as spec §4.4 and D-182 describe; the server starts normally. The model files are
-not distributed (noncommercial, private): the Docker image and CI do not contain them. Vectors written by M4's
-general CLAP model are kept but never used; re-embed them with the enrichment re-run from the `vectors` step (D-194).
+not distributed (noncommercial, private): the Docker image and CI do not contain them.
+
+**Vectors from M4's general CLAP model** are never used by the vibe engine. Once the music model is available (checked
+at startup; models added later count after a restart), enrichment re-embeds those tracks by itself, without deleting
+anything: each old vector is kept until its replacement is written, and the library's similarity and mood state stay
+as they are while the tracks are re-embedded (D-194). The enrichment re-run from the `vectors` step
+(`POST /api/enrichment/rerun {"step":"vectors"}`) is a different, destructive tool: it deletes every stored vector,
+including correct music vectors, together with the similarity and mood state, and re-embeds the whole library. It is
+never run automatically; use it only when you want that.
+
 A real-model end-to-end run on 30 generated tracks passed (`docs/testing/vibe-e2e.md`); the 20-real-track parity and
 recall gates have not been run.
 

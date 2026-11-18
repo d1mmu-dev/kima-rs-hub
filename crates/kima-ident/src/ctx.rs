@@ -40,6 +40,9 @@ pub struct EmbeddingRuntimeState {
     pub(crate) vibe_readings: crate::stages::readings::PromptCache,
     /// The similarity step's per-process state (the feel probe, the single-flight map service).
     pub(crate) vibe_similarity: Mutex<Option<Arc<crate::stages::similarity::SimilarityRuntime>>>,
+    /// The D-194 transition pass found nothing left to reopen; it is not run again until restart (the audio
+    /// capability it depends on is itself evaluated once per process).
+    pub(crate) vector_transition_complete: std::sync::atomic::AtomicBool,
 }
 
 pub type EmbeddingRuntimeCache = Arc<EmbeddingRuntimeState>;

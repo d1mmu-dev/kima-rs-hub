@@ -141,6 +141,73 @@ pub async fn complete_embedding(
     Ok(true)
 }
 
+/// `embedding` rows of present tracks that are `done` without a usable vector of `identity`: no stored vector, or
+/// one under another model id, other model bytes or another pipeline, of the wrong width, zero, or from an older
+/// file generation. `$1..$3` are the identity. Aliases: `s` (`track_stages`), `t` (`tracks`).
+const UNMATCHED_DONE: &str = "track_stages s JOIN tracks t ON t.id = s.track_id
+     WHERE s.stage = 'embedding' AND s.status = 'done' AND t.missing_since IS NULL
+       AND NOT EXISTS (SELECT 1 FROM track_embeddings te
+           WHERE te.track_id = s.track_id AND te.file_generation = t.ml_generation
+             AND te.model_id = $1 AND te.model_sha256 = $2 AND te.pipeline_version = $3
+             AND vector_dims(te.embedding) = 512 AND vector_norm(te.embedding) > 0)";
+
+/// D-194 checkpoint transition, one bounded chunk: up to `limit` such rows go back to `pending`
+/// with a clean slate and `evidence = {"reason":"sound model changed"}`, so the embedding stage computes them
+/// again under `identity`. Returns the rows reopened.
+///
+/// Non-destructive: no vector, derived row (feel, map, scores, readings), track row, other stage or library-wide
+/// state is touched. A stored vector stays until [`complete_embedding`] upserts its replacement (a failed
+/// re-embedding keeps it). Only `done` rows move: `pending`/`failed`/`working` rows already have their own
+/// schedule, a `working` row is a claim in flight that must not be reset under its worker, and terminal failures
+/// describe the file, not the model. A reopened row's `started_at` is cleared, so a finished claim's token can never
+/// publish onto it.
+///
+/// Locks only the stage rows it changes, `SKIP LOCKED`: it never waits on a row another writer holds (scanner
+/// invalidation, a re-run, another process), so it cannot block a cycle or close a lock cycle with the
+/// track-then-stage writers; a skipped row stays counted by [`unmatched_embeddings`] and is taken by a later pass.
+/// Idempotent: a second pass finds nothing. `limit` must be positive.
+pub async fn reopen_unmatched_embeddings(
+    pool: &PgPool,
+    identity: &Provenance,
+    limit: i64,
+) -> sqlx::Result<u64> {
+    if limit <= 0 {
+        return Err(sqlx::Error::Protocol(
+            "the transition chunk bound must be positive".into(),
+        ));
+    }
+    let r = sqlx::query(&format!(
+        r#"WITH candidates AS (
+               SELECT s.track_id FROM {UNMATCHED_DONE}
+               ORDER BY s.track_id LIMIT $4
+               FOR NO KEY UPDATE OF s SKIP LOCKED)
+           UPDATE track_stages s
+           SET status = 'pending', attempts = 0, redelivered = 0, next_attempt_at = NULL,
+               started_at = NULL, finished_at = NULL, last_error = NULL, error_code = NULL,
+               error_class = NULL, source = NULL,
+               evidence = '{{"reason":"sound model changed"}}'::jsonb, updated_at = clock_timestamp()
+           FROM candidates c
+           WHERE s.track_id = c.track_id AND s.stage = 'embedding' AND s.status = 'done'"#
+    ))
+    .bind(&identity.model_id)
+    .bind(&identity.model_sha256[..])
+    .bind(&identity.pipeline_version)
+    .bind(limit)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// How many rows [`reopen_unmatched_embeddings`] would still reopen (locked ones included). Takes no locks.
+pub async fn unmatched_embeddings(pool: &PgPool, identity: &Provenance) -> sqlx::Result<i64> {
+    sqlx::query_scalar(&format!("SELECT count(*) FROM {UNMATCHED_DONE}"))
+        .bind(&identity.model_id)
+        .bind(&identity.model_sha256[..])
+        .bind(&identity.pipeline_version)
+        .fetch_one(pool)
+        .await
+}
+
 /// Only expose results matching the requested model AND pipeline on a present generation
 /// with completed embedding work. Explicit provenance prevents accidental model mixing.
 pub async fn embedding(

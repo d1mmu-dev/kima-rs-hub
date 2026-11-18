@@ -755,3 +755,205 @@ async fn blocked_snapshot_setup_claims_nothing() {
     }
     db.cleanup().await;
 }
+
+// ---- D-194 checkpoint transition on the real music model -------------------------------------
+
+/// Every `embedding` stage row and every stored vector, in a stable order.
+async fn embedding_state(pool: &PgPool) -> (Vec<String>, Vec<String>) {
+    let stages = sqlx::query_scalar(
+        "SELECT row_to_json(s)::text FROM track_stages s WHERE stage = 'embedding' ORDER BY track_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let vectors = sqlx::query_scalar(
+        "SELECT row_to_json(e)::text FROM (SELECT track_id, file_generation, model_id,
+             encode(model_sha256, 'hex') AS sha, pipeline_version, embedding::text AS v, created_at
+             FROM track_embeddings) e ORDER BY track_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    (stages, vectors)
+}
+
+async fn vector_row(pool: &PgPool, track: uuid::Uuid) -> String {
+    sqlx::query_scalar(
+        "SELECT row_to_json(e)::text FROM (SELECT track_id, file_generation, model_id,
+             encode(model_sha256, 'hex') AS sha, pipeline_version, embedding::text AS v, created_at
+             FROM track_embeddings WHERE track_id = $1) e",
+    )
+    .bind(track)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// `done` with a synthetic one-hot vector of `identity`, through the real claim and publication path.
+async fn seed_done(pool: &PgPool, track: uuid::Uuid, identity: &Provenance, hot: usize) {
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status, started_at, next_attempt_at)
+         VALUES ($1, 'embedding', 'working', clock_timestamp(), now() + interval '15 minutes')",
+    )
+    .bind(track)
+    .execute(pool)
+    .await
+    .unwrap();
+    let claim = ml::embedding_claim(pool, track).await.unwrap().unwrap();
+    let mut v = vec![0f32; 512];
+    v[hot] = 1.;
+    assert!(
+        ml::complete_embedding(pool, &claim, identity, &v)
+            .await
+            .unwrap()
+    );
+}
+
+/// D-194: a library M4 embedded with the general checkpoint is re-embedded on the music checkpoint
+/// automatically, but only once the music capability is `Available` (models provisioned after startup count from
+/// the next restart); correct vectors are not touched, and a restart with nothing left changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs isolated Postgres + KIMA_CLAP_MODEL_DIR; run with --ignored"]
+async fn old_general_vectors_are_reembedded_on_the_music_checkpoint_once_available() {
+    let model_dir = model_dir();
+    let db = isolated_db().await;
+    let pool = db.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let tracks = tracks_with_audio(&pool, &root, 3).await;
+    let general = Provenance {
+        model_id: "hf_audio".into(),
+        model_sha256: [0x37; 32],
+        pipeline_version: "clap-audio-v1".into(),
+    };
+    let music = Provenance {
+        model_id: OnnxModel::ClapAudio.artifact_id().as_str().to_owned(),
+        model_sha256: OnnxModel::ClapAudio.expected_sha256(),
+        pipeline_version: PIPELINE_VERSION.to_owned(),
+    };
+    seed_done(&pool, tracks[0], &general, 0).await;
+    seed_done(&pool, tracks[1], &general, 1).await;
+    // A correct (music-identity) vector; synthetic, so a re-embedding would visibly replace it.
+    seed_done(&pool, tracks[2], &music, 2).await;
+    let correct_before = vector_row(&pool, tracks[2]).await;
+    let old_before = [
+        vector_row(&pool, tracks[0]).await,
+        vector_row(&pool, tracks[1]).await,
+    ];
+
+    // 1. The process started before the models were provisioned: the capability is not available, nothing moves.
+    let unprovisioned = tempfile::tempdir().unwrap();
+    let mut before_models = embedding_config(model_dir.clone(), &root);
+    before_models.model_dir = Some(unprovisioned.path().to_path_buf());
+    let make = |config| {
+        let mut ctx = ident_ctx_with_embedding(
+            &pool,
+            &root,
+            common::dead_bases(),
+            IdentifySwitch::new(false, false),
+            config,
+        );
+        ctx.config.fingerprinting = false;
+        ctx
+    };
+    let ctx = make(before_models);
+    let state = embedding_state(&pool).await;
+    let report = coordinator::run_cycle(&ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(report.ran);
+    assert_eq!(
+        (report.reopened_vectors, report.embedding.claimed),
+        (0, 0),
+        "{report:?}"
+    );
+    assert_eq!(embedding_state(&pool).await, state);
+    // Provisioning the models while it runs changes nothing for this process (capabilities are evaluated once).
+    for name in [
+        OnnxModel::CLAP_AUDIO_BASENAME,
+        OnnxModel::CLAP_TEXT_BASENAME,
+        "tokenizer.json",
+    ] {
+        std::fs::copy(model_dir.join(name), unprovisioned.path().join(name)).unwrap();
+    }
+    *ctx.last_cycle.lock().unwrap() = None;
+    let report = coordinator::run_cycle(&ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(report.reopened_vectors, 0);
+    drop(ctx);
+
+    // 2. Restart with the now provisioned directory: one cycle reopens the two general rows and re-embeds them.
+    let mut provisioned = embedding_config(model_dir.clone(), &root);
+    provisioned.model_dir = Some(unprovisioned.path().to_path_buf());
+    let ctx = make(provisioned);
+    let report = coordinator::run_cycle(&ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(report.reopened_vectors, 2, "{report:?}");
+    assert_eq!(report.embedding.claimed, 2, "{report:?}");
+    assert_eq!(report.embedding.done, 2, "{report:?}");
+    for (t, old) in tracks[..2].iter().zip(&old_before) {
+        let v = ml::embedding(&pool, *t, &music)
+            .await
+            .unwrap()
+            .expect("re-embedded under the music identity");
+        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.).abs() < 1e-3, "{norm}");
+        assert_ne!(&vector_row(&pool, *t).await, old, "replaced in place");
+        let (status, source): (String, Option<String>) = sqlx::query_as(
+            "SELECT status, source FROM track_stages WHERE track_id = $1 AND stage = 'embedding'",
+        )
+        .bind(t)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((status.as_str(), source.as_deref()), ("done", Some(SOURCE)));
+    }
+    assert_eq!(
+        vector_row(&pool, tracks[2]).await,
+        correct_before,
+        "a correct vector is never reopened"
+    );
+    assert_eq!(ml::unmatched_embeddings(&pool, &music).await.unwrap(), 0);
+    let settled = embedding_state(&pool).await;
+    // The pass is done for this process.
+    assert_eq!(
+        embedding::reopen_unmatched_vectors(
+            &ctx,
+            &CancellationToken::new(),
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap(),
+        embedding::VectorTransition::AlreadyComplete
+    );
+    *ctx.last_cycle.lock().unwrap() = None;
+    let report = coordinator::run_cycle(&ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        (report.reopened_vectors, report.embedding.claimed),
+        (0, 0),
+        "{report:?}"
+    );
+    assert_eq!(embedding_state(&pool).await, settled);
+    // A restart is a new process: release this one's ONNX sessions first (admission budget).
+    drop(ctx);
+
+    // 3. Restart with nothing left: the pass completes with nothing reopened.
+    let ctx = make(embedding_config(model_dir, &root));
+    assert_eq!(
+        embedding::reopen_unmatched_vectors(
+            &ctx,
+            &CancellationToken::new(),
+            &CancellationToken::new()
+        )
+        .await
+        .unwrap(),
+        embedding::VectorTransition::Complete { reopened: 0 }
+    );
+    assert_eq!(embedding_state(&pool).await, settled);
+    drop(ctx);
+    db.cleanup().await;
+}

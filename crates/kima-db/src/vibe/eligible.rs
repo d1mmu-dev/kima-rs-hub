@@ -11,7 +11,9 @@ use std::sync::LazyLock;
 /// `laion-clap-music-onnx-v1` (`music_audio.onnx`) that upstream's probe and heads were fitted on, and they are exactly
 /// what the native embedding stage publishes (`kima_ml::onnx::OnnxModel::ClapAudio` id and pin,
 /// `kima_ident::stages::embedding::PIPELINE_VERSION`; a kima-ident test asserts the equality). Vectors M4 wrote with the
-/// general model (`hf_audio`, `clap-audio-v1`) are never relabelled and stay ineligible until re-embedded (D-194).
+/// general model (`hf_audio`, `clap-audio-v1`) are never relabelled and stay ineligible until the embedding stage
+/// re-embeds them, which `kima_ident::stages::embedding::reopen_unmatched_vectors` schedules automatically once the
+/// music capability is available ([`crate::ml::reopen_unmatched_embeddings`], D-194).
 pub const MATCHING_SOUND: SoundIdentity = SoundIdentity {
     model_id: "music_audio",
     model_sha256: [

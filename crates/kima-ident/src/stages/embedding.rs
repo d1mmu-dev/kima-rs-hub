@@ -400,6 +400,134 @@ pub async fn embed_text(
         .map_err(|e| TextEmbeddingError::Worker(e.to_string()))?
 }
 
+/// Stage rows reopened per transition statement (D-194); each statement is one short transaction.
+pub const TRANSITION_CHUNK: i64 = 500;
+
+/// What [`reopen_unmatched_vectors`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorTransition {
+    /// The music audio capability is not `Available` (disabled, unconfigured, a file missing or not matching its
+    /// pin, the snapshot setup blocked) or its runtime does not publish [`kima_db::vibe::MATCHING_SOUND`]: nothing
+    /// was read or written.
+    Gated,
+    /// Cancelled or stopped before or between chunks; `reopened` rows were already reopened (committed).
+    Stopped { reopened: u64 },
+    /// `reopened` rows reopened; `remaining` rows were held by another writer and are retried next cycle.
+    Partial { reopened: u64, remaining: i64 },
+    /// `reopened` rows reopened and none remains; the pass is not run again until restart.
+    Complete { reopened: u64 },
+    /// An earlier cycle of this process completed the pass.
+    AlreadyComplete,
+}
+
+impl VectorTransition {
+    /// Rows this call reopened.
+    pub fn reopened(self) -> u64 {
+        match self {
+            Self::Stopped { reopened }
+            | Self::Partial { reopened, .. }
+            | Self::Complete { reopened } => reopened,
+            Self::Gated | Self::AlreadyComplete => 0,
+        }
+    }
+}
+
+/// Whether vectors published with `provenance` are exactly the engine's [`kima_db::vibe::MATCHING_SOUND`]. The
+/// transition only runs for such a runtime: reopening rows for any other identity would re-embed them into vectors
+/// that are still ineligible, and reopen them again on every restart.
+pub(crate) fn publishes_matching_sound(provenance: &Provenance) -> bool {
+    let sound = kima_db::vibe::MATCHING_SOUND;
+    provenance.model_id == sound.model_id
+        && provenance.model_sha256 == sound.model_sha256
+        && provenance.pipeline_version == sound.pipeline_version
+}
+
+/// D-194 checkpoint transition (owner decision 2026-11-18): reopens the `embedding` stage of present tracks whose
+/// row is `done` without a vector of the music checkpoint (M4 general-model vectors, an unknown pipeline, other
+/// model bytes, no vector), so this stage embeds them again. Runs only when the music audio capability is
+/// `Available` in this process and its runtime publishes [`kima_db::vibe::MATCHING_SOUND`]; otherwise
+/// [`VectorTransition::Gated`] and nothing is touched.
+///
+/// Non-destructive ([`ml::reopen_unmatched_embeddings`]): stored vectors and their derived rows stay until the
+/// replacement is upserted, no library-wide matching or mood state is cleared, claims in flight and other stages
+/// are left alone, and a row another writer holds is skipped rather than waited for. Bounded: chunks of
+/// [`TRANSITION_CHUNK`], each its own short statement, with `cancel`/`stop` checked between chunks; it runs in the
+/// coordinator's embedding phase, never during startup. Once a pass leaves nothing behind it is latched until
+/// restart, like the capability itself: models provisioned after startup become `Available` (and the transition
+/// runs) after the next restart.
+pub async fn reopen_unmatched_vectors(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    stop: &CancellationToken,
+) -> sqlx::Result<VectorTransition> {
+    use std::sync::atomic::Ordering;
+    let stopped = || cancel.is_cancelled() || stop.is_cancelled();
+    if stopped() {
+        return Ok(VectorTransition::Stopped { reopened: 0 });
+    }
+    if ctx
+        .embedding_runtime
+        .vector_transition_complete
+        .load(Ordering::Acquire)
+    {
+        return Ok(VectorTransition::AlreadyComplete);
+    }
+    let check = ctx.clone();
+    let identity = match tokio::task::spawn_blocking(move || {
+        runtime_now(&check).map(|runtime| runtime.provenance.clone())
+    })
+    .await
+    {
+        Ok(Ok(provenance)) if publishes_matching_sound(&provenance) => provenance,
+        Ok(Ok(provenance)) => {
+            tracing::debug!(
+                ?provenance,
+                "the audio encoder does not publish MATCHING_SOUND; no vector is reopened"
+            );
+            return Ok(VectorTransition::Gated);
+        }
+        _ => return Ok(VectorTransition::Gated),
+    };
+    let (check, root) = (ctx.clone(), ctx.library.root.get());
+    if tokio::task::spawn_blocking(move || {
+        fresh_block(&check.embedding_runtime, &check.config.embedding, &root)
+    })
+    .await
+    .map_or(true, |block| block.is_some())
+    {
+        return Ok(VectorTransition::Gated);
+    }
+    let mut reopened = 0u64;
+    loop {
+        if stopped() {
+            return Ok(VectorTransition::Stopped { reopened });
+        }
+        let n = ml::reopen_unmatched_embeddings(&ctx.pool, &identity, TRANSITION_CHUNK).await?;
+        reopened += n;
+        if n < TRANSITION_CHUNK.unsigned_abs() {
+            break;
+        }
+    }
+    let remaining = ml::unmatched_embeddings(&ctx.pool, &identity).await?;
+    if reopened > 0 || remaining > 0 {
+        tracing::info!(
+            reopened,
+            remaining,
+            "sound vectors not from the music checkpoint: embedding reopened, old vectors kept until replaced (D-194)"
+        );
+    }
+    if remaining > 0 {
+        return Ok(VectorTransition::Partial {
+            reopened,
+            remaining,
+        });
+    }
+    ctx.embedding_runtime
+        .vector_transition_complete
+        .store(true, Ordering::Release);
+    Ok(VectorTransition::Complete { reopened })
+}
+
 /// Claims up to [`BATCH`] tracks and embeds them, at most `embedding.workers` at once.
 /// Unconditional (spec decision): nothing here checks `ctx.config.fingerprinting` or
 /// MusicBrainz/`ctx.net`.
@@ -1093,6 +1221,44 @@ mod tests {
         cancel.cancel();
         release_tx.send(()).unwrap();
         assert_eq!(task.await.unwrap(), Some(7));
+    }
+
+    /// The transition is gated on the runtime publishing exactly `MATCHING_SOUND`; the compiled runtime does, and
+    /// any single difference (id, bytes, pipeline: the M4 general identity included) refuses it.
+    #[test]
+    fn the_transition_runs_only_for_a_runtime_publishing_matching_sound() {
+        use kima_db::ml::Provenance;
+        let sound = kima_db::vibe::MATCHING_SOUND;
+        let music = Provenance {
+            model_id: sound.model_id.into(),
+            model_sha256: sound.model_sha256,
+            pipeline_version: sound.pipeline_version.into(),
+        };
+        assert!(super::publishes_matching_sound(&music));
+        let compiled = Provenance {
+            model_id: super::OnnxModel::ClapAudio
+                .artifact_id()
+                .as_str()
+                .to_owned(),
+            model_sha256: super::OnnxModel::ClapAudio.expected_sha256(),
+            pipeline_version: super::PIPELINE_VERSION.to_owned(),
+        };
+        assert!(super::publishes_matching_sound(&compiled));
+        let general = Provenance {
+            model_id: "hf_audio".into(),
+            model_sha256: [0x37; 32],
+            pipeline_version: "clap-audio-v1".into(),
+        };
+        assert!(!super::publishes_matching_sound(&general));
+        let mut id = music.clone();
+        id.model_id = "hf_audio".into();
+        let mut bytes = music.clone();
+        bytes.model_sha256[31] ^= 1;
+        let mut pipeline = music.clone();
+        pipeline.pipeline_version = "clap-audio-v1".into();
+        for other in [id, bytes, pipeline] {
+            assert!(!super::publishes_matching_sound(&other), "{other:?}");
+        }
     }
 
     fn claim_with_attempts(attempts: i16) -> kima_db::stages::Claim {

@@ -125,6 +125,8 @@ pub struct CycleReport {
     pub ran: bool,
     pub fingerprint: BatchReport,
     pub embedding: BatchReport,
+    /// `embedding` rows the D-194 transition reopened this cycle (stored vectors not from the music checkpoint).
+    pub reopened_vectors: u64,
     pub analysis: BatchReport,
     /// The mood step: `claimed = done =` scores written (it has no per-track rows to claim).
     pub moods: BatchReport,
@@ -139,7 +141,7 @@ pub struct CycleReport {
 }
 
 impl CycleReport {
-    /// Whether any item was claimed.
+    /// Whether any item was claimed, or the D-194 transition reopened rows (the next cycle embeds them).
     pub fn any_work(&self) -> bool {
         self.fingerprint.claimed
             + self.embedding.claimed
@@ -149,6 +151,7 @@ impl CycleReport {
             + self.artists.claimed
             + self.tracks.claimed
             > 0
+            || self.reopened_vectors > 0
     }
 }
 
@@ -214,6 +217,7 @@ pub async fn run_cycle(
     let ((fp, emb, an, net, vibe), ()) = tokio::join!(phases, watch_state(pool, cancel, &stop));
     report.fingerprint = fp.report;
     report.embedding = emb.report;
+    report.reopened_vectors = emb.reopened;
     report.analysis = an.report;
     report.moods = vibe.moods.report;
     report.similarity = vibe.similarity.report;
@@ -304,6 +308,8 @@ async fn watch_state(pool: &PgPool, cancel: &CancellationToken, stop: &Cancellat
 struct PhaseOutcome {
     report: BatchReport,
     errors: usize,
+    /// Embedding only: rows the D-194 transition reopened.
+    reopened: u64,
 }
 
 /// Whether a phase goes on to another batch.
@@ -363,13 +369,23 @@ impl<'a> Announcer<'a> {
 /// changed, or the batch claimed work and the status moved (a run starting). A failure is
 /// logged only.
 async fn mark(ctx: &IdentCtx, ann: &Announcer<'_>, phase: Phase, b: BatchReport) {
-    let changed = b.done + b.failed > 0;
+    mark_counts(ctx, ann, phase, b.done + b.failed > 0, b.claimed).await;
+}
+
+/// [`mark`] from the bare facts: whether counts changed, and how many items were claimed.
+async fn mark_counts(
+    ctx: &IdentCtx,
+    ann: &Announcer<'_>,
+    phase: Phase,
+    changed: bool,
+    claimed: usize,
+) {
     let _guard = ann.mark_lock.lock().await;
     if let Err(error) = enrichment::set_phase(&ctx.pool, Some(phase), changed).await {
         warn!(%error, "recording the enrichment phase failed");
         return;
     }
-    if !changed && b.claimed == 0 {
+    if !changed && claimed == 0 {
         return;
     }
     match enrichment::state(&ctx.pool).await {
@@ -419,6 +435,11 @@ async fn fingerprint_phase(
 /// `network_may_run`/`ctx.net` (the MusicBrainz switch), per the owner's 2026-11-04
 /// decision. Joined alongside `fingerprint_phase` and `network_phases` in `run_cycle`, so
 /// it keeps claiming even while MusicBrainz network phases are paused or disabled.
+///
+/// First the D-194 checkpoint transition ([`embedding::reopen_unmatched_vectors`]): only while the music audio
+/// capability is available, bounded, never waiting on another writer, and done for this process once nothing is
+/// left; the batches below then embed what it reopened. A failure is recorded like a batch error and the batches
+/// still run.
 async fn embedding_phase(
     ctx: &IdentCtx,
     cancel: &CancellationToken,
@@ -426,6 +447,19 @@ async fn embedding_phase(
     ann: &Announcer<'_>,
 ) -> PhaseOutcome {
     let mut out = PhaseOutcome::default();
+    match embedding::reopen_unmatched_vectors(ctx, cancel, stop).await {
+        Ok(transition) => {
+            out.reopened = transition.reopened();
+            if out.reopened > 0 {
+                // The embedding counts changed (rows went back to pending): announce it.
+                mark_counts(ctx, ann, Phase::Embedding, true, 0).await;
+            }
+        }
+        Err(e) => {
+            out.errors += 1;
+            batch_failed(ctx, Phase::Embedding, e).await;
+        }
+    }
     let mut marked = false;
     while go_on(cancel, stop) {
         match embedding::run_batch_until(ctx, cancel, stop).await {

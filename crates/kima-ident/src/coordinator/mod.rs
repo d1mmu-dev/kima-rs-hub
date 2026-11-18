@@ -21,6 +21,7 @@ pub mod control;
 
 use kima_db::PgPool;
 use kima_db::enrichment::{self, Phase, State, Status};
+use kima_db::identity;
 use kima_jobs::queue;
 use kima_jobs::worker::{self, Handler, JobError};
 use kima_library::jobs::OnChange;
@@ -673,6 +674,18 @@ async fn artists_phase(
 ) -> PhaseOutcome {
     let mut out = PhaseOutcome::default();
     let mut marked = false;
+    // Upstream `executeArtistsPhase` opens with this, before it looks for artists to queue.
+    match identity::reopen_unresolvable_without_mbid(&ctx.pool).await {
+        Ok(0) => {}
+        Ok(n) => info!(
+            reopened = n,
+            "unresolvable artists without an MBID are pending again"
+        ),
+        Err(e) => {
+            out.errors += 1;
+            batch_failed(ctx, Phase::Artists, e).await;
+        }
+    }
     for _ in 0..ARTIST_BATCHES_PER_CYCLE {
         if !network_may_run(ctx, cancel, stop) {
             break;

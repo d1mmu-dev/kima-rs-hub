@@ -404,6 +404,21 @@ pub async fn claim_artists(pool: &PgPool, n: i64) -> sqlx::Result<Vec<ArtistForE
         .collect())
 }
 
+/// Puts `unresolvable` artists without an MBID last tried over 24 hours ago back to `pending`
+/// with no failures (upstream `executeArtistsPhase`, `unifiedEnrichment.ts:2380-2389`, whose
+/// `temp-` placeholder MBID is kima-rs's `mbid IS NULL`, D-117). Only the status and the count
+/// change, as upstream. Returns how many were reopened.
+pub async fn reopen_unresolvable_without_mbid(pool: &PgPool) -> sqlx::Result<u64> {
+    let r = sqlx::query!(
+        "UPDATE artists SET enrichment_status = 'pending', enrichment_failures = 0
+         WHERE mbid IS NULL AND enrichment_status = 'unresolvable'
+           AND last_enriched_at < now() - interval '24 hours'"
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
 /// Gives claimed artists back (`enriching` → `pending`): claims a stopped or cancelled batch did
 /// not finish.
 pub async fn release_artists(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<u64> {

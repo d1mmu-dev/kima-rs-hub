@@ -907,6 +907,38 @@ async fn an_outage_is_retried_once_a_minute_until_the_cap(pool: PgPool) {
     assert_eq!(artist_row(&pool, a).await, ("unresolvable".to_string(), 4));
 }
 
+/// Upstream `executeArtistsPhase` starts by putting `unresolvable` artists with no real MBID
+/// tried over a day ago back to `pending` with no failures; the same cycle then asks again
+/// (here MusicBrainz does not answer: one fresh failure, not a fifth).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn the_artists_phase_reopens_unresolvable_artists_without_an_mbid(pool: PgPool) {
+    let replay = Replay::start(Recording(vec![])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    let (a, _) = pending_artist(
+        &pool,
+        "a.wav",
+        "Nameless",
+        "66666666-0000-4000-8000-000000000010",
+        None,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE artists SET mbid = NULL, mbid_source = NULL, enrichment_status = 'unresolvable',
+                enrichment_failures = 4, last_enriched_at = now() - interval '25 hours'
+         WHERE id = $1",
+    )
+    .bind(a)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = cycle(&ctx).await;
+    assert_eq!(report.artists.claimed, 1);
+    assert_eq!(artist_row(&pool, a).await, ("failed".to_string(), 1));
+}
+
 // ---- M-SYNC Task 14 (upstream b78b1167): the scan first, then each step for the whole library ----
 
 /// A `library`-queue job of `kind` in `state`, due in `due_in_secs` (a retry waits in `queued`).

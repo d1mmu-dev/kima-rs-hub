@@ -1519,6 +1519,66 @@ async fn a_failed_artist_is_due_at_its_retry_time(pool: PgPool) {
     assert_eq!(claimed.iter().map(|a| a.id).collect::<Vec<_>>(), [later]);
 }
 
+/// Upstream `unifiedEnrichment.ts` `executeArtistsPhase` (2380-2389): an `unresolvable` artist
+/// without a real MBID (upstream a `temp-` placeholder; kima-rs has none, D-117, so `mbid IS
+/// NULL`) last tried over 24 h ago goes back to `pending` with no failures. Nothing else is
+/// touched: an artist with an MBID waits out the week, a recent or never-tried one stays.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unresolvable_artists_without_an_mbid_are_reopened_after_a_day(pool: PgPool) {
+    let unres = "enrichment_status = 'unresolvable', enrichment_failures = 4, \
+                 last_error_code = 'HTTP_500'";
+    let old = seed(&pool, "Old", "A").await;
+    set(
+        &pool,
+        old,
+        &format!("{unres}, last_enriched_at = now() - interval '25 hours'"),
+    )
+    .await;
+    let recent = seed(&pool, "Recent", "A").await;
+    set(
+        &pool,
+        recent,
+        &format!("{unres}, last_enriched_at = now() - interval '23 hours'"),
+    )
+    .await;
+    let known = seed(&pool, "Known", "A").await;
+    set_mbid(&pool, known, M, "search").await;
+    set(
+        &pool,
+        known,
+        &format!("{unres}, last_enriched_at = now() - interval '25 hours'"),
+    )
+    .await;
+    let never = seed(&pool, "Never", "A").await;
+    set(&pool, never, unres).await;
+    let failed = seed(&pool, "Failed", "A").await;
+    set(&pool, failed, "enrichment_status = 'failed', enrichment_failures = 2, last_enriched_at = now() - interval '25 hours'").await;
+
+    assert_eq!(
+        identity::reopen_unresolvable_without_mbid(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+
+    let r = row(&pool, old).await;
+    assert_eq!((r.status.as_str(), r.failures), ("pending", 0));
+    assert_eq!(
+        r.last_error_code.as_deref(),
+        Some("HTTP_500"),
+        "only status and failures"
+    );
+    for (id, want) in [
+        (recent, ("unresolvable", 4)),
+        (known, ("unresolvable", 4)),
+        (never, ("unresolvable", 4)),
+        (failed, ("failed", 2)),
+    ] {
+        let r = row(&pool, id).await;
+        assert_eq!((r.status.as_str(), r.failures), want);
+    }
+}
+
 /// Task 21 carry: an unchanged local image is not read, re-encoded and rewritten on every
 /// claim; a changed one is.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

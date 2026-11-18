@@ -2,9 +2,7 @@
 
 _Ostatnia aktualizacja: 2026-11-18 · `main` = `30d8d16`_
 
-<!-- private -->
 > Podsumowanie stanu projektu (aktualizowane po każdym etapie, publikowane razem z kolejnym merge'em do `main`). Źródłem prawdy jest historia gita; szczegóły różnic od upstreamu są w `docs/DIVERGENCES.md`, plan w `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md`.
-<!-- /private -->
 
 ## Cel
 
@@ -24,7 +22,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M9 | kima-web część 1 (logowanie, biblioteka, player, playlisty, ustawienia, SSR) | ✅ (wygląd 1:1 otwarty) |
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
 | **M-PROF** | **Profile w koncie (Netflix)** | ✅ na `main`; ręczne logowanie właściciela odłożone do wdrożenia |
-| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–20 lokalnie; pełna weryfikacja workspace zielona (3362/0/31); audyt Task 20 i ponowny przegląd: 0 Critical/Important, uwagi Minor poprawione; przeglądy poprawek Task 13/18: 0 Critical/Important, Minor poprawione w kodzie (`731ca56`, `19b5a34`, `c619be3`); przegląd tej rundy: 0 Critical/Important (liczba Subsonic poprawiona w `cea1124`); brak `ETag`/304 mapy odłożony przez właściciela do odbioru strony vibe w M10; odbiór real-model otwarty; **modele muzyczne CLAP podłączone natywnie (D-194, lokalny commit, czeka na niezależny przegląd)** |
+| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–20 lokalnie; pełna weryfikacja workspace zielona (3362/0/31); audyt Task 20 i ponowny przegląd: 0 Critical/Important, uwagi Minor poprawione; przeglądy poprawek Task 13/18: 0 Critical/Important, Minor poprawione w kodzie (`731ca56`, `19b5a34`, `c619be3`); przegląd tej rundy: 0 Critical/Important (liczba Subsonic poprawiona w `cea1124`); brak `ETag`/304 mapy odłożony przez właściciela do odbioru strony vibe w M10; odbiór real-model otwarty; **modele muzyczne CLAP podłączone natywnie (D-194, lokalny commit, czeka na niezależny przegląd)**; **dołączony `frontend/` usunięty (D-180, `a3d3ac7`), zewnętrzna referencja z weryfikowaną proweniencją (`a0d3377`, czeka na ponowny przegląd)** |
 | M5b | Mixy, radio, „co nowego” | ⏳ ~1 tydz. |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
 | M6b | Audiobooki (Audiobookshelf) | ⏳ ~1 tydz., po M7 |
@@ -51,6 +49,10 @@ Decyzje właściciela (2026-11-14): awatary z 12 presetów; kilka profili dzieci
 Ręczne sprawdzenie istniejącego konta właściciela odłożone do wdrożenia (nie PASS); ścisły smoke referencyjnego frontendu odłożony do M10. Testy wymagające prywatnych modeli pozostają poza zweryfikowanym zakresem.
 
 ## M5 — punkt integracyjny
+
+**Etap — proweniencja zewnętrznej referencji frontendu (2026-11-18, lokalny commit `a0d3377`, bez push/merge/wdrożenia):** niezależny przegląd usunięcia `frontend/` (`a3d3ac7`): 0 Critical, 2 Important, kilka Minor — wszystkie poprawione. Important 1: kopia referencji nie jest już uznawana za aktualną tylko dlatego, że `REFERENCE.env` podaje ten sam SHA; przy każdym uruchomieniu `frontend/` jest wypakowywany z obiektów gita i porównywany manifestem treści (typ, tryb, ścieżka, SHA-256, cele dowiązań; bez `node_modules`/`.next`), zmieniona kopia jest odtwarzana (zostaje tylko `node_modules`), a serwer referencji restartuje się przy zmianie SHA, ścieżki kopii, manifestu lub po odtworzeniu. Important 2: referencja musi być gałęzią `main` śledzącą `main` kanonicznego `Chevron7Locked/kima-hub` (adres skonfigurowany i efektywny, więc fork i przekierowanie `insteadOf` są odrzucane przed pull), a po pull HEAD = upstream (lokalne commity odrzucane); raport porównania zapisuje SHA, adres, gałąź, upstream, pulled, relację do pinu, drzewo i manifest i bez nich nie startuje. Minor: plik konfiguracyjny narzędzi czyta tylko sześć kluczy (zmienna środowiska, także pusta, ma pierwszeństwo), dziedziczone `GIT_DIR`/`GIT_WORK_TREE` są usuwane; generator ikon czyta konfigurację jak pozostałe narzędzia i zapisuje wersję lucide-react 0.552.0 z sumą npm (treść ikon bez zmian, sprawdzona z archiwum rejestru); generator CSS wymaga dokładnych wersji trzech bezpośrednich pakietów z jednego pliku i nie szuka ich w nadrzędnych `node_modules`; Next.js tylko z `node_modules/.bin` kopii (bez `npx`); ignorowany test DTO vibe czyta `api.ts` z obiektu HEAD, podaje SHA i wykrywa każdą zmianę SHA-256; goldens vibe czytane z obiektów pinu `c7527577` (regeneracja z pobranej referencji: 5/5 plików identycznych bajtowo); D-170/D-030 oznaczone jako zastąpione przez D-180, opis wykrywania dryfu w D-180 poprawiony. TDD: `tools/tests/reference-tooling.sh` (26 przypadków, tylko sztuczne repozytoria; 21 czerwonych przed zmianą, 0 po), test vibe na sztucznych repozytoriach (stary przepuszczał dryf). Referencja `9450c94b` (v1.12.4, pin+20) pobrana `pull --ff-only` bez zmian w checkoutcie. Zielone: `kima-api-types` wszystkie cele (58 + 1 ign.), fmt, Clippy `kima-api-types`, `cargo check` kima-web, CSS `--check`, ikony `--check`, piny, klucze podcastów, `git diff --check`. **Nieuruchomione:** pełne porównanie wizualne (Docker, `npm ci` w kopii), ścieżka instalacji CSS w CI (npm), hosted CI, ponowny niezależny przegląd.
+
+**Etap — usunięcie dołączonego `frontend/` (2026-11-18, decyzja właściciela, lokalny commit `a3d3ac7`):** repozytorium nie zawiera już Next.js ani TypeScriptu (607 plików); referencją wizualną/funkcjonalną jest zewnętrzny checkout upstreamu, sprawdzany i pobierany `--ff-only` przed każdym porównaniem, kopiowany do izolowanego katalogu (D-180). Piny modeli i fixtures zostają na `c7527577`. Wszystkie kryteria odbioru wizualnego M10 pozostają.
 
 **Etap — automatyczne, niedestrukcyjne przejście starych wektorów na model muzyczny (D-194, 2026-11-18, decyzja właściciela, lokalne commity `7b90f8d` + `b643078`, bez push/merge/wdrożenia):** faza embedding koordynatora (nie start serwera) ponownie otwiera etap `embedding` obecnych utworów, które mają `done` bez wektora o tożsamości `MATCHING_SOUND` (stary model ogólny M4, nieznany pipeline, inne bajty, brak wektora) — tylko gdy zdolność audio modelu muzycznego jest `Available` i runtime publikuje dokładnie tę tożsamość. Nic nie jest kasowane: stary wektor zostaje do udanego upsertu, globalny stan matching/mood i inne etapy nietknięte, wiersze `working`/`pending`/`failed` pomijane, wiersze trzymane przez innego pisarza pomijane (`SKIP LOCKED`), porcje po 500, po zakończeniu zatrzask do restartu (modele dodane po starcie działają po restarcie). Ręczny re-run `vectors` zostaje jako narzędzie destrukcyjne (README). TDD: kima-db `embedding_transition` 6, kima-ident `vector_transition` 2 + test bramki, prywatny E2E na prawdziwym modelu (przed provisioningiem nic, po restarcie 2 wektory przeliczone, poprawny nietknięty, restart idempotentny); mutacje (bez filtra `done`, bez `SKIP LOCKED`, bez bramki) dają czerwone testy. W tym samym wycinku poprawione uwagi Minor z przeglądu podłączenia modeli: agregacja przez `postprocess_clap_model_outputs`, kontrakt maski tekstu, mel bit w bit, literalne bity kwantyzacji, zmieniona nazwa testu, referencja Pythona v2 z 24 promptami odczytów i wersjami stosu, cytaty linii upstreamu, GiB/GB. Weryfikacja na `b643078`: kima-db 424/0/1, kima-ident 595/0/18, kima-api 650/0/3, kima-ml 228/0/9 (+131 z `pg-publish`), kima-subsonic 348/0/2, kima-server 53/0/0, kima-vibe 89/0/1 (liczby zgodne z inwentarzem `--list`); clippy stable `-D warnings` (zwykły i `pg-publish`), fmt, `sqlx prepare --check`, pin-refs, klucze profili i podcastów, `git diff --check`: PASS. Prywatne testy na prawdziwych modelach: parytet audio/tekst (29 promptów) cos 1,000000000, max |Δ| ≤ 3,2e-7; 24 prompty odczytów zgodne tekstowo i wektorowo; `embedding_e2e` 8/8; vibe E2E na 30 wygenerowanych WAV 1/1. **Nieuruchomione:** 20 prawdziwych utworów (parytet odczytów, recall), przegląd niezależny tego wycinka, hosted CI (brak push), odbiór w przeglądarce.
 
@@ -94,6 +96,7 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 - M5/D-185: brak `ETag`/304 mapy vibe odłożony do bramki odbioru strony vibe w M10 (opcja 2, 2026-11-18); nie implementować w M5.
 - M5/D-194 (2026-11-18): stare wektory modelu ogólnego są przeliczane automatycznie i niedestrukcyjnie, gdy model muzyczny jest dostępny (stary wektor zostaje do udanego zapisu nowego, bez czyszczenia globalnego stanu); ręczny re-run `vectors` pozostaje narzędziem destrukcyjnym. Zastępuje wcześniejszy wariant „tylko ręczny re-run”.
 - Next.js tylko jako referencja porównawcza, nigdy w produkcji/dev/CI.
+- D-180 (2026-11-18): dołączony `frontend/` usunięty; referencją jest zewnętrzny, świeżo pobrany checkout upstreamu (najnowszy), piny modeli i fixtures zostają na `c7527577`.
 - Push do `main` tylko po pytaniu (prośba właściciela o merge = zgoda); gałęzie feature można wypychać.
 - Commity: `dimmu <3417783+d1mmu-dev@users.noreply.github.com>`, bez `Co-authored-by` i trailerów AI.
 
@@ -101,7 +104,6 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 
 - M5: odbiór wymaga prawdziwego modelu CLAP `laion-clap-music-onnx-v1` (licencje/rozmiary do pokazania przed pobraniem).
 
-<!-- private -->
 ## Zasady pracy
 
 - Jeden pisarz na worktree.
@@ -110,6 +112,8 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 
 ## Historia etapów (najnowsze na górze)
 
+- 2026-11-18: M5 proweniencja zewnętrznej referencji frontendu (`a0d3377`): 2 Important i Minor z przeglądu `a3d3ac7` poprawione (weryfikacja kopii manifestem, kanoniczny upstream i HEAD = upstream, raport bez proweniencji nie startuje, lista kluczy konfiguracji, wersje CSS/ikon, goldens z pinu); testy narzędzi 26/26; czeka na ponowny przegląd; bez push/merge.
+- 2026-11-18: M5 usunięcie dołączonego `frontend/` (`a3d3ac7`, D-180); referencja = zewnętrzny checkout upstreamu.
 - 2026-11-18: M5 D-194 — automatyczne, niedestrukcyjne przeliczanie wektorów spoza modelu muzycznego (`7b90f8d`) i poprawki Minor z przeglądu podłączenia modeli (`b643078`); testy i prywatne E2E zielone, czeka na niezależny przegląd; bez push/merge/wdrożenia.
 - 2026-11-18: M5 decyzja właściciela: `ETag`/304 mapy vibe (D-185) odłożone do odbioru strony vibe w M10; przegląd rundy poprawek 0 Critical/Important, liczba Subsonic poprawiona (348/0/2); tylko dokumentacja.
 - 2026-11-18: M5 poprawki po ponownych przeglądach (Task 20: 4 Minor; Task 13/18: 7 Minor; wszystkie 0 Critical/Important): negocjacja kodowania mapy przed odczytem z bazy, sprzątanie E2E zachowuje panikę testu, referencja zero-shot na zweryfikowanych kopiach modeli (`731ca56`, `19b5a34`, `c619be3`); dotknięte testy i bramki statyczne zielone; czeka na przegląd tej rundy.

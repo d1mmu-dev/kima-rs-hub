@@ -33,7 +33,16 @@ jobs:
       CI: "true"
       # No test reaches the real network: kima-net panics on any host but this machine.
       KIMA_NET_DENY_REAL: "1"
+      # The workspace test build outgrew the runner's free disk (run 44370344775 died with
+      # "No space left on device"). Full debuginfo is the bulk of target/; line tables keep backtraces.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
+      - name: Free runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       # The input-snapshot tests need FICLONE, which the runner's ext4 lacks; they fail loudly

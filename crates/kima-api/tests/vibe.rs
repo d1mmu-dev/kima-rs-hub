@@ -19,6 +19,19 @@ async fn map_negotiates_case_insensitive_quality_wildcard_and_identity(pool: kim
         ("gzip;q=1.1", 400, false),
         ("GZip; Q=0.5", 200, true),
         ("identity", 200, false),
+        // A wildcard at q=0 also excludes identity unless identity is listed (RFC 9110 §12.5.3).
+        ("*;q=0", 406, false),
+        ("*;q=0,identity", 200, false),
+        ("*;q=0,identity;q=0.5", 200, false),
+        ("*;q=0.5,identity;q=0", 200, true),
+        // An explicit identity entry overrides the wildcard; explicit gzip=0 overrides it too.
+        ("identity;q=0,*;q=0", 406, false),
+        ("gzip;q=0,*", 200, false),
+        // An empty field lists nothing: identity stays acceptable.
+        ("", 200, false),
+        // `x-gzip` is an unknown coding here (D-185: upstream's `\bgzip\b` regex would gzip).
+        ("x-gzip", 200, false),
+        ("x-gzip,identity;q=0", 406, false),
     ] {
         let res = srv
             .get("/api/vibe/map")
@@ -31,6 +44,66 @@ async fn map_negotiates_case_insensitive_quality_wildcard_and_identity(pool: kim
             gzip,
             "{value}"
         );
+    }
+    // No header at all: identity.
+    let res = srv.get("/api/vibe/map").authorization_bearer(&token).await;
+    assert_eq!(res.status_code().as_u16(), 200);
+    assert!(res.headers().get("content-encoding").is_none());
+    // Several header fields combine as one list.
+    for (fields, status, gzip) in [
+        (["identity;q=0", "gzip"], 200, true),
+        (["gzip;q=0", "*;q=0"], 406, false),
+        (["gzip", "gzip;q=0"], 200, false),
+        (["identity", "gzip;q=bogus"], 400, false),
+    ] {
+        let res = srv
+            .get("/api/vibe/map")
+            .authorization_bearer(&token)
+            .add_header("accept-encoding", fields[0])
+            .add_header("accept-encoding", fields[1])
+            .await;
+        assert_eq!(res.status_code().as_u16(), status, "{fields:?}");
+        assert_eq!(
+            res.headers().get("content-encoding").is_some(),
+            gzip,
+            "{fields:?}"
+        );
+    }
+}
+
+/// The header is negotiated before any library or snapshot read: a malformed or unsatisfiable
+/// `Accept-Encoding` is answered even while the layout is still computing (202 otherwise).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn map_rejects_bad_accept_encoding_before_any_library_read(pool: PgPool) {
+    mapped(&pool, "Pending", [0.0; 3]).await;
+    sqlx::query("DELETE FROM matching_map")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state = with_assets(common::state(pool), true, false);
+    let (_, token) = common::user_with_token(&state, "precedence").await;
+    let srv = TestServer::new(kima_api::router(state)).unwrap();
+    for (value, status, body) in [
+        (
+            "gzip;q=bogus",
+            400,
+            json!({"error": "Invalid Accept-Encoding"}),
+        ),
+        (
+            "identity;q=0",
+            406,
+            json!({"error": "No acceptable map encoding"}),
+        ),
+        ("gzip", 202, json!({"computing": true})),
+        ("identity", 202, json!({"computing": true})),
+    ] {
+        let res = srv
+            .get("/api/vibe/map")
+            .authorization_bearer(&token)
+            .add_header("accept-encoding", value)
+            .await;
+        assert_eq!(res.status_code().as_u16(), status, "{value}");
+        assert_eq!(res.json::<Value>(), body, "{value}");
     }
 }
 

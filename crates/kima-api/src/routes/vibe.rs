@@ -194,6 +194,19 @@ async fn map(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     const ERROR: &str = "Failed to read the vibe map";
+    // Negotiated first: a malformed (400) or unsatisfiable (406) Accept-Encoding is answered
+    // before any library, layout or snapshot read, so it never costs database work (D-185).
+    let accepts_gzip = match super::vibe_encoding::gzip(&headers) {
+        Ok(gzip) => gzip,
+        Err(status) => {
+            let error = if status == StatusCode::NOT_ACCEPTABLE {
+                "No acceptable map encoding"
+            } else {
+                "Invalid Accept-Encoding"
+            };
+            return Ok((status, Json(serde_json::json!({ "error": error }))).into_response());
+        }
+    };
     let read = available_map(&state).await.map_err(|e| failure(ERROR, e))?;
     if read.rows.is_empty() && pending(&state).await.map_err(|e| failure(ERROR, e))? {
         return Ok(computing());
@@ -265,10 +278,6 @@ async fn map(
         .await
         .map_err(|e| failure(ERROR, e))?
         .map_err(|e| failure(ERROR, e))?;
-    let accepts_gzip = match super::vibe_encoding::gzip(&headers) {
-        Ok(gzip) => gzip,
-        Err(status) => return Ok((status, Json(serde_json::json!({"error": if status == StatusCode::NOT_ACCEPTABLE { "No acceptable map encoding" } else { "Invalid Accept-Encoding" }}))).into_response()),
-    };
     let body = if accepts_gzip {
         state
             .vibe_map_cache

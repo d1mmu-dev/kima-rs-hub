@@ -56,7 +56,7 @@ Optional. The address clients use to reach Kima, such as `https://music.example.
 
 ## What is supported
 
-All 81 paths upstream registers are answered, each with and without `.view`, by GET, HEAD or POST (form bodies are merged with the query string). 16 are still stubs (listed below); the others read real data, some with the differences recorded in [DIVERGENCES.md](DIVERGENCES.md).
+All 81 paths upstream registers are answered, each with and without `.view`, by GET, HEAD or POST (form bodies are merged with the query string). 14 are still stubs (listed below); the others read real data, some with the differences recorded in [DIVERGENCES.md](DIVERGENCES.md).
 
 - **System:** `ping`, `getLicense`, `getMusicFolders` (one folder, id `1`), `getOpenSubsonicExtensions` (no sign-in needed; advertises `apiKeyAuthentication`, `formPost`, `indexBasedQueue`), `tokenInfo`, `getScanStatus`, `startScan` (admin).
 - **Browsing:** `getArtists`, `getIndexes`, `getArtist`, `getMusicDirectory`, `getAlbum`, `getSong`, `getAlbumList` and `getAlbumList2` (every list type, `byGenre` included since M3).
@@ -93,17 +93,16 @@ Endpoints that started as stubs and are now real, by the milestone that made the
 
 | Milestone | Endpoints |
 |---|---|
-| M3 (identification) | `getGenres`, `getSongsByGenre`, `getLyrics`, `getLyricsBySongId`, `getArtistInfo`, `getArtistInfo2`; `byGenre` lists; artist cover art. They read what identification stored (artist genres follow a person's edited list when one is set, D-166) |
+| M3 (identification) | `getGenres`, `getSongsByGenre`, `getLyrics`, `getLyricsBySongId`, `getArtistInfo`, `getArtistInfo2`, `getAlbumInfo`, `getAlbumInfo2`; `byGenre` lists; artist cover art. They read what identification stored (artist genres follow a person's edited list when one is set, D-166). `getAlbumInfo(2)` answers `albumInfo` with the album's release `musicBrainzId` (omitted when none) and error 70 "Album not found" for an id that is no album with a present track, where upstream always answers an empty `albumInfo` (D-116) |
 | M5 (vibe engine) | `getSimilarSongs`, `getSimilarSongs2`: a track seed with current matching data is ranked by the vibe formula as `/api/vibe/similar`; other seeds, and a seed whose ranking is empty, get upstream's artist-based pick (D-190) |
 | M6 (podcasts) | `getPodcasts`, `getNewestPodcasts`, `getPodcastEpisode`, `refreshPodcasts` (refreshes the caller's followed shows), with the AI-content filter on the lists (D-086, D-205, D-208) |
 
-Still stubs (16):
+Still stubs (14):
 
 | Milestone | Endpoints |
 |---|---|
 | M8 (hardening) | `getShares` (empty), `createShare`, `updateShare`, `deleteShare` (error 0, "Sharing is not supported by this server yet") |
 | never planned | internet radio, chat, video, captions and the jukebox: listing calls answer empty and calls that change something answer error 0 |
-| none (as upstream) | `getAlbumInfo`, `getAlbumInfo2`: empty |
 
 Any other path under `/rest/` answers error 0 "Not implemented: `<path>`".
 

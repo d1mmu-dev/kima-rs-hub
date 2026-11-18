@@ -439,23 +439,23 @@ The enrichment cycle must never block on the layout (the cycle awaits it only th
 
 ## 14. Divergence rows to reserve
 
-The highest used on `main` is **D-180** (Next.js UI, `docs/DIVERGENCES.md`); `feature/m-sync` holds D-163..D-179 [V grep of both trees]. M5 reserves **D-181 – D-195**. Status of each is `to-decide` or `open` until its task lands; text is drafted in plan Task 20.
+The highest used on `main` is **D-180** (Next.js UI, `docs/DIVERGENCES.md`); `feature/m-sync` holds D-163..D-179 [V grep of both trees]. M5 reserves **D-181 – D-195**. Status of each is `to-decide` or `open` until its task lands; text is drafted in plan Task 20. **Task 20 (2026-11-18):** all thirteen rows D-181–D-193 are written in `docs/DIVERGENCES.md` with an owner-decision status; D-194/D-195 stay reserved and unused.
 
-| ID | Area | Gist |
-|---|---|---|
-| D-181 | Vibe / formula | Rust port; probe id = sha256 of the asset file; `FORMULA_VERSION` own counter; real columns read as f32 not text-parsed f64; SQL scoring kept. |
-| D-182 | Vibe / model gate | `(model_id, model_sha256, pipeline_version)` instead of the `model_version` label; `created_at` is the freshness token; 503 text for "needs the music model". |
-| D-183 | Vibe search | In-process `embed_text` instead of Redis pub/sub; 503 vs 504 mapping. |
-| D-184 | Vibe search | Exact scan up to `KIMA_VIBE_EXACT_MAX`, HNSW + iterative scan above. |
-| D-185 | Vibe map | Native thread + rayon, f32 storage; exact-math port; accumulation choice from Task 8's benchmark; gzip cache key. |
-| D-186 | Moods / eligibility | No `analysisStatus`, `corrupt`, `albums.location`; readings from CLAP only until MusiCNN/DSP; assets outside Git. |
-| D-187 | CLAP readings | Zero-shot readings computed after the fact from the stored vector (upstream: at embedding time). |
-| D-188 | Enrichment | Phases `mood`/`similarity`; progress `moods`; rerun steps real. |
-| D-189 | Similar artists | Re-rank enabled (supersedes the M3 delta 0). |
-| D-190 | Subsonic | `getSimilarSongs(2)` is vibe-based (ranked by the formula from the seed track) instead of upstream's random artist+similar-artist pick; artist-based path kept as fallback when the seed has no eligible embedding or its ranking is empty; a non-empty short ranking is not topped up. Owner decision Q8 (2026-11-06, option 1 for the empty ranking 2026-11-18). Amends D-086. |
-| D-191 | Public vibe | Not in M5 core; D-062 stays. |
-| D-192 | Genres | Matching genres from `artist_genres_effective` + `user_genres` (replace), MB-list filter. |
-| D-193 | Validation | UUID checks replace CUID regex; non-numeric `length` ignored. |
+| ID | Area | Gist | Status (Task 20, 2026-11-18) |
+|---|---|---|---|
+| D-181 | Vibe / formula | Rust port; probe id = sha256 of the asset file; `FORMULA_VERSION` own counter; real columns read as f32 not text-parsed f64; SQL scoring kept. | Written (Task 20); accepted; implemented Tasks 1–6; synthetic parity (formula 1e-12, SQL 1e-5) |
+| D-182 | Vibe / model gate | `(model_id, model_sha256, pipeline_version)` instead of the `model_version` label; `created_at` is the freshness token; 503 text for "needs the music model". | Written (Task 18); accepted; real-model E2E NOT RUN |
+| D-183 | Vibe search | In-process `embed_text` instead of Redis pub/sub; 503 vs 504 mapping. | Written (Task 14); accepted |
+| D-184 | Vibe search | Exact scan up to `KIMA_VIBE_EXACT_MAX`, HNSW + iterative scan above. | Written (Task 14); accepted (Q6 200000, construction200 owner-approved); real recall NOT RUN |
+| D-185 | Vibe map | Native thread + rayon, f32 storage; exact-math port; accumulation choice from Task 8's benchmark; gzip cache key. | Written (Task 13); accepted |
+| D-186 | Moods / eligibility | No `analysisStatus`, `corrupt`, `albums.location`; readings from CLAP only until MusiCNN/DSP; assets outside Git. | Written (Task 20); accepted (Q1/Q3); asset pins absent |
+| D-187 | CLAP readings | Zero-shot readings computed after the fact from the stored vector (upstream: at embedding time). | Written (Task 17); accepted (Q4); readings parity NOT RUN |
+| D-188 | Enrichment | Phases `mood`/`similarity`; progress `moods`; rerun steps real. | Written (Task 20); accepted (upstream `STEP_CLEARS`; D-112 amended) |
+| D-189 | Similar artists | Re-rank enabled (supersedes the M3 delta 0). | Written (Task 16); accepted |
+| D-190 | Subsonic | `getSimilarSongs(2)` is vibe-based (ranked by the formula from the seed track) instead of upstream's random artist+similar-artist pick; artist-based path kept as fallback when the seed has no eligible embedding or its ranking is empty; a non-empty short ranking is not topped up. Owner decision Q8 (2026-11-06, option 1 for the empty ranking 2026-11-18). Amends D-086. | Written (Task 19); accepted (Q8, option 1); D-086 amended |
+| D-191 | Public vibe | Not in M5 core; D-062 stays. | Written (Task 20); accepted (Q2: Phase E deferred); D-062 amended (unchanged) |
+| D-192 | Genres | Matching genres from `artist_genres_effective` + `user_genres` (replace), MB-list filter. | Written (Task 20); accepted (M-SYNC Q5); D-114 cross-referenced |
+| D-193 | Validation | UUID checks replace CUID regex; non-numeric `length` ignored. | Written (Task 15); accepted |
 
 ## 15. Risks and unverified items
 

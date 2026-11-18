@@ -22,7 +22,7 @@ login, kima-rs now scans and watches a music folder, shows it as Artist, then Ye
 browse, search, stream (with transcodes), keep playlists and resume playback. An admin can also
 preview and apply a tidy on-disk layout. Music apps that speak Subsonic/OpenSubsonic can connect
 with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Identification and the album
-autotagger and CLAP/analysis plumbing are built. Podcasts (M6a) are served, see [Podcasts](#podcasts);
+autotagger and CLAP/analysis plumbing are built. Podcasts (M6a) are served, see [Podcasts](#podcasts); the vibe engine (M5) is ported but not enabled until the music CLAP checkpoint and its private assets exist, see [Vibe engine](#vibe-engine-m5-not-yet-enabled);
 private-model inference acceptance, audiobooks (M6b) and integrations are still open. See
 `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` for what comes next.
 
@@ -129,11 +129,10 @@ artist photos, biographies, similar artists and genres, album cover fallbacks an
 Progress shows under Settings > Library Tools; new files are picked up as they arrive. Identification
 itself only fills the database; the separate autotagger can write tags when explicitly configured.
 
-Admins can `POST /api/enrichment/rerun` with `{"step":"identification"}` or
-`{"step":"artists"}` to reset that step and its dependent answers; the reply includes
-`artists`, `tracks`, `vectors` and `message`. The other recognized steps (`analysis`,
-`vectors`, `moods`, `similarity`) currently return 409 without a reset; an unknown step returns
-400. This is a partial implementation of the upstream six-step route (D-112).
+Admins can `POST /api/enrichment/rerun` with `{"step":"<step>"}` to reset that step and its
+dependent answers, where `<step>` is one of upstream's six: `identification`, `artists`, `analysis`,
+`vectors`, `moods`, `similarity` (the clear matrix is upstream's, D-188); the reply includes
+`artists`, `tracks`, `vectors` and `message`, and an unknown step returns 400 (D-112).
 
 - **Switch it off.** `KIMA_IDENTIFY=off` stops every outbound lookup for the whole server. An admin can
   also turn "Auto enrich metadata" off in Settings > Artwork; the environment switch wins and
@@ -148,6 +147,36 @@ Admins can `POST /api/enrichment/rerun` with `{"step":"identification"}` or
   Tagged files cost nothing, and later runs reuse a cache. Progress survives restarts. For a large library
   point `MUSICBRAINZ_BASE_URL` at a local MusicBrainz mirror.
 - Fingerprinting uses half the CPU cores by default; set `KIMA_FINGERPRINT_WORKERS` to change that.
+
+## Vibe engine (M5, not yet enabled)
+
+The upstream vibe engine is ported (matching formula, library state, map layout, learned moods, similar
+tracks, alchemy, song path, text search, CLAP zero-shot readings, similar-artist re-rank and Subsonic
+`getSimilarSongs`/`getSimilarSongs2`), but it stays **off** in practice until two things exist: the music CLAP
+checkpoint (`laion-clap-music-onnx-v1`) from the M4 follow-up, and the private assets below with their SHA-256
+pins compiled in. Until then `/api/system/features` answers `"vibeEmbeddings": false`, nothing is eligible, and
+the routes degrade as spec §4.4 and D-182 describe; the server starts normally. The engine is tested on
+synthetic vectors only; real-model acceptance (end-to-end, readings parity, text-search recall) has not been run.
+
+Endpoints (signed in, any profile; library-global): `GET /api/vibe/map` (202 while a first layout is pending,
+gzip when accepted), `GET /api/vibe/mood-summary`, `GET /api/vibe/mood/:trackId`, `GET /api/vibe/similar/:trackId`,
+`POST /api/vibe/alchemy`, `POST /api/vibe/path`, `POST /api/vibe/search`. Enrichment gains the `mood` and
+`similarity` phases, `moods`/`similarity` progress and the real re-run steps (D-188). Differences: D-181–D-193.
+
+**Assets.** Two files go into the directory named by `KIMA_VIBE_ASSET_DIR`, each opened without following
+symlinks, size-bounded and checked against a SHA-256 compiled into the server; the verified bytes are what
+gets parsed. Missing, unpinned or mismatching files never stop startup; they turn off only what depends on them:
+
+| File | Upstream source (v1.12.3, `c7527577`) | SHA-256 of that upstream file | Turns on | Rights |
+|---|---|---|---|---|
+| `feel_probe.json` | `backend/src/services/matching/feelProbe.json` (25 710 bytes) | `13707b5107a591d2c7d5ca7c143005477db41d5cec18eced78a9503902044e2d` | `vibe_assets`: the formula, similar/alchemy/path, map and mood summary, `vibeEmbeddings` (text search needs only the music text model and stored music vectors) | CC BY-NC (derived from DEAM), separate from the GPL code: private, noncommercial use; not in this repository |
+| `mood_heads.json` | `backend/src/services/moods/moodHeads.json` (238 610 bytes) | `335edd4dfe57b3683440367cf0effceec94ad9f5b6dfc36ddafab93dcd427110` | `vibe_mood_heads`: the 22 learned moods, mood summary | No licence statement; training-data licences not checked. Not used until they are (owner decision Q3) |
+
+Take the files from the pinned upstream commit itself (no mirrors), and compare their SHA-256 with the
+values above, which were computed from that commit's Git objects. The pin table compiled into kima-rs
+(`crates/kima-ident/src/stages/vibe_assets.rs`, `VibePins::compiled`) is still empty, so even correct files
+are reported unavailable until a reviewed commit fills in the pins. The MusicBrainz genre list
+(`mbGenres.json`, CC0) is bundled in `crates/kima-vibe/assets/`.
 
 ## Podcasts
 
@@ -246,6 +275,8 @@ New in kima-rs:
 | `KIMA_NET_DENY_REAL` | unset | `1` makes any outbound request to a host other than this machine panic. Set in CI so no test reaches the network. |
 | `KIMA_TRANSCODE_CACHE_MB` | `2048` | Size cap of the transcode cache under `KIMA_DATA_DIR`, in MB. |
 | `KIMA_ARTWORK_CACHE_MB` | `512` | Size cap of the cover-art cache under `KIMA_DATA_DIR/artwork`, in MB. The oldest albums are dropped first. `0` means nothing is kept, so every request rebuilds. |
+| `KIMA_VIBE_ASSET_DIR` | unset | Directory with the private vibe assets `feel_probe.json` and `mood_heads.json` (see [Vibe engine](#vibe-engine-m5-not-yet-enabled)). Unset, missing or unpinned files turn off only the vibe capabilities. |
+| `KIMA_VIBE_EXACT_MAX` | `200000` | Vibe text search scans exactly up to this many eligible tracks and uses the HNSW index above it (D-184). A whole number; `0` always uses the index; anything else stops startup. |
 
 Keep `secrets.json` (or the two secret variables) safe: losing it makes stored encrypted settings
 unreadable. A corrupt file stops startup rather than being replaced.

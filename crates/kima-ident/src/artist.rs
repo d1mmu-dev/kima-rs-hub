@@ -4,8 +4,10 @@
 //!
 //! Every answer is untrusted. A source that fails keeps what was stored (it never records
 //! "none") and, for MusicBrainz, Wikidata and the similar-artist sources, fails the run: the
-//! artist is `failed`, and `unresolvable` at the [`FAILURE_CAP`]-th failure in a row; a source
-//! that only waits on its rate limit leaves the artist `pending` without counting a failure.
+//! artist is `failed`, due again on the next cycle (upstream's job completes), and
+//! `unresolvable` at the [`FAILURE_CAP`]-th failure in a row; a source that only waits on its
+//! rate limit leaves the artist `pending` without counting a failure. A run over its time cap
+//! ([`ARTIST_TIMEOUT`]) also fails, but waits out [`identity::FAILED_RETRY_GRACE`] first.
 //! Image sources never fail the run. Images are decoded and re-encoded, staged in a temp file,
 //! and put in place at `<data_dir>/artist-images/<id>.jpg` only inside the transaction that
 //! records them, after the row's precedence check accepted them: a `user` image is never
@@ -50,8 +52,10 @@ pub const DEFER_CAP: i16 = 6;
 pub const MAX_GENRES: usize = 5;
 /// The most one artist's enrichment may take, every request and download included (the
 /// production value of `IdentConfig::artist_timeout`). Past it before the artist's own write,
-/// the run fails with `TIMEOUT` and nothing it learned is written; the album covers that
-/// follow the write only get what is left.
+/// the run fails with `TIMEOUT`, nothing it learned is written and it is retried only after
+/// [`identity::FAILED_RETRY_GRACE`] (the nearest upstream case is a run that throws, whose
+/// failed job holds the artist for that long); the album covers that follow the write only
+/// get what is left.
 pub const ARTIST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// How one artist's enrichment ended.
@@ -504,7 +508,10 @@ pub async fn enrich_one(ctx: &IdentCtx, a: &ArtistForEnrichment) -> sqlx::Result
     let g = match tokio::time::timeout_at(deadline, gather(ctx, a)).await {
         Ok(g) => g,
         Err(_) => Gathered {
-            write: ArtistWrite::status(ArtistStatus::Completed, 0),
+            write: ArtistWrite {
+                retry_grace: true,
+                ..ArtistWrite::status(ArtistStatus::Completed, 0)
+            },
             steps: Steps {
                 failure: Some(Failure::new(
                     "TIMEOUT",

@@ -633,10 +633,11 @@ async fn deferrals_of(pool: &PgPool, a: Uuid) -> i16 {
         .unwrap()
 }
 
-/// Moves the artist's last try past the 15 min retry grace.
+/// Moves the artist's last try past the 15 min retry grace (its retry time with it).
 async fn backdate(pool: &PgPool, a: Uuid) {
     sqlx::query(
-        "UPDATE artists SET last_enriched_at = now() - interval '16 minutes' WHERE id = $1",
+        "UPDATE artists SET last_enriched_at = now() - interval '16 minutes', \
+         enrichment_retry_at = now() - interval '1 minute' WHERE id = $1",
     )
     .bind(a)
     .execute(pool)

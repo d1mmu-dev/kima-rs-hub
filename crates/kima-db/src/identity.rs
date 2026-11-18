@@ -323,15 +323,18 @@ pub struct ArtistForEnrichment {
     pub album_dirs: Vec<String>,
 }
 
-/// How long a `failed` artist waits before it is claimed again (upstream
-/// `FAILED_JOB_RETRY_GRACE_MS`, 15 min: a failed job holds its id until then). The claim
-/// writes the same 15 minutes as an SQL interval, on the database clock.
+/// How long a `failed` artist waits before it is claimed again when its run hit the whole-run
+/// time cap or left album covers to retry ([`ArtistWrite::retry_grace`],
+/// [`defer_completed_artist`]): upstream `FAILED_JOB_RETRY_GRACE_MS`, 15 min, the time a
+/// thrown run's failed job holds its id. A run whose source did not answer is due again at
+/// once, as upstream's completed job. The writers use the same 15 minutes as an SQL interval,
+/// on the database clock (`artists.enrichment_retry_at`).
 pub const FAILED_RETRY_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Claims up to `n` artists for enrichment (spec §10.5): `pending`, `failed` and last tried
-/// over [`FAILED_RETRY_GRACE`] ago, or `unresolvable` and last tried over 7 days ago, with a
-/// present track, Various Artists aside; oldest `last_enriched_at` first (never tried first),
-/// then id. Each is set `enriching`; a row another claimer holds is skipped.
+/// Claims up to `n` artists for enrichment (spec §10.5): `pending`, `failed` and due
+/// (`enrichment_retry_at` unset or passed), or `unresolvable` and last tried over 7 days ago,
+/// with a present track, Various Artists aside; oldest `last_enriched_at` first (never tried
+/// first), then id. Each is set `enriching`; a row another claimer holds is skipped.
 pub async fn claim_artists(pool: &PgPool, n: i64) -> sqlx::Result<Vec<ArtistForEnrichment>> {
     let rows = sqlx::query!(
         r#"WITH due AS (
@@ -339,8 +342,8 @@ pub async fn claim_artists(pool: &PgPool, n: i64) -> sqlx::Result<Vec<ArtistForE
                WHERE a.name_key <> $2
                  AND (a.enrichment_status = 'pending'
                       OR (a.enrichment_status = 'failed'
-                          AND (a.last_enriched_at IS NULL
-                               OR a.last_enriched_at < now() - interval '15 minutes'))
+                          AND (a.enrichment_retry_at IS NULL
+                               OR a.enrichment_retry_at <= now()))
                       OR (a.enrichment_status = 'unresolvable'
                           AND (a.last_enriched_at IS NULL
                                OR a.last_enriched_at < now() - interval '7 days')))
@@ -474,6 +477,9 @@ pub struct ArtistWrite {
     pub similar: Change<serde_json::Value>,
     /// The artist's `musicbrainz` genres: `Set` replaces them (top first), `Clear` deletes them.
     pub mb_genres: Change<Vec<String>>,
+    /// A `failed` status waits out [`FAILED_RETRY_GRACE`] before it is claimed again (the
+    /// whole-run time cap); otherwise a `failed` artist is due on the next cycle.
+    pub retry_grace: bool,
 }
 
 impl ArtistWrite {
@@ -488,6 +494,7 @@ impl ArtistWrite {
             image: Change::Keep,
             similar: Change::Keep,
             mb_genres: Change::Keep,
+            retry_grace: false,
         }
     }
 }
@@ -530,6 +537,8 @@ pub async fn save_artist_outcome_in(
     let updated = sqlx::query_scalar!(
         r#"UPDATE artists SET
                enrichment_status = $2, enrichment_failures = $3, last_enriched_at = now(),
+               enrichment_retry_at = CASE WHEN $2 = 'failed' AND $17
+                                          THEN now() + interval '15 minutes' END,
                last_error = CASE $4 WHEN 'keep' THEN last_error WHEN 'set' THEN $5 ELSE NULL END,
                last_error_code = CASE $4 WHEN 'keep' THEN last_error_code WHEN 'set' THEN $6
                                          ELSE NULL END,
@@ -563,6 +572,7 @@ pub async fn save_artist_outcome_in(
         image.map(|i| i.1.as_str()),
         out.similar.mode(),
         out.similar.value(),
+        out.retry_grace,
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -611,14 +621,15 @@ pub async fn reopen_completed_artist(pool: &PgPool, id: Uuid) -> sqlx::Result<bo
 }
 
 /// Puts a `completed` artist to `failed` without counting a failure or recording an error, so
-/// it is claimed again after [`FAILED_RETRY_GRACE`] (its `last_enriched_at` was just written):
+/// it is claimed again after [`FAILED_RETRY_GRACE`] (`enrichment_retry_at`):
 /// album covers left to retry (final review I1). `deferrals` is how many times that has now
 /// happened in a row; it is kept in `cover_deferrals`, apart from `enrichment_failures`, which
 /// stays as it was (so the failure counts and lists do not show the artist). Answers whether
 /// the row changed.
 pub async fn defer_completed_artist(pool: &PgPool, id: Uuid, deferrals: i16) -> sqlx::Result<bool> {
     let r = sqlx::query!(
-        "UPDATE artists SET enrichment_status = 'failed', cover_deferrals = $2
+        "UPDATE artists SET enrichment_status = 'failed', cover_deferrals = $2,
+                enrichment_retry_at = now() + interval '15 minutes'
          WHERE id = $1 AND enrichment_status = 'completed'",
         id,
         deferrals

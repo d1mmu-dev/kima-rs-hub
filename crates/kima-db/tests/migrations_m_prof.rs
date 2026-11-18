@@ -527,8 +527,10 @@ async fn name_must_be_trimmed_and_1_to_50(pool: PgPool) {
 #[sqlx::test(migrations = false)]
 async fn down_script_restores_pre_profile_schema(pool: PgPool) {
     at_0039_with_seed(&pool).await;
-    // 0060's rollback must retain both independent M5 migrations and their index options.
-    migrator_upto(41).run(&pool).await.unwrap();
+    // 0060's rollback must retain both independent M5 migrations and their index options, and
+    // the schema of every later migration (0062 adds `artists.enrichment_retry_at`): the
+    // reference is every migration but 0060, which then runs out of order.
+    migrator_without(60).run(&pool).await.unwrap();
     let schema_before_profiles = schema_fingerprint(&pool).await;
     let rows_0039 = snapshot(&pool, "user_id").await;
     kima_db::MIGRATOR.run(&pool).await.unwrap();
@@ -574,7 +576,8 @@ async fn down_script_restores_pre_profile_schema(pool: PgPool) {
     sqlx::raw_sql(DOWN_0060).execute(&pool).await.unwrap();
     assert_eq!(schema_fingerprint(&pool).await, schema_before_profiles);
     assert_eq!(snapshot(&pool, "user_id").await, rows_0039);
-    // Only 0060 is undone; migrations after it (0061 reopens stage rows, no schema) stay applied.
+    // Only 0060 is undone; migrations after it (0061 reopens stage rows, 0062 adds an artists
+    // column) stay applied.
     let versions: Vec<i64> =
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
             .fetch_all(&pool)

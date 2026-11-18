@@ -1382,21 +1382,109 @@ async fn wikidata_image_is_downloaded_and_stored(pool: PgPool) {
     );
 }
 
-/// A `failed` artist waits out the retry grace (15 min, database clock) before it is claimed
-/// again, so a short outage cannot run it to the failure cap.
+/// Upstream `artistEnrichment.ts`: a source that does not answer (an outage, a timeout:
+/// `musicbrainzFailed`, `wikidataFailed`, `similarFetchFailed`) records `failedArtistStatus`
+/// and the job completes, so the next cycle (`unifiedEnrichment.ts` cleans completed jobs at
+/// once) asks again; every try counts toward `STAGE_RETRY_CAP` and the fourth is
+/// `unresolvable`. One artist batch per cycle, so a down source is asked once per cycle.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn a_failed_artist_waits_out_the_retry_grace(pool: PgPool) {
+async fn an_unanswered_source_is_asked_again_next_cycle_until_the_cap(pool: PgPool) {
+    let a = seed(&pool, "Perturbator", "Dangerous Days").await;
+    set_mbid(&pool, a, M, "search").await;
+    let w = World::default().status(&mb_artist_url(M, "aliases"), 500);
+    let f = fx(&pool, w, World::default()).await;
+
+    for (cycle, want) in [
+        (1, "failed"),
+        (2, "failed"),
+        (3, "failed"),
+        (4, "unresolvable"),
+    ] {
+        let report = artist::run_batch(&f.ctx, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(report.claimed, 1, "cycle {cycle} asks again");
+        let r = row(&pool, a).await;
+        assert_eq!(
+            (r.status.as_str(), r.failures),
+            (want, cycle),
+            "cycle {cycle}"
+        );
+        assert_eq!(r.last_error_code.as_deref(), Some("HTTP_500"));
+    }
+    assert_eq!(f.asked().len(), 4, "one try per cycle: {:?}", f.asked());
+    let report = artist::run_batch(&f.ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        report.claimed, 0,
+        "unresolvable is asked again only after a week"
+    );
+}
+
+/// The 15 min grace (upstream `FAILED_JOB_RETRY_GRACE_MS`, which only a thrown run's failed job
+/// holds) is kept for a run that hit kima-rs's whole-run time cap: it is retried after the
+/// grace, not on the next cycle.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_run_over_its_time_cap_waits_out_the_retry_grace(pool: PgPool) {
     assert_eq!(
         identity::FAILED_RETRY_GRACE,
         std::time::Duration::from_secs(15 * 60)
     );
     let a = seed(&pool, "Perturbator", "Dangerous Days").await;
-    set(&pool, a, "enrichment_status = 'failed', enrichment_failures = 1, last_enriched_at = now() - interval '14 minutes'").await;
+    set_mbid(&pool, a, M, "search").await;
+    let mut f = fx(&pool, known("Perturbator", M), World::default()).await;
+    f.ctx.config.artist_timeout = std::time::Duration::ZERO;
+
+    let out = enrich(&f, a).await;
+    assert!(
+        matches!(&out, ArtistResult::Failed { code, .. } if code == "TIMEOUT"),
+        "{out:?}"
+    );
+    assert_eq!(row(&pool, a).await.failures, 1);
     assert!(identity::claim_artists(&pool, 10).await.unwrap().is_empty());
-    set(&pool, a, "last_enriched_at = now() - interval '16 minutes'").await;
+    let due_in: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM enrichment_retry_at - now())::float8 FROM artists WHERE id = $1",
+    )
+    .bind(a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!((14.0 * 60.0..=15.0 * 60.0).contains(&due_in), "{due_in}");
+    set(
+        &pool,
+        a,
+        "enrichment_retry_at = now() - interval '1 second'",
+    )
+    .await;
     let claimed = identity::claim_artists(&pool, 10).await.unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, a);
+}
+
+/// The claim reads `enrichment_retry_at` on the database clock: a `failed` artist with none is
+/// due now, one with a later time waits for it.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_failed_artist_is_due_at_its_retry_time(pool: PgPool) {
+    let now = seed(&pool, "Now", "A").await;
+    set(
+        &pool,
+        now,
+        "enrichment_status = 'failed', enrichment_failures = 1, last_enriched_at = now()",
+    )
+    .await;
+    let later = seed(&pool, "Later", "A").await;
+    set(&pool, later, "enrichment_status = 'failed', enrichment_failures = 1, last_enriched_at = now() - interval '1 hour', enrichment_retry_at = now() + interval '1 minute'").await;
+    let claimed = identity::claim_artists(&pool, 10).await.unwrap();
+    assert_eq!(claimed.iter().map(|a| a.id).collect::<Vec<_>>(), [now]);
+    set(
+        &pool,
+        later,
+        "enrichment_retry_at = now() - interval '1 second'",
+    )
+    .await;
+    let claimed = identity::claim_artists(&pool, 10).await.unwrap();
+    assert_eq!(claimed.iter().map(|a| a.id).collect::<Vec<_>>(), [later]);
 }
 
 /// Task 21 carry: an unchanged local image is not read, re-encoded and rewritten on every

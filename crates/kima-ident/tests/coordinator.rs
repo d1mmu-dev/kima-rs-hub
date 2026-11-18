@@ -859,10 +859,11 @@ async fn paused_similar_sources_end_the_artists_phase(pool: PgPool) {
     }
 }
 
-/// Review I1: a source outage fails an artist once per retry grace, not once per batch: two
-/// cycles in a row leave it at one failure.
+/// D-254 (upstream `artistEnrichment.ts`/`unifiedEnrichment.ts`): a source outage fails the
+/// run, the artist is asked again on the next cycle, one try per cycle, and each try counts
+/// toward the cap of 4; it supersedes review I1's 15 min grace between tries.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn a_short_outage_cannot_make_an_artist_unresolvable(pool: PgPool) {
+async fn an_outage_is_retried_once_per_cycle_until_the_cap(pool: PgPool) {
     let id = "66666666-0000-4000-8000-000000000009";
     // Wikidata is not recorded: the replay answers 599, a failure.
     let mut entries = artist_answers("Flaky", id);
@@ -878,11 +879,14 @@ async fn a_short_outage_cannot_make_an_artist_unresolvable(pool: PgPool) {
     ctx.config.fingerprinting = false;
     let (a, _) = pending_artist(&pool, "a.wav", "Flaky", id, None).await;
 
-    for _ in 0..3 {
+    for tries in 1..=3 {
         cycle(&ctx).await;
+        assert_eq!(artist_row(&pool, a).await, ("failed".to_string(), tries));
     }
-
-    assert_eq!(artist_row(&pool, a).await, ("failed".to_string(), 1));
+    cycle(&ctx).await;
+    assert_eq!(artist_row(&pool, a).await, ("unresolvable".to_string(), 4));
+    cycle(&ctx).await;
+    assert_eq!(artist_row(&pool, a).await, ("unresolvable".to_string(), 4));
 }
 
 // ---- M-SYNC Task 14 (upstream b78b1167): the scan first, then each step for the whole library ----

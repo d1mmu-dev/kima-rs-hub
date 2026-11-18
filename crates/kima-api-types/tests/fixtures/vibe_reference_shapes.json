@@ -1,0 +1,42 @@
+{
+  "_about": "Reference TypeScript shapes for the vibe matching/path DTOs, extracted from upstream kima-hub `frontend/lib/api.ts` (interfaces `VibeTrack`, `VibePathTrack` and the inline response types of getVibeSimilar/getVibeAlchemy/getVibePath). Replaces reading the bundled `frontend/` copy, which was removed (owner decision 2026-11-18, D-180). `trackNo` is excluded: /vibe/similar and /vibe/alchemy never send it. Re-verify against an external checkout with `KIMA_HUB_REFERENCE=<kima-hub checkout> cargo test -p kima-api-types --test vibe -- --ignored`.",
+  "source": {
+    "repository": "Chevron7Locked/kima-hub",
+    "path": "frontend/lib/api.ts",
+    "extractedAt": "9450c94b1faf8c0e4cedbb76299b3642819ccd02",
+    "sha256": "6bd1cef0050cfe702adf8ced59793317fca89c84020c8de55891b56b1c216634",
+    "pinned": "c7527577d925b20f5adf410c7fd4e0c8ac250f69",
+    "identicalAtPin": true
+  },
+  "interfaces": {
+    "VibeTrack": [
+      "album",
+      "artist",
+      "displayTitle",
+      "distance",
+      "duration",
+      "id",
+      "similarity",
+      "title"
+    ],
+    "VibePathTrack": [
+      "albumCoverUrl",
+      "albumId",
+      "albumTitle",
+      "artistId",
+      "artistName",
+      "displayTitle",
+      "duration",
+      "id",
+      "title"
+    ]
+  },
+  "fields": [
+    "sourceTrackId: string; tracks: VibeTrack[]",
+    "tracks: VibeTrack[]",
+    "startTrack: VibePathTrack",
+    "endTrack: VibePathTrack",
+    "path: Array<VibePathTrack>",
+    "totalTracks: number; embeddingDistance: number; averageStepSize: number; mode: string"
+  ]
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Isolated stack for the visual comparison of kima-web against the legacy Next.js frontend: ONE backend
+# Isolated stack for the visual comparison of kima-web against the upstream kima-hub Next.js frontend: ONE backend
 # (kima-server + its own throw-away Docker postgres), ONE seeded library, and both frontends in front of it.
 #
 #   tools/run-kima-web-visual.sh up       start everything that is not running (idempotent), print the env
@@ -8,20 +8,24 @@
 #   tools/run-kima-web-visual.sh run [args]       `compare`, then `down`
 #   tools/run-kima-web-visual.sh down     stop kima/next and remove the postgres container + state
 #
-# The legacy Next.js app is used ONLY here, as the visual reference (scratch copy; it is not part of any product path).
-# Needs: cargo, node/npm (legacy frontend only: dependencies are installed in a scratch COPY, never in frontend/),
-# docker (pgvector/pgvector:pg17 on a random 127.0.0.1 port, never 5456), ffmpeg, vertigo 0.13.4 (+ wasm-opt), Chrome.
-# Environment (all optional): VISUAL_DIR (default ~/.hermes/cache/scratch/m9-visual), LEGACY_COPY
-# (default ~/.hermes/cache/scratch/m9-legacy-ref), VERTIGO, FFMPEG, CHROME.
+# The reference is an EXTERNAL kima-hub checkout (this repository no longer bundles the Next.js app, D-180).
+# `up` runs tools/prepare-kima-hub-reference.sh --install first: clean-tree check, `git pull --ff-only`, fetched SHA
+# recorded, `frontend/` extracted into an isolated copy whose dependencies are installed there (never in the
+# checkout). Next.js runs ONLY here, as the visual reference; it is not part of any product, dev or CI path.
+# A pull that moves the reference restarts the reference dev server; compare writes the SHA into its report.
+# Needs: cargo, node/npm (reference copy only), docker (pgvector/pgvector:pg17 on a random 127.0.0.1 port),
+# ffmpeg, vertigo 0.13.4 (+ wasm-opt), Chrome.
+# Environment, or the private tools config (tools/tools-env.inc.sh): KIMA_HUB_REFERENCE (required),
+# KIMA_REFERENCE_COPY, VISUAL_DIR (default ${XDG_CACHE_HOME:-~/.cache}/kima-rs/visual), VERTIGO (default
+# `vertigo` on PATH), FFMPEG (default `ffmpeg` on PATH), KIMA_TOOLS_PATH (prepended to PATH), CHROME.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-dir="${VISUAL_DIR:-$HOME/.hermes/cache/scratch/m9-visual}"
-legacy="${LEGACY_COPY:-$HOME/.hermes/cache/scratch/m9-legacy-ref}"
-vertigo="${VERTIGO:-$HOME/.local/opt/vertigo-cli-0.13.4/bin/vertigo}"
-ffbin="${FFMPEG_DIR:-$HOME/.hermes/tools/ffmpeg-9.0.1-linux-x64/bin}"
-nodebin="$HOME/.hermes/tools/node-26.12.1-linux-x64/bin:$HOME/.hermes/tools/npm-12.0.2-linux-x64/bin"
-export PATH="$nodebin:$ffbin:$HOME/.local/bin:$PATH"
+# shellcheck source=tools/tools-env.inc.sh
+. "$root/tools/tools-env.inc.sh"
+dir="${VISUAL_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/kima-rs/visual}"
+vertigo="${VERTIGO:-vertigo}"
+ffmpeg="${FFMPEG:-ffmpeg}"
 name="kima-visual-pg-$$"
 state="$dir/state.env"
 mkdir -p "$dir"
@@ -38,6 +42,8 @@ SSR_PORT=$SSR_PORT
 LEGACY_PORT=$LEGACY_PORT
 KIMA_PID=${KIMA_PID:-}
 LEGACY_PID=${LEGACY_PID:-}
+REF_SHA=${REF_SHA:-}
+REF_FRONTEND=${REF_FRONTEND:-}
 EOF
 }
 
@@ -60,6 +66,13 @@ start_kima() {
   echo "kima did not come up" >&2; return 1
 }
 
+stop_legacy() {
+  if alive "${LEGACY_PID:-}"; then pkill -P "$LEGACY_PID" 2>/dev/null || true; kill "$LEGACY_PID" 2>/dev/null || true; fi
+  # next dev leaves a child behind on its port.
+  [ -n "${LEGACY_PORT:-}" ] && (fuser -k "${LEGACY_PORT}/tcp" >/dev/null 2>&1 || true)
+  LEGACY_PID=""
+}
+
 stop_kima() {
   if alive "${KIMA_PID:-}"; then kill "$KIMA_PID" 2>/dev/null || true; for _ in $(seq 1 30); do alive "$KIMA_PID" || break; sleep 0.5; done; fi
   KIMA_PID=""
@@ -80,22 +93,31 @@ up() {
     docker exec "$PG_NAME" pg_isready -U kima -d kima -h 127.0.0.1 >/dev/null 2>&1 && break
     sleep 1
   done
-  [ -d "$dir/library" ] || FFMPEG="$ffbin/ffmpeg" "$root/tools/make-visual-library.sh" "$dir/library"
+  [ -d "$dir/library" ] || FFMPEG="$ffmpeg" "$root/tools/make-visual-library.sh" "$dir/library"
   [ -f "$root/crates/kima-web/build/index.json" ] || (cd "$root/crates/kima-web" && "$vertigo" build)
   if ! alive "${KIMA_PID:-}"; then
     start_kima; save
     seed
   fi
+  # Fresh reference before every comparison: check the external checkout, pull, record the SHA, isolated copy.
+  local prov sha
+  prov="$("$root/tools/prepare-kima-hub-reference.sh" --install)"
+  sha="$(sed -n 's/^KIMA_HUB_REFERENCE_SHA=//p' <<<"$prov")"
+  REF_FRONTEND="$(sed -n 's/^KIMA_REFERENCE_FRONTEND=//p' <<<"$prov")"
+  if alive "${LEGACY_PID:-}" && [ "$sha" != "${REF_SHA:-}" ]; then
+    echo "reference moved to $sha: restarting the reference dev server" >&2
+    stop_legacy
+  fi
+  REF_SHA="$sha"; save
   if ! alive "${LEGACY_PID:-}"; then
-    [ -d "$legacy/node_modules" ] || { echo "no node_modules in $legacy (run: cd $legacy && npm ci)" >&2; exit 1; }
     (
-      cd "$legacy"
+      cd "$REF_FRONTEND"
       NEXT_PUBLIC_BACKEND_URL="http://127.0.0.1:${KIMA_PORT}" KIMA_DEV_ORIGINS="127.0.0.1:${LEGACY_PORT}" \
         NEXT_TELEMETRY_DISABLED=1 exec npx next dev -p "$LEGACY_PORT" -H 127.0.0.1 >"$dir/legacy.log" 2>&1
     ) &
     LEGACY_PID=$!; save
     for _ in $(seq 1 120); do
-      curl -fsS "http://127.0.0.1:${LEGACY_PORT}/login/" >/dev/null 2>&1 && break
+      curl -fsS "http://127.0.0.1:${LEGACY_PORT}/login" >/dev/null 2>&1 && break
       alive "$LEGACY_PID" || { echo "legacy dev server exited, see $dir/legacy.log" >&2; exit 1; }
       sleep 1
     done
@@ -141,6 +163,7 @@ env_out() {
 export WEB_URL=http://127.0.0.1:${KIMA_PORT}
 export LEGACY_URL=http://127.0.0.1:${LEGACY_PORT}
 export ADMIN_USER=admin ADMIN_PASS=visual-pass-1
+export KIMA_HUB_REFERENCE_SHA=${REF_SHA:-}
 EOF
 }
 
@@ -154,9 +177,7 @@ reload() {
 down() {
   load
   stop_kima
-  if alive "${LEGACY_PID:-}"; then pkill -P "$LEGACY_PID" 2>/dev/null || true; kill "$LEGACY_PID" 2>/dev/null || true; fi
-  # next dev leaves a child behind on its port.
-  [ -n "${LEGACY_PORT:-}" ] && (fuser -k "${LEGACY_PORT}/tcp" >/dev/null 2>&1 || true)
+  stop_legacy
   [ -n "${PG_NAME:-}" ] && docker rm -f -v "$PG_NAME" >/dev/null 2>&1 || true
   rm -f "$state"
   echo "stopped"
@@ -174,7 +195,7 @@ case "$cmd" in
     load
     set +e
     WEB_URL="http://127.0.0.1:${KIMA_PORT}" LEGACY_URL="http://127.0.0.1:${LEGACY_PORT}" \
-      ADMIN_USER=admin ADMIN_PASS=visual-pass-1 node "$root/tools/compare-kima-web-visual.mjs" "$@"
+      ADMIN_USER=admin ADMIN_PASS=visual-pass-1 KIMA_HUB_REFERENCE_SHA="${REF_SHA:-}" node "$root/tools/compare-kima-web-visual.mjs" "$@"
     rc=$?
     set -e
     [ "$cmd" = run ] && down

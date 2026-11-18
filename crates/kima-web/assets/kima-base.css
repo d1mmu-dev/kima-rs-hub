@@ -1,4 +1,4 @@
-/* kima-web base styles. Tokens and global rules are ported from frontend/app/globals.css (the legacy Next.js app).
+/* kima-web base styles. Tokens and global rules are ported from upstream kima-hub frontend/app/globals.css (Next.js).
  * tools/gen-kima-web-css.mjs compiles this file with Tailwind into assets/kima.css (checked in); nothing here
  * runs at kima-web build time. */
 @import "tailwindcss" source(none);

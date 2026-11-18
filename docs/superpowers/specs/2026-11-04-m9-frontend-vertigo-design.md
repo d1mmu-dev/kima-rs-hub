@@ -1,5 +1,8 @@
 # M9: Rust/WASM Frontend, Part 1 — Design
 
+> **Superseded (owner, 2026-11-18):** the bundled `frontend/` was removed from the repository; references to it below are historical. The visual/functional reference is an external upstream kima-hub checkout, pulled with `--ff-only` before each comparison (`tools/prepare-kima-hub-reference.sh`, SHA recorded), and every M10 visual/functional acceptance criterion stays in force (D-180).
+
+
 Date: 2026-11-04 (revised 2026-11-05 per owner decisions below)
 Status: Revised — scope changed by explicit owner decision after the initial draft. Superseded: the original draft
 assumed dual-serve (Next.js + `kima-web` side by side behind a runtime switch) and CSR-only production for

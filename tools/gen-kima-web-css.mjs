@@ -3,10 +3,10 @@
 // Tailwind scans crates/kima-web/src (@source in the base file) for class names.
 //   node tools/gen-kima-web-css.mjs          write assets/kima.css
 //   node tools/gen-kima-web-css.mjs --check  exit 1 if the checked-in file is stale
-// Needs node_modules with tailwindcss, @tailwindcss/postcss and postcss (the legacy frontend's install:
-// LEGACY_COPY, default ~/.hermes/cache/scratch/m9-legacy-ref, i.e. `npm ci` in a scratch copy of frontend/). Any
-// directory with those three packages works (CI: a scratch `npm install` of tailwindcss@4.2.1 @tailwindcss/postcss@4.2.1
-// postcss@8.5.23, the versions frontend/package-lock.json pins; see the kima-web job in .github/workflows/ci.yml).
+// Needs an ISOLATED node_modules with the exact tailwindcss, @tailwindcss/postcss and postcss versions that
+// tools/install-kima-web-css-deps.sh installs (local runs and the kima-web CI job both use it). Directory:
+// KIMA_CSS_DEPS (environment or the private tools config, see tools/tools-env.inc.sh), default
+// ${XDG_CACHE_HOME:-~/.cache}/kima-rs/tailwind. No reference frontend and no repository package.json are involved.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,16 +14,28 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const legacy = process.env.LEGACY_COPY || path.join(os.homedir(), '.hermes/cache/scratch/m9-legacy-ref');
-const require = createRequire(path.join(legacy, 'package.json'));
+// The private tools config (KEY=VALUE lines) fills keys the environment leaves unset, like tools-env.inc.sh.
+function toolsEnv(key) {
+  if (process.env[key]) return process.env[key];
+  const file = process.env.KIMA_RS_TOOLS_ENV || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'kima-rs/tools.env');
+  if (!fs.existsSync(file)) return undefined;
+  const line = fs.readFileSync(file, 'utf8').split('\n').find((l) => l.startsWith(`${key}=`));
+  return line ? line.slice(key.length + 1) : undefined;
+}
+const deps = toolsEnv('KIMA_CSS_DEPS') || path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'kima-rs/tailwind');
+if (!fs.existsSync(path.join(deps, 'node_modules/@tailwindcss/postcss'))) {
+  console.error(`no Tailwind packages in ${deps}: run tools/install-kima-web-css-deps.sh`);
+  process.exit(2);
+}
+const require = createRequire(path.join(deps, 'package.json'));
 const postcss = require('postcss');
 const tailwind = require('@tailwindcss/postcss');
 
 const web = path.join(root, 'crates/kima-web');
 const basePath = path.join(web, 'assets/kima-base.css');
-// Compile from a file inside the legacy copy so `@import "tailwindcss"` resolves; @source is made absolute.
+// Compile from a file inside the deps directory so `@import "tailwindcss"` resolves; @source is made absolute.
 const input = fs.readFileSync(basePath, 'utf8').replace('@source "../src";', `@source "${path.join(web, 'src')}";`);
-const from = path.join(legacy, '.kima-base.css');
+const from = path.join(deps, '.kima-base.css');
 fs.writeFileSync(from, input);
 const result = await postcss([tailwind({ optimize: { minify: true } })]).process(input, { from, to: path.join(web, 'assets/kima.css') });
 fs.rmSync(from);

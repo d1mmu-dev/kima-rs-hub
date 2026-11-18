@@ -1,7 +1,9 @@
-// Visual parity check: kima-web against the legacy Next.js frontend, same backend, same data.
+// Visual parity check: kima-web against the upstream kima-hub Next.js frontend (an external checkout, never bundled),
+// same backend, same data. The report records the reference commit (KIMA_HUB_REFERENCE_SHA).
 // Both frontends must already be running in front of ONE backend (tools/run-kima-web-visual.sh sets that up):
 //   WEB_URL=http://127.0.0.1:3030    kima-web (embedded SSR origin of kima-server)
-//   LEGACY_URL=http://127.0.0.1:3040 legacy Next.js (dev server rewriting /api to the same kima-server)
+//   LEGACY_URL=http://127.0.0.1:3040 reference Next.js (dev server of an isolated copy, rewriting /api to the same kima-server)
+//   KIMA_HUB_REFERENCE_SHA          reference commit, written into report.json (tools/run-kima-web-visual.sh sets it)
 //   ADMIN_USER / ADMIN_PASS          account of that backend
 //   CHROME=/path/to/chrome  DEBUG_PORT=9444  OUT=<dir, default target/kima-web-visual (gitignored)>
 //   THRESHOLD=1                      percent of differing pixels allowed per page/viewport (default 1)
@@ -241,18 +243,18 @@ async function main() {
   // The same user action on both sides: press the first row's Play button, let it load, pause at 0:00.
   const playFirst = `(async()=>{const b=document.querySelector('main button[aria-label=Play]');if(b)b.click();await new Promise(r=>setTimeout(r,2000));const a=document.querySelector('audio');if(a){a.pause();a.currentTime=0}await new Promise(r=>setTimeout(r,500))})()`;
   const pages = [
-    { name: 'login', legacy: '/login/', web: '/login' },
+    { name: 'login', legacy: '/login', web: '/login' },
     // The seeded backend has an account, so both frontends would leave the wizard; the status call is mocked to a
     // fresh install on both sides so the wizard itself is what gets compared.
-    { name: 'setup', legacy: '/onboarding/', web: '/setup', mock: { hasAccount: false, needsOnboarding: true, registrationOpen: true, onboardingComplete: false } },
-    { name: 'artists', legacy: '/collection/?tab=artists', web: '/collection', auth: true },
-    { name: 'albums', legacy: '/collection/?tab=albums', web: '/collection/albums', auth: true },
-    { name: 'tracks', legacy: '/collection/?tab=tracks', web: '/collection/tracks', auth: true },
-    { name: 'search', legacy: `/search/?q=${QUERY}`, web: '/search', auth: true, actWeb: typeWeb, actLegacy: typeLegacy },
-    { name: 'playlists', legacy: '/playlists/', web: '/playlists', auth: true },
-    { name: 'playlist', legacy: `/playlist/?id=${pl.id}`, web: `/playlists/${pl.id}`, auth: true },
-    { name: 'settings', legacy: '/settings/', web: '/settings', auth: true },
-    { name: 'player', legacy: '/collection/?tab=tracks', web: '/collection/tracks', auth: true, actWeb: playFirst, actLegacy: playFirst, note: 'player bar with a track loaded' },
+    { name: 'setup', legacy: '/onboarding', web: '/setup', mock: { hasAccount: false, needsOnboarding: true, registrationOpen: true, onboardingComplete: false } },
+    { name: 'artists', legacy: '/collection?tab=artists', web: '/collection', auth: true },
+    { name: 'albums', legacy: '/collection?tab=albums', web: '/collection/albums', auth: true },
+    { name: 'tracks', legacy: '/collection?tab=tracks', web: '/collection/tracks', auth: true },
+    { name: 'search', legacy: `/search?q=${QUERY}`, web: '/search', auth: true, actWeb: typeWeb, actLegacy: typeLegacy },
+    { name: 'playlists', legacy: '/playlists', web: '/playlists', auth: true },
+    { name: 'playlist', legacy: `/playlist/${pl.id}`, web: `/playlists/${pl.id}`, auth: true },
+    { name: 'settings', legacy: '/settings', web: '/settings', auth: true },
+    { name: 'player', legacy: '/collection?tab=tracks', web: '/collection/tracks', auth: true, actWeb: playFirst, actLegacy: playFirst, note: 'player bar with a track loaded' },
   ].filter((p) => !ONLY || ONLY.includes(p.name));
   void album;
 
@@ -307,7 +309,7 @@ async function main() {
       console.log(`${pg.name.padEnd(10)} ${vp.padEnd(9)} diff ${row.ratio.toFixed(2).padStart(6)}%  ink ${row.ink.toFixed(1).padStart(5)}%  ssim ${row.ssim.toFixed(3)}  controls ${row.controls.legacy}/${row.controls.web}` + (row.ssrShift !== undefined ? `   ssr->hydrated ${row.ssrShift.toFixed(2)}%` : ''));
     }
   }
-  fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify(rows, null, 2));
+  fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify({ reference: process.env.KIMA_HUB_REFERENCE_SHA || null, rows }, null, 2));
   const names = [...new Set(rows.map((r) => r.page))];
   const hdr = VIEWPORTS.map((v) => v.join('x'));
   const table = (title, f) => {

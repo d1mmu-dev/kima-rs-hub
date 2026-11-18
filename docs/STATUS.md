@@ -24,7 +24,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M9 | kima-web część 1 (logowanie, biblioteka, player, playlisty, ustawienia, SSR) | ✅ (wygląd 1:1 otwarty) |
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
 | **M-PROF** | **Profile w koncie (Netflix)** | ✅ na `main`; ręczne logowanie właściciela odłożone do wdrożenia |
-| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–19 zaimplementowane lokalnie; przegląd Task 19 (0 Critical/Important) i jego uwagi Minor poprawione, czeka na ponowny przegląd; odbiór real-model otwarty |
+| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–20 lokalnie; pełna weryfikacja workspace zielona (3362/0/31), przegląd Task 20 i odbiór real-model otwarte |
 | M5b | Mixy, radio, „co nowego” | ⏳ ~1 tydz. |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
 | M6b | Audiobooki (Audiobookshelf) | ⏳ ~1 tydz., po M7 |
@@ -51,6 +51,8 @@ Decyzje właściciela (2026-11-14): awatary z 12 presetów; kilka profili dzieci
 Ręczne sprawdzenie istniejącego konta właściciela odłożone do wdrożenia (nie PASS); ścisły smoke referencyjnego frontendu odłożony do M10. Testy wymagające prywatnych modeli pozostają poza zweryfikowanym zakresem.
 
 ## M5 — punkt integracyjny
+
+**Etap — Task 20 (2026-11-18):** wiersze D-181–D-193, README, roadmapa (commit `b8d24b0`) i pełna lokalna weryfikacja workspace na tym commicie, na jednej izolowanej bazie testowej: 248/248 sekcji testów, 3393 testy porównane co do nazwy z inwentarzem — 3362 zaliczone, 0 niezaliczonych, 31 ignorowanych (prywatne modele/zasoby, real-model, pomiary ręczne; nie wymuszane). Ścieżka aktualizacji 0040/0060 → 0041 i migracje profili zielone; fmt, Clippy `-D warnings` (stable i nightly, z `pg-publish` i bez), `sqlx prepare --check`, bramki pinów i kluczy profili, kima-web (Clippy natywnie i wasm, testy, CSS, `vertigo build`, SSR na prawdziwym buildzie) zielone. Nieuruchomione: przebieg w locale C, testy real-model, E2E w przeglądarce, niezależny przegląd Task 20, hosted CI.
 
 **Etap — Task 19 (2026-11-17, runda poprawek 2026-11-18):** Subsonic `getSimilarSongs`/`getSimilarSongs2` (decyzja Q8, D-190): utwór-seed z bieżącymi danymi dopasowania (zweryfikowana sonda feel, zbudowany matching state, kwalifikujący się wektor `MATCHING_SOUND`) jest rankowany formułą vibe jak `/api/vibe/similar` (seed wykluczony, limity albumu/artysty, stała kolejność); każdy inny seed (album, artysta, utwór bez danych, hf_audio) idzie ścieżką upstream: artysta seeda + do 50 podobnych artystów z biblioteki, losowo, `count` 1–500. Tylko obecne utwory, wspólny kształt piosenki, gwiazdki/oceny wywołującego profilu. D-190 zapisany, D-086 poprawiony. kima-subsonic **343 PASS / 0 FAIL / 2 ignored**, kima-api vibe + profile_isolation **43 / 0 / 1**; check, stable Clippy (plain i pg-publish), fmt, SQLx prepare check, pin/klucze profili: PASS. Przegląd Task 19: 0 Critical/Important, 5 Minor. **Decyzja właściciela Q8 opcja 1 (2026-11-18):** seed z danymi, ale z pustym rankingiem, przechodzi na ścieżkę artystową; niepusty krótki ranking jest odpowiedzią i nie jest dopełniany. Runda poprawek (`4cde4cc`, `ebd6a3d`): kima-subsonic 348/0/2, kima-api vibe + profile_isolation 43/0/1; ponowny przegląd 0 Critical/Important, jego 2 Minor dokumentacji poprawione w Task 20. (Pierwotny stan tego akapitu — „pusty element, do potwierdzenia” — jest nieaktualny.)
 
@@ -96,6 +98,7 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 
 ## Historia etapów (najnowsze na górze)
 
+- 2026-11-18: M5 Task 20 — dokumentacja (`b8d24b0`) i pełna lokalna weryfikacja workspace: 248/248 sekcji, 3362 PASS / 0 FAIL / 31 ignored, bramki statyczne i kima-web zielone; locale C, real-model i hosted CI nieuruchomione; czeka na niezależny przegląd; bez push/merge.
 - 2026-11-18: M5 Task 19 po przeglądzie (0 Critical/Important): decyzja właściciela Q8 opcja 1 — pusty ranking vibe przechodzi na dobór artystowy, krótka niepusta lista nie jest dopełniana; 5 uwag Minor poprawionych (zgodność ID z `/api/vibe/similar`, limity 2/4 z ziarnem, błąd bazy = błąd 0, D-190, `docs/subsonic.md`); 348 PASS / 0 FAIL / 2 ignored w kima-subsonic, bramki statyczne zielone; bez wdrożenia, Task 20 nierozpoczęty.
 - 2026-11-17: M5 Task 19 lokalnie gotowy do przeglądu: getSimilarSongs(2) rankowane vibe z fallbackiem artystowym upstream (D-190); 386 PASS / 0 FAIL / 3 ignored w wybranych zestawach, bramki statyczne zielone; bez wdrożenia.
 - 2026-11-18: M5 Task 18 po przeglądzie (0 Critical/Important): 8 uwag Minor poprawionych lokalnie (test tożsamości audio dla 202, utwardzony harness E2E: piny modeli przed bazą, KIMA_NET_DENY_REAL, pusta baza, sprzątanie po panice; pliki tokenizera przypięte w readings_real, skrypt Pythona bez assert, spec §5.8 i D-182 uzgodnione); bez wdrożenia, Task 19 nierozpoczęty.

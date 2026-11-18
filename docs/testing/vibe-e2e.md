@@ -19,7 +19,10 @@ Checked **before any database connection or creation**; any gap panics (never sk
 - `KIMA_CLAP_MODEL_DIR`: absolute directory with the native music audio/text export; the audio
   model, text model and `tokenizer.json` must each verify against their compiled SHA-256 pins.
 - The snapshot store under the generated library must pass the reflink/mount check.
-- `KIMA_NET_DENY_REAL=1` (the harness refuses otherwise).
+- `KIMA_NET_DENY_REAL=1` (the harness refuses otherwise). This keeps the run's profile consistent
+  with CI; it is an environment check, not OS-level network isolation. The router state is built
+  with `Net::disabled()`, so no outbound HTTP client is configured, but nothing in the harness
+  blocks sockets. Run it in a network-isolated environment if that guarantee is needed.
 - `KIMA_VIBE_ASSET_DIR`: absolute directory whose `feel_probe.json`/`mood_heads.json` verify
   against the compiled SHA-256 pins (none are compiled today, so this refuses).
 - `ORT_DYLIB_PATH`: trusted ONNX Runtime library.
@@ -30,14 +33,20 @@ Checked **before any database connection or creation**; any gap panics (never sk
   `current_database()` must match and must be empty (no relation, type or function in any
   non-system schema including `public`, no extra schema, no extension besides `plpgsql`); only
   then a uniquely named `kima_vibe_e2e_<uuid>` database is created and marked with a run comment.
-  It is migrated and used, then dropped on success **and** on panic; cleanup drops only that
-  name and only while it carries this run's comment (or none). No `#[sqlx::test]` harness is used.
+  It is migrated and used, then dropped on success **and** when the test body panics; cleanup
+  drops only that name and only while it carries this run's comment (or none). The body's panic
+  message is logged before cleanup starts, and a panic during cleanup is logged without replacing
+  the body's original panic. Cleanup is **not** guaranteed on SIGKILL, abort, a hang, Ctrl-C, or a
+  panic inside a task the body spawned and never joined: the database then stays behind with its
+  `kima vibe_e2e run <uuid>` comment and must be removed by hand. No `#[sqlx::test]` harness is used.
 
 The non-ignored `prerequisites_fail_closed_when_environment_is_unset_or_checkpoint_is_wrong`
 proves the empty environment and the current `hf_audio` checkpoint both refuse;
 `prerequisites_refuse_without_the_network_deny_switch`, `model_dir_without_pinned_files_refuses`
-and `cleanup_runs_when_the_body_panics_and_the_panic_is_kept` cover the deny switch, the model
-pins and the cleanup path.
+`cleanup_runs_when_the_body_panics_and_the_panic_is_kept`,
+`a_failing_cleanup_never_replaces_the_body_panic` and
+`panic_messages_are_readable_for_literal_formatted_and_other_payloads` cover the deny switch, the
+model pins and the cleanup path.
 
 ## Command (only after the M4 music-checkpoint swap, asset pins and authorization)
 

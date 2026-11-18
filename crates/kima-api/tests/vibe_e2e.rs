@@ -9,7 +9,9 @@
 //! explicitly authorized isolated database. It never skips: every missing prerequisite (including
 //! the SHA-256 of every CLAP model file and the snapshot/reflink setup) panics before any database
 //! connection. No downloads, no owner library. The throwaway database it creates is dropped on
-//! success and on panic, and only that database. See `docs/testing/vibe-e2e.md` for the command.
+//! success and when the test body panics, and only that database; a cleanup panic never hides the
+//! body's panic. Not covered: SIGKILL, abort, a hang, Ctrl-C (see `run_then_clean_up`). See
+//! `docs/testing/vibe-e2e.md` for the command.
 //!
 //! Required environment:
 //! - `KIMA_CLAP_MODEL_DIR`: absolute directory with the verified native music audio/text export.
@@ -17,7 +19,9 @@
 //! - `ORT_DYLIB_PATH`: trusted ONNX Runtime library.
 //! - `DATABASE_URL` (127.0.0.1, not the development port) and `PGDATABASE` naming the same
 //!   empty database, plus `KIMA_VIBE_E2E_AUTHORIZED_DATABASE` equal to it (explicit consent).
-//! - `KIMA_NET_DENY_REAL=1`: the harness refuses to run with the real network reachable.
+//! - `KIMA_NET_DENY_REAL=1`: required for profile consistency with CI (the harness refuses without
+//!   it). It is an environment check, not OS network isolation; the router state is built with
+//!   `Net::disabled()`, so no outbound client is configured, but nothing here blocks sockets.
 //!
 //! No `#[sqlx::test]`: that harness would create databases before any guard could run.
 
@@ -219,25 +223,61 @@ async fn drop_owned(admin: &PgPool, owned: &OwnedDatabase) {
     }
 }
 
+/// Polls `fut` to completion, turning a panic raised while it is polled into `Err(payload)`.
+async fn catch_poll<F: std::future::Future>(fut: F) -> std::thread::Result<F::Output> {
+    let mut fut = std::pin::pin!(fut);
+    std::future::poll_fn(|cx| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fut.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Ok(std::task::Poll::Ready(out)) => std::task::Poll::Ready(Ok(out)),
+            Err(payload) => std::task::Poll::Ready(Err(payload)),
+        }
+    })
+    .await
+}
+
+/// A panic payload as text (`panic!` with a literal or a formatted message).
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic payload>".to_owned())
+}
+
 /// Runs `body`, catching a panic raised while it is polled, always runs `cleanup`, then
 /// re-raises the body's panic (the router's test futures are not `Send`, so no task spawn).
+///
+/// The body's panic message is logged before cleanup starts, and a panic in `cleanup` never
+/// replaces it: it is logged and the body's original payload is re-raised. Only when the body
+/// succeeded does a cleanup panic surface. Scope: this covers a panic unwinding through the
+/// polled body. It is no guarantee against SIGKILL, an abort, a hang, Ctrl-C, or a panic inside
+/// a task the body spawned that the body never joins; then the throwaway database stays behind,
+/// carrying its marker comment for manual removal.
 async fn run_then_clean_up<B, C>(body: B, cleanup: C)
 where
     B: std::future::Future<Output = ()>,
     C: std::future::Future<Output = ()>,
 {
-    let mut body = std::pin::pin!(body);
-    let outcome = std::future::poll_fn(|cx| {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body.as_mut().poll(cx))) {
-            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
-            Ok(std::task::Poll::Ready(())) => std::task::Poll::Ready(Ok(())),
-            Err(payload) => std::task::Poll::Ready(Err(payload)),
+    let outcome = catch_poll(body).await;
+    if let Err(payload) = &outcome {
+        eprintln!(
+            "vibe_e2e: body panicked ({}); cleaning up before re-raising",
+            panic_message(payload.as_ref())
+        );
+    }
+    let cleaned = catch_poll(cleanup).await;
+    match (outcome, cleaned) {
+        (Err(body), Err(cleanup)) => {
+            eprintln!(
+                "vibe_e2e: cleanup also panicked ({}); re-raising the original body panic",
+                panic_message(cleanup.as_ref())
+            );
+            std::panic::resume_unwind(body);
         }
-    })
-    .await;
-    cleanup.await;
-    if let Err(payload) = outcome {
-        std::panic::resume_unwind(payload);
+        (Err(body), Ok(())) => std::panic::resume_unwind(body),
+        (Ok(()), Err(cleanup)) => std::panic::resume_unwind(cleanup),
+        (Ok(()), Ok(())) => {}
     }
 }
 
@@ -414,6 +454,33 @@ async fn cleanup_runs_when_the_body_panics_and_the_panic_is_kept() {
     let flag = cleaned.clone();
     run_then_clean_up(async {}, async move { flag.store(true, Ordering::SeqCst) }).await;
     assert!(cleaned.load(Ordering::SeqCst), "cleanup ran after success");
+}
+
+#[test]
+fn panic_messages_are_readable_for_literal_formatted_and_other_payloads() {
+    let literal = std::panic::catch_unwind(|| panic!("literal")).unwrap_err();
+    let formatted = std::panic::catch_unwind(|| panic!("formatted {}", 7)).unwrap_err();
+    let other = std::panic::catch_unwind(|| std::panic::panic_any(7_u8)).unwrap_err();
+    assert_eq!(panic_message(literal.as_ref()), "literal");
+    assert_eq!(panic_message(formatted.as_ref()), "formatted 7");
+    assert_eq!(panic_message(other.as_ref()), "<non-string panic payload>");
+}
+
+#[tokio::test]
+async fn a_failing_cleanup_never_replaces_the_body_panic() {
+    let outcome = tokio::spawn(run_then_clean_up(async { panic!("body failed") }, async {
+        panic!("cleanup failed")
+    }))
+    .await;
+    let payload = outcome.unwrap_err().into_panic();
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&"body failed"));
+    // Without a body panic the cleanup's own panic surfaces.
+    let outcome = tokio::spawn(run_then_clean_up(async {}, async {
+        panic!("cleanup failed")
+    }))
+    .await;
+    let payload = outcome.unwrap_err().into_panic();
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&"cleanup failed"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

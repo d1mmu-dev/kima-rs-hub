@@ -832,11 +832,13 @@ pub struct Progress {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct ArtistProgress {
     pub total: i64,
-    /// `completed` + `unresolvable`.
+    /// `completed` + `unresolvable`, and artists only their album covers wait on (see
+    /// `artist_progress`).
     pub completed: i64,
     /// `pending` + `enriching`.
     pub pending: i64,
-    /// Still to answer: `pending`, `enriching`, or `failed` and due a retry (upstream).
+    /// Still to answer: `pending`, `enriching`, or `failed` and due a retry (upstream); album
+    /// covers alone never make an artist owed.
     pub owed: i64,
     pub failed: i64,
     pub progress: i64,
@@ -1045,19 +1047,29 @@ async fn stage_counts(pool: &PgPool, stage: &str, gate: bool) -> sqlx::Result<St
 }
 
 async fn artist_progress(pool: &PgPool) -> sqlx::Result<ArtistProgress> {
+    // An artist with album-cover retries recorded, no failure and no error since its last
+    // completed write (which clears the error; every reopen resets `cover_deferrals`) finished
+    // its own enrichment; only its album covers wait, `failed`
+    // (`identity::defer_completed_artist`) or `pending` (`requeue_completed_artist`, covers on a
+    // rate-limited source) or re-run. Upstream's covers never hold an artist back, so it counts
+    // as completed and is not owed: a slow cover host cannot hold the vibe map (review M2).
     let r = sqlx::query!(
-        r#"SELECT
+        r#"WITH a AS (
+             SELECT CASE WHEN a.enrichment_status IN ('failed', 'pending', 'enriching')
+                              AND a.enrichment_failures = 0 AND a.cover_deferrals > 0
+                              AND a.last_error_code IS NULL
+                         THEN 'completed' ELSE a.enrichment_status END AS status
+             FROM artists a
+             WHERE a.name_key <> 'various artists'
+               AND EXISTS (SELECT 1 FROM albums al JOIN tracks t ON t.album_id = al.id
+                           WHERE al.artist_id = a.id AND t.missing_since IS NULL))
+           SELECT
              count(*) AS "total!",
-             count(*) FILTER (WHERE enrichment_status IN ('completed', 'unresolvable'))
-               AS "completed!",
-             count(*) FILTER (WHERE enrichment_status IN ('pending', 'enriching')) AS "pending!",
-             count(*) FILTER (WHERE enrichment_status IN ('pending', 'enriching', 'failed'))
-               AS "owed!",
-             count(*) FILTER (WHERE enrichment_status = 'failed') AS "failed!"
-           FROM artists a
-           WHERE a.name_key <> 'various artists'
-             AND EXISTS (SELECT 1 FROM albums al JOIN tracks t ON t.album_id = al.id
-                         WHERE al.artist_id = a.id AND t.missing_since IS NULL)"#
+             count(*) FILTER (WHERE status IN ('completed', 'unresolvable')) AS "completed!",
+             count(*) FILTER (WHERE status IN ('pending', 'enriching')) AS "pending!",
+             count(*) FILTER (WHERE status IN ('pending', 'enriching', 'failed')) AS "owed!",
+             count(*) FILTER (WHERE status = 'failed') AS "failed!"
+           FROM a"#
     )
     .fetch_one(pool)
     .await?;

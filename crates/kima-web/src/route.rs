@@ -54,6 +54,15 @@ pub enum Route {
 }
 
 impl Route {
+    /// The page this route shows: routes that differ only in the page's own state (`/vibe` and
+    /// `/vibe?track=`) are one page, which keeps its state while that changes.
+    pub fn page(&self) -> Route {
+        match self {
+            Route::Vibe { .. } => Route::Vibe { track: None },
+            other => other.clone(),
+        }
+    }
+
     pub fn requires_auth(&self) -> bool {
         !matches!(self, Route::Login | Route::Setup | Route::NotFound)
     }
@@ -291,6 +300,25 @@ mod tests {
         for url in ["/vibe?track=<script>", "/vibe/map", "/vibe?track=a b"] {
             assert_eq!(Route::new(url), Route::NotFound, "{url}");
         }
+    }
+
+    #[test]
+    fn vibe_track_changes_stay_on_the_same_page() {
+        let with = Route::Vibe {
+            track: Some(ID.into()),
+        };
+        assert_eq!(with.page(), Route::Vibe { track: None });
+        assert_eq!(
+            Route::Vibe { track: None }.page(),
+            Route::Vibe { track: None }
+        );
+        // Other params still make different pages.
+        let album = Route::Tracks {
+            album: Some(ID.into()),
+        };
+        assert_eq!(album.page(), album);
+        assert_ne!(album.page(), Route::Tracks { album: None }.page());
+        assert_eq!(Route::Artists.page(), Route::Artists);
     }
 
     #[test]

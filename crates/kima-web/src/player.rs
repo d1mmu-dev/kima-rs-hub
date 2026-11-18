@@ -354,6 +354,17 @@ impl Player {
         self.persist();
     }
 
+    /// Replaces the queue and plays it in order from `start` with shuffle off: a vibe queue is an
+    /// ordered journey (upstream `replaceOperation`).
+    pub fn play_in_order(&self, queue: Vec<QueueItem>, start: usize) {
+        if queue.is_empty() {
+            return;
+        }
+        // Before `play_queue`, so its save already carries shuffle off.
+        self.0.shuffle.set(false);
+        self.play_queue(queue, start);
+    }
+
     /// Plays one podcast episode from `resume` seconds (its saved progress) or the start.
     pub fn play_episode(&self, item: QueueItem, resume: Option<f64>) {
         self.0
@@ -1324,6 +1335,28 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain_item(id: &str) -> QueueItem {
+        QueueItem {
+            id: id.into(),
+            title: id.into(),
+            duration: 1.0,
+            artist: None,
+            album: None,
+        }
+    }
+
+    #[test]
+    fn a_vibe_queue_plays_in_order_with_shuffle_off() {
+        let session = Session::new(Rc::new(crate::auth::MemoryStorage::default()));
+        let player = Player::new(ApiClient::new(session.token(), || {}), session);
+        player.toggle_shuffle();
+        assert!(Player::read(&player.0.shuffle));
+        player.play_in_order(vec![plain_item("a"), plain_item("b")], 0);
+        assert!(!Player::read(&player.0.shuffle));
+        assert_eq!(Player::read(&player.0.index), 0);
+        assert_eq!(Player::read(&player.0.queue).len(), 2);
+    }
 
     #[test]
     fn pause_retires_pending_play_before_mount() {

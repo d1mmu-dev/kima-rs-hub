@@ -256,24 +256,35 @@ nothing for unknown; there is no separate explicit ("E") badge because upstream'
 available on this server", the model and analysis it needs) and sends no vibe request. Otherwise it loads
 `GET /api/vibe/map`; a 202 `{computing:true}` shows "Charting your library" and is asked again every 4 s while the page is
 open (an hour at most, then "Try again"); a failure shows the backend's message with "Try again"; an empty map shows
-upstream's "No tracks with vibe analysis yet".
+upstream's "No tracks with vibe analysis yet". A failed `/system/features` also offers "Try again". Only one map loader
+runs at a time: opening the page again or "Try again" retires the older one, and every loader stops once the page is
+left. The loaded map is kept for the session (`Ctx`) like upstream's React Query cache: for an hour (`staleTime`) a
+visit shows it with no request; after that it is shown and asked for again quietly, and the drawing (with the search,
+mood and panel) stays unless `computedAt`, the mood signature or the size changed; a 202 or "Try again" drops it.
+`/vibe` and `/vibe?track=` are one page (`Route::page`): the player's "match this vibe" on the vibe page opens the
+track's panel and matches without rebuilding the map.
 
 What is on the page:
 
 - **Map**: every track as a point at its `x`/`y`, seen from above, coloured by its dominant mood (upstream's mood colours);
   hover shows "title — artist"; clicking a point opens its panel. Lit tracks (a mood, a search, a track's matches) are
-  drawn over the dimmed field; the selected track has a white ring and the playing one a brand-coloured ring.
+  drawn over the dimmed field as one SVG path per mood colour (white outline only up to 1000 lit points); the selected
+  track has a white ring and the playing one a brand-coloured ring, each in its own layer so a click redraws one ring.
+  Opening another track drops the previous track's lit matches and list (a late answer for it is ignored). The points
+  are not keyboard stops; the search box is the keyboard way in. Escape closes the result list, then the panel.
 - **Search box** (top centre, full width on phone/tablet): after a 250 ms pause, title/artist matches on the map (every
   word, accents and case ignored, word starts first: upstream `searchLibrary`) are lit and listed at once, then tracks
   that *sound* like the words (`POST /api/vibe/search`, limit 10) are added below them, marked "sounds like it"
-  (upstream `useTrackFinder`'s merge). A newer keystroke drops older answers. Each result: pick (opens its panel), Play,
-  Add to queue. A sound-search error (503 without the music CLAP model, 504) is shown under the name matches.
+  (upstream `useTrackFinder`'s merge) after a further 350 ms pause, cached per phrase for the visit. A newer keystroke
+  or a pick drops older answers. Each result: pick (opens its panel), Play, Add to queue. A 503 (no text model) shows a
+  quiet "sound search is not available on this server" and no further sound searches are sent during the visit; other
+  sound-search errors (504, ...) are shown under the name matches.
 - **Mood legend** (bottom left): each dominant mood with its count, moods first; a click lights that mood (another
   click turns it off); the track total below.
 - **Track panel** (right; bottom sheet on phone/tablet): cover, title, artist and album links, mood bars and
   positivity from the map (a track not on the map yet, from a sound search or `?track=`, shows its detail with "Not on
-  the map yet"), then Play, **Match Vibe** (the track and its up to 50 matches replace the queue and play, upstream's vibe
-  operation) and **Similar** (`GET /api/vibe/similar/<id>?limit=50`: the matches are lit on the map **and listed in the
+  the map yet"), then Play, **Match Vibe** (the track and its up to 50 matches replace the queue and play in order with
+  shuffle off, upstream's vibe operation / `replaceOperation`; matches are queued under their `displayTitle`) and **Similar** (`GET /api/vibe/similar/<id>?limit=50`: the matches are lit on the map **and listed in the
   panel** with their similarity, play-from-here, add-to-queue and "Play as vibe queue"). A 404 "No similar tracks found"
   or any error shows in the panel.
 - **Player**: the desktop bar has "match this vibe" (audio-waveform icon after repeat) only while `vibeEmbeddings` is
@@ -297,11 +308,18 @@ What is on the page:
   the visit only); the mood legend has no hover preview and no compact phone chip/dialog; no phone `VibePanelSheet`
   tabs (the panel becomes a bottom sheet instead).
 - The page is gated on `vibeEmbeddings` with its own message (upstream shows the empty-map note instead).
-- Search debounce is one 250 ms pause for both name and sound matches (upstream 150 ms for names; its sound search runs
-  only inside the Song Path/Blend pickers).
+- Search: names after 250 ms, sound after a further 350 ms (upstream 150 ms for names; its sound search runs only inside
+  the Song Path/Blend pickers, cached 30 s). The sound cache here lives for the visit and a 503 stops sound searches.
+- Selecting another track clears the previous track's similar highlight (upstream keeps it until the mode is reset).
+- The result list is a `list` of rows with buttons (not a `listbox`), points are mouse-only, and opening a panel does
+  not move keyboard focus into it.
 - Mobile/overlay players have no "match this vibe" button yet (desktop bar only).
 - Not measured with `tools/compare-kima-web-visual.mjs` and not browser-checked against the reference; the map
   `ETag`/304 gate (D-185, roadmap M10 vibe-page acceptance) is not implemented in this slice.
+- Size: measured with a synthetic 15k-point map in headless Chrome (desktop 1440x900): about 2.1-2.5 s to an
+  interactive map, ~45k DOM nodes and 15k click listeners, a point click 46-62 ms and a mood toggle 30-115 ms to paint
+  (also when all 15k tracks are one mood). A phone-class run (390x844, CPU slowed 4x) takes 7.5-8.6 s to load, then
+  125-210 ms per click/toggle. A canvas/WebGL drawing would be the next step for phones.
 
 ## Visual parity: compromises and assets
 

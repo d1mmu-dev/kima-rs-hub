@@ -10,33 +10,70 @@
 
 pub mod logic;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use kima_api_types::playback_state::QueueItem;
-use kima_api_types::vibe::{MapResponse, MapTrack, SimilarResponse};
-use vertigo::{Computed, DomElement, DomNode, Reactive, Resource, Value, bind, dom, get_driver};
+use kima_api_types::vibe::{MapResponse, MapTrack, SearchTrack, SimilarResponse};
+use vertigo::{
+    Computed, DomElement, DomNode, KeyDownEvent, Reactive, Resource, Value, bind, dom, get_driver,
+};
 
 use crate::api::client::load;
 use crate::api::vibe::{self as api, Features, MapState, SEARCH_LIMIT};
 use crate::icons::icon;
 use crate::route::Route;
 use crate::ui::{Ctx, cover_url};
-use logic::{Found, Via};
+use logic::{CacheUse, Found, Generation, SoundFailure, Via};
 
 /// How often a map that is still being computed is asked for again (upstream: every 4 s).
 const POLL_MS: u32 = 4000;
 /// Give up polling after an hour; the page offers "Try again".
 const MAX_POLLS: u32 = 900;
-/// Idle time before the search box's text is searched (upstream: 150 ms for names; the sound search
-/// rides on the same pause here).
+/// Idle time before the search box's text is searched by name (upstream: 150 ms).
 const DEBOUNCE_MS: u32 = 250;
+/// Further idle time before the same text is also searched by sound (`POST /vibe/search` runs the
+/// text model), so typing does not send one request per pause.
+const SOUND_DEBOUNCE_MS: u32 = 350;
 /// Name matches listed under the search box (upstream `searchLibrary` default).
 const NAME_LIMIT: usize = 8;
+/// Lit layers up to this many points get a white outline (see `lit_layer`).
+const OUTLINE_MAX: usize = 1000;
 
 const OFF_TITLE: &str = "Vibe is not available on this server";
 const OFF_DETAIL: &str = "The vibe map and sound matching need the music analysis model (vibe embeddings). Once an admin provisions it and the library is analysed, your tracks appear here.";
+const SOUND_OFF: &str = "sound search is not available on this server";
+
+/// Vibe state that outlives one visit to the page, kept in [`Ctx`]: the loaded map (upstream keeps
+/// it in React Query for an hour) and the generation of the map loader, so a page left and opened
+/// again never leaves an older polling loop running.
+#[derive(Clone, Default)]
+pub struct Shared {
+    loader: Generation,
+    kept: Rc<RefCell<Option<Kept>>>,
+}
+
+#[derive(Clone)]
+struct Kept {
+    map: Rc<MapResponse>,
+    fetched_at: u64,
+}
+
+impl Shared {
+    fn kept(&self) -> Option<Kept> {
+        self.kept.borrow().clone()
+    }
+
+    fn keep(&self, map: Rc<MapResponse>) {
+        let fetched_at = get_driver().utc_now();
+        *self.kept.borrow_mut() = Some(Kept { map, fetched_at });
+    }
+
+    fn forget(&self) {
+        *self.kept.borrow_mut() = None;
+    }
+}
 
 #[derive(Clone, PartialEq)]
 enum MapLoad {
@@ -64,6 +101,16 @@ enum Matches {
     Failed(String, String),
 }
 
+impl Matches {
+    /// The track the request was made for.
+    fn of(&self) -> Option<&str> {
+        match self {
+            Matches::Idle => None,
+            Matches::Loading(of) | Matches::Ready(of, _) | Matches::Failed(of, _) => Some(of),
+        }
+    }
+}
+
 /// The search box's results: the query, its name matches and the merged list (sound pending or not).
 #[derive(Clone, PartialEq)]
 struct Results {
@@ -77,6 +124,8 @@ struct Results {
 enum Sound {
     Pending,
     Done,
+    /// The server has no text model (503): a quiet note, and no more sound searches on this page.
+    Unavailable,
     Failed(String),
 }
 
@@ -87,24 +136,41 @@ fn is_vibe_page(ctx: &Ctx) -> bool {
     )
 }
 
-pub fn render(ctx: &Ctx, track: Option<String>) -> DomNode {
-    let features = load(bind!(ctx, async move { api::features(&ctx.client).await }));
-    let body = features.render_value(bind!(ctx, track, |state: Resource<Rc<Features>>| {
-        match state {
-            Resource::Loading => note("Charting your library", None, true, None),
-            Resource::Error(message) => {
-                note("The music map did not load", Some(message), false, None)
+/// The page. It stays mounted while only `?track=` changes (`Route::page`), so the map, search,
+/// mood and highlights survive the player's "match this vibe" on this page.
+pub fn render(ctx: &Ctx) -> DomNode {
+    let attempt = Value::new(0u32);
+    let body = attempt.render_value(bind!(ctx, attempt, |n: u32| {
+        let features = load(bind!(ctx, async move { api::features(&ctx.client).await }));
+        features.render_value(bind!(ctx, attempt, |state: Resource<Rc<Features>>| {
+            match state {
+                Resource::Loading => note("Charting your library", None, true, None),
+                Resource::Error(message) => {
+                    let retry = bind!(attempt, |_| attempt.set(n.wrapping_add(1)));
+                    note(
+                        "The music map did not load",
+                        Some(message),
+                        false,
+                        Some(retry_button(retry)),
+                    )
+                }
+                Resource::Ready(f) if !f.vibe_embeddings => {
+                    note(OFF_TITLE, Some(OFF_DETAIL.to_owned()), false, None)
+                }
+                Resource::Ready(_) => map_page(&ctx),
             }
-            Resource::Ready(f) if !f.vibe_embeddings => {
-                note(OFF_TITLE, Some(OFF_DETAIL.to_owned()), false, None)
-            }
-            Resource::Ready(_) => map_page(&ctx, track.clone()),
-        }
+        }))
     }));
     dom! {
         <div data-testid="vibe-page" class="vibe-sky relative w-full overflow-hidden animate-rise h-[calc(100vh-168px)] tablet:h-full">
             {body}
         </div>
+    }
+}
+
+fn retry_button(on_click: impl Fn(vertigo::ClickEvent) + 'static) -> DomNode {
+    dom! {
+        <button class="mt-3 inline-flex items-center justify-center rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-black hover:bg-brand-hover" on_click={on_click}>"Try again"</button>
     }
 }
 
@@ -133,10 +199,14 @@ fn note(title: &str, detail: Option<String>, spinner: bool, action: Option<DomNo
     }
 }
 
-fn map_page(ctx: &Ctx, track: Option<String>) -> DomNode {
-    let state = Value::new(MapLoad::Loading);
-    poll_map(ctx, state.clone());
-    state.render_value(bind!(ctx, state, track, |load: MapLoad| match load {
+fn map_page(ctx: &Ctx) -> DomNode {
+    // The first state is decided here, not written later: a `Value` cannot be set while rendering.
+    let (initial, job) = plan_map(ctx, false);
+    let state = Value::new(initial);
+    if let Some(job) = job {
+        run_map(ctx, state.clone(), job);
+    }
+    state.render_value(bind!(ctx, state, |load: MapLoad| match load {
         MapLoad::Loading => note("Charting your library", None, true, None),
         MapLoad::Computing => note(
             "Charting your library",
@@ -146,44 +216,114 @@ fn map_page(ctx: &Ctx, track: Option<String>) -> DomNode {
         ),
         MapLoad::Failed(message) => {
             let retry = bind!(ctx, state, |_| {
-                state.set(MapLoad::Loading);
-                poll_map(&ctx, state.clone());
+                let (initial, job) = plan_map(&ctx, true);
+                state.set(initial);
+                if let Some(job) = job {
+                    run_map(&ctx, state.clone(), job);
+                }
             });
-            let action = dom! {
-                <button class="mt-3 inline-flex items-center justify-center rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-black hover:bg-brand-hover" on_click={retry}>"Try again"</button>
-            };
-            note("The music map did not load", Some(message), false, Some(action))
+            note(
+                "The music map did not load",
+                Some(message),
+                false,
+                Some(retry_button(retry)),
+            )
         }
         MapLoad::Ready(map) if map.tracks.is_empty() => note(
             "No tracks with vibe analysis yet",
-            Some("Run enrichment to analyse your library; tracks appear here as they finish.".into()),
+            Some(
+                "Run enrichment to analyse your library; tracks appear here as they finish.".into()
+            ),
             false,
             None,
         ),
-        MapLoad::Ready(map) => scene(&ctx, map, track.clone()),
+        MapLoad::Ready(map) => scene(&ctx, map),
     }))
 }
 
-/// Asks for the map until it is ready, failed or the page was left.
-fn poll_map(ctx: &Ctx, state: Value<MapLoad>) {
+/// A map request loop to run: its loader generation and the kept map already on screen, if any.
+struct MapJob {
+    generation: u32,
+    shown: Option<Rc<MapResponse>>,
+}
+
+/// What the page shows first and whether it asks the server: a kept map younger than an hour is
+/// shown with no request; an older one is shown and asked for again quietly; otherwise the map is
+/// loaded. Every plan retires older loaders (a page left and opened again, "Try again"); `retry`
+/// also drops the kept map.
+fn plan_map(ctx: &Ctx, retry: bool) -> (MapLoad, Option<MapJob>) {
     if !get_driver().is_browser() {
-        return;
+        return (MapLoad::Loading, None);
     }
-    get_driver().spawn(bind!(ctx, state, async move {
+    let shared = &ctx.vibe;
+    let generation = shared.loader.begin();
+    if retry {
+        shared.forget();
+    }
+    let kept = shared.kept();
+    match (
+        logic::cache_use(kept.as_ref().map(|k| k.fetched_at), get_driver().utc_now()),
+        kept,
+    ) {
+        (CacheUse::Fresh, Some(kept)) => (MapLoad::Ready(kept.map), None),
+        (CacheUse::Stale, Some(kept)) => (
+            MapLoad::Ready(kept.map.clone()),
+            Some(MapJob {
+                generation,
+                shown: Some(kept.map),
+            }),
+        ),
+        _ => (
+            MapLoad::Loading,
+            Some(MapJob {
+                generation,
+                shown: None,
+            }),
+        ),
+    }
+}
+
+/// Asks for the map until it is ready, failed, a newer loader started or the page was left; checks
+/// after every await. A refresh of a shown map keeps the drawing when the layout did not change.
+fn run_map(ctx: &Ctx, state: Value<MapLoad>, job: MapJob) {
+    let shared = ctx.vibe.clone();
+    let MapJob {
+        generation,
+        mut shown,
+    } = job;
+    let live = bind!(ctx, shared, || shared.loader.is_current(generation)
+        && is_vibe_page(&ctx));
+    get_driver().spawn(bind!(ctx, async move {
         for _ in 0..MAX_POLLS {
-            match api::map(&ctx.client).await {
-                Ok(MapState::Ready(map)) => {
-                    state.set(MapLoad::Ready(Rc::new(map)));
+            let answer = api::map(&ctx.client).await;
+            if !live() {
+                return;
+            }
+            match (answer, shown.take()) {
+                (Ok(MapState::Ready(map)), Some(old)) if logic::same_map(&old, &map) => {
+                    // Same layout: keep the drawing (and the user's search, mood and panel).
+                    shared.keep(old);
                     return;
                 }
-                Ok(MapState::Computing(_)) => state.set(MapLoad::Computing),
-                Err(err) => {
+                (Ok(MapState::Ready(map)), _) => {
+                    let map = Rc::new(map);
+                    shared.keep(map.clone());
+                    state.set(MapLoad::Ready(map));
+                    return;
+                }
+                (Ok(MapState::Computing(_)), _) => {
+                    shared.forget();
+                    state.set(MapLoad::Computing);
+                }
+                // A failed background refresh keeps the map on screen (upstream keeps cached data).
+                (Err(_), Some(_)) => return,
+                (Err(err), None) => {
                     state.set(MapLoad::Failed(err.message));
                     return;
                 }
             }
             get_driver().sleep(POLL_MS).await;
-            if !is_vibe_page(&ctx) {
+            if !live() {
                 return;
             }
         }
@@ -205,7 +345,10 @@ struct Scene {
     matches: Value<Matches>,
     results: Value<Option<Rc<Results>>>,
     typed: Value<String>,
-    generation: Rc<Cell<u32>>,
+    search_gen: Generation,
+    /// Sound-search answers by query, for this page's lifetime.
+    sound_cache: Rc<RefCell<HashMap<String, Rc<Vec<SearchTrack>>>>>,
+    sound_off: Rc<Cell<bool>>,
     hint: Value<bool>,
 }
 
@@ -214,12 +357,17 @@ impl Scene {
         self.index.get(id).and_then(|i| self.map.tracks.get(*i))
     }
 
+    /// Opens (or closes) a track's panel. Another track drops the previous one's matches, its
+    /// highlight and any similar request still on its way.
     fn select(&self, id: Option<String>) {
-        if id.is_none() && matches!(vertigo::transaction(|c| self.lit.get(c)), Lit::Similar(_)) {
-            self.lit.set(Lit::None);
-        }
-        if id.is_none() {
-            self.matches.set(Matches::Idle);
+        let matches = vertigo::transaction(|c| self.matches.get(c));
+        if !logic::keeps_matches(matches.of(), id.as_deref()) {
+            if matches != Matches::Idle {
+                self.matches.set(Matches::Idle);
+            }
+            if matches!(vertigo::transaction(|c| self.lit.get(c)), Lit::Similar(_)) {
+                self.lit.set(Lit::None);
+            }
         }
         self.selected.set(id);
     }
@@ -231,7 +379,10 @@ impl Scene {
         get_driver().spawn(async move {
             let answer = api::similar(&me.ctx.client, &id).await;
             // A newer request (another track, a closed panel) wins.
-            if vertigo::transaction(|c| me.matches.get(c)) != Matches::Loading(id.clone()) {
+            let open = vertigo::transaction(|c| me.selected.get(c));
+            if vertigo::transaction(|c| me.matches.get(c)) != Matches::Loading(id.clone())
+                || open.as_deref() != Some(id.as_str())
+            {
                 return;
             }
             match answer {
@@ -249,7 +400,8 @@ impl Scene {
         });
     }
 
-    /// "Match Vibe": the track and its matches replace the queue (upstream `replaceOperation`).
+    /// "Match Vibe": the track and its matches replace the queue and play in order, shuffle off
+    /// (upstream `replaceOperation`).
     fn match_vibe(&self, id: String) {
         let me = self.clone();
         get_driver().spawn(async move {
@@ -272,7 +424,7 @@ impl Scene {
                 Ok(source) => {
                     let queue = api::vibe_queue(source, &found.tracks);
                     let n = queue.len() - 1;
-                    me.ctx.player.play_queue(queue, 0);
+                    me.ctx.player.play_in_order(queue, 0);
                     me.ctx
                         .notify(format!("Playing this vibe: {n} matching tracks queued"));
                 }
@@ -299,8 +451,7 @@ impl Scene {
     fn toggle_mood(&self, mood: String) {
         let current = vertigo::transaction(|c| self.lit.get(c));
         self.clear_search();
-        self.selected.set(None);
-        self.matches.set(Matches::Idle);
+        self.select(None);
         self.lit.set(if current == Lit::Mood(mood.clone()) {
             Lit::None
         } else {
@@ -309,7 +460,7 @@ impl Scene {
     }
 
     fn clear_search(&self) {
-        self.generation.set(self.generation.get() + 1);
+        self.search_gen.begin();
         self.typed.set(String::new());
         self.results.set(None);
         if matches!(vertigo::transaction(|c| self.lit.get(c)), Lit::Search(_)) {
@@ -317,16 +468,40 @@ impl Scene {
         }
     }
 
+    /// Closes the result list and drops answers still on their way (the typed text stays).
+    fn close_results(&self) {
+        self.search_gen.begin();
+        self.results.set(None);
+    }
+
+    /// A search result picked: its panel opens, the list closes.
+    fn pick(&self, id: String) {
+        self.close_results();
+        self.select(Some(id));
+    }
+
+    /// Escape: closes the result list first, then the panel.
+    fn on_escape(&self) -> bool {
+        if vertigo::transaction(|c| self.results.get(c)).is_some() {
+            self.close_results();
+            true
+        } else if vertigo::transaction(|c| self.selected.get(c)).is_some() {
+            self.select(None);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Typing in the search box: after a pause, name matches at once and sound matches when the
     /// server answers. A newer keystroke drops older answers.
     fn on_type(&self, text: String) {
         self.typed.set(text.clone());
-        let this = self.generation.get() + 1;
-        self.generation.set(this);
+        let this = self.search_gen.begin();
         let me = self.clone();
         get_driver().spawn(async move {
             get_driver().sleep(DEBOUNCE_MS).await;
-            if me.generation.get() != this {
+            if !me.search_gen.is_current(this) {
                 return;
             }
             me.search(text, this).await;
@@ -362,27 +537,60 @@ impl Scene {
             found: by_name.clone(),
             sound: Sound::Pending,
         };
-        self.results.set(Some(Rc::new(pending.clone())));
-        let answer = api::search(&self.ctx.client, &body).await;
-        if self.generation.get() != this {
+        let with_sound = |tracks: &[SearchTrack]| Results {
+            found: logic::found_tracks(by_name.clone(), tracks, SEARCH_LIMIT as usize),
+            sound: Sound::Done,
+            ..pending.clone()
+        };
+        if self.sound_off.get() {
+            let quiet = Results {
+                sound: Sound::Unavailable,
+                ..pending.clone()
+            };
+            self.results.set(Some(Rc::new(quiet)));
             return;
         }
+        let cached = self.sound_cache.borrow().get(&body.query).cloned();
+        if let Some(tracks) = cached {
+            self.results.set(Some(Rc::new(with_sound(&tracks))));
+            return;
+        }
+        self.results.set(Some(Rc::new(pending.clone())));
+        get_driver().sleep(SOUND_DEBOUNCE_MS).await;
+        if !self.search_gen.is_current(this) {
+            return;
+        }
+        let answer = api::search(&self.ctx.client, &body).await;
         let done = match answer {
-            Ok(sound) => Results {
-                found: logic::found_tracks(by_name, &sound.tracks, SEARCH_LIMIT as usize),
-                sound: Sound::Done,
-                ..pending
-            },
-            Err(err) => Results {
-                sound: Sound::Failed(err.message),
-                ..pending
+            Ok(sound) => {
+                let tracks = Rc::new(sound.tracks);
+                self.sound_cache
+                    .borrow_mut()
+                    .insert(body.query.clone(), tracks.clone());
+                with_sound(&tracks)
+            }
+            Err(err) => match logic::sound_failure(err.status, err.message) {
+                SoundFailure::Unavailable => {
+                    self.sound_off.set(true);
+                    Results {
+                        sound: Sound::Unavailable,
+                        ..pending
+                    }
+                }
+                SoundFailure::Error(message) => Results {
+                    sound: Sound::Failed(message),
+                    ..pending
+                },
             },
         };
+        if !self.search_gen.is_current(this) {
+            return;
+        }
         self.results.set(Some(Rc::new(done)));
     }
 }
 
-fn scene(ctx: &Ctx, map: Rc<MapResponse>, track: Option<String>) -> DomNode {
+fn scene(ctx: &Ctx, map: Rc<MapResponse>) -> DomNode {
     let index: HashMap<String, usize> = map
         .tracks
         .iter()
@@ -399,28 +607,46 @@ fn scene(ctx: &Ctx, map: Rc<MapResponse>, track: Option<String>) -> DomNode {
         matches: Value::new(Matches::Idle),
         results: Value::new(None),
         typed: Value::new(String::new()),
-        generation: Rc::new(Cell::new(0)),
+        search_gen: Generation::default(),
+        sound_cache: Rc::new(RefCell::new(HashMap::new())),
+        sound_off: Rc::new(Cell::new(false)),
         hint: Value::new(true),
     };
-    if let Some(id) = track {
-        // Opened from the player's "match this vibe" (or a shared link): that track's matches.
-        get_driver().spawn(bind!(s, async move {
-            s.selected.set(Some(id.clone()));
-            s.similar(id);
+    // `?track=<id>` (the player's "match this vibe", a shared link): that track's panel and matches.
+    // The page stays mounted when only the param changes, so this follows it without a reload.
+    let track = Computed::from(bind!(ctx, |c| match ctx.router.get(c) {
+        Route::Vibe { track } => track,
+        _ => None,
+    }));
+    let follow = track.subscribe(bind!(s, |track: Option<String>| {
+        if let Some(id) = track {
+            // Writes are not allowed inside a subscription: defer them.
+            get_driver().spawn(bind!(s, async move {
+                s.close_results();
+                s.select(Some(id.clone()));
+                s.similar(id);
+            }));
+        }
+    }));
+    let root = DomElement::new("div")
+        .attr_static("class", "relative h-full w-full")
+        .on_key_down(bind!(s, |event: KeyDownEvent| {
+            event.key == "Escape" && s.on_escape()
         }));
-    }
-    dom! {
-        <div class="relative h-full w-full">
-            <div aria-hidden="true" class="pointer-events-none absolute inset-0"
-                style="background: radial-gradient(circle at 18% 30%, rgba(95,47,142,0.04), transparent 55%), radial-gradient(circle at 82% 72%, rgba(125,47,102,0.03), transparent 55%); mix-blend-mode: screen;"></div>
-            {stars(&s)}
-            {highlights(&s)}
-            {toolbar(&s)}
-            {legend(&s)}
-            {hint(&s)}
-            {panel(&s)}
-        </div>
-    }
+    root.append_drop_resource(follow);
+    let glow = dom! {
+        <div aria-hidden="true" class="pointer-events-none absolute inset-0"
+            style="background: radial-gradient(circle at 18% 30%, rgba(95,47,142,0.04), transparent 55%), radial-gradient(circle at 82% 72%, rgba(125,47,102,0.03), transparent 55%); mix-blend-mode: screen;"></div>
+    };
+    root.child(glow)
+        .child(stars(&s))
+        .child(lit_layer(&s))
+        .child(rings(&s))
+        .child(toolbar(&s))
+        .child(legend(&s))
+        .child(hint(&s))
+        .child(panel(&s))
+        .into()
 }
 
 // ---- the map drawing ------------------------------------------------------------------------------------------
@@ -443,10 +669,15 @@ fn stars(s: &Scene) -> DomNode {
     let dimmed = Computed::from(bind!(s, |c| {
         s.lit.get(c) != Lit::None || s.selected.get(c).is_some()
     }));
-    let group = DomElement::new("g").attr(
-        "opacity",
-        dimmed.map(|d| if d { "0.28" } else { "0.9" }.to_owned()),
-    );
+    // Dimming is an opacity on the whole drawing in its own compositor layer: the browser fades the
+    // layer instead of repainting 15k points.
+    let style = dimmed.map(|d| {
+        format!(
+            "will-change: opacity; opacity: {}",
+            if d { "0.28" } else { "0.9" }
+        )
+    });
+    let group = DomElement::new("g");
     for t in s.map.tracks.iter() {
         let (cx, cy) = logic::project(t.x, t.y);
         let id = t.id.clone();
@@ -465,77 +696,111 @@ fn stars(s: &Scene) -> DomNode {
         point.add_child(DomElement::new("svg:title").child_text(label));
         group.add_child(point);
     }
+    // Not `role="img"`: the points are clickable. They are not keyboard stops (15k of them); the
+    // search box is the keyboard way to open a track.
     svg_root("absolute inset-0 h-full w-full")
-        .attr_static("role", "img")
-        .attr_static("aria-label", "Your library mapped by vibe")
+        .attr("style", style)
+        .attr_static("role", "group")
+        .attr_static(
+            "aria-label",
+            "Your library mapped by vibe. Use the search box to open a track with the keyboard.",
+        )
         .child(group)
         .into()
 }
 
-/// The lit tracks, the selected one and the playing one, drawn over the points (no pointer events).
-fn highlights(s: &Scene) -> DomNode {
-    let playing = s.ctx.player.now_playing().map(|(id, _)| id);
-    let state = Computed::from(bind!(s, playing, |c| {
-        (s.lit.get(c), s.selected.get(c), playing.get(c))
-    }));
-    state.render_value(bind!(s, |(lit, selected, playing): (
-        Lit,
-        Option<String>,
-        Option<String>
-    )| {
-        let svg = svg_root("pointer-events-none absolute inset-0 h-full w-full");
-        let ids: Vec<String> = match &lit {
+fn overlay() -> DomElement {
+    svg_root("pointer-events-none absolute inset-0 h-full w-full")
+        .attr_static("aria-hidden", "true")
+}
+
+/// The lit tracks (a mood, search or similar matches), drawn over the points (no pointer events).
+/// Rebuilt only when what is lit changes, as one `<path>` per mood colour: a lit mood of 15k tracks
+/// is one element, not 15k.
+fn lit_layer(s: &Scene) -> DomNode {
+    s.lit.render_value(bind!(s, |lit: Lit| {
+        let svg = overlay();
+        let tracks: Vec<&MapTrack> = match &lit {
             Lit::None => Vec::new(),
             Lit::Mood(mood) => s
                 .map
                 .tracks
                 .iter()
                 .filter(|t| t.dominant_mood == *mood)
-                .map(|t| t.id.clone())
                 .collect(),
-            Lit::Search(ids) | Lit::Similar(ids) => ids.to_vec(),
+            Lit::Search(ids) | Lit::Similar(ids) => {
+                ids.iter().filter_map(|id| s.track(id)).collect()
+            }
         };
-        for id in &ids {
-            let Some(t) = s.track(id) else { continue };
-            let (cx, cy) = logic::project(t.x, t.y);
-            svg.add_child(
-                DomElement::new("circle")
-                    .attr("cx", format!("{cx:.1}"))
-                    .attr("cy", format!("{cy:.1}"))
-                    .attr_static("r", "6")
-                    .attr("fill", rgb(logic::mood_rgb(&t.dominant_mood)))
-                    .attr_static("stroke", "rgba(255,255,255,0.45)")
+        let mut by_mood: Vec<(&str, Vec<(f64, f64)>)> = Vec::new();
+        for t in &tracks {
+            let at = logic::project(t.x, t.y);
+            match by_mood.iter_mut().find(|(m, _)| *m == t.dominant_mood) {
+                Some((_, points)) => points.push(at),
+                None => by_mood.push((&t.dominant_mood, vec![at])),
+            }
+        }
+        // The white outline sets a few lit points apart; on a whole mood (thousands of points) it
+        // only costs paint time, so large layers go without it.
+        let outline = tracks.len() <= OUTLINE_MAX;
+        for (mood, points) in by_mood {
+            let path = DomElement::new("path")
+                .attr("d", logic::circles_path(&points, 6.0))
+                .attr("fill", rgb(logic::mood_rgb(mood)))
+                .attr("data-vibe-lit", points.len().to_string());
+            svg.add_child(if outline {
+                path.attr_static("stroke", "rgba(255,255,255,0.45)")
                     .attr_static("stroke-width", "1.5")
-                    .attr_static("data-vibe-lit", "true"),
-            );
-        }
-        let ring = |id: &str, r: &'static str, style: &'static str, mark: &'static str| {
-            s.track(id).map(|t| {
-                let (cx, cy) = logic::project(t.x, t.y);
-                DomElement::new("circle")
-                    .attr("cx", format!("{cx:.1}"))
-                    .attr("cy", format!("{cy:.1}"))
-                    .attr_static("r", r)
-                    .attr_static("fill", "none")
-                    .attr_static("stroke-width", "2.5")
-                    .attr_static("style", style)
-                    .attr_static(mark, "true")
-            })
-        };
-        if let Some(ring) = playing
-            .as_deref()
-            .and_then(|id| ring(id, "10", "stroke: var(--color-brand);", "data-vibe-playing"))
-        {
-            svg.add_child(ring);
-        }
-        if let Some(ring) = selected
-            .as_deref()
-            .and_then(|id| ring(id, "14", "stroke: #ffffff;", "data-vibe-selected"))
-        {
-            svg.add_child(ring);
+            } else {
+                path
+            });
         }
         svg.into()
     }))
+}
+
+/// The playing track's ring and the selected track's ring, each its own small layer so a click or a
+/// track change never redraws the lit points.
+fn rings(s: &Scene) -> DomNode {
+    let playing = s.ctx.player.now_playing().map(|(id, _)| id);
+    let ring = |s: &Scene,
+                which: Computed<Option<String>>,
+                r: &'static str,
+                style: &'static str,
+                mark: &'static str| {
+        which.render_value(bind!(s, |id: Option<String>| {
+            let svg = overlay();
+            if let Some(t) = id.as_deref().and_then(|id| s.track(id)) {
+                let (cx, cy) = logic::project(t.x, t.y);
+                svg.add_child(
+                    DomElement::new("circle")
+                        .attr("cx", format!("{cx:.1}"))
+                        .attr("cy", format!("{cy:.1}"))
+                        .attr_static("r", r)
+                        .attr_static("fill", "none")
+                        .attr_static("stroke-width", "2.5")
+                        .attr_static("style", style)
+                        .attr_static(mark, "true"),
+                );
+            }
+            svg.into()
+        }))
+    };
+    let playing = ring(
+        s,
+        playing,
+        "10",
+        "stroke: var(--color-brand);",
+        "data-vibe-playing",
+    );
+    let selected = ring(
+        s,
+        s.selected.to_computed(),
+        "14",
+        "stroke: #ffffff;",
+        "data-vibe-selected",
+    );
+    dom! { <div class="contents">{playing}{selected}</div> }
 }
 
 // ---- toolbar (search) -----------------------------------------------------------------------------------------
@@ -590,6 +855,9 @@ fn results_list(s: &Scene, r: &Results) -> DomNode {
             dom! { <p class="px-3 pb-1 text-[11px] text-white/45">"listening for tracks that sound like it…"</p> }
         }
         Sound::Done => dom! { <span /> },
+        Sound::Unavailable => {
+            dom! { <p class="px-3 pb-1 text-[11px] text-white/45">{SOUND_OFF}</p> }
+        }
         Sound::Failed(message) => {
             let message = format!("sound search: {message}");
             dom! { <p class="px-3 pb-1 text-[11px] text-danger-light">{message}</p> }
@@ -599,10 +867,7 @@ fn results_list(s: &Scene, r: &Results) -> DomNode {
         .found
         .iter()
         .map(|f| {
-            let pick = bind!(s, f, |_| {
-                s.results.set(None);
-                s.selected.set(Some(f.id.clone()));
-            });
+            let pick = bind!(s, f, |_| s.pick(f.id.clone()));
             let play = bind!(s, f, |_| s.play_by_id(f.id.clone(), false));
             let queue = bind!(s, f, |_| s.play_by_id(f.id.clone(), true));
             let via = match f.via {
@@ -611,7 +876,7 @@ fn results_list(s: &Scene, r: &Results) -> DomNode {
             };
             let (title, artist) = (f.title.clone(), f.artist.clone());
             dom! {
-                <div class="group flex items-center gap-1 px-1 hover:bg-white/[0.06]" data-vibe-result="true">
+                <div class="group flex items-center gap-1 px-1 hover:bg-white/[0.06]" role="listitem" data-vibe-result="true">
                     <button class="min-w-0 flex-1 px-2 py-2 text-left" on_click={pick}>
                         <span class="block truncate text-sm text-[var(--text-primary)]">{title}</span>
                         <span class="block truncate text-xs text-white/60">{artist}<span class="ml-2 text-white/40">{via}</span></span>
@@ -627,7 +892,7 @@ fn results_list(s: &Scene, r: &Results) -> DomNode {
         })
         .collect();
     dom! {
-        <div id="vibe-search-results" role="listbox" aria-label="Matching tracks"
+        <div id="vibe-search-results" role="list" aria-label="Matching tracks"
             class="vibe-glass vibe-glass--solid absolute left-0 top-full z-10 mt-2 w-full min-w-72 max-h-[60vh] overflow-y-auto rounded-xl py-1">
             <p class="px-3 pb-1 pt-1.5 text-[11px] text-white/60" aria-live="polite">{summary}</p>
             {sound}
@@ -915,7 +1180,7 @@ fn match_rows(s: &Scene, id: &str, found: &SimilarResponse) -> DomNode {
                 s.ctx.notify(format!("Added “{}” to the queue", item.title));
                 s.ctx.player.enqueue(item.clone());
             });
-            let (title, artist) = (t.title.clone(), t.artist.name.clone());
+            let (title, artist) = (api::shown_title(t).to_owned(), t.artist.name.clone());
             let similarity = logic::percent(t.similarity);
             dom! {
                 <div class="group flex items-center gap-1 rounded-lg hover:bg-white/[0.06]" data-vibe-match="true">

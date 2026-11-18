@@ -94,11 +94,20 @@ fn item(
     }
 }
 
+/// The title a match is shown and queued under: the edited one when set (upstream `toQueueTrack`
+/// keeps `displayTitle`, which the player shows before `title`).
+pub fn shown_title(t: &MatchTrack) -> &str {
+    t.display_title
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&t.title)
+}
+
 /// A similar-track answer as a player queue item (upstream `toQueueTrack`).
 pub fn match_item(t: &MatchTrack) -> QueueItem {
     item(
         &t.id,
-        &t.title,
+        shown_title(t),
         t.duration,
         (&t.artist.id, &t.artist.name),
         (&t.album.id, &t.album.title, &t.album.cover_url),
@@ -259,6 +268,21 @@ mod tests {
         let album = item.album.unwrap();
         assert_eq!((album.id.as_str(), album.title.as_str()), ("al", "Album"));
         assert_eq!(album.cover_art.as_deref(), Some("al"));
+    }
+
+    #[test]
+    fn match_items_use_the_edited_title_when_there_is_one() {
+        let mut edited = match_json("m1");
+        edited["displayTitle"] = json!("Edited");
+        let t: MatchTrack = serde_json::from_value(edited).unwrap();
+        assert_eq!(shown_title(&t), "Edited");
+        assert_eq!(match_item(&t).title, "Edited");
+        let mut blank = match_json("m2");
+        blank["displayTitle"] = json!("");
+        let t: MatchTrack = serde_json::from_value(blank).unwrap();
+        assert_eq!(match_item(&t).title, "Song");
+        let t: MatchTrack = serde_json::from_value(match_json("m3")).unwrap();
+        assert_eq!(shown_title(&t), "Song");
     }
 
     #[test]

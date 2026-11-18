@@ -3,9 +3,11 @@
 //! title/artist search over the loaded map, the merged name/sound results, the 2D projection of the
 //! map and the selected track's mood bars.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
+use std::rc::Rc;
 
-use kima_api_types::vibe::{MapTrack, SearchTrack};
+use kima_api_types::vibe::{MapResponse, MapTrack, SearchTrack};
 use unicode_normalization::UnicodeNormalization;
 
 /// The five moods, in upstream's fixed order (`MOOD_KEYS`).
@@ -171,6 +173,23 @@ pub fn project(x: f64, y: f64) -> (f64, f64) {
     (at(x), MAP_SIZE - at(y))
 }
 
+/// One SVG path drawing a circle of radius `r` around each point (two arcs per circle), so a layer
+/// of thousands of lit points is one element instead of one per point.
+pub fn circles_path(points: &[(f64, f64)], r: f64) -> String {
+    use std::fmt::Write;
+    let mut d = String::with_capacity(points.len() * 40);
+    for (x, y) in points {
+        let _ = write!(
+            d,
+            "M{:.1} {:.1}a{r} {r} 0 1 0 {d2} 0a{r} {r} 0 1 0 -{d2} 0",
+            x - r,
+            y,
+            d2 = 2.0 * r
+        );
+    }
+    d
+}
+
 /// The selected track's moods above zero, strongest first, each with its bar width in percent of
 /// the strongest (`TrackPanel`).
 pub fn mood_bars(moods: &BTreeMap<String, f64>) -> Vec<(String, f64)> {
@@ -191,6 +210,76 @@ pub fn mood_bars(moods: &BTreeMap<String, f64>) -> Vec<(String, f64)> {
 pub fn percent(v: f64) -> String {
     // Math.round rounds halves up; f64::round rounds them away from zero (same for v >= 0).
     format!("{}%", (v * 100.0 + 0.5).floor())
+}
+
+/// How long a loaded map is shown without asking the server again (upstream `staleTime`: 1 h).
+pub const MAP_FRESH_MS: u64 = 3_600_000;
+
+/// What a page does with the map kept from an earlier visit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheUse {
+    /// Nothing kept: load it.
+    Missing,
+    /// Younger than [`MAP_FRESH_MS`]: show it, ask nothing.
+    Fresh,
+    /// Older: show it and ask once in the background.
+    Stale,
+}
+
+pub fn cache_use(fetched_at: Option<u64>, now: u64) -> CacheUse {
+    match fetched_at {
+        None => CacheUse::Missing,
+        Some(at) if now.saturating_sub(at) < MAP_FRESH_MS => CacheUse::Fresh,
+        Some(_) => CacheUse::Stale,
+    }
+}
+
+/// Two answers draw the same map when the layout time, mood signature and size agree; the page then
+/// keeps the drawing it has.
+pub fn same_map(a: &MapResponse, b: &MapResponse) -> bool {
+    a.computed_at == b.computed_at
+        && a.mood_signature == b.mood_signature
+        && a.track_count == b.track_count
+        && a.tracks.len() == b.tracks.len()
+}
+
+/// A counter that lets only the latest of several async tasks act: each task takes a number with
+/// [`Generation::begin`] and checks [`Generation::is_current`] after every await.
+#[derive(Debug, Clone, Default)]
+pub struct Generation(Rc<Cell<u32>>);
+
+impl Generation {
+    pub fn begin(&self) -> u32 {
+        let next = self.0.get().wrapping_add(1);
+        self.0.set(next);
+        next
+    }
+
+    pub fn is_current(&self, generation: u32) -> bool {
+        self.0.get() == generation
+    }
+}
+
+/// Whether the open panel's similar-tracks request and highlight (made for `matches_of`) stay when
+/// `selected` becomes the open track: only when it is the same track.
+pub fn keeps_matches(matches_of: Option<&str>, selected: Option<&str>) -> bool {
+    matches_of.is_some() && matches_of == selected
+}
+
+/// Why a sound search gave no tracks: the server has no text model (503, a quiet notice that stops
+/// further sound searches on this page) or another error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SoundFailure {
+    Unavailable,
+    Error(String),
+}
+
+pub fn sound_failure(status: Option<u32>, message: String) -> SoundFailure {
+    if status == Some(503) {
+        SoundFailure::Unavailable
+    } else {
+        SoundFailure::Error(message)
+    }
 }
 
 #[cfg(test)]
@@ -333,6 +422,20 @@ mod tests {
     }
 
     #[test]
+    fn circles_path_draws_two_arcs_per_point() {
+        assert_eq!(circles_path(&[], 6.0), "");
+        assert_eq!(
+            circles_path(&[(500.0, 250.5)], 6.0),
+            "M494.0 250.5a6 6 0 1 0 12 0a6 6 0 1 0 -12 0"
+        );
+        let two = circles_path(&[(10.0, 20.0), (30.04, 40.06)], 6.0);
+        assert_eq!(
+            two,
+            "M4.0 20.0a6 6 0 1 0 12 0a6 6 0 1 0 -12 0M24.0 40.1a6 6 0 1 0 12 0a6 6 0 1 0 -12 0"
+        );
+    }
+
+    #[test]
     fn mood_bars_are_relative_to_the_strongest() {
         let moods: BTreeMap<String, f64> = [
             ("moodHappy".to_string(), 0.2),
@@ -348,6 +451,82 @@ mod tests {
             ]
         );
         assert!(mood_bars(&BTreeMap::new()).is_empty());
+    }
+
+    fn map(computed_at: &str, signature: &str, n: usize) -> MapResponse {
+        MapResponse {
+            tracks: (0..n)
+                .map(|i| track(&i.to_string(), "t", "a", "neutral"))
+                .collect(),
+            track_count: n,
+            computed_at: computed_at.into(),
+            mood_signature: signature.into(),
+        }
+    }
+
+    #[test]
+    fn a_kept_map_is_fresh_for_an_hour_then_stale() {
+        assert_eq!(cache_use(None, 5), CacheUse::Missing);
+        assert_eq!(cache_use(Some(1_000), 1_000), CacheUse::Fresh);
+        assert_eq!(
+            cache_use(Some(1_000), 1_000 + MAP_FRESH_MS - 1),
+            CacheUse::Fresh
+        );
+        assert_eq!(
+            cache_use(Some(1_000), 1_000 + MAP_FRESH_MS),
+            CacheUse::Stale
+        );
+        // A clock that went backwards does not keep a map forever, nor panic.
+        assert_eq!(cache_use(Some(5_000), 1_000), CacheUse::Fresh);
+    }
+
+    #[test]
+    fn same_map_compares_layout_time_signature_and_size() {
+        let a = map("2026-11-18T00:00:00.000Z", "s", 2);
+        assert!(same_map(&a, &map("2026-11-18T00:00:00.000Z", "s", 2)));
+        assert!(!same_map(&a, &map("2026-11-18T01:00:00.000Z", "s", 2)));
+        assert!(!same_map(&a, &map("2026-11-18T00:00:00.000Z", "t", 2)));
+        assert!(!same_map(&a, &map("2026-11-18T00:00:00.000Z", "s", 3)));
+    }
+
+    #[test]
+    fn only_the_latest_generation_is_current() {
+        let g = Generation::default();
+        let first = g.begin();
+        assert!(g.is_current(first));
+        let clone = g.clone();
+        let second = clone.begin();
+        assert_ne!(first, second);
+        assert!(
+            !g.is_current(first),
+            "a newer task (any clone) retires the older one"
+        );
+        assert!(g.is_current(second));
+    }
+
+    #[test]
+    fn matches_stay_only_for_the_same_track() {
+        assert!(keeps_matches(Some("a"), Some("a")));
+        assert!(!keeps_matches(Some("a"), Some("b")));
+        assert!(!keeps_matches(Some("a"), None));
+        assert!(!keeps_matches(None, Some("a")));
+        assert!(!keeps_matches(None, None));
+    }
+
+    #[test]
+    fn a_503_sound_search_means_no_text_model() {
+        assert_eq!(
+            sound_failure(Some(503), "Text embedding service unavailable".into()),
+            SoundFailure::Unavailable
+        );
+        assert_eq!(
+            sound_failure(Some(500), "boom".into()),
+            SoundFailure::Error("boom".into())
+        );
+        assert_eq!(
+            sound_failure(None, "offline".into()),
+            SoundFailure::Error("offline".into())
+        );
     }
 
     #[test]

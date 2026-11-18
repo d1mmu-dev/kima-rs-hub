@@ -70,6 +70,32 @@ pub struct Config {
     /// `FANART_API_KEY`: the fanart.tv key when no enabled key is stored (spec §15.1). A secret:
     /// never printed.
     pub fanart_api_key: Option<String>,
+    /// CLAP audio ONNX execution and parallelism (`KIMA_ONNX_PROVIDER`, `KIMA_CLAP_*`).
+    pub clap_runtime: ClapRuntimeEnv,
+}
+
+/// CLAP audio ONNX runtime settings; unset values are resolved from the machine's cores by
+/// `kima_ident::EmbeddingParallelism::resolve`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClapRuntimeEnv {
+    /// `KIMA_ONNX_PROVIDER=cuda` (default `cpu`): run the CLAP audio encoder on the CUDA
+    /// execution provider, falling back to the CPU when it cannot be initialized.
+    pub cuda: bool,
+    /// `KIMA_CUDA_DEVICE_ID` (default 0).
+    pub cuda_device_id: i32,
+    /// `KIMA_CUDA_LIB_DIR`: absolute directory with the CUDA 12 / cuDNN 9 libraries to preload.
+    pub cuda_lib_dir: Option<PathBuf>,
+    /// `KIMA_CUDA_MEM_LIMIT_MIB`: per-session CUDA arena limit.
+    pub cuda_mem_limit_mib: Option<u64>,
+    /// `KIMA_CLAP_POOL_SIZE`: audio ONNX sessions (1..=8).
+    pub pool_size: Option<usize>,
+    /// `KIMA_CLAP_INTRA_THREADS`: ORT intra-op threads per audio session (1..=16).
+    pub intra_threads: Option<usize>,
+    /// `KIMA_EMBEDDING_WORKERS`: concurrent blocking embedding workers (1..=32).
+    pub workers: Option<usize>,
+    /// `KIMA_ONNX_HOST_BUDGET_MIB`: process-wide ONNX host-memory admission budget
+    /// (default 4096).
+    pub host_budget_mib: Option<u64>,
 }
 
 // Never prints a secret.
@@ -115,6 +141,7 @@ impl std::fmt::Debug for Config {
             .field("acoustid_disabled", &self.acoustid_disabled)
             .field("acoustid_client_key", &hidden(&self.acoustid_client_key))
             .field("fanart_api_key", &hidden(&self.fanart_api_key))
+            .field("clap_runtime", &self.clap_runtime)
             .finish()
     }
 }
@@ -345,6 +372,58 @@ impl Config {
                 value: raw,
             })?,
         };
+        let bounded = |name: &'static str, max: u64| -> Result<Option<usize>, ConfigError> {
+            match positive(name)? {
+                Some(n) if n <= max => Ok(Some(n as usize)),
+                Some(n) => Err(ConfigError::Invalid {
+                    name,
+                    value: n.to_string(),
+                }),
+                None => Ok(None),
+            }
+        };
+        let clap_runtime = ClapRuntimeEnv {
+            cuda: match value("KIMA_ONNX_PROVIDER") {
+                None => false,
+                Some(raw) => match raw.to_ascii_lowercase().as_str() {
+                    "cpu" => false,
+                    "cuda" => true,
+                    _ => {
+                        return Err(ConfigError::Invalid {
+                            name: "KIMA_ONNX_PROVIDER",
+                            value: raw,
+                        });
+                    }
+                },
+            },
+            cuda_device_id: match value("KIMA_CUDA_DEVICE_ID") {
+                None => 0,
+                Some(raw) => match raw.parse::<i32>() {
+                    Ok(n) if n >= 0 => n,
+                    _ => {
+                        return Err(ConfigError::Invalid {
+                            name: "KIMA_CUDA_DEVICE_ID",
+                            value: raw,
+                        });
+                    }
+                },
+            },
+            cuda_lib_dir: match value("KIMA_CUDA_LIB_DIR") {
+                None => None,
+                Some(raw) if std::path::Path::new(&raw).is_absolute() => Some(raw.into()),
+                Some(raw) => {
+                    return Err(ConfigError::Invalid {
+                        name: "KIMA_CUDA_LIB_DIR",
+                        value: raw,
+                    });
+                }
+            },
+            cuda_mem_limit_mib: positive("KIMA_CUDA_MEM_LIMIT_MIB")?,
+            pool_size: bounded("KIMA_CLAP_POOL_SIZE", 8)?,
+            intra_threads: bounded("KIMA_CLAP_INTRA_THREADS", 16)?,
+            workers: bounded("KIMA_EMBEDDING_WORKERS", 32)?,
+            host_budget_mib: positive("KIMA_ONNX_HOST_BUDGET_MIB")?,
+        };
         // Upstream compares with `'true'`; any other value leaves AcoustID on.
         let acoustid_disabled =
             value("ACOUSTID_DISABLED").is_some_and(|v| v.eq_ignore_ascii_case("true"));
@@ -390,6 +469,7 @@ impl Config {
             acoustid_disabled,
             acoustid_client_key: value("ACOUSTID_CLIENT_KEY"),
             fanart_api_key: value("FANART_API_KEY"),
+            clap_runtime,
         })
     }
 }
@@ -968,6 +1048,56 @@ mod tests {
                     value: bad.into()
                 }),
                 "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn clap_runtime_defaults_to_cpu_and_parses_overrides() {
+        let base = ("DATABASE_URL", "postgres://x");
+        let config = Config::from_lookup(lookup(&[base])).unwrap();
+        assert_eq!(config.clap_runtime, ClapRuntimeEnv::default());
+        let config = Config::from_lookup(lookup(&[
+            base,
+            ("KIMA_ONNX_PROVIDER", "CUDA"),
+            ("KIMA_CUDA_DEVICE_ID", "1"),
+            ("KIMA_CUDA_LIB_DIR", "/opt/cuda12"),
+            ("KIMA_CUDA_MEM_LIMIT_MIB", "2048"),
+            ("KIMA_CLAP_POOL_SIZE", "2"),
+            ("KIMA_CLAP_INTRA_THREADS", "4"),
+            ("KIMA_EMBEDDING_WORKERS", "8"),
+            ("KIMA_ONNX_HOST_BUDGET_MIB", "8192"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.clap_runtime,
+            ClapRuntimeEnv {
+                cuda: true,
+                cuda_device_id: 1,
+                cuda_lib_dir: Some("/opt/cuda12".into()),
+                cuda_mem_limit_mib: Some(2048),
+                pool_size: Some(2),
+                intra_threads: Some(4),
+                workers: Some(8),
+                host_budget_mib: Some(8192),
+            }
+        );
+        for (name, bad) in [
+            ("KIMA_ONNX_PROVIDER", "rocm"),
+            ("KIMA_CUDA_DEVICE_ID", "-1"),
+            ("KIMA_CUDA_LIB_DIR", "relative/dir"),
+            ("KIMA_CLAP_POOL_SIZE", "9"),
+            ("KIMA_CLAP_POOL_SIZE", "0"),
+            ("KIMA_CLAP_INTRA_THREADS", "17"),
+            ("KIMA_EMBEDDING_WORKERS", "33"),
+            ("KIMA_ONNX_HOST_BUDGET_MIB", "x"),
+        ] {
+            assert!(
+                matches!(
+                    Config::from_lookup(lookup(&[base, (name, bad)])),
+                    Err(ConfigError::Invalid { name: n, .. }) if n == name
+                ),
+                "{name}={bad}"
             );
         }
     }

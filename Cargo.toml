@@ -83,3 +83,62 @@ opt-level = 3
 # The layout and colour-field loops are plain arithmetic; the 20k-track memory/time test needs them optimised.
 [profile.dev.package.kima-vibe]
 opt-level = 3
+
+# CLAP decode/preprocessing is per-sample arithmetic: unoptimised it made a debug server ~30x slower
+# per track (5-min MP3: decode 63 s vs 1.5 s, one log-mel window 1.4 s vs 0.04 s).
+[profile.dev.package.kima-ml]
+opt-level = 3
+
+[profile.dev.package.symphonia-core]
+opt-level = 3
+
+[profile.dev.package.symphonia-common]
+opt-level = 3
+
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-alac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-adpcm]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-isomp4]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-ogg]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-riff]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-mkv]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-caf]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
+
+[profile.dev.package.rubato]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

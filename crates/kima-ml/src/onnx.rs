@@ -1,9 +1,12 @@
 //! ONNX runtime session management and model loading.
 
+mod provider;
 mod resources;
 #[cfg(test)]
 mod tests;
+pub use provider::{ActiveProvider, ExecutionProvider, ProviderConfig};
 use resources::ResourceReservation;
+pub use resources::set_host_budget_bytes;
 
 use ort::session::Session;
 use std::collections::BTreeMap;
@@ -356,6 +359,17 @@ impl ClapAudioSession {
         pool_size: usize,
         threads: Option<usize>,
     ) -> Result<Self, OnnxError> {
+        Self::from_verified_bytes_on(artifact, pool_size, threads, &ProviderConfig::cpu())
+    }
+
+    /// [`Self::from_verified_bytes`] on the requested provider; CUDA failures fall back to the
+    /// CPU (see [`Self::provider`]). Hash pin and graph signature are checked either way.
+    pub fn from_verified_bytes_on(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+        provider: &ProviderConfig,
+    ) -> Result<Self, OnnxError> {
         use sha2::{Digest, Sha256};
         let expected = OnnxModel::ClapAudio.descriptor();
         if artifact.id() != expected.id
@@ -367,19 +381,41 @@ impl ClapAudioSession {
                 message: "CLAP audio artifact does not match the pinned model".into(),
             });
         }
-        let model = Self::from_trusted_bytes(artifact, pool_size, threads)?;
+        let model = Self::from_trusted_bytes_on(artifact, pool_size, threads, provider)?;
         model.check_signature()?;
         Ok(model)
     }
 
+    #[cfg(test)]
     fn from_trusted_bytes(
         artifact: &VerifiedBytes,
         pool_size: usize,
         threads: Option<usize>,
     ) -> Result<Self, OnnxError> {
+        Self::from_trusted_bytes_on(artifact, pool_size, threads, &ProviderConfig::cpu())
+    }
+
+    fn from_trusted_bytes_on(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+        provider: &ProviderConfig,
+    ) -> Result<Self, OnnxError> {
         Ok(Self {
-            pool: BoundedSessionPool::from_verified_bytes(artifact, pool_size, threads)?,
+            pool: BoundedSessionPool::from_verified_bytes_on(
+                artifact, pool_size, threads, provider,
+            )?,
         })
+    }
+
+    /// Provider the sessions run on (after any CUDA fallback).
+    pub fn provider(&self) -> &ActiveProvider {
+        self.pool.provider()
+    }
+
+    /// Number of pooled sessions.
+    pub fn capacity(&self) -> usize {
+        self.pool.capacity()
     }
 
     /// The graph signature the music export declares (read from the verified graph, not
@@ -478,6 +514,17 @@ impl ClapTextSession {
         pool_size: usize,
         threads: Option<usize>,
     ) -> Result<Self, OnnxError> {
+        Self::from_verified_bytes_on(artifact, pool_size, threads, &ProviderConfig::cpu())
+    }
+
+    /// [`Self::from_verified_bytes`] on the requested provider (CUDA falls back to the CPU).
+    /// The server keeps the text encoder on the CPU; this exists for the CUDA parity gate.
+    pub fn from_verified_bytes_on(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: Option<usize>,
+        provider: &ProviderConfig,
+    ) -> Result<Self, OnnxError> {
         use sha2::{Digest, Sha256};
         let expected = OnnxModel::ClapText.descriptor();
         if artifact.id() != expected.id
@@ -489,11 +536,16 @@ impl ClapTextSession {
                 message: "CLAP text artifact does not match the pinned model".into(),
             });
         }
-        let model = Self::from_trusted_bytes(artifact, pool_size, threads)?;
+        let model = Self {
+            pool: BoundedSessionPool::from_verified_bytes_on(
+                artifact, pool_size, threads, provider,
+            )?,
+        };
         model.check_signature()?;
         Ok(model)
     }
 
+    #[cfg(test)]
     fn from_trusted_bytes(
         artifact: &VerifiedBytes,
         pool_size: usize,
@@ -502,6 +554,11 @@ impl ClapTextSession {
         Ok(Self {
             pool: BoundedSessionPool::from_verified_bytes(artifact, pool_size, threads)?,
         })
+    }
+
+    /// Provider the sessions run on (after any CUDA fallback).
+    pub fn provider(&self) -> &ActiveProvider {
+        self.pool.provider()
     }
 
     /// The music text export's declared signature: int64 `input_ids` and `attention_mask`
@@ -955,6 +1012,7 @@ pub struct BoundedSessionPool {
     sessions: Arc<Mutex<Vec<Session>>>,
     condvar: Arc<Condvar>,
     capacity: usize,
+    provider: ActiveProvider,
     _reservation: ResourceReservation,
     #[cfg(test)]
     wait_observer: Option<std::sync::mpsc::Sender<()>>,
@@ -985,34 +1043,99 @@ impl BoundedSessionPool {
         pool_size: usize,
         intra_threads: Option<usize>,
     ) -> Result<Self, OnnxError> {
-        let threads = validate_resources(pool_size, intra_threads)?;
-        let reservation =
-            ResourceReservation::acquire(pool_size, threads, artifact.as_bytes().len())?;
+        Self::from_verified_bytes_on(artifact, pool_size, intra_threads, &ProviderConfig::cpu())
+    }
 
+    /// Builds every session on `provider`. When CUDA is requested and any CUDA step fails
+    /// (library preload, EP registration, session creation), all CUDA sessions are dropped,
+    /// the CUDA reservation is released and the whole pool is built on the CPU instead:
+    /// [`Self::provider`] is then [`ActiveProvider::CpuFallback`] with the first error.
+    pub fn from_verified_bytes_on(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        intra_threads: Option<usize>,
+        provider: &ProviderConfig,
+    ) -> Result<Self, OnnxError> {
+        let threads = validate_resources(pool_size, intra_threads)?;
         initialize_runtime()?;
+        let mut active = ActiveProvider::Cpu;
+        if provider.provider == ExecutionProvider::Cuda {
+            match Self::build_sessions(artifact, pool_size, threads, Some(provider)) {
+                Ok((sessions, reservation)) => {
+                    return Ok(Self::assemble(
+                        artifact,
+                        sessions,
+                        reservation,
+                        ActiveProvider::Cuda {
+                            device_id: provider.cuda_device_id,
+                        },
+                    ));
+                }
+                Err(error) => {
+                    let reason = error.to_string();
+                    tracing::warn!(
+                        artifact = %artifact.id(),
+                        %reason,
+                        "CUDA execution provider unavailable; falling back to CPU"
+                    );
+                    active = ActiveProvider::CpuFallback { reason };
+                }
+            }
+        }
+        let (sessions, reservation) = Self::build_sessions(artifact, pool_size, threads, None)?;
+        Ok(Self::assemble(artifact, sessions, reservation, active))
+    }
+
+    fn build_sessions(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        threads: usize,
+        cuda: Option<&ProviderConfig>,
+    ) -> Result<(Vec<Session>, ResourceReservation), OnnxError> {
+        let reservation = ResourceReservation::acquire_for(
+            pool_size,
+            threads,
+            artifact.as_bytes().len(),
+            cuda.is_some(),
+        )?;
+        if let Some(dir) = cuda.and_then(|c| c.cuda_lib_dir.as_deref()) {
+            provider::preload_cuda(dir).map_err(OnnxError::SessionBuilder)?;
+        }
         let mut sessions = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            let builder = bounded_session_builder(threads)?;
-
+            let builder = session_builder(threads, cuda)?;
             let session = builder
                 .commit_from_memory(artifact.as_bytes())
                 .map_err(|e| OnnxError::SessionInit {
                     id: artifact.id(),
                     message: e.to_string(),
                 })?;
-
             sessions.push(session);
         }
+        Ok((sessions, reservation))
+    }
 
-        Ok(Self {
+    fn assemble(
+        artifact: &VerifiedBytes,
+        sessions: Vec<Session>,
+        reservation: ResourceReservation,
+        provider: ActiveProvider,
+    ) -> Self {
+        let capacity = sessions.len();
+        Self {
             id: artifact.id(),
             sessions: Arc::new(Mutex::new(sessions)),
             condvar: Arc::new(Condvar::new()),
-            capacity: pool_size,
+            capacity,
+            provider,
             _reservation: reservation,
             #[cfg(test)]
             wait_observer: None,
-        })
+        }
+    }
+
+    pub fn provider(&self) -> &ActiveProvider {
+        &self.provider
     }
 
     pub fn id(&self) -> &ArtifactId {
@@ -1059,13 +1182,19 @@ impl BoundedSessionPool {
     }
 }
 
-/// Fixed CPU policy: 1 thread by default, never ORT's machine-sized auto pool.
+/// Largest session pool accepted per artifact.
+pub const MAX_POOL_SIZE: usize = 8;
+/// Largest intra-op thread count accepted per session.
+pub const MAX_INTRA_THREADS: usize = 16;
+
+/// Explicit CPU policy: 1 thread by default, never ORT's machine-sized auto pool.
+/// The process-wide admission budget still bounds the totals.
 fn validate_resources(pool_size: usize, threads: Option<usize>) -> Result<usize, OnnxError> {
     let threads = threads.unwrap_or(1);
-    if !(1..=4).contains(&pool_size) || !(1..=4).contains(&threads) {
-        return Err(OnnxError::SessionBuilder(
-            "pool size and intra threads must each be in 1..=4".into(),
-        ));
+    if !(1..=MAX_POOL_SIZE).contains(&pool_size) || !(1..=MAX_INTRA_THREADS).contains(&threads) {
+        return Err(OnnxError::SessionBuilder(format!(
+            "pool size must be in 1..={MAX_POOL_SIZE} and intra threads in 1..={MAX_INTRA_THREADS}"
+        )));
     }
     Ok(threads)
 }
@@ -1073,18 +1202,40 @@ fn validate_resources(pool_size: usize, threads: Option<usize>) -> Result<usize,
 fn bounded_session_builder(
     threads: usize,
 ) -> Result<ort::session::builder::SessionBuilder, OnnxError> {
-    Session::builder()
+    session_builder(threads, None)
+}
+
+/// CPU-only builder, or a CUDA builder that fails instead of silently registering nothing
+/// (`error_on_failure`), so the caller can fall back explicitly. CUDA sessions keep the CPU
+/// EP for nodes CUDA does not implement, as ORT always does.
+fn session_builder(
+    threads: usize,
+    cuda: Option<&ProviderConfig>,
+) -> Result<ort::session::builder::SessionBuilder, OnnxError> {
+    use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider};
+    let cpu = CPUExecutionProvider::default()
+        .with_arena_allocator(false)
+        .build();
+    let builder = Session::builder()
         .and_then(|builder| builder.with_intra_threads(threads))
         .and_then(|builder| builder.with_inter_threads(1))
         .and_then(|builder| builder.with_parallel_execution(false))
-        .and_then(|builder| {
-            builder.with_execution_providers([
-                ort::execution_providers::CPUExecutionProvider::default()
-                    .with_arena_allocator(false)
-                    .build(),
-            ])
-        })
-        .map_err(|e| OnnxError::SessionBuilder(e.to_string()))
+        .map_err(|e| OnnxError::SessionBuilder(e.to_string()))?;
+    let result = match cuda {
+        None => builder.with_execution_providers([cpu]),
+        Some(config) => {
+            let mut ep = CUDAExecutionProvider::default()
+                .with_device_id(config.cuda_device_id)
+                .with_arena_extend_strategy(
+                    ort::execution_providers::ArenaExtendStrategy::SameAsRequested,
+                );
+            if let Some(limit) = config.cuda_mem_limit_bytes {
+                ep = ep.with_memory_limit(limit);
+            }
+            builder.with_execution_providers([ep.build().error_on_failure(), cpu])
+        }
+    };
+    result.map_err(|e| OnnxError::SessionBuilder(e.to_string()))
 }
 
 /// Initialize only a separately provisioned, administrator-trusted runtime.

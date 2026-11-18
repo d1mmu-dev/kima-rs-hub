@@ -51,6 +51,7 @@ pub const PIPELINE_VERSION: &str = "clap-music-audio-v1";
 /// this model+pipeline combination. Built once and cached on [`IdentCtx`].
 pub struct EmbeddingRuntime {
     session: ClapAudioSession,
+    provider: kima_ml::onnx::ActiveProvider,
     mel: MusicClapMel,
     provenance: Provenance,
 }
@@ -61,6 +62,8 @@ pub struct EmbeddingRuntime {
 fn load(
     model_dir: &Path,
     pool_size: usize,
+    intra_threads: Option<usize>,
+    provider: &kima_ml::onnx::ProviderConfig,
 ) -> (CapabilityEvaluationReport, Option<EmbeddingRuntime>) {
     let mut built: Option<ClapAudioSession> = None;
     let mut requirements = BTreeMap::new();
@@ -74,14 +77,18 @@ fn load(
         &requirements,
         |cap, bytes| {
             if cap == Capability::ClapAudioEmbedding {
-                built = Some(ClapAudioSession::from_verified_bytes(
-                    &bytes, pool_size, None,
+                built = Some(ClapAudioSession::from_verified_bytes_on(
+                    &bytes,
+                    pool_size,
+                    intra_threads,
+                    provider,
                 )?);
             }
             Ok::<(), kima_ml::onnx::OnnxError>(())
         },
     );
     let runtime = built.map(|session| EmbeddingRuntime {
+        provider: session.provider().clone(),
         session,
         mel: MusicClapMel::new(),
         provenance: Provenance {
@@ -156,7 +163,12 @@ fn initialize_config(
             vec![OnnxModel::ClapAudio.artifact_id()],
         ));
     };
-    let (report, runtime) = load(model_dir, config.pool_size.max(1));
+    let (report, runtime) = load(
+        model_dir,
+        config.pool_size.max(1),
+        config.intra_threads,
+        &config.provider,
+    );
     runtime.map(Arc::new).ok_or(report)
 }
 
@@ -203,12 +215,9 @@ fn initialize_text_config(
                 );
             } else {
                 session = Some(
-                    kima_ml::onnx::ClapTextSession::from_verified_bytes(
-                        &bytes,
-                        config.pool_size.max(1),
-                        None,
-                    )
-                    .map_err(|e| e.to_string())?,
+                    // One session: interactive, and the host budget holds the audio pool too.
+                    kima_ml::onnx::ClapTextSession::from_verified_bytes(&bytes, 1, None)
+                        .map_err(|e| e.to_string())?,
                 );
             }
             Ok::<(), String>(())
@@ -234,6 +243,18 @@ fn text_runtime_now(ctx: &IdentCtx) -> Result<Arc<TextRuntime>, CapabilityEvalua
     let result = initialize_text_config(&ctx.config.embedding);
     *slot = Some(result.clone());
     result
+}
+
+/// Execution provider of the loaded audio encoder (`None` before initialization or when the
+/// capability is not available). Reported next to the capability status at startup.
+pub fn audio_provider(ctx: &IdentCtx) -> Option<kima_ml::onnx::ActiveProvider> {
+    ctx.embedding_runtime
+        .runtime
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|runtime| runtime.provider.clone())
 }
 
 /// Read the cached capability report without loading a model. Includes whichever of the

@@ -176,9 +176,13 @@ pub struct EmbeddingConfig {
     pub model_dir: Option<PathBuf>,
     /// Explicit operator override that skips model loading.
     pub disabled: bool,
-    /// `BoundedSessionPool` size for the CLAP ONNX session (bounded, never one session per
-    /// claim).
+    /// `BoundedSessionPool` size for the CLAP audio ONNX session (bounded, never one session
+    /// per claim). The interactive text encoder always uses one session.
     pub pool_size: usize,
+    /// ORT intra-op threads per audio session; `None` is one thread.
+    pub intra_threads: Option<usize>,
+    /// Execution provider for the audio encoder (CPU default; CUDA falls back to CPU).
+    pub provider: kima_ml::onnx::ProviderConfig,
     /// Maximum simultaneous blocking embeddings shared by clones of one context, including
     /// work still running after cancellation. Fixed when first used; separate contexts have
     /// independent limits.
@@ -199,10 +203,52 @@ impl Default for EmbeddingConfig {
             model_dir: None,
             disabled: false,
             pool_size: 1,
+            intra_threads: None,
+            provider: kima_ml::onnx::ProviderConfig::default(),
             workers: 1,
             snapshot_dir: None,
             audio_blocked_reason: None,
             snapshot_limits: kima_ml::input_snapshot::SnapshotLimits::default(),
+        }
+    }
+}
+
+/// Resolved CLAP audio parallelism: ONNX sessions, threads per session and concurrent
+/// blocking embedding workers (decode + preprocessing + inference).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingParallelism {
+    pub pool_size: usize,
+    pub intra_threads: usize,
+    pub workers: usize,
+}
+
+impl EmbeddingParallelism {
+    /// Defaults from the provider and the machine's cores, each overridable.
+    ///
+    /// CPU: one session (the 4 GiB host admission budget also holds the text encoder) with
+    /// `cores / 8` threads (1..=4) and `cores / 8` workers (1..=4) so decoding overlaps
+    /// inference. CUDA: two sessions with one host thread each and `cores / 4` workers
+    /// (2..=8), because decoding then dominates. Measured on a 32-thread host: CPU ONNX
+    /// 1.7 windows/s at 1 thread, 5.7 at 4; CUDA 57/s per session at batch 1, 88/s with two.
+    pub fn resolve(
+        provider: kima_ml::onnx::ExecutionProvider,
+        cores: usize,
+        pool_size: Option<usize>,
+        intra_threads: Option<usize>,
+        workers: Option<usize>,
+    ) -> Self {
+        let cores = cores.max(1);
+        let (pool, threads, work) = match provider {
+            kima_ml::onnx::ExecutionProvider::Cpu => {
+                (1, (cores / 8).clamp(1, 4), (cores / 8).clamp(1, 4))
+            }
+            kima_ml::onnx::ExecutionProvider::Cuda => (2, 1, (cores / 4).clamp(2, 8)),
+        };
+        let pool_size = pool_size.unwrap_or(pool);
+        Self {
+            pool_size,
+            intra_threads: intra_threads.unwrap_or(threads),
+            workers: workers.unwrap_or(work.max(pool_size)),
         }
     }
 }
@@ -269,6 +315,34 @@ impl Default for IdentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallelism_defaults_follow_provider_and_cores() {
+        use kima_ml::onnx::ExecutionProvider::{Cpu, Cuda};
+        let p = |provider, cores| EmbeddingParallelism::resolve(provider, cores, None, None, None);
+        let e = |pool_size, intra_threads, workers| EmbeddingParallelism {
+            pool_size,
+            intra_threads,
+            workers,
+        };
+        assert_eq!(p(Cpu, 32), e(1, 4, 4));
+        assert_eq!(p(Cpu, 1), e(1, 1, 1));
+        assert_eq!(p(Cuda, 32), e(2, 1, 8));
+        assert_eq!(p(Cuda, 4), e(2, 1, 2));
+        assert_eq!(
+            EmbeddingParallelism::resolve(Cpu, 32, Some(3), Some(2), None),
+            e(3, 2, 4)
+        );
+        // Workers never fall below the session count by default; explicit values win.
+        assert_eq!(
+            EmbeddingParallelism::resolve(Cpu, 8, Some(4), None, None).workers,
+            4
+        );
+        assert_eq!(
+            EmbeddingParallelism::resolve(Cuda, 32, None, None, Some(1)).workers,
+            1
+        );
+    }
 
     #[test]
     fn debug_hides_both_keys() {

@@ -159,6 +159,7 @@ fn embedding_config(model_dir: PathBuf, root: &Path) -> kima_ident::EmbeddingCon
         snapshot_dir: Some(private_snapshot_dir(root)),
         audio_blocked_reason: None,
         snapshot_limits: Default::default(),
+        ..Default::default()
     }
 }
 

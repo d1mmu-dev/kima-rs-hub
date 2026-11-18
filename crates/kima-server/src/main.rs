@@ -130,8 +130,36 @@ async fn main() -> anyhow::Result<()> {
         data_dir: config.data_dir.clone(),
         ignore: state.library.ignore.clone(),
     };
+    let clap = &config.clap_runtime;
+    if let Some(mib) = clap.host_budget_mib {
+        kima_ml::onnx::set_host_budget_bytes(mib.saturating_mul(1024 * 1024));
+    }
+    let provider = if clap.cuda {
+        kima_ml::onnx::ExecutionProvider::Cuda
+    } else {
+        kima_ml::onnx::ExecutionProvider::Cpu
+    };
+    let parallelism = kima_ident::EmbeddingParallelism::resolve(
+        provider,
+        std::thread::available_parallelism().map_or(1, |n| n.get()),
+        clap.pool_size,
+        clap.intra_threads,
+        clap.workers,
+    );
+    info!(?provider, ?parallelism, "CLAP audio runtime configuration");
     let mut embedding = kima_ident::EmbeddingConfig {
         model_dir: config.clap_model_dir.clone(),
+        pool_size: parallelism.pool_size,
+        intra_threads: Some(parallelism.intra_threads),
+        workers: parallelism.workers,
+        provider: kima_ml::onnx::ProviderConfig {
+            provider,
+            cuda_device_id: clap.cuda_device_id,
+            cuda_lib_dir: clap.cuda_lib_dir.clone(),
+            cuda_mem_limit_bytes: clap
+                .cuda_mem_limit_mib
+                .and_then(|mib| usize::try_from(mib.saturating_mul(1024 * 1024)).ok()),
+        },
         disabled: config.disable_clap,
         snapshot_dir: config.snapshot_dir.clone(),
         snapshot_limits: kima_ident::SnapshotLimits {
@@ -203,7 +231,11 @@ async fn main() -> anyhow::Result<()> {
     let clap_status = kima_ident::stages::embedding::initialize(&ident_ctx)
         .await
         .context("initializing CLAP blocking worker")?;
-    info!(capabilities = ?clap_status.capabilities, "ML capability status");
+    info!(
+        capabilities = ?clap_status.capabilities,
+        clap_audio_provider = ?kima_ident::stages::embedding::audio_provider(&ident_ctx),
+        "ML capability status"
+    );
     // The vibe assets are optional: a missing or unpinned file turns the dependent capability off, never the server.
     let vibe = kima_ident::stages::vibe_assets::initialize(&ident_ctx)
         .await

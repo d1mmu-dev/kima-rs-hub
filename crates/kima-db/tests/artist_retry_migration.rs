@@ -49,10 +49,7 @@ async fn due_in(pool: &PgPool, id: Uuid) -> Option<f64> {
 
 #[sqlx::test(migrations = false)]
 async fn failed_artists_keep_their_grace_across_the_upgrade(pool: PgPool) {
-    assert_eq!(
-        kima_db::MIGRATOR.iter().map(|m| m.version).max(),
-        Some(VERSION)
-    );
+    assert!(kima_db::MIGRATOR.iter().any(|m| m.version == VERSION));
     before_retry_at().run(&pool).await.unwrap();
     let recent = artist(&pool, "failed", Some("5 minutes")).await;
     let old = artist(&pool, "failed", Some("1 hour")).await;
@@ -61,6 +58,13 @@ async fn failed_artists_keep_their_grace_across_the_upgrade(pool: PgPool) {
     let done = artist(&pool, "completed", Some("5 minutes")).await;
 
     kima_db::MIGRATOR.run(&pool).await.unwrap();
+    let applied: bool =
+        sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = $1")
+            .bind(VERSION)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(applied, "0062 applied");
 
     let recent = due_in(&pool, recent).await.expect("a retry time");
     assert!((9.0 * 60.0..=10.0 * 60.0).contains(&recent), "{recent}");

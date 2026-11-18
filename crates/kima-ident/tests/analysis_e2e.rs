@@ -462,3 +462,68 @@ async fn stale_file_generation_rejects_publication_and_claim_is_not_done() {
 
     db.cleanup().await;
 }
+
+// ---- 4. Retry cap: an undecodable file stops being retried after RETRY_CAP attempts ---------
+
+/// A file no decoder reads fails INCONCLUSIVE like any decode error; after the fourth reported failure the row is
+/// terminal (no `next_attempt_at`), exactly as for the embedding stage, so the vibe steps that wait for analysis
+/// to settle are not held back forever by it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs isolated Postgres; run with --ignored"]
+async fn undecodable_file_becomes_terminal_after_the_retry_cap_and_settles_vibe_inputs() {
+    let db = isolated_db().await;
+    let pool = db.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::write(root.join("bad.mp3"), vec![0x5a_u8; 64 * 1024]).unwrap();
+    let track_id = common::track(&pool, "bad.mp3", 30).await;
+    // Three failures already reported, the fourth attempt is due now.
+    sqlx::query(
+        "INSERT INTO track_stages (track_id, stage, status, attempts, error_code, error_class, next_attempt_at)
+         VALUES ($1, 'analysis', 'failed', 3, 'UNSUPPORTED_FORMAT', 'INCONCLUSIVE', now() - interval '1 minute'),
+                ($1, 'embedding', 'done', 0, NULL, NULL, NULL)",
+    )
+    .bind(track_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let ctx = ident_ctx_with_embedding_and_analysis(
+        &pool,
+        &root,
+        common::dead_bases(),
+        IdentifySwitch::new(false, true),
+        embedding_config_for_analysis(&root),
+        analysis_config(None),
+    );
+    let report = analysis::run_batch(&ctx, &CancellationToken::new())
+        .await
+        .expect("analysis batch should succeed");
+    assert_eq!((report.claimed, report.failed), (1, 1));
+    let (status, attempts, retry, class): (
+        String,
+        i16,
+        Option<time::OffsetDateTime>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT status, attempts, next_attempt_at, error_class FROM track_stages
+             WHERE track_id = $1 AND stage = 'analysis'",
+    )
+    .bind(track_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (status.as_str(), attempts, class.as_deref()),
+        ("failed", 4, Some("INCONCLUSIVE"))
+    );
+    assert_eq!(retry, None, "the fourth failure is terminal (RETRY_CAP)");
+    assert!(
+        kima_db::enrichment::vibe_inputs(&pool, true)
+            .await
+            .unwrap()
+            .settled,
+        "a terminal analysis failure must not hold the vibe steps"
+    );
+    db.cleanup().await;
+}

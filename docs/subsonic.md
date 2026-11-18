@@ -56,12 +56,12 @@ Optional. The address clients use to reach Kima, such as `https://music.example.
 
 ## What is supported
 
-All 81 paths upstream registers are answered, each with and without `.view`, by GET, HEAD or POST (form bodies are merged with the query string). 44 are complete, 8 partial and 29 stubs.
+All 81 paths upstream registers are answered, each with and without `.view`, by GET, HEAD or POST (form bodies are merged with the query string). 16 are still stubs (listed below); the others read real data, some with the differences recorded in [DIVERGENCES.md](DIVERGENCES.md).
 
 - **System:** `ping`, `getLicense`, `getMusicFolders` (one folder, id `1`), `getOpenSubsonicExtensions` (no sign-in needed; advertises `apiKeyAuthentication`, `formPost`, `indexBasedQueue`), `tokenInfo`, `getScanStatus`, `startScan` (admin).
 - **Browsing:** `getArtists`, `getIndexes`, `getArtist`, `getMusicDirectory`, `getAlbum`, `getSong`, `getAlbumList` and `getAlbumList2` (every list type, `byGenre` included since M3).
 - **Search:** `search`, `search2` and `search3`. An empty query lists the whole library page by page, which is how Symfonium and others sync. `getRandomSongs` (with the `genre` filter since M3), `getTopSongs`, `getNowPlaying`.
-- **Playing:** `stream`, `download`, `hls`, `getTranscodeDecision`, `getTranscodeStream` (songs; podcasts wait for M6), `getCoverArt` (albums, tracks and, since M3, artists with a stored image), `getAvatar`, `scrobble` (batches and now playing).
+- **Playing:** `stream`, `download`, `hls`, `getTranscodeDecision`, `getTranscodeStream` (songs and, since M6, podcast episodes), `getCoverArt` (albums, tracks and, since M3, artists with a stored image), `getAvatar`, `scrobble` (batches and now playing).
 - **Queue and bookmarks:** `getPlayQueue`, `savePlayQueue`, the by-index variants, and bookmarks.
 - **Playlists:** list, read, create, update and delete.
 - **Starring and ratings:** `star`, `unstar`, `getStarred`, `getStarred2` and `setRating`, for songs, albums and artists.
@@ -84,16 +84,23 @@ Direct decisions return `q-original`; MP3 decisions return `q-<high|medium|low>[
 or `mp3-<high|medium|low>[-<cap>]`. `getTranscodeStream` accepts only valid decision
 parameters, not arbitrary quality strings. Source bitrate is recorded during scanning,
 not re-probed on each request; an unknown bitrate is transcode-eligible under a cap.
-The source format is taken from the filename extension. Podcast decisions and streams
-remain unavailable until M6 (D-101). See [D-167](DIVERGENCES.md) for remaining differences.
+The source format is taken from the filename extension. Since M6 a podcast decision never
+transcodes: it is direct play of the episode, or a refusal when `format` names another
+format; and `getTranscodeStream` with `mediaType=podcast`
+redirects (302) to the episode's feed URL (D-101). See [D-167](DIVERGENCES.md) for remaining differences.
 
-Stubs, by the milestone that makes them real:
+Endpoints that started as stubs and are now real, by the milestone that made them real:
 
 | Milestone | Endpoints |
 |---|---|
-| M3 (identification) | `getGenres`, `getSongsByGenre`, `getLyrics`, `getLyricsBySongId`, `getArtistInfo`, `getArtistInfo2`; `byGenre` lists; artist cover art. These answered empty results (or 70 for artist art) until M3; they now read what identification stored (artist genres follow a person's edited list when one is set, D-166) |
-| M5 (vibe engine) | `getSimilarSongs`, `getSimilarSongs2` (empty) |
-| M6 (podcasts) | `getPodcasts`, `getNewestPodcasts`, `getPodcastEpisode` (70), `refreshPodcasts` (ok, nothing to refresh) |
+| M3 (identification) | `getGenres`, `getSongsByGenre`, `getLyrics`, `getLyricsBySongId`, `getArtistInfo`, `getArtistInfo2`; `byGenre` lists; artist cover art. They read what identification stored (artist genres follow a person's edited list when one is set, D-166) |
+| M5 (vibe engine) | `getSimilarSongs`, `getSimilarSongs2`: a track seed with current matching data is ranked by the vibe formula as `/api/vibe/similar`; other seeds, and a seed whose ranking is empty, get upstream's artist-based pick (D-190) |
+| M6 (podcasts) | `getPodcasts`, `getNewestPodcasts`, `getPodcastEpisode`, `refreshPodcasts` (refreshes the caller's followed shows), with the AI-content filter on the lists (D-086, D-205, D-208) |
+
+Still stubs (16):
+
+| Milestone | Endpoints |
+|---|---|
 | M8 (hardening) | `getShares` (empty), `createShare`, `updateShare`, `deleteShare` (error 0, "Sharing is not supported by this server yet") |
 | never planned | internet radio, chat, video, captions and the jukebox: listing calls answer empty and calls that change something answer error 0 |
 | none (as upstream) | `getAlbumInfo`, `getAlbumInfo2`: empty |

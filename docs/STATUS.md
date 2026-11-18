@@ -1,6 +1,6 @@
 # kima-rs-hub — stan prac
 
-_Ostatnia aktualizacja: 2026-11-17 · `main` = `30d8d16`_
+_Ostatnia aktualizacja: 2026-11-18 · `main` = `30d8d16`_
 
 <!-- private -->
 > Podsumowanie stanu projektu (aktualizowane po każdym etapie, publikowane razem z kolejnym merge'em do `main`). Źródłem prawdy jest historia gita; szczegóły różnic od upstreamu są w `docs/DIVERGENCES.md`, plan w `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md`.
@@ -24,7 +24,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M9 | kima-web część 1 (logowanie, biblioteka, player, playlisty, ustawienia, SSR) | ✅ (wygląd 1:1 otwarty) |
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
 | **M-PROF** | **Profile w koncie (Netflix)** | ✅ na `main`; ręczne logowanie właściciela odłożone do wdrożenia |
-| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–19 zaimplementowane lokalnie; Task 19 czeka na niezależny przegląd, odbiór real-model otwarty |
+| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–19 zaimplementowane lokalnie; przegląd Task 19 (0 Critical/Important) i jego uwagi Minor poprawione, czeka na ponowny przegląd; odbiór real-model otwarty |
 | M5b | Mixy, radio, „co nowego” | ⏳ ~1 tydz. |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
 | M6b | Audiobooki (Audiobookshelf) | ⏳ ~1 tydz., po M7 |
@@ -96,6 +96,7 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 
 ## Historia etapów (najnowsze na górze)
 
+- 2026-11-18: M5 Task 19 po przeglądzie (0 Critical/Important): decyzja właściciela Q8 opcja 1 — pusty ranking vibe przechodzi na dobór artystowy, krótka niepusta lista nie jest dopełniana; 5 uwag Minor poprawionych (zgodność ID z `/api/vibe/similar`, limity 2/4 z ziarnem, błąd bazy = błąd 0, D-190, `docs/subsonic.md`); 348 PASS / 0 FAIL / 2 ignored w kima-subsonic, bramki statyczne zielone; bez wdrożenia, Task 20 nierozpoczęty.
 - 2026-11-17: M5 Task 19 lokalnie gotowy do przeglądu: getSimilarSongs(2) rankowane vibe z fallbackiem artystowym upstream (D-190); 386 PASS / 0 FAIL / 3 ignored w wybranych zestawach, bramki statyczne zielone; bez wdrożenia.
 - 2026-11-18: M5 Task 18 po przeglądzie (0 Critical/Important): 8 uwag Minor poprawionych lokalnie (test tożsamości audio dla 202, utwardzony harness E2E: piny modeli przed bazą, KIMA_NET_DENY_REAL, pusta baza, sprzątanie po panice; pliki tokenizera przypięte w readings_real, skrypt Pythona bez assert, spec §5.8 i D-182 uzgodnione); bez wdrożenia, Task 19 nierozpoczęty.
 - 2026-11-17: M5 Task 18 lokalnie gotowy do przeglądu: predykat vibeEmbeddings, macierz degradacji §4.4, harness real-model E2E (nieuruchomiony), proweniencja tokenizera; 296 PASS / 0 FAIL / 8 ignored, bramki statyczne zielone; bez wdrożenia.

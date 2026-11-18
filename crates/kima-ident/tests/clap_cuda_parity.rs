@@ -242,3 +242,34 @@ fn cuda_music_clap_matches_cpu_audio_and_text() {
         );
     }
 }
+
+/// CUDA arena limit for [`cuda_pool_that_cannot_run_falls_back_to_cpu_at_load`].
+const STARVED_MIB: usize = 300;
+
+/// A CUDA pool that can be created but cannot run (a device-memory limit far below the
+/// model's activations) must fall back to the CPU at load, via the warm-up inference, instead
+/// of reporting CUDA and failing every track at run time.
+#[test]
+#[ignore = "private noncommercial music CLAP models and a CUDA ONNX Runtime required"]
+fn cuda_pool_that_cannot_run_falls_back_to_cpu_at_load() {
+    let dir = env_path("KIMA_CLAP_MODEL_DIR");
+    env_path("ORT_DYLIB_PATH");
+    let artifact = kima_ml::verify_artifact(&dir, &OnnxModel::ClapAudio.descriptor()).unwrap();
+    // Large enough to create the session (initializers fit), far too small for a run.
+    let mib: usize = std::env::var("KIMA_PARITY_STARVED_MIB")
+        .map_or(STARVED_MIB, |v| v.parse().expect("KIMA_PARITY_STARVED_MIB"));
+    let starved = ProviderConfig {
+        cuda_mem_limit_bytes: Some(mib * 1024 * 1024),
+        ..cuda()
+    };
+    let session =
+        ClapAudioSession::from_verified_bytes_on(&artifact, 1, Some(1), &starved).unwrap();
+    eprintln!("provider: {:?}", session.provider());
+    assert!(
+        matches!(session.provider(), ActiveProvider::CpuFallback { .. }),
+        "a CUDA pool that cannot run must not be reported as CUDA: {:?}",
+        session.provider()
+    );
+    let out = session.infer(&vec![0.0; 1001 * 64], 1).unwrap();
+    assert!(out[0].iter().all(|x| x.is_finite()));
+}

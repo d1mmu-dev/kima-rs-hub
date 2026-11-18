@@ -131,6 +131,9 @@ opt-level = 3
 [profile.dev.package.symphonia-format-caf]
 opt-level = 3
 
+[profile.dev.package.symphonia-metadata]
+opt-level = 3
+
 [profile.dev.package.rustfft]
 opt-level = 3
 

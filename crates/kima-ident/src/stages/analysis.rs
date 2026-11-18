@@ -183,12 +183,17 @@ fn compute_and_publish(
             )));
         }
     };
-    let src = store.create(root, path).map_err(|e| {
-        StageFailure::Infrastructure(Failure::new(
-            "SNAPSHOT_UNAVAILABLE",
-            format!("snapshot create: {e}"),
-        ))
-    })?;
+    // Shares the embedding stage's store and slots: wait for a slot rather than fail.
+    let src = store
+        .create_waiting(root, path, super::embedding::SNAPSHOT_SLOT_WAIT)
+        .map_err(|e| {
+            let code = if e.class() == kima_ml::input_snapshot::SnapshotClass::Busy {
+                SNAPSHOT_BUSY
+            } else {
+                "SNAPSHOT_UNAVAILABLE"
+            };
+            StageFailure::Infrastructure(Failure::new(code, format!("snapshot create: {e}")))
+        })?;
     let open = || -> Result<Box<dyn symphonia::core::io::MediaSource>, StageFailure> {
         Ok(Box::new(src.open().map_err(|e| {
             StageFailure::Infrastructure(Failure::new(
@@ -517,6 +522,9 @@ impl AnalysisRuntime {
     }
 }
 
+/// Code of a snapshot attempt that found every slot taken for the whole wait.
+const SNAPSHOT_BUSY: &str = "SNAPSHOT_BUSY";
+
 /// Finalise a claim's outcome.
 async fn finish_outcome(
     ctx: &super::IdentCtx,
@@ -550,6 +558,21 @@ async fn finish_outcome(
             } else {
                 ClaimResult::Stale
             })
+        }
+        // Every snapshot slot stayed taken: give the claim back (due now, no attempt).
+        Err(StageFailure::Infrastructure(f)) if f.code == SNAPSHOT_BUSY => {
+            db_stages::release(
+                &ctx.pool,
+                &[Claim {
+                    track_id: claim.track_id,
+                    stage: Stage::Analysis,
+                    started_at: claim.started_at,
+                    attempts: 0,
+                    redelivered: 0,
+                }],
+            )
+            .await?;
+            Ok(ClaimResult::Stale)
         }
         Err(failure) => {
             let record = record_for(

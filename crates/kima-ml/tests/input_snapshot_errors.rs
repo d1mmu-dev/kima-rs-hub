@@ -43,6 +43,7 @@ fn constant_failures_are_classified_per_file() {
     assert!(SnapshotClass::InvalidPath.is_permanent());
     assert!(!SnapshotClass::Missing.is_permanent());
     assert!(!SnapshotClass::Infrastructure.is_permanent());
+    assert!(!SnapshotClass::Busy.is_permanent());
 }
 
 #[test]
@@ -64,12 +65,21 @@ fn infrastructure_failures_stay_infrastructure() {
     let dotdot = lib.path().join("..").join(lib.path().file_name().unwrap());
     let e = s.create(&dotdot, "a".as_ref()).err().unwrap();
     assert_eq!(e.class(), SnapshotClass::Infrastructure);
-    // Quota: second live snapshot.
+    // Quota: a second live snapshot is backpressure (`Busy`), not infrastructure.
     if require_reflink(snap.path()) {
         let first = s.create(lib.path(), "a".as_ref()).unwrap();
         let e = s.create(lib.path(), "a".as_ref()).err().unwrap();
-        assert_eq!(e.class(), SnapshotClass::Infrastructure);
+        assert_eq!(e.class(), SnapshotClass::Busy);
         assert_eq!(e.kind(), std::io::ErrorKind::QuotaExceeded);
+        let e = s
+            .create_waiting(
+                lib.path(),
+                "a".as_ref(),
+                std::time::Duration::from_millis(20),
+            )
+            .err()
+            .unwrap();
+        assert_eq!(e.class(), SnapshotClass::Busy, "still taken after the wait");
         drop(first);
     }
 }

@@ -4,9 +4,9 @@ mod provider;
 mod resources;
 #[cfg(test)]
 mod tests;
-pub use provider::{ActiveProvider, ExecutionProvider, ProviderConfig};
+pub use provider::{ActiveProvider, ExecutionProvider, PoolShape, ProviderConfig};
 use resources::ResourceReservation;
-pub use resources::set_host_budget_bytes;
+pub use resources::{MAX_HOST_BUDGET_BYTES, MAX_THREAD_SLOTS, set_host_budget_bytes};
 
 use ort::session::Session;
 use std::collections::BTreeMap;
@@ -401,10 +401,12 @@ impl ClapAudioSession {
         threads: Option<usize>,
         provider: &ProviderConfig,
     ) -> Result<Self, OnnxError> {
+        // One zero window per CUDA session: proves the EP can allocate and run the graph.
+        let warmup = |session: &mut Session| {
+            run_clap_audio(session, &vec![0.0; CLAP_MEL_FRAMES * 64], 1).map(drop)
+        };
         Ok(Self {
-            pool: BoundedSessionPool::from_verified_bytes_on(
-                artifact, pool_size, threads, provider,
-            )?,
+            pool: BoundedSessionPool::build(artifact, pool_size, threads, provider, Some(&warmup))?,
         })
     }
 
@@ -451,49 +453,57 @@ impl ClapAudioSession {
                 "invalid CLAP input shape or non-finite value".into(),
             ));
         }
-        self.pool.with_session(|session| {
-            let tensor = ort::value::Tensor::from_array((
-                [batch, 1, CLAP_MEL_FRAMES, 64],
-                input.to_vec().into_boxed_slice(),
-            ))
-            .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let output_buffer = ort::value::Tensor::from_array((
-                [batch, 512],
-                vec![0.0_f32; batch * 512].into_boxed_slice(),
-            ))
-            .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            // Selecting a fetch does not guarantee ORT prunes unrelated graph
-            // nodes; the pinned graph and bounded inputs remain essential.
-            let options = ort::session::run_options::RunOptions::new()
-                .map_err(|e| OnnxError::Inference(e.to_string()))?
-                .with_outputs(
-                    ort::session::run_options::OutputSelector::no_default()
-                        .with("embedding")
-                        .preallocate("embedding", output_buffer),
-                );
-            let outputs = session
-                .run_with_options(ort::inputs!["mel" => tensor], &options)
-                .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let output = outputs
-                .get("embedding")
-                .ok_or_else(|| OnnxError::Inference("missing CLAP output".into()))?;
-            let (shape, values) = output
-                .try_extract_tensor::<f32>()
-                .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            if shape.as_ref() != [batch as i64, 512] || values.iter().any(|x| !x.is_finite()) {
-                return Err(OnnxError::Inference(
-                    "invalid CLAP output shape or non-finite value".into(),
-                ));
-            }
-            values
-                .chunks_exact(512)
-                .map(|v| {
-                    v.try_into()
-                        .map_err(|_| OnnxError::Inference("invalid CLAP output length".into()))
-                })
-                .collect()
-        })
+        self.pool
+            .with_session(|session| run_clap_audio(session, input, batch))
     }
+}
+
+/// One CLAP audio run on a checked-out session; inputs were validated by the caller.
+fn run_clap_audio(
+    session: &mut Session,
+    input: &[f32],
+    batch: usize,
+) -> Result<Vec<[f32; 512]>, OnnxError> {
+    let tensor = ort::value::Tensor::from_array((
+        [batch, 1, CLAP_MEL_FRAMES, 64],
+        input.to_vec().into_boxed_slice(),
+    ))
+    .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let output_buffer = ort::value::Tensor::from_array((
+        [batch, 512],
+        vec![0.0_f32; batch * 512].into_boxed_slice(),
+    ))
+    .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    // Selecting a fetch does not guarantee ORT prunes unrelated graph
+    // nodes; the pinned graph and bounded inputs remain essential.
+    let options = ort::session::run_options::RunOptions::new()
+        .map_err(|e| OnnxError::Inference(e.to_string()))?
+        .with_outputs(
+            ort::session::run_options::OutputSelector::no_default()
+                .with("embedding")
+                .preallocate("embedding", output_buffer),
+        );
+    let outputs = session
+        .run_with_options(ort::inputs!["mel" => tensor], &options)
+        .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let output = outputs
+        .get("embedding")
+        .ok_or_else(|| OnnxError::Inference("missing CLAP output".into()))?;
+    let (shape, values) = output
+        .try_extract_tensor::<f32>()
+        .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    if shape.as_ref() != [batch as i64, 512] || values.iter().any(|x| !x.is_finite()) {
+        return Err(OnnxError::Inference(
+            "invalid CLAP output shape or non-finite value".into(),
+        ));
+    }
+    values
+        .chunks_exact(512)
+        .map(|v| {
+            v.try_into()
+                .map_err(|_| OnnxError::Inference("invalid CLAP output length".into()))
+        })
+        .collect()
 }
 
 /// Maximum prompts accepted per CLAP text inference call, matching the bounded
@@ -536,10 +546,17 @@ impl ClapTextSession {
                 message: "CLAP text artifact does not match the pinned model".into(),
             });
         }
+        // One minimal padded prompt (`<s>` `</s>`, then `<pad>`) per CUDA session.
+        let warmup = |session: &mut Session| {
+            let tokens = crate::text_tokenizer::CLAP_TEXT_MAX_TOKENS;
+            let mut ids = vec![crate::text_tokenizer::CLAP_TEXT_PAD_ID; tokens];
+            let mut mask = vec![0; tokens];
+            (ids[0], ids[1]) = (0, 2);
+            (mask[0], mask[1]) = (1, 1);
+            run_clap_text(session, &ids, &mask, 1).map(drop)
+        };
         let model = Self {
-            pool: BoundedSessionPool::from_verified_bytes_on(
-                artifact, pool_size, threads, provider,
-            )?,
+            pool: BoundedSessionPool::build(artifact, pool_size, threads, provider, Some(&warmup))?,
         };
         model.check_signature()?;
         Ok(model)
@@ -627,55 +644,63 @@ impl ClapTextSession {
                 ));
             }
         }
-        self.pool.with_session(|session| {
-            let ids = ort::value::Tensor::from_array((
-                [batch, sequence],
-                input_ids.to_vec().into_boxed_slice(),
-            ))
-            .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let mask = ort::value::Tensor::from_array((
-                [batch, sequence],
-                attention_mask.to_vec().into_boxed_slice(),
-            ))
-            .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let output_buffer = ort::value::Tensor::from_array((
-                [batch, 512],
-                vec![0.0_f32; batch * 512].into_boxed_slice(),
-            ))
-            .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let options = ort::session::run_options::RunOptions::new()
-                .map_err(|e| OnnxError::Inference(e.to_string()))?
-                .with_outputs(
-                    ort::session::run_options::OutputSelector::no_default()
-                        .with("embedding")
-                        .preallocate("embedding", output_buffer),
-                );
-            let outputs = session
-                .run_with_options(
-                    ort::inputs!["input_ids" => ids, "attention_mask" => mask],
-                    &options,
-                )
-                .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            let output = outputs
-                .get("embedding")
-                .ok_or_else(|| OnnxError::Inference("missing CLAP text output".into()))?;
-            let (shape, values) = output
-                .try_extract_tensor::<f32>()
-                .map_err(|e| OnnxError::Inference(e.to_string()))?;
-            if shape.as_ref() != [batch as i64, 512] || values.iter().any(|x| !x.is_finite()) {
-                return Err(OnnxError::Inference(
-                    "invalid CLAP text output shape or non-finite value".into(),
-                ));
-            }
-            values
-                .chunks_exact(512)
-                .map(|v| {
-                    v.try_into()
-                        .map_err(|_| OnnxError::Inference("invalid CLAP text output length".into()))
-                })
-                .collect()
-        })
+        self.pool
+            .with_session(|session| run_clap_text(session, input_ids, attention_mask, batch))
     }
+}
+
+/// One CLAP text run on a checked-out session; inputs were validated by the caller.
+fn run_clap_text(
+    session: &mut Session,
+    input_ids: &[i64],
+    attention_mask: &[i64],
+    batch: usize,
+) -> Result<Vec<[f32; 512]>, OnnxError> {
+    let sequence = crate::text_tokenizer::CLAP_TEXT_MAX_TOKENS;
+    let ids =
+        ort::value::Tensor::from_array(([batch, sequence], input_ids.to_vec().into_boxed_slice()))
+            .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let mask = ort::value::Tensor::from_array((
+        [batch, sequence],
+        attention_mask.to_vec().into_boxed_slice(),
+    ))
+    .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let output_buffer = ort::value::Tensor::from_array((
+        [batch, 512],
+        vec![0.0_f32; batch * 512].into_boxed_slice(),
+    ))
+    .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let options = ort::session::run_options::RunOptions::new()
+        .map_err(|e| OnnxError::Inference(e.to_string()))?
+        .with_outputs(
+            ort::session::run_options::OutputSelector::no_default()
+                .with("embedding")
+                .preallocate("embedding", output_buffer),
+        );
+    let outputs = session
+        .run_with_options(
+            ort::inputs!["input_ids" => ids, "attention_mask" => mask],
+            &options,
+        )
+        .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    let output = outputs
+        .get("embedding")
+        .ok_or_else(|| OnnxError::Inference("missing CLAP text output".into()))?;
+    let (shape, values) = output
+        .try_extract_tensor::<f32>()
+        .map_err(|e| OnnxError::Inference(e.to_string()))?;
+    if shape.as_ref() != [batch as i64, 512] || values.iter().any(|x| !x.is_finite()) {
+        return Err(OnnxError::Inference(
+            "invalid CLAP text output shape or non-finite value".into(),
+        ));
+    }
+    values
+        .chunks_exact(512)
+        .map(|v| {
+            v.try_into()
+                .map_err(|_| OnnxError::Inference("invalid CLAP text output length".into()))
+        })
+        .collect()
 }
 
 /// Typed MusiCNN core backbone inference over a bounded pool of verified sessions.
@@ -1056,11 +1081,25 @@ impl BoundedSessionPool {
         intra_threads: Option<usize>,
         provider: &ProviderConfig,
     ) -> Result<Self, OnnxError> {
+        Self::build(artifact, pool_size, intra_threads, provider, None)
+    }
+
+    /// [`Self::from_verified_bytes_on`]; `warmup` runs once on every CUDA session before the
+    /// pool is accepted, and its failure is a CUDA failure (whole-pool CPU fallback). The CPU
+    /// fallback uses [`ProviderConfig::cpu_fallback`] when set.
+    fn build(
+        artifact: &VerifiedBytes,
+        pool_size: usize,
+        intra_threads: Option<usize>,
+        provider: &ProviderConfig,
+        warmup: Option<&Warmup>,
+    ) -> Result<Self, OnnxError> {
         let threads = validate_resources(pool_size, intra_threads)?;
         initialize_runtime()?;
         let mut active = ActiveProvider::Cpu;
+        let (mut pool_size, mut threads) = (pool_size, threads);
         if provider.provider == ExecutionProvider::Cuda {
-            match Self::build_sessions(artifact, pool_size, threads, Some(provider)) {
+            match Self::build_sessions(artifact, pool_size, threads, Some(provider), warmup) {
                 Ok((sessions, reservation)) => {
                     return Ok(Self::assemble(
                         artifact,
@@ -1079,10 +1118,15 @@ impl BoundedSessionPool {
                         "CUDA execution provider unavailable; falling back to CPU"
                     );
                     active = ActiveProvider::CpuFallback { reason };
+                    if let Some(shape) = provider.cpu_fallback {
+                        pool_size = shape.pool_size;
+                        threads = validate_resources(shape.pool_size, shape.intra_threads)?;
+                    }
                 }
             }
         }
-        let (sessions, reservation) = Self::build_sessions(artifact, pool_size, threads, None)?;
+        let (sessions, reservation) =
+            Self::build_sessions(artifact, pool_size, threads, None, None)?;
         Ok(Self::assemble(artifact, sessions, reservation, active))
     }
 
@@ -1091,6 +1135,7 @@ impl BoundedSessionPool {
         pool_size: usize,
         threads: usize,
         cuda: Option<&ProviderConfig>,
+        warmup: Option<&Warmup>,
     ) -> Result<(Vec<Session>, ResourceReservation), OnnxError> {
         let reservation = ResourceReservation::acquire_for(
             pool_size,
@@ -1104,12 +1149,18 @@ impl BoundedSessionPool {
         let mut sessions = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
             let builder = session_builder(threads, cuda)?;
-            let session = builder
+            let mut session = builder
                 .commit_from_memory(artifact.as_bytes())
                 .map_err(|e| OnnxError::SessionInit {
                     id: artifact.id(),
                     message: e.to_string(),
                 })?;
+            if let (Some(_), Some(warmup)) = (cuda, warmup) {
+                warmup(&mut session).map_err(|e| OnnxError::SessionInit {
+                    id: artifact.id(),
+                    message: format!("CUDA warm-up inference failed: {e}"),
+                })?;
+            }
             sessions.push(session);
         }
         Ok((sessions, reservation))
@@ -1181,6 +1232,9 @@ impl BoundedSessionPool {
         f(checkout.session.as_mut().ok_or(OnnxError::LockPoisoned)?)
     }
 }
+
+/// One inference run on a freshly created CUDA session (see [`BoundedSessionPool::build`]).
+type Warmup = dyn Fn(&mut Session) -> Result<(), OnnxError>;
 
 /// Largest session pool accepted per artifact.
 pub const MAX_POOL_SIZE: usize = 8;

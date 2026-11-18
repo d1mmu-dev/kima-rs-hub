@@ -185,8 +185,14 @@ pub struct EmbeddingConfig {
     pub provider: kima_ml::onnx::ProviderConfig,
     /// Maximum simultaneous blocking embeddings shared by clones of one context, including
     /// work still running after cancellation. Fixed when first used; separate contexts have
-    /// independent limits.
+    /// independent limits. Every worker holds one input snapshot while it decodes, so
+    /// `snapshot_limits.max_concurrent` should cover the workers plus the analysis workers
+    /// ([`snapshot_concurrency`]); a worker that finds every slot taken waits for one.
     pub workers: usize,
+    /// Parallelism used instead of `pool_size`/`intra_threads`/`workers` when CUDA was
+    /// requested but the pool fell back to the CPU (CUDA-tuned values do not fit the CPU's
+    /// host budget). `None` keeps the configured values.
+    pub cpu_fallback: Option<EmbeddingParallelism>,
     /// Private (0700, server-owned) snapshot directory on the library's mount. `None` makes
     /// no audio embedding is claimed and the capability reports why.
     pub snapshot_dir: Option<PathBuf>,
@@ -206,6 +212,7 @@ impl Default for EmbeddingConfig {
             intra_threads: None,
             provider: kima_ml::onnx::ProviderConfig::default(),
             workers: 1,
+            cpu_fallback: None,
             snapshot_dir: None,
             audio_blocked_reason: None,
             snapshot_limits: kima_ml::input_snapshot::SnapshotLimits::default(),
@@ -251,6 +258,27 @@ impl EmbeddingParallelism {
             workers: workers.unwrap_or(work.max(pool_size)),
         }
     }
+}
+
+// The configuration's bounds match the runtime: more embedding workers than one claim batch
+// never run, and the audio encoder's thread slots leave room for the other sessions.
+const _: () =
+    assert!(kima_core::config::MAX_EMBEDDING_WORKERS as i64 <= crate::stages::embedding::BATCH);
+const _: () =
+    assert!(kima_core::config::MAX_CLAP_AUDIO_THREAD_SLOTS < kima_ml::onnx::MAX_THREAD_SLOTS);
+
+/// Concurrent input snapshots the server allows: the explicit `KIMA_SNAPSHOT_MAX_CONCURRENT`,
+/// else enough for every embedding and analysis worker to hold one at once (never below the
+/// `kima-ml` default). Workers beyond the limit wait for a slot (backpressure); they never
+/// fail or disable audio embedding for it.
+pub fn snapshot_concurrency(
+    explicit: Option<usize>,
+    embedding_workers: usize,
+    analysis_workers: usize,
+) -> usize {
+    explicit.unwrap_or_else(|| {
+        (embedding_workers + analysis_workers).max(kima_ml::input_snapshot::DEFAULT_MAX_CONCURRENT)
+    })
 }
 
 // Never prints the key.
@@ -342,6 +370,47 @@ mod tests {
             EmbeddingParallelism::resolve(Cuda, 32, None, None, Some(1)).workers,
             1
         );
+    }
+
+    #[test]
+    fn snapshot_capacity_covers_every_worker_unless_set_explicitly() {
+        // The CUDA default (8 embedding workers) plus one analysis worker.
+        assert_eq!(snapshot_concurrency(None, 8, 1), 9);
+        assert_eq!(
+            snapshot_concurrency(None, 1, 0),
+            2,
+            "never below the kima-ml default"
+        );
+        assert_eq!(snapshot_concurrency(Some(1), 8, 1), 1, "explicit wins");
+    }
+
+    #[test]
+    fn embedding_workers_never_exceed_one_claim_batch() {
+        assert_eq!(
+            kima_core::config::MAX_CLAP_POOL_SIZE,
+            kima_ml::onnx::MAX_POOL_SIZE
+        );
+        assert_eq!(
+            kima_core::config::MAX_CLAP_INTRA_THREADS,
+            kima_ml::onnx::MAX_INTRA_THREADS
+        );
+        assert_eq!(
+            kima_core::config::MAX_ONNX_HOST_BUDGET_MIB * 1024 * 1024,
+            kima_ml::onnx::MAX_HOST_BUDGET_BYTES
+        );
+        // Defaults stay within the configurable ranges.
+        for provider in [
+            kima_ml::onnx::ExecutionProvider::Cpu,
+            kima_ml::onnx::ExecutionProvider::Cuda,
+        ] {
+            for cores in [1, 4, 16, 64, 256] {
+                let p = EmbeddingParallelism::resolve(provider, cores, None, None, None);
+                assert!(p.workers <= kima_core::config::MAX_EMBEDDING_WORKERS);
+                assert!(
+                    p.pool_size * p.intra_threads <= kima_core::config::MAX_CLAP_AUDIO_THREAD_SLOTS
+                );
+            }
+        }
     }
 
     #[test]

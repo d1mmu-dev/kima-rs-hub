@@ -3,8 +3,12 @@ use super::OnnxError;
 use std::sync::Mutex;
 
 const MAX_SESSIONS: usize = 32;
-const MAX_THREAD_SLOTS: usize = 64;
+/// Intra-op thread slots all ONNX sessions of the process may reserve together.
+pub const MAX_THREAD_SLOTS: usize = 64;
 const MAX_ESTIMATED_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Largest host-memory admission budget accepted (64 GiB).
+pub const MAX_HOST_BUDGET_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
 const SESSION_OVERHEAD: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Default)]
@@ -26,10 +30,13 @@ static LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(M
 /// Sets the process-wide host-memory admission limit (estimated bytes, see
 /// [`super::ProviderConfig`] for how CPU and CUDA sessions are counted). Call before
 /// loading sessions; it never evicts admitted sessions. Values below the default 4 GiB are
-/// accepted (stricter), zero is ignored.
+/// accepted (stricter), zero is ignored and values above [`MAX_HOST_BUDGET_BYTES`] are capped.
 pub fn set_host_budget_bytes(bytes: u64) {
     if bytes > 0 {
-        LIMIT.store(bytes, std::sync::atomic::Ordering::SeqCst);
+        LIMIT.store(
+            bytes.min(MAX_HOST_BUDGET_BYTES),
+            std::sync::atomic::Ordering::SeqCst,
+        );
     }
 }
 
@@ -72,9 +79,17 @@ impl Budget {
             || threads > MAX_THREAD_SLOTS.saturating_sub(self.threads)
             || bytes > limit.saturating_sub(self.bytes)
         {
-            return Err(OnnxError::SessionBuilder(
-                "aggregate ONNX session/thread/memory admission budget exceeded".into(),
-            ));
+            return Err(OnnxError::SessionBuilder(format!(
+                "aggregate ONNX session/thread/memory admission budget exceeded: this pool needs \
+                 {sessions} sessions, {threads} threads and ~{} MiB; in use {}/{MAX_SESSIONS} \
+                 sessions, {}/{MAX_THREAD_SLOTS} threads, ~{}/{} MiB host budget (raise \
+                 KIMA_ONNX_HOST_BUDGET_MIB or lower KIMA_CLAP_POOL_SIZE/KIMA_CLAP_INTRA_THREADS)",
+                bytes.div_ceil(MIB),
+                self.sessions,
+                self.threads,
+                self.bytes.div_ceil(MIB),
+                limit / MIB,
+            )));
         }
         self.sessions += sessions;
         self.threads += threads;

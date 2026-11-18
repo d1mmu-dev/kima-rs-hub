@@ -757,6 +757,121 @@ async fn blocked_snapshot_setup_claims_nothing() {
     db.cleanup().await;
 }
 
+// ---- Workers vs snapshot slots (perf/clap-gpu review, Critical 1) ---------------------------
+
+/// Every track's embedding row is `done` without a consumed attempt, and audio stays
+/// available (nothing latched).
+async fn assert_all_done_unlatched(ctx: &kima_ident::IdentCtx, tracks: &[uuid::Uuid]) {
+    for track in tracks {
+        let (status, attempts, ..) = stage_row(&ctx.pool, *track).await.expect("claimed");
+        assert_eq!((status.as_str(), attempts), ("done", 0), "track {track}");
+    }
+    let status = embedding::cached_status(ctx).unwrap();
+    assert!(
+        status.is_available(kima_ml::Capability::ClapAudioEmbedding),
+        "audio must not be latched: {status:?}"
+    );
+}
+
+/// More embedding workers than snapshot slots: the extra claims wait for a slot
+/// (backpressure) instead of failing as snapshot infrastructure, which would halt the batch
+/// and latch audio embedding off until restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs isolated Postgres + KIMA_CLAP_MODEL_DIR; run with --ignored"]
+async fn more_workers_than_snapshot_slots_wait_instead_of_latching() {
+    let model_dir = model_dir();
+    let db = isolated_db().await;
+    let pool = db.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut config = embedding_config(model_dir, &root);
+    config.workers = 4;
+    config.snapshot_limits = kima_ident::SnapshotLimits {
+        max_concurrent: 1,
+        ..Default::default()
+    };
+    let ctx = ident_ctx_with_embedding(
+        &pool,
+        &root,
+        common::dead_bases(),
+        IdentifySwitch::new(false, true),
+        config,
+    );
+    let tracks = tracks_with_audio(&pool, &root, 6).await;
+    let report = embedding::run_batch(&ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        (report.claimed, report.done, report.failed, report.halted),
+        (6, 6, 0, false),
+        "{report:?}"
+    );
+    assert_all_done_unlatched(&ctx, &tracks).await;
+    db.cleanup().await;
+}
+
+/// The server's CUDA default of eight workers with the snapshot capacity the server derives
+/// for them (`snapshot_concurrency`), on the provider named by `KIMA_E2E_ONNX_PROVIDER`
+/// (`cpu` default, or `cuda`: then `ORT_DYLIB_PATH` must be a CUDA build, the pool must
+/// really run on CUDA and `KIMA_CUDA_LIB_DIR` is passed through).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs isolated Postgres + KIMA_CLAP_MODEL_DIR; run with --ignored"]
+async fn eight_workers_with_the_server_snapshot_capacity_embed_a_batch() {
+    let model_dir = model_dir();
+    let cuda = match std::env::var("KIMA_E2E_ONNX_PROVIDER").as_deref() {
+        Err(_) | Ok("cpu") => false,
+        Ok("cuda") => true,
+        Ok(other) => panic!("KIMA_E2E_ONNX_PROVIDER={other}: expected cpu or cuda"),
+    };
+    let db = isolated_db().await;
+    let pool = db.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut config = embedding_config(model_dir, &root);
+    config.workers = 8;
+    config.snapshot_limits.max_concurrent = kima_ident::snapshot_concurrency(None, 8, 1);
+    assert_eq!(config.snapshot_limits.max_concurrent, 9);
+    if cuda {
+        config.pool_size = 2;
+        config.provider = kima_ml::onnx::ProviderConfig {
+            provider: kima_ml::onnx::ExecutionProvider::Cuda,
+            cuda_lib_dir: std::env::var_os("KIMA_CUDA_LIB_DIR").map(PathBuf::from),
+            ..Default::default()
+        };
+    }
+    let ctx = ident_ctx_with_embedding(
+        &pool,
+        &root,
+        common::dead_bases(),
+        IdentifySwitch::new(false, true),
+        config,
+    );
+    let tracks = tracks_with_audio(&pool, &root, 12).await;
+    let started = std::time::Instant::now();
+    let report = embedding::run_batch(&ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    let provider = embedding::audio_provider(&ctx);
+    eprintln!(
+        "provider={provider:?} workers={} report={report:?} elapsed={:?}",
+        embedding::effective_workers(&ctx),
+        started.elapsed()
+    );
+    assert_eq!(
+        provider.as_ref().is_some_and(|p| p.is_cuda()),
+        cuda,
+        "{provider:?}"
+    );
+    assert_eq!(embedding::effective_workers(&ctx), 8);
+    assert_eq!(
+        (report.claimed, report.done, report.failed, report.halted),
+        (12, 12, 0, false),
+        "{report:?}"
+    );
+    assert_all_done_unlatched(&ctx, &tracks).await;
+    db.cleanup().await;
+}
+
 // ---- D-194 checkpoint transition on the real music model -------------------------------------
 
 /// Every `embedding` stage row and every stored vector, in a stable order.

@@ -6,7 +6,12 @@
 //! it) plus the CUDA 12 / cuDNN 9 user-space libraries, either on the loader path or in
 //! [`ProviderConfig::cuda_lib_dir`]. If any CUDA step fails, the pool is built on the CPU
 //! instead and [`ActiveProvider::CpuFallback`] records why; nothing is downloaded or searched
-//! for.
+//! for. CUDA sessions run one warm-up inference each while the pool is built, so allocation
+//! or kernel failures that only show at run time (a too small `cuda_mem_limit_bytes`, a
+//! missing cuDNN kernel) also fall back to the CPU at load instead of failing every track.
+//! Note that a CUDA session may still place individual nodes on the CPU execution provider
+//! (ORT's partitioning for nodes the CUDA EP does not implement); `Cuda` means the session
+//! was created with the CUDA EP first and its warm-up ran, not that every node runs on the GPU.
 //!
 //! Admission: a CPU session reserves four times its encoded size against the process host
 //! budget (weights, prepacked copies and activations live in host memory). A CUDA session
@@ -16,7 +21,8 @@
 //! `gpu_mem_limit`), not by the host budget.
 use std::path::PathBuf;
 
-/// Requested execution provider.
+/// Requested execution provider. Parsed from configuration by `kima_core` (one parser for
+/// `KIMA_ONNX_PROVIDER`); this crate only consumes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionProvider {
@@ -25,18 +31,11 @@ pub enum ExecutionProvider {
     Cuda,
 }
 
-impl std::str::FromStr for ExecutionProvider {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "cpu" => Ok(Self::Cpu),
-            "cuda" => Ok(Self::Cuda),
-            other => Err(format!(
-                "unknown ONNX execution provider {other:?} (cpu|cuda)"
-            )),
-        }
-    }
+/// Session count and intra-op threads of a pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolShape {
+    pub pool_size: usize,
+    pub intra_threads: Option<usize>,
 }
 
 /// Provider request for one pool.
@@ -51,6 +50,10 @@ pub struct ProviderConfig {
     pub cuda_lib_dir: Option<PathBuf>,
     /// Per-session CUDA arena limit in bytes; `None` is ORT's default (unbounded).
     pub cuda_mem_limit_bytes: Option<usize>,
+    /// Shape of the pool when CUDA was requested but the pool falls back to the CPU; `None`
+    /// keeps the requested shape. CUDA-tuned shapes (several one-thread sessions) do not fit
+    /// the CPU's host-memory budget, so callers pass their CPU shape here.
+    pub cpu_fallback: Option<PoolShape>,
 }
 
 impl ProviderConfig {
@@ -103,19 +106,6 @@ pub(super) fn preload_cuda(dir: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_provider_names() {
-        assert_eq!(
-            "cpu".parse::<ExecutionProvider>(),
-            Ok(ExecutionProvider::Cpu)
-        );
-        assert_eq!(
-            " CUDA ".parse::<ExecutionProvider>(),
-            Ok(ExecutionProvider::Cuda)
-        );
-        assert!("rocm".parse::<ExecutionProvider>().is_err());
-    }
 
     #[test]
     fn active_provider_serializes_with_tag() {

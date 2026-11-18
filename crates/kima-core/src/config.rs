@@ -74,28 +74,119 @@ pub struct Config {
     pub clap_runtime: ClapRuntimeEnv,
 }
 
-/// CLAP audio ONNX runtime settings; unset values are resolved from the machine's cores by
-/// `kima_ident::EmbeddingParallelism::resolve`.
+/// `KIMA_ONNX_PROVIDER`: execution provider requested for the CLAP audio encoder. This is
+/// the only parser of the variable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OnnxProvider {
+    #[default]
+    Cpu,
+    Cuda,
+}
+
+impl std::str::FromStr for OnnxProvider {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "cpu" => Ok(Self::Cpu),
+            "cuda" => Ok(Self::Cuda),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Upper bounds of the CLAP runtime settings (inclusive; every lower bound is 1).
+pub const MAX_CLAP_POOL_SIZE: usize = 8;
+pub const MAX_CLAP_INTRA_THREADS: usize = 16;
+/// Embedding claims are taken in batches of 20 (`kima_ident::stages::embedding::BATCH`):
+/// more workers than that never run at once.
+pub const MAX_EMBEDDING_WORKERS: usize = 20;
+/// 64 GiB, the cap `kima_ml::onnx::set_host_budget_bytes` applies as well.
+pub const MAX_ONNX_HOST_BUDGET_MIB: u64 = 64 * 1024;
+pub const DEFAULT_ONNX_HOST_BUDGET_MIB: u64 = 4096;
+/// 1 TiB; far above any GPU, low enough that the byte value never overflows.
+pub const MAX_CUDA_MEM_LIMIT_MIB: u64 = 1024 * 1024;
+/// ONNX intra-op thread slots of the process (`kima_ml::onnx::MAX_THREAD_SLOTS`) minus the
+/// slots kept for the CLAP text encoder and the MusiCNN sessions.
+pub const MAX_CLAP_AUDIO_THREAD_SLOTS: usize = 64 - 16;
+/// Host-budget estimates of the pinned music CLAP exports on the CPU (D-194: 4 × encoded
+/// bytes + 16 MiB per session): ~1.06 GiB per audio session, ~1.88 GiB for the text session.
+pub const CLAP_AUDIO_CPU_SESSION_MIB: u64 = 1100;
+pub const CLAP_TEXT_CPU_SESSION_MIB: u64 = 1940;
+
+/// CLAP audio ONNX runtime settings; unset values are resolved from the machine's cores and
+/// the active provider by `kima_ident::EmbeddingParallelism::resolve`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClapRuntimeEnv {
-    /// `KIMA_ONNX_PROVIDER=cuda` (default `cpu`): run the CLAP audio encoder on the CUDA
-    /// execution provider, falling back to the CPU when it cannot be initialized.
-    pub cuda: bool,
+    /// `KIMA_ONNX_PROVIDER` (`cpu` default, or `cuda`): `cuda` runs the CLAP audio encoder
+    /// on the CUDA execution provider, falling back to the CPU when it cannot be used.
+    pub provider: OnnxProvider,
     /// `KIMA_CUDA_DEVICE_ID` (default 0).
-    pub cuda_device_id: i32,
+    pub cuda_device_id: Option<i32>,
     /// `KIMA_CUDA_LIB_DIR`: absolute directory with the CUDA 12 / cuDNN 9 libraries to preload.
     pub cuda_lib_dir: Option<PathBuf>,
-    /// `KIMA_CUDA_MEM_LIMIT_MIB`: per-session CUDA arena limit.
+    /// `KIMA_CUDA_MEM_LIMIT_MIB`: per-session CUDA arena limit (1..=[`MAX_CUDA_MEM_LIMIT_MIB`]).
     pub cuda_mem_limit_mib: Option<u64>,
-    /// `KIMA_CLAP_POOL_SIZE`: audio ONNX sessions (1..=8).
+    /// `KIMA_CLAP_POOL_SIZE`: audio ONNX sessions (1..=[`MAX_CLAP_POOL_SIZE`]).
     pub pool_size: Option<usize>,
-    /// `KIMA_CLAP_INTRA_THREADS`: ORT intra-op threads per audio session (1..=16).
+    /// `KIMA_CLAP_INTRA_THREADS`: ORT intra-op threads per audio session
+    /// (1..=[`MAX_CLAP_INTRA_THREADS`]).
     pub intra_threads: Option<usize>,
-    /// `KIMA_EMBEDDING_WORKERS`: concurrent blocking embedding workers (1..=32).
+    /// `KIMA_EMBEDDING_WORKERS`: concurrent blocking embedding workers
+    /// (1..=[`MAX_EMBEDDING_WORKERS`]).
     pub workers: Option<usize>,
     /// `KIMA_ONNX_HOST_BUDGET_MIB`: process-wide ONNX host-memory admission budget
-    /// (default 4096).
+    /// (default [`DEFAULT_ONNX_HOST_BUDGET_MIB`], 1..=[`MAX_ONNX_HOST_BUDGET_MIB`]).
     pub host_budget_mib: Option<u64>,
+}
+
+impl ClapRuntimeEnv {
+    /// CUDA settings that are set although the provider is the CPU (they have no effect);
+    /// the server logs a warning naming them.
+    pub fn ignored_cuda_settings(&self) -> Vec<&'static str> {
+        if self.provider == OnnxProvider::Cuda {
+            return Vec::new();
+        }
+        [
+            ("KIMA_CUDA_DEVICE_ID", self.cuda_device_id.is_some()),
+            ("KIMA_CUDA_LIB_DIR", self.cuda_lib_dir.is_some()),
+            ("KIMA_CUDA_MEM_LIMIT_MIB", self.cuda_mem_limit_mib.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, set)| set.then_some(name))
+        .collect()
+    }
+
+    /// Combinations that cannot be admitted, checked when explicitly configured: the audio
+    /// thread slots, and the host budget a CPU (or CPU-fallback) pool needs next to the text
+    /// encoder. Values left unset are resolved within these limits.
+    fn validate(&self) -> Result<(), ConfigError> {
+        if let (Some(pool), Some(threads)) = (self.pool_size, self.intra_threads)
+            && pool * threads > MAX_CLAP_AUDIO_THREAD_SLOTS
+        {
+            return Err(ConfigError::Combination(format!(
+                "KIMA_CLAP_POOL_SIZE × KIMA_CLAP_INTRA_THREADS = {pool} × {threads} = {} \
+                 exceeds the {MAX_CLAP_AUDIO_THREAD_SLOTS} ONNX thread slots available to the \
+                 CLAP audio encoder (64 per process, 16 kept for the text encoder and MusiCNN)",
+                pool * threads
+            )));
+        }
+        if self.pool_size.is_some() || self.host_budget_mib.is_some() {
+            let pool = self.pool_size.unwrap_or(1) as u64;
+            let budget = self.host_budget_mib.unwrap_or(DEFAULT_ONNX_HOST_BUDGET_MIB);
+            let need = pool * CLAP_AUDIO_CPU_SESSION_MIB + CLAP_TEXT_CPU_SESSION_MIB;
+            if need > budget {
+                return Err(ConfigError::Combination(format!(
+                    "{pool} CLAP audio session(s) on the CPU (KIMA_CLAP_POOL_SIZE; also the CUDA \
+                     fallback) need ~{need} MiB of ONNX host budget ({pool} × \
+                     ~{CLAP_AUDIO_CPU_SESSION_MIB} MiB audio + ~{CLAP_TEXT_CPU_SESSION_MIB} MiB \
+                     text), but KIMA_ONNX_HOST_BUDGET_MIB is {budget} (allowed \
+                     1..={MAX_ONNX_HOST_BUDGET_MIB}, default {DEFAULT_ONNX_HOST_BUDGET_MIB})"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 // Never prints a secret.
@@ -187,6 +278,14 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("invalid value for {name}: {value:?}")]
     Invalid { name: &'static str, value: String },
+    #[error("invalid value for {name}: {value:?} (allowed: {allowed})")]
+    OutOfRange {
+        name: &'static str,
+        value: String,
+        allowed: String,
+    },
+    #[error("invalid combination: {0}")]
+    Combination(String),
 }
 
 impl Config {
@@ -372,38 +471,40 @@ impl Config {
                 value: raw,
             })?,
         };
-        let bounded = |name: &'static str, max: u64| -> Result<Option<usize>, ConfigError> {
-            match positive(name)? {
-                Some(n) if n <= max => Ok(Some(n as usize)),
-                Some(n) => Err(ConfigError::Invalid {
+        let bounded = |name: &'static str, max: u64| -> Result<Option<u64>, ConfigError> {
+            let Some(raw) = value(name) else {
+                return Ok(None);
+            };
+            match raw.parse::<u64>() {
+                Ok(n) if (1..=max).contains(&n) => Ok(Some(n)),
+                _ => Err(ConfigError::OutOfRange {
                     name,
-                    value: n.to_string(),
+                    value: raw,
+                    allowed: format!("an integer in 1..={max}"),
                 }),
-                None => Ok(None),
             }
         };
+        let bounded_usize = |name: &'static str, max: usize| {
+            bounded(name, max as u64).map(|n| n.map(|n| n as usize))
+        };
         let clap_runtime = ClapRuntimeEnv {
-            cuda: match value("KIMA_ONNX_PROVIDER") {
-                None => false,
-                Some(raw) => match raw.to_ascii_lowercase().as_str() {
-                    "cpu" => false,
-                    "cuda" => true,
-                    _ => {
-                        return Err(ConfigError::Invalid {
-                            name: "KIMA_ONNX_PROVIDER",
-                            value: raw,
-                        });
-                    }
-                },
+            provider: match value("KIMA_ONNX_PROVIDER") {
+                None => OnnxProvider::Cpu,
+                Some(raw) => raw.parse().map_err(|()| ConfigError::OutOfRange {
+                    name: "KIMA_ONNX_PROVIDER",
+                    value: raw,
+                    allowed: "cpu or cuda".into(),
+                })?,
             },
             cuda_device_id: match value("KIMA_CUDA_DEVICE_ID") {
-                None => 0,
+                None => None,
                 Some(raw) => match raw.parse::<i32>() {
-                    Ok(n) if n >= 0 => n,
+                    Ok(n) if n >= 0 => Some(n),
                     _ => {
-                        return Err(ConfigError::Invalid {
+                        return Err(ConfigError::OutOfRange {
                             name: "KIMA_CUDA_DEVICE_ID",
                             value: raw,
+                            allowed: format!("an integer in 0..={}", i32::MAX),
                         });
                     }
                 },
@@ -412,18 +513,20 @@ impl Config {
                 None => None,
                 Some(raw) if std::path::Path::new(&raw).is_absolute() => Some(raw.into()),
                 Some(raw) => {
-                    return Err(ConfigError::Invalid {
+                    return Err(ConfigError::OutOfRange {
                         name: "KIMA_CUDA_LIB_DIR",
                         value: raw,
+                        allowed: "an absolute directory".into(),
                     });
                 }
             },
-            cuda_mem_limit_mib: positive("KIMA_CUDA_MEM_LIMIT_MIB")?,
-            pool_size: bounded("KIMA_CLAP_POOL_SIZE", 8)?,
-            intra_threads: bounded("KIMA_CLAP_INTRA_THREADS", 16)?,
-            workers: bounded("KIMA_EMBEDDING_WORKERS", 32)?,
-            host_budget_mib: positive("KIMA_ONNX_HOST_BUDGET_MIB")?,
+            cuda_mem_limit_mib: bounded("KIMA_CUDA_MEM_LIMIT_MIB", MAX_CUDA_MEM_LIMIT_MIB)?,
+            pool_size: bounded_usize("KIMA_CLAP_POOL_SIZE", MAX_CLAP_POOL_SIZE)?,
+            intra_threads: bounded_usize("KIMA_CLAP_INTRA_THREADS", MAX_CLAP_INTRA_THREADS)?,
+            workers: bounded_usize("KIMA_EMBEDDING_WORKERS", MAX_EMBEDDING_WORKERS)?,
+            host_budget_mib: bounded("KIMA_ONNX_HOST_BUDGET_MIB", MAX_ONNX_HOST_BUDGET_MIB)?,
         };
+        clap_runtime.validate()?;
         // Upstream compares with `'true'`; any other value leaves AcoustID on.
         let acoustid_disabled =
             value("ACOUSTID_DISABLED").is_some_and(|v| v.eq_ignore_ascii_case("true"));
@@ -1057,9 +1160,10 @@ mod tests {
         let base = ("DATABASE_URL", "postgres://x");
         let config = Config::from_lookup(lookup(&[base])).unwrap();
         assert_eq!(config.clap_runtime, ClapRuntimeEnv::default());
+        assert_eq!(config.clap_runtime.provider, OnnxProvider::Cpu);
         let config = Config::from_lookup(lookup(&[
             base,
-            ("KIMA_ONNX_PROVIDER", "CUDA"),
+            ("KIMA_ONNX_PROVIDER", " CUDA "),
             ("KIMA_CUDA_DEVICE_ID", "1"),
             ("KIMA_CUDA_LIB_DIR", "/opt/cuda12"),
             ("KIMA_CUDA_MEM_LIMIT_MIB", "2048"),
@@ -1072,8 +1176,8 @@ mod tests {
         assert_eq!(
             config.clap_runtime,
             ClapRuntimeEnv {
-                cuda: true,
-                cuda_device_id: 1,
+                provider: OnnxProvider::Cuda,
+                cuda_device_id: Some(1),
                 cuda_lib_dir: Some("/opt/cuda12".into()),
                 cuda_mem_limit_mib: Some(2048),
                 pool_size: Some(2),
@@ -1082,23 +1186,94 @@ mod tests {
                 host_budget_mib: Some(8192),
             }
         );
+        assert!(config.clap_runtime.ignored_cuda_settings().is_empty());
         for (name, bad) in [
             ("KIMA_ONNX_PROVIDER", "rocm"),
             ("KIMA_CUDA_DEVICE_ID", "-1"),
             ("KIMA_CUDA_LIB_DIR", "relative/dir"),
+            ("KIMA_CUDA_MEM_LIMIT_MIB", "0"),
+            ("KIMA_CUDA_MEM_LIMIT_MIB", "1048577"),
+            ("KIMA_CUDA_MEM_LIMIT_MIB", "18446744073709551615"),
             ("KIMA_CLAP_POOL_SIZE", "9"),
             ("KIMA_CLAP_POOL_SIZE", "0"),
             ("KIMA_CLAP_INTRA_THREADS", "17"),
-            ("KIMA_EMBEDDING_WORKERS", "33"),
+            ("KIMA_EMBEDDING_WORKERS", "21"),
             ("KIMA_ONNX_HOST_BUDGET_MIB", "x"),
+            ("KIMA_ONNX_HOST_BUDGET_MIB", "65537"),
         ] {
+            let err = Config::from_lookup(lookup(&[base, (name, bad)])).unwrap_err();
             assert!(
-                matches!(
-                    Config::from_lookup(lookup(&[base, (name, bad)])),
-                    Err(ConfigError::Invalid { name: n, .. }) if n == name
-                ),
-                "{name}={bad}"
+                matches!(&err, ConfigError::OutOfRange { name: n, .. } if *n == name),
+                "{name}={bad}: {err:?}"
             );
+            assert!(err.to_string().contains("allowed"), "{err}");
         }
+    }
+
+    #[test]
+    fn clap_runtime_rejects_combinations_that_cannot_be_admitted() {
+        let base = ("DATABASE_URL", "postgres://x");
+        let err = |pairs: &[(&str, &str)]| {
+            let mut all = vec![base];
+            all.extend_from_slice(pairs);
+            match Config::from_lookup(lookup(&all)) {
+                Err(ConfigError::Combination(message)) => message,
+                other => panic!("{pairs:?}: {other:?}"),
+            }
+        };
+        let threads = err(&[
+            ("KIMA_CLAP_POOL_SIZE", "4"),
+            ("KIMA_CLAP_INTRA_THREADS", "16"),
+            ("KIMA_ONNX_HOST_BUDGET_MIB", "16384"),
+        ]);
+        assert!(
+            threads.contains("4 × 16 = 64") && threads.contains("48"),
+            "{threads}"
+        );
+        let budget = err(&[("KIMA_CLAP_POOL_SIZE", "2")]);
+        assert!(
+            budget.contains("4140") && budget.contains("4096"),
+            "{budget}"
+        );
+        assert!(budget.contains("1..=65536"), "{budget}");
+        let budget = err(&[("KIMA_ONNX_HOST_BUDGET_MIB", "2048")]);
+        assert!(budget.contains("3040"), "{budget}");
+        // Admissible combinations pass.
+        for ok in [
+            vec![
+                ("KIMA_CLAP_POOL_SIZE", "3"),
+                ("KIMA_CLAP_INTRA_THREADS", "16"),
+                ("KIMA_ONNX_HOST_BUDGET_MIB", "8192"),
+            ],
+            vec![
+                ("KIMA_CLAP_POOL_SIZE", "2"),
+                ("KIMA_ONNX_HOST_BUDGET_MIB", "4140"),
+            ],
+            vec![("KIMA_CLAP_INTRA_THREADS", "16")],
+        ] {
+            let mut all = vec![base];
+            all.extend(ok.iter().copied());
+            assert!(Config::from_lookup(lookup(&all)).is_ok(), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn cuda_settings_with_the_cpu_provider_are_reported_as_ignored() {
+        let base = ("DATABASE_URL", "postgres://x");
+        let config = Config::from_lookup(lookup(&[
+            base,
+            ("KIMA_CUDA_LIB_DIR", "/opt/cuda12"),
+            ("KIMA_CUDA_MEM_LIMIT_MIB", "512"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.clap_runtime.ignored_cuda_settings(),
+            ["KIMA_CUDA_LIB_DIR", "KIMA_CUDA_MEM_LIMIT_MIB"]
+        );
+        let config = Config::from_lookup(lookup(&[base, ("KIMA_CUDA_DEVICE_ID", "0")])).unwrap();
+        assert_eq!(
+            config.clap_runtime.ignored_cuda_settings(),
+            ["KIMA_CUDA_DEVICE_ID"]
+        );
     }
 }

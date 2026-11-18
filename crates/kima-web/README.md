@@ -248,6 +248,61 @@ shows no hidden count; media cards have no badge slot, so cards name a known lab
 nothing for unknown; there is no separate explicit ("E") badge because upstream's wire shapes carry no `explicit` key
 (plan S4 lists one; recorded in D-207).
 
+## Vibe (M10, first slice, D-250)
+
+`/vibe`, optionally `/vibe?track=<uuid>` (sidebar item 05 "Vibe", bottom-nav item after Collection). Reference: upstream
+`frontend/app/vibe/page.tsx`, `features/vibe/*`, `components/player/VibeToggleButton.tsx` at the external checkout's
+`9450c94b`. The page reads `GET /api/system/features` first: with `vibeEmbeddings` off it says so ("Vibe is not
+available on this server", the model and analysis it needs) and sends no vibe request. Otherwise it loads
+`GET /api/vibe/map`; a 202 `{computing:true}` shows "Charting your library" and is asked again every 4 s while the page is
+open (an hour at most, then "Try again"); a failure shows the backend's message with "Try again"; an empty map shows
+upstream's "No tracks with vibe analysis yet".
+
+What is on the page:
+
+- **Map**: every track as a point at its `x`/`y`, seen from above, coloured by its dominant mood (upstream's mood colours);
+  hover shows "title — artist"; clicking a point opens its panel. Lit tracks (a mood, a search, a track's matches) are
+  drawn over the dimmed field; the selected track has a white ring and the playing one a brand-coloured ring.
+- **Search box** (top centre, full width on phone/tablet): after a 250 ms pause, title/artist matches on the map (every
+  word, accents and case ignored, word starts first: upstream `searchLibrary`) are lit and listed at once, then tracks
+  that *sound* like the words (`POST /api/vibe/search`, limit 10) are added below them, marked "sounds like it"
+  (upstream `useTrackFinder`'s merge). A newer keystroke drops older answers. Each result: pick (opens its panel), Play,
+  Add to queue. A sound-search error (503 without the music CLAP model, 504) is shown under the name matches.
+- **Mood legend** (bottom left): each dominant mood with its count, moods first; a click lights that mood (another
+  click turns it off); the track total below.
+- **Track panel** (right; bottom sheet on phone/tablet): cover, title, artist and album links, mood bars and
+  positivity from the map (a track not on the map yet, from a sound search or `?track=`, shows its detail with "Not on
+  the map yet"), then Play, **Match Vibe** (the track and its up to 50 matches replace the queue and play, upstream's vibe
+  operation) and **Similar** (`GET /api/vibe/similar/<id>?limit=50`: the matches are lit on the map **and listed in the
+  panel** with their similarity, play-from-here, add-to-queue and "Play as vibe queue"). A 404 "No similar tracks found"
+  or any error shows in the panel.
+- **Player**: the desktop bar has "match this vibe" (audio-waveform icon after repeat) only while `vibeEmbeddings` is
+  on, disabled for no track or a podcast episode. It opens `/vibe?track=<current track>`, which shows that track's
+  matches; "Match Vibe" / "Play as vibe queue" there replaces the queue.
+
+**Compromises and deferred parts** (each also in D-250):
+
+- No WebGL scene: a flat SVG drawing of `x`/`y` (no `z`, depth, glow shader, rotate/pan/zoom, labels toggle, "show the
+  whole library" reset, fly-to on a search pick, constellation lines of the queue). Large libraries draw one SVG circle
+  per track.
+- No double-click play and no right-click track menu (vertigo 0.13 has no dblclick/contextmenu events here); Play is in
+  the panel and the result rows.
+- **Song Path** (`POST /vibe/path`) and **Blend** (`POST /vibe/alchemy`) tools are not ported (backend routes exist);
+  deferred to the next M10 vibe slice. Mood summary (`/vibe/mood-summary`, the collection's mood band) and per-track mood
+  (`/vibe/mood/:id`) are not used here either.
+- "Similar" lists the matches in the panel (upstream only lights them on the map); the player button opens the page
+  instead of switching the queue to vibe mode at once, and there is no vibe-mode on/off state (upstream
+  `activeOperation`, "turn off vibe mode") nor its queue badges/match percentages in the queue panel.
+- No sound-features rebuild progress note (`useSoundRebuild`); no onboarding hint persistence (the hint is dismissed for
+  the visit only); the mood legend has no hover preview and no compact phone chip/dialog; no phone `VibePanelSheet`
+  tabs (the panel becomes a bottom sheet instead).
+- The page is gated on `vibeEmbeddings` with its own message (upstream shows the empty-map note instead).
+- Search debounce is one 250 ms pause for both name and sound matches (upstream 150 ms for names; its sound search runs
+  only inside the Song Path/Blend pickers).
+- Mobile/overlay players have no "match this vibe" button yet (desktop bar only).
+- Not measured with `tools/compare-kima-web-visual.mjs` and not browser-checked against the reference; the map
+  `ETag`/304 gate (D-185, roadmap M10 vibe-page acceptance) is not implemented in this slice.
+
 ## Visual parity: compromises and assets
 
 kima-web does **not** reproduce the upstream UI as a finished goal. The target is the upstream kima-hub **v1.12.3** UI,
@@ -300,7 +355,8 @@ login shell for guarded pages) with the hydrated page, so it is not a layout-shi
 The owner placed these outside M9; they are omitted, not stubbed:
 
 - Sidebar entries queue, vibe, browse, stats (kima-web has collection / search / playlists instead; the playlist stack
-  below is therefore ~94px higher). This is the largest block of diff in every desktop table row.
+  below is therefore ~94px higher). This is the largest block of diff in every desktop table row. **[M10: the vibe entry
+  and the player's "match this vibe" now exist, see "Vibe" above.]**
 - Player bar: "match this vibe" and "show lyrics" buttons (the transport group is ~32px narrower), keyboard-shortcut
   info button, expand-to-fullscreen button (the volume slider is longer: 150px against 40px).
 - Header: bell (notifications) and the version badge shows kima-web's `v0.1.0`, legacy shows its own `v1.11.0`.

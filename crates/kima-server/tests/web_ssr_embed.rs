@@ -157,6 +157,8 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
         "/podcasts",
         "/podcasts/show?id=0b1c2d3e",
         "/podcasts/category?id=1303",
+        "/vibe",
+        "/vibe?track=0b1c2d3e",
         ASSETS[0],
         ASSETS[1],
     ] {
@@ -191,6 +193,7 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
         "/no/such/page",
         "/loginx",
         "/searching",
+        "/vibes",
         "/collections",
         "/playlist",
         "/x/login",
@@ -370,6 +373,19 @@ async fn login_is_server_rendered_markup(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(playlist.status(), StatusCode::OK);
+    // The vibe page (M10): its public shell (features and map load in the browser) and its nav items.
+    let vibe = reqwest::get(format!(
+        "{base}/vibe?track=00000000-0000-0000-0000-000000000000"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(vibe.status(), StatusCode::OK);
+    let vibe = vibe.text().await.unwrap();
+    assert!(
+        vibe.contains(r#"data-testid="vibe-page""#) && vibe.contains("Charting your library"),
+        "{vibe}"
+    );
+    assert!(vibe.contains(r#"href="/vibe""#), "{vibe}");
 
     // The two files the page names are served through the proxy; others in the directory are not.
     let attr = |name: &str| -> String {

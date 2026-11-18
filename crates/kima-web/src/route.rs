@@ -2,7 +2,7 @@
 //!
 //! Login, setup (onboarding), the library browse root with its albums / tracks drill-downs, search,
 //! playlists (list and detail), settings and podcasts (home, a followed show or an Apple preview,
-//! a category's chart).
+//! a category's chart) and the vibe map.
 
 use std::fmt;
 
@@ -44,6 +44,11 @@ pub enum Route {
     /// `/podcasts/category?id=<n>`: one Apple category's chart.
     PodcastCategory {
         id: u32,
+    },
+    /// `/vibe`, optionally `?track=<uuid>` (the track whose matches are shown; the player's
+    /// "match this vibe" opens it).
+    Vibe {
+        track: Option<String>,
     },
     NotFound,
 }
@@ -87,6 +92,7 @@ impl Route {
             "/playlists" => Route::Playlists,
             "/settings" => Route::Settings,
             "/podcasts" => Route::Podcasts,
+            "/vibe" => param("track").map_or(Route::NotFound, |track| Route::Vibe { track }),
             "/podcasts/show" => match (param("id"), raw(query, "itunesId")) {
                 (Ok(Some(id)), _) => Route::PodcastShow { id },
                 (Ok(None), Some(itunes)) if is_number(itunes) => Route::PodcastPreview {
@@ -145,6 +151,8 @@ impl fmt::Display for Route {
             Route::PodcastShow { id } => write!(f, "/podcasts/show?id={id}"),
             Route::PodcastPreview { itunes_id } => write!(f, "/podcasts/show?itunesId={itunes_id}"),
             Route::PodcastCategory { id } => write!(f, "/podcasts/category?id={id}"),
+            Route::Vibe { track: None } => f.write_str("/vibe"),
+            Route::Vibe { track: Some(id) } => write!(f, "/vibe?track={id}"),
             Route::NotFound => f.write_str("/404"),
         }
     }
@@ -267,6 +275,22 @@ mod tests {
         );
         assert!(Route::Podcasts.requires_auth());
         assert!(Route::PodcastCategory { id: 1 }.requires_auth());
+    }
+
+    #[test]
+    fn vibe_page_takes_an_optional_track_query_param() {
+        assert_eq!(Route::new("/vibe"), Route::Vibe { track: None });
+        assert_eq!(Route::new("/vibe/"), Route::Vibe { track: None });
+        assert_eq!(Route::Vibe { track: None }.to_string(), "/vibe");
+        let with = Route::Vibe {
+            track: Some(ID.into()),
+        };
+        assert_eq!(with.to_string(), format!("/vibe?track={ID}"));
+        assert_eq!(Route::from(with.to_string()), with);
+        assert!(with.requires_auth());
+        for url in ["/vibe?track=<script>", "/vibe/map", "/vibe?track=a b"] {
+            assert_eq!(Route::new(url), Route::NotFound, "{url}");
+        }
     }
 
     #[test]

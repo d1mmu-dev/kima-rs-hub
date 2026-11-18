@@ -1005,7 +1005,9 @@ impl Player {
     }
 
     /// The desktop player bar (`UniversalPlayer` at its widest: cover + title, transport, seek, volume).
-    pub fn desktop_bar(&self) -> DomNode {
+    /// The desktop player bar. `vibe` is the "match this vibe" control the shell builds (it needs the
+    /// router and the server's features); it sits after repeat, as upstream's `VibeToggleButton`.
+    pub fn desktop_bar(&self, vibe: DomNode) -> DomNode {
         let me = self.clone();
         let current = self.current();
         let has_track = current.map(|i| i.is_some());
@@ -1203,6 +1205,7 @@ impl Player {
                                     disabled={no_track.clone()} on_click={bind!(me, |_| me.cycle_repeat())}>
                                     {repeat_icon}
                                 </button>
+                                {vibe}
                             </div>
                             <div class="w-full flex items-center gap-3">
                                 <span class={times_class}>{position_text}</span>

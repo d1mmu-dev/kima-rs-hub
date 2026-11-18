@@ -10,6 +10,7 @@ pub mod profiles;
 pub mod search;
 pub mod settings;
 pub mod tracks;
+pub mod vibe;
 
 use vertigo::{DomNode, dom};
 

@@ -5,6 +5,11 @@ Tokenizer: a local roberta-base directory plus an externally supplied trusted ma
 {"repository", "revision", "files": {name: sha256}}; it must equal the revision and file
 SHA-256 values the pinned upstream Dockerfile declares, every file is verified before use and
 only the verified bytes are loaded (from a private offline cache), never resolved by name.
+Models: each pinned ONNX file is copied into the same private temporary directory while its
+SHA-256 is computed over the written bytes; the analyzer loads those copies (upstream's analyzer
+opens models by path, so in-memory bytes would need a patched analyzer). The copies are re-hashed
+after inference. Trust boundary: a same-user process able to write the private temporary
+directory is not prevented, only detected afterwards.
 """
 import argparse
 import hashlib
@@ -101,6 +106,44 @@ def stage_tokenizer(manifest, source_dir, cache_root):
             f.write(data)
     return home
 
+MODEL_LIMIT = 2_000_000_000
+
+def stage_models(model_dir, pins, cache_root):
+    """Copies each pinned model into a new private (0700) directory under `cache_root`, hashing the
+    exact bytes while they are written, and returns that directory. The analyzer is pointed at these
+    copies, so replacing a file in `model_dir` after this check cannot change what it loads (no
+    verify-by-path-then-reopen window on the caller's directory). Trust boundary: `cache_root` must
+    be a private temporary directory of this process; another process of the same user can still
+    write there, which `verify_staged_models` detects only after inference, not prevents."""
+    source = Path(model_dir).resolve(strict=True)
+    target = Path(cache_root, 'models')
+    target.mkdir(mode=0o700, parents=True)
+    for name, expected in sorted(pins.items()):
+        require(BASENAME.fullmatch(name) is not None, f'model file name {name!r}')
+        fd = os.open(source / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(fd, 'rb') as src:
+            st = os.fstat(src.fileno())
+            require(stat.S_ISREG(st.st_mode) and st.st_size <= MODEL_LIMIT,
+                    f'{name}: expected a bounded regular file')
+            out = os.open(target / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                          | os.O_CLOEXEC, 0o600)
+            h = hashlib.sha256()
+            total = 0
+            with os.fdopen(out, 'wb') as dst:
+                while chunk := src.read(1024 * 1024):
+                    total += len(chunk)
+                    require(total <= MODEL_LIMIT, f'{name} exceeds the size limit')
+                    h.update(chunk)
+                    dst.write(chunk)
+        require(h.hexdigest() == expected, f'{name} SHA-256 mismatch')
+        os.chmod(target / name, 0o400)
+    return target
+
+def verify_staged_models(pins, target):
+    require(sorted(os.listdir(target)) == sorted(pins), 'staged model files changed')
+    for name, expected in pins.items():
+        require(digest(target / name, MODEL_LIMIT) == expected, f'staged model {name} changed')
+
 def verify_staged(manifest, home):
     snapshot = home / 'hub' / f'models--{TOKENIZER_REPOSITORY}' / 'snapshots' / manifest['revision']
     require(sorted(os.listdir(snapshot)) == sorted(manifest['files']), 'staged tokenizer files changed')
@@ -119,9 +162,7 @@ def main():
                    help='trusted external JSON: repository, revision, files {name: sha256}')
     p.add_argument('--licensed-private-use-confirmed', action='store_true', required=True)
     args = p.parse_args()
-    model = Path(args.model_dir).resolve(strict=True)
-    for name, expected in PINS.items():
-        require(digest(model / name, 2_000_000_000) == expected, f'{name} SHA-256 mismatch')
+    model_dir = Path(args.model_dir).resolve(strict=True)
     tracks = json.loads(Path(args.audio_list).read_text())
     require(len(tracks) == 20 and len({x['path'] for x in tracks}) == 20,
             'audio list must name exactly 20 distinct files')
@@ -141,6 +182,8 @@ def main():
     # Only GPL source code is copied; no weights, audio or generated derivatives enter the repo.
     with tempfile.TemporaryDirectory(prefix='kima-zero-shot-reference-') as td:
         hf_home = stage_tokenizer(tokenizer, args.tokenizer_dir, td)
+        # Verified private copies: the analyzer loads exactly the bytes that were hashed.
+        model = stage_models(model_dir, PINS, td)
         # Set before the analyzer imports transformers/huggingface_hub: offline, private cache only.
         os.environ.update({'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
                            'HF_HOME': str(hf_home), 'HF_HUB_CACHE': str(hf_home / 'hub'),
@@ -164,6 +207,7 @@ def main():
                 audio_vector=vector.tolist(), expected=[analyzer.detect_vocals(vector),
                 analyzer.detect_acousticness(vector), valence, arousal]))
         verify_staged(tokenizer, hf_home)
+        verify_staged_models(PINS, model)
     result = dict(upstream=PIN, analyzer_sha256=hashlib.sha256(source).hexdigest(),
         models=PINS, tokenizer=tokenizer, tracks=results)
     fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

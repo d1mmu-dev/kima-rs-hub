@@ -49,7 +49,9 @@ After separate authorization and per-artifact rights approval:
    therefore never resolves by name against a network or an ambient cache. Every check raises
    an explicit error (no `assert`), so `python -O` cannot strip it;
    `tools/vibe-zero-shot-real-reference-selftest.py --upstream <clone>` exercises the refusals
-   offline on synthetic files and must pass both plainly and under `python3 -O`.
+   offline on synthetic files and must pass both plainly and under `python3 -O`. A refusal counts
+   there only with its exact kind (a `ReferenceRefusal`, or for the symlink cases an `ELOOP`
+   `OSError` from `O_NOFOLLOW`); any other exception fails the self-test.
 2. Prepare a private JSON audio-list of **20 distinct real recordings** as objects with `path`
    and nonempty `license`. Use explicitly authorized files, never a scan of the owner's library.
 3. Run the reference generator explicitly:
@@ -63,7 +65,14 @@ After separate authorization and per-artifact rights approval:
      --licensed-private-use-confirmed
    ```
 
-   It checks the two immutable model SHA-256 pins, extracts only pinned GPL Python source into
+   It copies the two models into a private (0700) directory inside its temporary directory,
+   computing each SHA-256 over the bytes it writes (no-follow, regular, bounded source), refuses
+   unless both equal the immutable pins, points the analyzer at those copies (the upstream
+   analyzer opens models by path, so this is the owned-bytes form available without patching it)
+   and re-hashes them after inference. Trust boundary: replacing a file in `--model-dir` after
+   the copy cannot change what is loaded, but another process of the same user able to write the
+   private temporary directory is only detected afterwards, not prevented; run it on a trusted
+   host. It extracts only pinned GPL Python source into
    a temporary directory, disables Hugging Face network resolution, runs the actual upstream
    analyzer's audio embedding and zero-shot methods, records each audio hash and reference vector,
    and exclusively creates a mode-0600 output. The generator is not a Rust acceptance result.

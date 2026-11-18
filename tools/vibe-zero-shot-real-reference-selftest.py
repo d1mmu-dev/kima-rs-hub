@@ -2,18 +2,22 @@
 """Offline self-test of tools/vibe-zero-shot-real-reference.py's provenance refusals.
 
 No downloads, models or audio: it reads the pinned upstream Dockerfile from a local clone and
-exercises the tokenizer manifest/staging checks on synthetic files. Run it both plainly and with
-`python3 -O` (which strips `assert`): every refusal must still fire.
+exercises the tokenizer manifest/staging and model staging checks on synthetic files. Run it both
+plainly and with `python3 -O` (which strips `assert`): every refusal must still fire. A refusal
+counts only with its exact kind: provenance checks must raise ReferenceRefusal, the symlink cases
+an ELOOP OSError from O_NOFOLLOW; any other exception fails the self-test.
 
     python3 tools/vibe-zero-shot-real-reference-selftest.py --upstream <kima-hub clone>
     python3 -O tools/vibe-zero-shot-real-reference-selftest.py --upstream <kima-hub clone>
 """
 import argparse
+import errno
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -33,11 +37,15 @@ FILES = {'vocab.json', 'merges.txt', 'tokenizer.json', 'tokenizer_config.json'}
 TOKENIZER_JSON = '847bbeab6174d66a88898f729d52fa8d355fafe1bea101cf960dd404581df70e'
 
 
-def refuses(fn, *args):
+def refuses(fn, *args, expected=None):
+    """True only when `fn` raises the expected refusal: a ReferenceRefusal by default. Any other
+    exception (a KeyError/TypeError crash, an OSError where a provenance check should fire)
+    propagates, so an accidental failure can never pass as a deliberate refusal."""
+    expected = expected or ref.ReferenceRefusal
     try:
         fn(*args)
-    except (ref.ReferenceRefusal, OSError, ValueError, KeyError):
-        return True
+    except expected as error:
+        return error
     return False
 
 
@@ -98,9 +106,48 @@ def main():
         linked = Path(td, 'linked')
         linked.mkdir()
         (linked / 'tokenizer.json').symlink_to(source / 'tokenizer.json')
-        check(refuses(ref.stage_tokenizer, synthetic, linked, Path(td, 'symlink')), 'symlink refused')
-        # The pinned upstream manifest against these synthetic bytes: mismatch.
-        check(refuses(ref.stage_tokenizer, pins, source, Path(td, 'upstream')), 'missing upstream files refused')
+        error = refuses(ref.stage_tokenizer, synthetic, linked, Path(td, 'symlink'), expected=OSError)
+        check(error and error.errno == errno.ELOOP, f'symlink refused by O_NOFOLLOW, not {error!r}')
+        # The pinned upstream manifest against these synthetic bytes: the other files are absent.
+        error = refuses(ref.stage_tokenizer, pins, source, Path(td, 'upstream'), expected=FileNotFoundError)
+        check(error, 'missing upstream files refused')
+
+        # Models: the analyzer loads private copies whose bytes were hashed while being written.
+        models = Path(td, 'models')
+        models.mkdir()
+        model_bytes = {'music_audio.onnx': b'synthetic audio model', 'music_text.onnx': b'synthetic text model'}
+        for name, data in model_bytes.items():
+            (models / name).write_bytes(data)
+        model_pins = {name: hashlib.sha256(data).hexdigest() for name, data in model_bytes.items()}
+        check(set(model_pins) == set(ref.PINS), 'synthetic model names match the real pins')
+        staged = ref.stage_models(models, model_pins, Path(td, 'm-ok'))
+        check(staged.parent == Path(td, 'm-ok') and stat.S_IMODE(staged.stat().st_mode) == 0o700,
+              'staged models live in a private directory')
+        for name, data in model_bytes.items():
+            check((staged / name).read_bytes() == data, f'staged {name} holds the verified bytes')
+        # Replacing the caller's file after staging does not change what the analyzer loads.
+        (models / 'music_audio.onnx').write_bytes(b'replaced after verification')
+        ref.verify_staged_models(model_pins, staged)
+        check((staged / 'music_audio.onnx').read_bytes() == model_bytes['music_audio.onnx'],
+              'staged copy unaffected by a later source replacement')
+        check(refuses(ref.stage_models, models, model_pins, Path(td, 'm-mismatch')),
+              'model SHA-256 mismatch refused')
+        (models / 'music_audio.onnx').write_bytes(model_bytes['music_audio.onnx'])
+        check(refuses(ref.stage_models, models, ref.PINS, Path(td, 'm-real-pins')),
+              'synthetic bytes never pass the real pins')
+        linked_models = Path(td, 'linked-models')
+        linked_models.mkdir()
+        for name in model_bytes:
+            (linked_models / name).symlink_to(models / name)
+        error = refuses(ref.stage_models, linked_models, model_pins, Path(td, 'm-symlink'), expected=OSError)
+        check(error and error.errno == errno.ELOOP, f'model symlink refused by O_NOFOLLOW, not {error!r}')
+        os.chmod(staged / 'music_text.onnx', 0o600)
+        (staged / 'music_text.onnx').write_bytes(b'changed during inference')
+        check(refuses(ref.verify_staged_models, model_pins, staged), 'staged model change refused')
+        (staged / 'music_text.onnx').write_bytes(model_bytes['music_text.onnx'])
+        ref.verify_staged_models(model_pins, staged)
+        (staged / 'extra.onnx').write_bytes(b'x')
+        check(refuses(ref.verify_staged_models, model_pins, staged), 'extra staged model refused')
     print(f'selftest ok (python optimize={sys.flags.optimize})')
 
 

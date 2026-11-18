@@ -1,9 +1,13 @@
 // Visual parity check: kima-web against the upstream kima-hub Next.js frontend (an external checkout, never bundled),
-// same backend, same data. The report records the reference commit (KIMA_HUB_REFERENCE_SHA).
+// same backend, same data. The report records the reference provenance (see KIMA_REFERENCE_PROVENANCE).
 // Both frontends must already be running in front of ONE backend (tools/run-kima-web-visual.sh sets that up):
 //   WEB_URL=http://127.0.0.1:3030    kima-web (embedded SSR origin of kima-server)
 //   LEGACY_URL=http://127.0.0.1:3040 reference Next.js (dev server of an isolated copy, rewriting /api to the same kima-server)
-//   KIMA_HUB_REFERENCE_SHA          reference commit, written into report.json (tools/run-kima-web-visual.sh sets it)
+//   KIMA_REFERENCE_PROVENANCE        file with the KEY=VALUE provenance printed by tools/prepare-kima-hub-reference.sh
+//                                    (tools/run-kima-web-visual.sh writes and sets it). REQUIRED: without a complete,
+//                                    canonical-upstream provenance the script exits 2 before opening any page; it is
+//                                    written into report.json as `reference`. `--check-provenance` only validates it
+//                                    and prints that JSON.
 //   ADMIN_USER / ADMIN_PASS          account of that backend
 //   CHROME=/path/to/chrome  DEBUG_PORT=9444  OUT=<dir, default target/kima-web-visual (gitignored)>
 //   THRESHOLD=1                      percent of differing pixels allowed per page/viewport (default 1)
@@ -51,6 +55,57 @@ const SSR_SHIFT = !process.argv.includes('--no-ssr-shift');
 
 // Pages with a documented compromise (see crates/kima-web/README.md): over-threshold ratios are reported, not failed.
 const COMPROMISES = new Set((process.env.COMPROMISES || '').split(',').filter(Boolean));
+
+// ---- reference provenance (fails closed) ------------------------------------------------------------------------
+const CANONICAL_REMOTE = /^(https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)Chevron7Locked\/kima-hub(\.git)?$/;
+function loadReference() {
+  const file = process.env.KIMA_REFERENCE_PROVENANCE;
+  const refuse = (why) => {
+    console.error(`reference provenance ${why}: run through tools/run-kima-web-visual.sh (tools/prepare-kima-hub-reference.sh)`);
+    process.exit(2);
+  };
+  if (!file) refuse('missing (KIMA_REFERENCE_PROVENANCE is not set)');
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    refuse(`unreadable (${e.message})`);
+  }
+  const kv = {};
+  for (const line of text.split('\n')) {
+    const i = line.indexOf('=');
+    if (i > 0 && !(line.slice(0, i) in kv)) kv[line.slice(0, i)] = line.slice(i + 1);
+  }
+  const ref = {
+    sha: kv.KIMA_HUB_REFERENCE_SHA,
+    describe: kv.KIMA_HUB_REFERENCE_DESCRIBE,
+    remote: kv.KIMA_HUB_REFERENCE_REMOTE,
+    remoteUrl: kv.KIMA_HUB_REFERENCE_REMOTE_URL,
+    branch: kv.KIMA_HUB_REFERENCE_BRANCH,
+    upstream: kv.KIMA_HUB_REFERENCE_UPSTREAM,
+    pulled: kv.KIMA_HUB_REFERENCE_PULLED,
+    pin: kv.KIMA_HUB_REFERENCE_PIN,
+    relation: kv.KIMA_HUB_REFERENCE_RELATION,
+    tree: kv.KIMA_HUB_REFERENCE_TREE,
+    checkedAt: kv.KIMA_HUB_REFERENCE_CHECKED_AT,
+    manifest: kv.KIMA_REFERENCE_MANIFEST,
+    copyRestored: kv.KIMA_REFERENCE_COPY_RESTORED,
+    frontend: kv.KIMA_REFERENCE_FRONTEND,
+  };
+  const missing = Object.entries(ref).filter(([, v]) => !v).map(([k]) => k);
+  if (missing.length) refuse(`incomplete (missing ${missing.join(', ')})`);
+  if (!/^[0-9a-f]{40}$/.test(ref.sha) || !/^[0-9a-f]{40}$/.test(ref.tree) || !/^[0-9a-f]{40}$/.test(ref.pin)) refuse('has a malformed SHA');
+  if (!/^[0-9a-f]{64}$/.test(ref.manifest)) refuse('has a malformed manifest');
+  if (!CANONICAL_REMOTE.test(ref.remoteUrl)) refuse(`names a non-canonical remote ${ref.remoteUrl}`);
+  if (ref.branch !== 'main' || ref.upstream !== `${ref.remote}/main`) refuse(`names branch ${ref.branch} tracking ${ref.upstream}`);
+  if (!['yes', 'no'].includes(ref.pulled) || !['new', 'no', 'yes'].includes(ref.copyRestored)) refuse('has malformed flags');
+  return ref;
+}
+const REFERENCE = loadReference();
+if (process.argv.includes('--check-provenance')) {
+  console.log(JSON.stringify(REFERENCE));
+  process.exit(0);
+}
 
 // ---- PNG (8-bit, non-interlaced RGB/RGBA only: what Chrome writes) ---------------------------------------------
 function decodePng(buf) {
@@ -309,7 +364,7 @@ async function main() {
       console.log(`${pg.name.padEnd(10)} ${vp.padEnd(9)} diff ${row.ratio.toFixed(2).padStart(6)}%  ink ${row.ink.toFixed(1).padStart(5)}%  ssim ${row.ssim.toFixed(3)}  controls ${row.controls.legacy}/${row.controls.web}` + (row.ssrShift !== undefined ? `   ssr->hydrated ${row.ssrShift.toFixed(2)}%` : ''));
     }
   }
-  fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify({ reference: process.env.KIMA_HUB_REFERENCE_SHA || null, rows }, null, 2));
+  fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify({ reference: REFERENCE, rows }, null, 2));
   const names = [...new Set(rows.map((r) => r.page))];
   const hdr = VIEWPORTS.map((v) => v.join('x'));
   const table = (title, f) => {

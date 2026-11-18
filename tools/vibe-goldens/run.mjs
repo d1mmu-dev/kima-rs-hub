@@ -2,8 +2,10 @@
 //
 //   node tools/vibe-goldens/run.mjs [outDir]
 //
-// Environment: UPSTREAM = path of a kima-hub checkout at c7527577d925b20f5adf410c7fd4e0c8ac250f69
-// (default ~/.hermes/cache/scratch/kima-hub-latest). Node >= 23.6 (native TypeScript type stripping; no tsx).
+// Environment: UPSTREAM = path of a kima-hub git checkout that CONTAINS c7527577d925b20f5adf410c7fd4e0c8ac250f69
+// (default KIMA_HUB_REFERENCE, environment or private tools config). The modules are read from that commit's git
+// objects (./upstream.mjs), never from the checkout's working tree, so a freshly pulled reference cannot move the
+// goldens off the pin. Node >= 23.6 (native TypeScript type stripping; no tsx).
 //
 // The five pure modules are copied to a temporary directory with their relative imports given a ".ts"
 // extension (Node's type stripping does not resolve extensionless specifiers) and `./worker` replaced by a
@@ -13,15 +15,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { readPinned } from "./upstream.mjs";
 
-const upstream = process.env.UPSTREAM ?? path.join(os.homedir(), ".hermes/cache/scratch/kima-hub-latest");
-const src = path.join(upstream, "backend/src/services/matching");
 const here = path.dirname(new URL(import.meta.url).pathname);
 const out = path.resolve(process.argv[2] ?? path.join(here, "../../crates/kima-vibe/tests/fixtures"));
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vibe-goldens-"));
 
 for (const name of ["exactMath", "formula", "mapLayout", "mapCompute", "neighbours"]) {
-    let text = fs.readFileSync(path.join(src, `${name}.ts`), "utf8");
+    let text = readPinned(`backend/src/services/matching/${name}.ts`);
     text = text.replace(/from "(\.\/[A-Za-z]+)"/g, 'from "$1.ts"');
     if (name === "mapLayout") text = text.replace("\nfunction gaussian(", "\nexport function gaussian(");
     fs.writeFileSync(path.join(tmp, `${name}.ts`), text);
@@ -124,8 +125,8 @@ function buildLibrary(rows, artistGenres) {
     return { rows, stats, tracks, model, spread, soundSpread, wg, feelZ };
 }
 
-const parity = JSON.parse(fs.readFileSync(path.join(src, "__tests__/fixtures/parity.json"), "utf8"));
-const mb = JSON.parse(fs.readFileSync(path.join(src, "mbGenres.json"), "utf8"));
+const parity = JSON.parse(readPinned("backend/src/services/matching/__tests__/fixtures/parity.json"));
+const mb = JSON.parse(readPinned("backend/src/services/matching/mbGenres.json"));
 const key = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 const MB = new Map();
 for (const n of mb.genres) if (!MB.has(key(n))) MB.set(key(n), n.toLowerCase());

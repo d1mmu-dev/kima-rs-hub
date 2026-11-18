@@ -9,10 +9,13 @@
 #   tools/run-kima-web-visual.sh down     stop kima/next and remove the postgres container + state
 #
 # The reference is an EXTERNAL kima-hub checkout (this repository no longer bundles the Next.js app, D-180).
-# `up` runs tools/prepare-kima-hub-reference.sh --install first: clean-tree check, `git pull --ff-only`, fetched SHA
-# recorded, `frontend/` extracted into an isolated copy whose dependencies are installed there (never in the
-# checkout). Next.js runs ONLY here, as the visual reference; it is not part of any product, dev or CI path.
-# A pull that moves the reference restarts the reference dev server; compare writes the SHA into its report.
+# `up` runs tools/prepare-kima-hub-reference.sh --install first: clean-tree check, canonical upstream remote and
+# branch, `git pull --ff-only`, HEAD == upstream, provenance recorded, `frontend/` verified against (or re-extracted
+# from) the git objects into an isolated copy whose dependencies are installed there (never in the checkout).
+# Next.js runs ONLY here, as the visual reference, from the copy's own node_modules/.bin/next (never npx); it is not
+# part of any product, dev or CI path. The reference dev server is restarted when the SHA, the copy path or the
+# copy's content manifest changes, or when the copy had been modified and was restored. compare refuses to run
+# without that provenance and writes it (SHA, remote URL, branch, pulled, relation, tree, manifest) into report.json.
 # Needs: cargo, node/npm (reference copy only), docker (pgvector/pgvector:pg17 on a random 127.0.0.1 port),
 # ffmpeg, vertigo 0.13.4 (+ wasm-opt), Chrome.
 # Environment, or the private tools config (tools/tools-env.inc.sh): KIMA_HUB_REFERENCE (required),
@@ -44,7 +47,25 @@ KIMA_PID=${KIMA_PID:-}
 LEGACY_PID=${LEGACY_PID:-}
 REF_SHA=${REF_SHA:-}
 REF_FRONTEND=${REF_FRONTEND:-}
+REF_MANIFEST=${REF_MANIFEST:-}
 EOF
+}
+
+# Why the running reference dev server must be restarted (empty: keep it). Arguments: the SHA, copy frontend path and
+# content manifest it was started on, then the freshly prepared ones, then KIMA_REFERENCE_COPY_RESTORED.
+reference_restart_reason() {
+  if [ "$1" != "$4" ]; then echo "reference moved to $4"
+  elif [ "$2" != "$5" ]; then echo "reference copy path changed to $5"
+  elif [ "$3" != "$6" ]; then echo "reference copy content changed"
+  elif [ "$7" != no ]; then echo "reference copy had been modified and was restored from git"
+  fi
+}
+
+# The reference copy's own Next.js binary; fails (never downloads via npx) when the copy or its install is missing.
+reference_next_bin() {
+  [ -d "$1" ] || { echo "reference frontend $1 does not exist" >&2; return 1; }
+  [ -x "$1/node_modules/.bin/next" ] || { echo "no node_modules/.bin/next in $1: run tools/prepare-kima-hub-reference.sh --install" >&2; return 1; }
+  echo "$1/node_modules/.bin/next"
 }
 
 start_kima() {
@@ -99,21 +120,30 @@ up() {
     start_kima; save
     seed
   fi
-  # Fresh reference before every comparison: check the external checkout, pull, record the SHA, isolated copy.
-  local prov sha
+  # Fresh reference before every comparison: check the external checkout, pull, record provenance, verified copy.
+  local prov sha frontend manifest restored reason next
   prov="$("$root/tools/prepare-kima-hub-reference.sh" --install)"
   sha="$(sed -n 's/^KIMA_HUB_REFERENCE_SHA=//p' <<<"$prov")"
-  REF_FRONTEND="$(sed -n 's/^KIMA_REFERENCE_FRONTEND=//p' <<<"$prov")"
-  if alive "${LEGACY_PID:-}" && [ "$sha" != "${REF_SHA:-}" ]; then
-    echo "reference moved to $sha: restarting the reference dev server" >&2
-    stop_legacy
+  frontend="$(sed -n 's/^KIMA_REFERENCE_FRONTEND=//p' <<<"$prov")"
+  manifest="$(sed -n 's/^KIMA_REFERENCE_MANIFEST=//p' <<<"$prov")"
+  restored="$(sed -n 's/^KIMA_REFERENCE_COPY_RESTORED=//p' <<<"$prov")"
+  { [ -n "$sha" ] && [ -n "$frontend" ] && [ -n "$manifest" ] && [ -n "$restored" ]; } \
+    || { echo "prepare-kima-hub-reference.sh printed incomplete provenance" >&2; exit 1; }
+  grep -E '^KIMA_(HUB_REFERENCE|REFERENCE)_[A-Z_]+=' <<<"$prov" >"$dir/reference.env"
+  next="$(reference_next_bin "$frontend")" || exit 1
+  if alive "${LEGACY_PID:-}"; then
+    reason="$(reference_restart_reason "${REF_SHA:-}" "${REF_FRONTEND:-}" "${REF_MANIFEST:-}" "$sha" "$frontend" "$manifest" "$restored")"
+    if [ -n "$reason" ]; then
+      echo "$reason: restarting the reference dev server" >&2
+      stop_legacy
+    fi
   fi
-  REF_SHA="$sha"; save
+  REF_SHA="$sha"; REF_FRONTEND="$frontend"; REF_MANIFEST="$manifest"; save
   if ! alive "${LEGACY_PID:-}"; then
     (
       cd "$REF_FRONTEND"
       NEXT_PUBLIC_BACKEND_URL="http://127.0.0.1:${KIMA_PORT}" KIMA_DEV_ORIGINS="127.0.0.1:${LEGACY_PORT}" \
-        NEXT_TELEMETRY_DISABLED=1 exec npx next dev -p "$LEGACY_PORT" -H 127.0.0.1 >"$dir/legacy.log" 2>&1
+        NEXT_TELEMETRY_DISABLED=1 exec "$next" dev -p "$LEGACY_PORT" -H 127.0.0.1 >"$dir/legacy.log" 2>&1
     ) &
     LEGACY_PID=$!; save
     for _ in $(seq 1 120); do
@@ -164,6 +194,7 @@ export WEB_URL=http://127.0.0.1:${KIMA_PORT}
 export LEGACY_URL=http://127.0.0.1:${LEGACY_PORT}
 export ADMIN_USER=admin ADMIN_PASS=visual-pass-1
 export KIMA_HUB_REFERENCE_SHA=${REF_SHA:-}
+export KIMA_REFERENCE_PROVENANCE=$dir/reference.env
 EOF
 }
 
@@ -195,7 +226,8 @@ case "$cmd" in
     load
     set +e
     WEB_URL="http://127.0.0.1:${KIMA_PORT}" LEGACY_URL="http://127.0.0.1:${LEGACY_PORT}" \
-      ADMIN_USER=admin ADMIN_PASS=visual-pass-1 KIMA_HUB_REFERENCE_SHA="${REF_SHA:-}" node "$root/tools/compare-kima-web-visual.mjs" "$@"
+      ADMIN_USER=admin ADMIN_PASS=visual-pass-1 KIMA_REFERENCE_PROVENANCE="$dir/reference.env" \
+      node "$root/tools/compare-kima-web-visual.mjs" "$@"
     rc=$?
     set -e
     [ "$cmd" = run ] && down

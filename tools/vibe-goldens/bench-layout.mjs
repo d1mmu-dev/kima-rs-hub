@@ -9,12 +9,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { readPinned } from "./upstream.mjs";
 
-const upstream = process.env.UPSTREAM ?? path.join(os.homedir(), ".hermes/cache/scratch/kima-hub-latest");
-const src = path.join(upstream, "backend/src/services/matching");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "vibe-bench-"));
 for (const name of ["exactMath", "formula", "mapLayout", "mapCompute", "neighbours"]) {
-    let text = fs.readFileSync(path.join(src, `${name}.ts`), "utf8");
+    let text = readPinned(`backend/src/services/matching/${name}.ts`);
     text = text.replace(/from "(\.\/[A-Za-z]+)"/g, 'from "$1.ts"');
     fs.writeFileSync(path.join(tmp, `${name}.ts`), text);
 }

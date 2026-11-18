@@ -5,9 +5,11 @@ server-side rendering from `kima-server`.
 
 **kima-web is the only frontend.** Next.js is in no production, Docker, dev-loop or CI path. The repository
 no longer bundles the upstream Next.js app (owner decision 2026-11-18, D-180): the visual/functional reference is an
-external kima-hub checkout (`KIMA_HUB_REFERENCE`), checked clean and pulled with `--ff-only` by
-`tools/prepare-kima-hub-reference.sh`, which extracts its `frontend/` into an isolated copy and installs it there;
-the fetched SHA goes into the comparison report. Next.js never runs from the checkout or in a product path.
+external kima-hub checkout (`KIMA_HUB_REFERENCE`), checked clean, on `main` of the canonical upstream remote, pulled
+with `--ff-only` and required to equal its upstream by `tools/prepare-kima-hub-reference.sh`, which verifies (or
+re-extracts) its `frontend/` from the git objects into an isolated copy and installs it there; the provenance (SHA,
+remote URL, branch, pulled, relation to the pin, tree, content manifest) goes into the comparison report, which
+refuses to run without it. Next.js never runs from the checkout or in a product path.
 The Docker image builds kima-web with `vertigo build kima-web --dest-dir /srv/kima/web` and sets
 `KIMA_WEB_BUILD_DIR=/srv/kima/web`, so the embedded SSR is on by default there.
 

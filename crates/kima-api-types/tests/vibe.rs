@@ -72,28 +72,80 @@ fn matching_and_path_dtos_match_reference_typescript_fields() {
 }
 
 /// Re-derives the fixture from an external, freshly pulled kima-hub checkout (never bundled in this
-/// repository). Run: `KIMA_HUB_REFERENCE=<checkout> cargo test -p kima-api-types --test vibe -- --ignored`;
-/// a mismatch means upstream moved: re-extract deliberately and record the drift.
+/// repository). Run: `KIMA_HUB_REFERENCE=<checkout> cargo test -p kima-api-types --test vibe -- --ignored`
+/// (pull it first, e.g. `tools/prepare-kima-hub-reference.sh --check`). The file is read from the
+/// checkout's HEAD git object, never its working tree, and the reported HEAD SHA is the provenance.
+/// It fails when the TypeScript keys differ, and also when `api.ts` changed at all since the extraction
+/// (SHA-256 differs from the fixture's `source.sha256`): upstream moved, so re-extract deliberately and
+/// record the drift.
 #[test]
 #[ignore = "needs KIMA_HUB_REFERENCE pointing at an external kima-hub checkout"]
 fn reference_fixture_matches_external_checkout() {
+    use sha2::{Digest, Sha256};
     let root = std::env::var("KIMA_HUB_REFERENCE")
         .expect("set KIMA_HUB_REFERENCE to an external kima-hub checkout");
-    let path = std::path::Path::new(&root).join("frontend/lib/api.ts");
-    let ts = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let git = |args: &[&str]| {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(&root).args(args);
+        // Inherited repository variables must not redirect these reads to another repository.
+        for var in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CONFIG",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_COUNT",
+            "GIT_NAMESPACE",
+            "GIT_REPLACE_REF_BASE",
+            "GIT_NO_REPLACE_OBJECTS",
+            "GIT_GRAFT_FILE",
+            "GIT_SHALLOW_FILE",
+        ] {
+            cmd.env_remove(var);
+        }
+        let out = cmd.output().expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?} in {root}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    let head = String::from_utf8(git(&["rev-parse", "HEAD"])).unwrap();
+    let head = head.trim();
+    let bytes = git(&["cat-file", "blob", "HEAD:frontend/lib/api.ts"]);
+    let sha256: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let reference = reference();
+    let source = &reference["source"];
+    eprintln!(
+        "reference {root} HEAD {head}: frontend/lib/api.ts sha256 {sha256} (fixture: {} extracted at {})",
+        source["sha256"], source["extractedAt"]
+    );
+    let ts = String::from_utf8(bytes).unwrap();
     for name in ["VibeTrack", "VibePathTrack"] {
         assert_eq!(
             typescript_keys(&ts, name),
             reference_keys(&reference, name),
-            "{name}"
+            "{name} at HEAD {head}"
         );
     }
     for field in reference["fields"].as_array().unwrap() {
         let field = field.as_str().unwrap();
-        assert!(ts.contains(field), "{field}");
+        assert!(ts.contains(field), "{field} at HEAD {head}");
     }
+    assert_eq!(
+        sha256,
+        source["sha256"].as_str().unwrap(),
+        "frontend/lib/api.ts at HEAD {head} differs from the extraction at {}: upstream moved, \
+         re-extract the fixture deliberately and record the drift",
+        source["extractedAt"]
+    );
 }
 
 fn roundtrip<T: serde::de::DeserializeOwned + serde::Serialize>(value: Value) {

@@ -3,31 +3,47 @@
 // Tailwind scans crates/kima-web/src (@source in the base file) for class names.
 //   node tools/gen-kima-web-css.mjs          write assets/kima.css
 //   node tools/gen-kima-web-css.mjs --check  exit 1 if the checked-in file is stale
-// Needs an ISOLATED node_modules with the exact tailwindcss, @tailwindcss/postcss and postcss versions that
-// tools/install-kima-web-css-deps.sh installs (local runs and the kima-web CI job both use it). Directory:
-// KIMA_CSS_DEPS (environment or the private tools config, see tools/tools-env.inc.sh), default
-// ${XDG_CACHE_HOME:-~/.cache}/kima-rs/tailwind. No reference frontend and no repository package.json are involved.
+// Needs an ISOLATED node_modules with the exact tailwindcss, @tailwindcss/postcss and postcss versions listed in
+// tools/kima-web-css-deps.json, which tools/install-kima-web-css-deps.sh installs (local runs and the kima-web CI job
+// both use it). Directory: KIMA_CSS_DEPS (environment or the private tools config, see tools/tools-env.mjs), default
+// ${XDG_CACHE_HOME:-~/.cache}/kima-rs/tailwind. Each of the three must be installed directly in <dir>/node_modules
+// with exactly that version and resolve from there (never from a parent node_modules); otherwise exit 2. Their
+// transitive dependencies are not pinned here. No reference frontend and no repository package.json are involved.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { toolsEnv } from './tools-env.mjs';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-// The private tools config (KEY=VALUE lines) fills keys the environment leaves unset, like tools-env.inc.sh.
-function toolsEnv(key) {
-  if (process.env[key]) return process.env[key];
-  const file = process.env.KIMA_RS_TOOLS_ENV || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'kima-rs/tools.env');
-  if (!fs.existsSync(file)) return undefined;
-  const line = fs.readFileSync(file, 'utf8').split('\n').find((l) => l.startsWith(`${key}=`));
-  return line ? line.slice(key.length + 1) : undefined;
-}
-const deps = toolsEnv('KIMA_CSS_DEPS') || path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'kima-rs/tailwind');
-if (!fs.existsSync(path.join(deps, 'node_modules/@tailwindcss/postcss'))) {
-  console.error(`no Tailwind packages in ${deps}: run tools/install-kima-web-css-deps.sh`);
-  process.exit(2);
-}
+const deps = path.resolve(toolsEnv('KIMA_CSS_DEPS') || path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'kima-rs/tailwind'));
+const expected = JSON.parse(fs.readFileSync(path.join(root, 'tools/kima-web-css-deps.json'), 'utf8')).packages;
 const require = createRequire(path.join(deps, 'package.json'));
+for (const [name, version] of Object.entries(expected)) {
+  const dir = path.join(deps, 'node_modules', name);
+  let installed;
+  try {
+    installed = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).version;
+  } catch {
+    console.error(`${name} is not installed in ${deps}/node_modules: run tools/install-kima-web-css-deps.sh`);
+    process.exit(2);
+  }
+  if (installed !== version) {
+    console.error(`${name} ${installed} in ${deps} is not the required ${version}: run tools/install-kima-web-css-deps.sh`);
+    process.exit(2);
+  }
+  let resolved;
+  try {
+    resolved = fs.realpathSync(require.resolve(name));
+  } catch {
+    resolved = '';
+  }
+  if (!resolved.startsWith(fs.realpathSync(dir) + path.sep)) {
+    console.error(`${name} resolves to ${resolved || 'nothing'}, not ${dir}`);
+    process.exit(2);
+  }
+}
 const postcss = require('postcss');
 const tailwind = require('@tailwindcss/postcss');
 

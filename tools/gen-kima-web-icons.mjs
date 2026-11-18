@@ -13,9 +13,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { toolsEnv } from './tools-env.mjs';
 
-const ICONS = ['arrow-left', 'audio-lines', 'bell', 'check', 'chevron-down', 'chevron-left', 'chevron-right', 'chevron-up', 'circle-alert', 'compass',
+const ICONS = ['arrow-left', 'audio-lines', 'audio-waveform', 'bell', 'check', 'chevron-down', 'chevron-left', 'chevron-right', 'chevron-up', 'circle-alert', 'compass',
   'download', 'ellipsis', 'eye', 'eye-off', 'file-music', 'globe', 'grip-vertical', 'heart', 'history', 'house', 'info', 'library', 'link-2', 'list-music', 'list-plus',
-  'lock', 'maximize-2', 'menu', 'mic-vocal', 'music', 'pause', 'pencil', 'play', 'plus', 'power', 'refresh-cw', 'repeat', 'repeat-1', 'rotate-ccw', 'rotate-cw', 'search',
+  'lock', 'maximize-2', 'menu', 'mic-vocal', 'music', 'orbit', 'pause', 'pencil', 'play', 'plus', 'power', 'refresh-cw', 'repeat', 'repeat-1', 'rotate-ccw', 'rotate-cw', 'search',
   'settings', 'share-2', 'shuffle', 'skip-back', 'skip-forward', 'sliders-horizontal', 'sparkles', 'timer', 'trash-2', 'user', 'volume-2', 'volume-x', 'x'];
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');

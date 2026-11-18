@@ -521,3 +521,21 @@ button:disabled {
     }
 }
 
+
+/* Vibe map, the library as a night sky (upstream app/globals.css, verbatim). */
+.vibe-sky {
+    background: radial-gradient(115% 90% at 50% 40%, #180b1e 0%, #0b0510 25%, #040207 48%, #000000 68%);
+}
+
+/* Floating surfaces over the map: dark violet glass, so the stars read through. */
+.vibe-glass {
+    background: rgba(8, 5, 14, 0.66);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(18px) saturate(120%);
+    -webkit-backdrop-filter: blur(18px) saturate(120%);
+    box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.7);
+}
+
+.vibe-glass--solid {
+    background: rgba(12, 8, 20, 0.94);
+}

@@ -55,6 +55,8 @@ pub struct Ctx {
     pub menu_open: Value<bool>,
     /// A transient message `(id, text)` shown by the shell for a few seconds.
     pub toast: Value<Option<(u32, String)>>,
+    /// The vibe page's map and map loader, kept across visits.
+    pub vibe: crate::pages::vibe::Shared,
 }
 
 impl Ctx {

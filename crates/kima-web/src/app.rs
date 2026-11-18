@@ -43,6 +43,7 @@ pub fn render() -> DomNode {
         refine_open: Value::new(false),
         menu_open: Value::new(false),
         toast: Value::new(None),
+        vibe: Default::default(),
     };
 
     // (requested, effective). On the server there is no session: the requested route is rendered.
@@ -62,13 +63,18 @@ pub fn render() -> DomNode {
     let bare: Computed<bool> = routes
         .map(|(_, effective)| matches!(effective, Route::Login | Route::Setup | Route::Profiles));
 
-    let page = bind!(ctx, routes, || -> DomNode {
-        routes.render_value(bind!(ctx, |(requested, effective): (Route, Route)| {
-            if requested != effective {
-                let url = effective.to_string();
+    // (redirect, page): a page is rebuilt only when it changes, not when only its own state in the
+    // URL does (`/vibe` <-> `/vibe?track=`, see `Route::page`).
+    let pages: Computed<(Option<String>, Route)> = routes.map(|(requested, effective)| {
+        let redirect = (requested != effective).then(|| effective.to_string());
+        (redirect, effective.page())
+    });
+    let page = bind!(ctx, pages, || -> DomNode {
+        pages.render_value(bind!(ctx, |(redirect, page): (Option<String>, Route)| {
+            if let Some(url) = redirect {
                 get_driver().spawn(async move { get_driver().history_replace(&url) });
             }
-            match effective {
+            match page {
                 Route::Login => pages::login::render(&ctx),
                 Route::Setup => pages::onboarding::render(&ctx),
                 Route::Profiles => pages::profiles::render(&ctx),
@@ -83,6 +89,7 @@ pub fn render() -> DomNode {
                 Route::PodcastShow { id } => pages::podcasts::show(&ctx, id),
                 Route::PodcastPreview { itunes_id } => pages::podcasts::preview(&ctx, itunes_id),
                 Route::PodcastCategory { id } => pages::podcasts::category(&ctx, id),
+                Route::Vibe { .. } => pages::vibe::render(&ctx),
                 Route::NotFound => pages::not_found(),
             }
         }))

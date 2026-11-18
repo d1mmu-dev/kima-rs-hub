@@ -4,6 +4,7 @@
 
 use sqlx::PgPool;
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::stages::{LAST_ERROR_MAX_CHARS, cut_chars};
 
@@ -211,6 +212,31 @@ pub async fn record_error(pool: &PgPool, message: &str) -> sqlx::Result<()> {
 pub async fn reset_enriching_artists(pool: &PgPool) -> sqlx::Result<u64> {
     let r = sqlx::query!(
         "UPDATE artists SET enrichment_status = 'pending' WHERE enrichment_status = 'enriching'"
+    )
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
+/// Each artists phase (upstream `executeArtistsPhase`: with nothing queued or running, no artist
+/// is really being enriched, so one still marked lost its run): artists left `enriching` go back
+/// to `pending`, unless another `queue` job (a cycle, which is where artists are enriched) is
+/// `running` on a live lease, i.e. another process may hold real claims. `own_job` is the
+/// caller's own running cycle; a lapsed lease is a dead process. Returns how many.
+pub async fn reset_enriching_artists_if_idle(
+    pool: &PgPool,
+    queue: &str,
+    own_job: Option<Uuid>,
+) -> sqlx::Result<u64> {
+    let r = sqlx::query!(
+        "UPDATE artists SET enrichment_status = 'pending'
+         WHERE enrichment_status = 'enriching'
+           AND NOT EXISTS (SELECT 1 FROM jobs j
+                           WHERE j.queue = $1 AND j.state = 'running'
+                             AND j.locked_until >= now()
+                             AND j.id IS DISTINCT FROM $2)",
+        queue,
+        own_job
     )
     .execute(pool)
     .await?;

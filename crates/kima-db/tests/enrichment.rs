@@ -1072,3 +1072,91 @@ async fn podcast_refresh_failure_is_counted_and_listed(pool: PgPool) {
     );
     assert!(rows.is_empty());
 }
+
+// ---- artists left `enriching` (upstream `executeArtistsPhase`, review M3) ----
+
+/// A job on `queue` in state `running` whose lease ends `lease` from now (negative: lapsed).
+async fn running_job(pool: &PgPool, queue: &str, lease_secs: i64) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO jobs (id, queue, payload, state, attempts, locked_until)
+         VALUES ($1, $2, '{\"kind\":\"cycle\"}', 'running', 1, now() + make_interval(secs => $3))",
+    )
+    .bind(id)
+    .bind(queue)
+    .bind(lease_secs as f64)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+async fn artist_status(pool: &PgPool, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT enrichment_status FROM artists WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn set_enriching(pool: &PgPool, id: Uuid) {
+    sqlx::query("UPDATE artists SET enrichment_status = 'enriching' WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Upstream resets every `enriching` artist to `pending` when its artist queue has nothing
+/// waiting or active. kima-rs enriches artists inside the `enrich` cycle, so "nothing active"
+/// is: no other `enrich` job running on a live lease (another process's cycle may hold claims);
+/// the caller's own job and lapsed leases (a dead process) do not count, nor other queues.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enriching_artists_are_reset_only_while_no_other_cycle_runs(pool: PgPool) {
+    let a = artist(&pool, "Stuck", "enriching").await;
+    let done = artist(&pool, "Done", "completed").await;
+
+    assert_eq!(
+        enrichment::reset_enriching_artists_if_idle(&pool, "enrich", None)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(artist_status(&pool, a).await, "pending");
+    assert_eq!(artist_status(&pool, done).await, "completed");
+
+    set_enriching(&pool, a).await;
+    let other = running_job(&pool, "enrich", 300).await;
+    assert_eq!(
+        enrichment::reset_enriching_artists_if_idle(&pool, "enrich", None)
+            .await
+            .unwrap(),
+        0,
+        "another cycle runs on a live lease"
+    );
+    assert_eq!(artist_status(&pool, a).await, "enriching");
+    assert_eq!(
+        enrichment::reset_enriching_artists_if_idle(&pool, "enrich", Some(other))
+            .await
+            .unwrap(),
+        1,
+        "the caller's own job does not count"
+    );
+
+    set_enriching(&pool, a).await;
+    let own = running_job(&pool, "enrich", 300).await;
+    sqlx::query("UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = $1")
+        .bind(other)
+        .execute(&pool)
+        .await
+        .unwrap();
+    running_job(&pool, "library", 300).await;
+    assert_eq!(
+        enrichment::reset_enriching_artists_if_idle(&pool, "enrich", Some(own))
+            .await
+            .unwrap(),
+        1,
+        "a lapsed lease and another queue do not count"
+    );
+    assert_eq!(artist_status(&pool, a).await, "pending");
+}

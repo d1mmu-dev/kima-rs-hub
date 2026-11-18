@@ -26,8 +26,9 @@ pub mod text;
 pub mod wikidata;
 
 pub use ctx::{
-    AnalysisConfig, AnalysisRuntimeCache, EmbeddingConfig, EmbeddingParallelism,
-    EmbeddingRuntimeCache, IdentConfig, IdentCtx, VibeConfig, snapshot_concurrency,
+    AnalysisConfig, AnalysisRuntimeCache, DEFAULT_ANALYSIS_WORKERS, EmbeddingConfig,
+    EmbeddingParallelism, EmbeddingRuntimeCache, IdentConfig, IdentCtx, VibeConfig,
+    snapshot_concurrency,
 };
 pub use kima_ml::input_snapshot::SnapshotLimits;
 pub use mbid::Mbid;

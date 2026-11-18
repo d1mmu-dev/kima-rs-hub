@@ -54,6 +54,7 @@ fn config(frontend: Option<&Path>, origins: &[&str]) -> Config {
         disable_clap: false,
         musicnn_model_dir: None,
         disable_musicnn: false,
+        analysis_workers: None,
         snapshot_dir: None,
         snapshot_max_bytes: None,
         snapshot_max_concurrent: None,

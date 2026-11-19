@@ -1579,6 +1579,136 @@ async fn unresolvable_artists_without_an_mbid_are_reopened_after_a_day(pool: PgP
     }
 }
 
+async fn cover_deferrals(pool: &PgPool, artist: Uuid) -> i16 {
+    sqlx::query_scalar("SELECT cover_deferrals FROM artists WHERE id = $1")
+        .bind(artist)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// `(completed, pending, owed)` artists in the progress, and the vibe map's `artists_owed`.
+async fn owed(pool: &PgPool) -> ((i64, i64, i64), i64) {
+    let a = kima_db::enrichment::progress(pool, true)
+        .await
+        .unwrap()
+        .artists;
+    let map = kima_db::enrichment::vibe_inputs(pool, false)
+        .await
+        .unwrap()
+        .artists_owed;
+    ((a.completed, a.pending, a.owed), map)
+}
+
+/// The state `identity::defer_completed_artist` leaves: a completed artist whose album covers
+/// wait, `failed` with no failure and no error, due again now. Its MBID (a search result)
+/// names another artist on the next run.
+async fn deferred_with_a_wrong_mbid(pool: &PgPool) -> Uuid {
+    let a = seed(pool, "Alexis Ffrench", "Evolution").await;
+    set_mbid(pool, a, M, "search").await;
+    set(
+        pool,
+        a,
+        "enrichment_status = 'failed', enrichment_failures = 0, cover_deferrals = 1, \
+         last_error = NULL, last_error_code = NULL, last_enriched_at = now(), \
+         enrichment_retry_at = now() - interval '1 second'",
+    )
+    .await;
+    a
+}
+
+/// Re-review M2 minor: an artist whose covers were deferred, re-run, whose MBID the guard drops
+/// and whose name resolves to nothing is `unresolvable` with no failure and no error. Its cover
+/// retries belong to the identity it lost, so they go with it: once the 24 h reopen makes it
+/// `pending`, it is owed (its own enrichment is not done), not counted completed.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn an_unresolvable_run_forgets_the_cover_deferrals_of_the_dropped_mbid(pool: PgPool) {
+    let a = deferred_with_a_wrong_mbid(&pool).await;
+    assert_eq!(owed(&pool).await, ((1, 0, 0), 0), "only its covers wait");
+    let w = World::default()
+        .get(
+            &mb_artist_url(M, "aliases"),
+            held(M, "Sam Cooke", "Cooke, Sam", &[]),
+        )
+        .get(&mb_search_url("Alexis Ffrench"), search(json!([])));
+    let f = fx(&pool, w, World::default()).await;
+
+    assert_eq!(enrich(&f, a).await, ArtistResult::Unresolvable);
+    let r = row(&pool, a).await;
+    assert_eq!(
+        (r.status.as_str(), r.failures, r.mbid),
+        ("unresolvable", 0, None)
+    );
+    assert_eq!(r.last_error_code, None);
+    assert_eq!(cover_deferrals(&pool, a).await, 0);
+
+    set(&pool, a, "last_enriched_at = now() - interval '25 hours'").await;
+    assert_eq!(
+        identity::reopen_unresolvable_without_mbid(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(row(&pool, a).await.status, "pending");
+    assert_eq!(owed(&pool).await, ((0, 1, 1), 1));
+}
+
+/// Re-review M2 minor, the other path: the guard drops the MBID and MusicBrainz's search waits
+/// on its rate limit, so the run is `pending` (no failure, no error) with the MBID and bio
+/// gone. Its own enrichment is owed again, so the cover retries are forgotten with the MBID.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_dropped_mbid_forgets_the_cover_deferrals_while_the_search_waits(pool: PgPool) {
+    let a = deferred_with_a_wrong_mbid(&pool).await;
+    set(&pool, a, "bio = 'Sam Cooke was…'").await;
+    let w = World::default()
+        .get(
+            &mb_artist_url(M, "aliases"),
+            held(M, "Sam Cooke", "Cooke, Sam", &[]),
+        )
+        .status(&mb_search_url("Alexis Ffrench"), 503)
+        .get(&deezer_search_url("Alexis Ffrench"), json!({"data": []}));
+    let f = fx(&pool, w, World::default()).await;
+
+    assert_eq!(enrich(&f, a).await, ArtistResult::Pending);
+    let r = row(&pool, a).await;
+    assert_eq!((r.status.as_str(), r.failures), ("pending", 0));
+    assert_eq!((r.mbid, r.bio, r.last_error_code), (None, None, None));
+    assert_eq!(cover_deferrals(&pool, a).await, 0);
+    assert_eq!(owed(&pool).await, ((0, 1, 1), 1));
+}
+
+/// A stored artist that is `unresolvable` with cover retries recorded (written before the
+/// unresolvable write forgot them) loses them when the 24 h reopen makes it `pending`; one not
+/// reopened keeps them.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn the_day_reopen_forgets_cover_deferrals(pool: PgPool) {
+    let unres = "enrichment_status = 'unresolvable', enrichment_failures = 0, cover_deferrals = 2";
+    let old = seed(&pool, "Old", "A").await;
+    set(
+        &pool,
+        old,
+        &format!("{unres}, last_enriched_at = now() - interval '25 hours'"),
+    )
+    .await;
+    let recent = seed(&pool, "Recent", "A").await;
+    set(
+        &pool,
+        recent,
+        &format!("{unres}, last_enriched_at = now() - interval '23 hours'"),
+    )
+    .await;
+
+    assert_eq!(
+        identity::reopen_unresolvable_without_mbid(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(cover_deferrals(&pool, old).await, 0);
+    assert_eq!(cover_deferrals(&pool, recent).await, 2);
+    assert_eq!(owed(&pool).await, ((1, 1, 1), 1));
+}
+
 /// Task 21 carry: an unchanged local image is not read, re-encoded and rewritten on every
 /// claim; a changed one is.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

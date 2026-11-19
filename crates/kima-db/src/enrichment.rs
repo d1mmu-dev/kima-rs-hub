@@ -1047,12 +1047,15 @@ async fn stage_counts(pool: &PgPool, stage: &str, gate: bool) -> sqlx::Result<St
 }
 
 async fn artist_progress(pool: &PgPool) -> sqlx::Result<ArtistProgress> {
-    // An artist with album-cover retries recorded, no failure and no error since its last
-    // completed write (which clears the error; every reopen resets `cover_deferrals`) finished
-    // its own enrichment; only its album covers wait, `failed`
-    // (`identity::defer_completed_artist`) or `pending` (`requeue_completed_artist`, covers on a
-    // rate-limited source) or re-run. Upstream's covers never hold an artist back, so it counts
-    // as completed and is not owed: a slow cover host cannot hold the vibe map (review M2).
+    // An artist with album-cover retries recorded, no failure and no error finished its own
+    // enrichment: `cover_deferrals` is set only on a completed artist
+    // (`identity::defer_completed_artist`), a completed write clears the error, and every way
+    // back to owing its own enrichment resets the count (every reopen, including the 24 h one
+    // of unresolvable artists without an MBID; an `unresolvable` write; a dropped MBID). Only
+    // its album covers wait, `failed` (`defer_completed_artist`) or `pending`
+    // (`requeue_completed_artist`, covers on a rate-limited source) or re-run. Upstream's
+    // covers never hold an artist back, so it counts as completed and is not owed: a slow
+    // cover host cannot hold the vibe map (review M2).
     let r = sqlx::query!(
         r#"WITH a AS (
              SELECT CASE WHEN a.enrichment_status IN ('failed', 'pending', 'enriching')

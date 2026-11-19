@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists SET enrichment_status = 'pending', enrichment_failures = 0,\n                            cover_deferrals = 0\n         WHERE mbid IS NULL AND enrichment_status = 'unresolvable'\n           AND last_enriched_at < now() - interval '24 hours'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b74cf5faa8d0cba1fc131fc3116a0521eca768d38df1c4003473c7a31b419372"
+}

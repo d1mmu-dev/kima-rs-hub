@@ -47,7 +47,8 @@ pub const FAILURE_CAP: i16 = RETRY_CAP;
 /// sets it `pending` again: a new album, a wipe and re-run, or the metadata editor (an MBID
 /// change, an image removal, a reset of those overrides, a removed user album cover). The
 /// stage retry and re-decide controls touch tracks only and do not reopen it. The count lives
-/// in `artists.cover_deferrals`; every reopen resets it and a completed write keeps it.
+/// in `artists.cover_deferrals`; every reopen resets it, as do an `unresolvable` write and a
+/// dropped MBID (`save_artist_outcome_in`), and a completed write keeps it.
 pub const DEFER_CAP: i16 = 6;
 /// MusicBrainz genres kept per artist (spec §12.4).
 pub const MAX_GENRES: usize = 5;

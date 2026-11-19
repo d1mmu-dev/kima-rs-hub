@@ -406,11 +406,14 @@ pub async fn claim_artists(pool: &PgPool, n: i64) -> sqlx::Result<Vec<ArtistForE
 
 /// Puts `unresolvable` artists without an MBID last tried over 24 hours ago back to `pending`
 /// with no failures (upstream `executeArtistsPhase`, `unifiedEnrichment.ts:2380-2389`, whose
-/// `temp-` placeholder MBID is kima-rs's `mbid IS NULL`, D-117). Only the status and the count
-/// change, as upstream. Returns how many were reopened.
+/// `temp-` placeholder MBID is kima-rs's `mbid IS NULL`, D-117). The status and the count change,
+/// as upstream, and any album-cover retries are forgotten (`cover_deferrals = 0`, a kima-rs
+/// counter upstream lacks): the artist's own enrichment is owed again, so the progress and the
+/// vibe map must not count it as one only its covers wait on. Returns how many were reopened.
 pub async fn reopen_unresolvable_without_mbid(pool: &PgPool) -> sqlx::Result<u64> {
     let r = sqlx::query!(
-        "UPDATE artists SET enrichment_status = 'pending', enrichment_failures = 0
+        "UPDATE artists SET enrichment_status = 'pending', enrichment_failures = 0,
+                            cover_deferrals = 0
          WHERE mbid IS NULL AND enrichment_status = 'unresolvable'
            AND last_enriched_at < now() - interval '24 hours'"
     )
@@ -523,7 +526,9 @@ impl ArtistWrite {
 /// Writes a run's outcome in one transaction: the artist row first (locked by the update),
 /// then its genres, the order every writer of artists and genres keeps. Applied only while the
 /// artist is still `enriching` (a wipe or a restart in between wins); returns whether it was.
-/// `last_enriched_at` is now.
+/// `last_enriched_at` is now. An `unresolvable` outcome or a dropped MBID forgets the album-cover
+/// retries (`cover_deferrals = 0`): they belonged to a completed enrichment the artist no
+/// longer has, and a later `pending` must count as owed, not as covers alone waiting.
 pub async fn save_artist_outcome(pool: &PgPool, id: Uuid, out: &ArtistWrite) -> sqlx::Result<bool> {
     let mut tx = pool.begin().await?;
     let saved = save_artist_outcome_in(&mut tx, id, out).await?;
@@ -576,7 +581,12 @@ pub async fn save_artist_outcome_in(
                image_source = CASE WHEN $12 = 'keep' OR image_source = 'user' THEN image_source
                                    WHEN $12 = 'set' THEN $14 ELSE NULL END,
                "similar" = CASE $15 WHEN 'keep' THEN "similar" WHEN 'set' THEN $16
-                                    ELSE NULL END
+                                    ELSE NULL END,
+               cover_deferrals = CASE WHEN $2 = 'unresolvable'
+                                        OR ($7 = 'clear'
+                                            AND mbid_source IS DISTINCT FROM 'user'
+                                            AND mbid_source IS DISTINCT FROM 'autotag')
+                                      THEN 0 ELSE cover_deferrals END
            WHERE id = $1 AND enrichment_status = 'enriching'
            RETURNING image_source"#,
         id,

@@ -167,7 +167,7 @@ pub fn scored_songs() -> String {
 }
 
 /// Upstream `PACE_SQL`: 1 inside the band (double or half counts) on a steady beat, 0 outside, else neutral.
-fn pace_sql() -> String {
+pub(crate) fn pace_sql() -> String {
     let (lo, hi) = PACE_BAND;
     let steady = const_lit(STEADY_BEAT_KIMA);
     format!(

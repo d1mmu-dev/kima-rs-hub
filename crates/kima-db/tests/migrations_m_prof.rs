@@ -32,6 +32,10 @@ const PERSONAL: [(&str, &str); 13] = [
 /// Tables without an owner column that the seed fills and the upgrade must leave alone.
 const UNTOUCHED: [(&str, &str); 3] = [("playlist_items", "id"), ("jobs", "id"), ("users", "id")];
 
+/// Columns later migrations add to these tables, with the value every existing row gets:
+/// `playlists.mix_id` (0063, M5b) is null on every playlist that is not a saved mix.
+const LATER_COLUMNS: [(&str, &str); 1] = [("playlists", "mix_id")];
+
 fn migrator_upto(version: i64) -> Migrator {
     Migrator {
         migrations: std::borrow::Cow::Owned(
@@ -80,10 +84,17 @@ async fn snapshot(pool: &PgPool, owner: &str) -> Vec<(String, Value)> {
                 items
                     .into_iter()
                     .map(|mut row| {
-                        if let Some(map) = row.as_object_mut()
-                            && let Some(v) = map.remove(owner)
-                        {
-                            map.insert("profile_id".into(), v);
+                        if let Some(map) = row.as_object_mut() {
+                            if let Some(v) = map.remove(owner) {
+                                map.insert("profile_id".into(), v);
+                            }
+                            for (t, column) in LATER_COLUMNS {
+                                if t == *table
+                                    && let Some(v) = map.remove(column)
+                                {
+                                    assert!(v.is_null(), "{table}.{column} = {v}");
+                                }
+                            }
                         }
                         row
                     })
@@ -524,16 +535,41 @@ async fn name_must_be_trimmed_and_1_to_50(pool: PgPool) {
     assert_eq!(pg_error(&err).code(), "23514", "unknown kind");
 }
 
+/// The last migration that does not depend on `profiles`: 0063 (M5b) creates tables keyed by
+/// `profile_id`, so 0060 can only be rolled back below it (0063 would have to go first).
+const LAST_PROFILE_INDEPENDENT: i64 = 62;
+
+/// Every migration up to `LAST_PROFILE_INDEPENDENT` except `version`.
+fn migrator_without_upto_independent(version: i64) -> Migrator {
+    Migrator {
+        migrations: std::borrow::Cow::Owned(
+            kima_db::MIGRATOR
+                .iter()
+                .filter(|m| m.version != version && m.version <= LAST_PROFILE_INDEPENDENT)
+                .cloned()
+                .collect(),
+        ),
+        ..Migrator::DEFAULT
+    }
+}
+
 #[sqlx::test(migrations = false)]
 async fn down_script_restores_pre_profile_schema(pool: PgPool) {
     at_0039_with_seed(&pool).await;
     // 0060's rollback must retain both independent M5 migrations and their index options, and
-    // the schema of every later migration (0062 adds `artists.enrichment_retry_at`): the
-    // reference is every migration but 0060, which then runs out of order.
-    migrator_without(60).run(&pool).await.unwrap();
+    // the schema of every later migration that does not need profiles (0062 adds
+    // `artists.enrichment_retry_at`): the reference is every such migration but 0060, which
+    // then runs out of order.
+    migrator_without_upto_independent(60)
+        .run(&pool)
+        .await
+        .unwrap();
     let schema_before_profiles = schema_fingerprint(&pool).await;
     let rows_0039 = snapshot(&pool, "user_id").await;
-    kima_db::MIGRATOR.run(&pool).await.unwrap();
+    migrator_upto(LAST_PROFILE_INDEPENDENT)
+        .run(&pool)
+        .await
+        .unwrap();
     assert_ne!(schema_fingerprint(&pool).await, schema_before_profiles);
 
     // A non-main profile owning a row blocks the way back, and nothing changes.
@@ -586,12 +622,15 @@ async fn down_script_restores_pre_profile_schema(pool: PgPool) {
     let expected: Vec<i64> = kima_db::MIGRATOR
         .iter()
         .map(|m| m.version)
-        .filter(|&v| v != 60)
+        .filter(|&v| v != 60 && v <= LAST_PROFILE_INDEPENDENT)
         .collect();
     assert_eq!(versions, expected);
 
     // And up again from there.
-    kima_db::MIGRATOR.run(&pool).await.unwrap();
+    migrator_upto(LAST_PROFILE_INDEPENDENT)
+        .run(&pool)
+        .await
+        .unwrap();
     assert_eq!(snapshot(&pool, "profile_id").await, rows_0039);
 }
 

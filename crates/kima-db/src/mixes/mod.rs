@@ -3,5 +3,6 @@
 //! choices, and `tracks.mood_tags`. Every personal row is keyed by the profile (M-PROF).
 //! Queries arrive with the tasks that use them (M5b plan Tasks 4, 9, 10, 15, 16).
 
+pub mod generators;
 pub mod recipe;
 pub mod tags;

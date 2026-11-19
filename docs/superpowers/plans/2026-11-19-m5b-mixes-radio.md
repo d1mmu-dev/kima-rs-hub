@@ -221,8 +221,9 @@ Reserved rows: D-260 listener state (Q1, Task 6) · D-261 `LIBRARY_PLAYABLE` = p
 ### Task 7: Non-recipe generators
 
 **Files:** `crates/kima-mixes/src/generators/{era_genre,discovery,analysis}.rs`, `crates/kima-db/src/mixes/generators.rs`, `crates/kima-db/tests/mix_generators.rs`.
-- [ ] **RED:** port the non-recipe half of `mixGenerators.integration` 33, `mixCutoffs` 4, `deepCutsOwnPlays` 2, `randomDiscoveryEligibility` 1, `unplayedTracks` 3, `mixPick` 4: `era_needs_mixable_decade`, `genre_top20_min5_two_per_artist`, `top_tracks_from_own_listens`, `rediscover_unplayed_recently`, `artist_similar_uses_library_similar_artists`, `deep_cuts_unplayed_then_three_or_fewer`, `key_journey_needs_completed_analysis_and_key`, `tempo_flow_bands_100_130`, `vocal_detox_instrumentalness_075` (CLAP reading), `minor_key_arousal_above_median`, `profile_isolation_of_plays`.
-- [ ] Implement with `listen_rows` (existing `kima_db::stats::listens`); GREEN; commit `feat(mixes): era, genre, discovery and analysis mixes`.
+- [x] **RED:** port the non-recipe half of `mixGenerators.integration` 33, `mixCutoffs` 4, `deepCutsOwnPlays` 2, `randomDiscoveryEligibility` 1, `unplayedTracks` 3, `mixPick` 4: `era_needs_mixable_decade`, `genre_top20_min5_two_per_artist`, `top_tracks_from_own_listens`, `rediscover_unplayed_recently`, `artist_similar_uses_library_similar_artists`, `deep_cuts_unplayed_then_three_or_fewer`, `key_journey_needs_completed_analysis_and_key`, `tempo_flow_bands_100_130`, `vocal_detox_instrumentalness_075` (CLAP reading), `minor_key_arousal_above_median`, `profile_isolation_of_plays`.
+- [x] Implement with `listen_rows` (existing `kima_db::stats::listens`); GREEN; commit `feat(mixes): era, genre, discovery and analysis mixes`.
+- Done notes: pure parts in `kima_mixes::mix` (`ProgrammaticMix`, colours, cover selection, Key Journey and Tempo Flow arrangements), SQL in `kima_db::mixes::generators` (one function per generator plus the shared seeded/capped draws and `mix_songs`); tests `kima-db/tests/mix_generators.rs` (16). More Like takes a `SimilarArtists` resolver (kima-db cannot call `kima_ident::similar`; the API wires the real one in Task 9). Column mapping and the stored similar list: D-272.
 
 ### Task 8: Recipe mixes, day mix, night plays, familiarity
 

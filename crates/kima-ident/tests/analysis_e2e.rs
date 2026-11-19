@@ -576,3 +576,146 @@ async fn undecodable_file_becomes_terminal_after_the_retry_cap_and_settles_vibe_
     );
     db.cleanup().await;
 }
+
+// ---- 6. Worker parallelism (upstream NUM_WORKERS, default 2) --------------------------------
+
+/// Sessions of `db_name` parked on the publication's track generation fence right now.
+async fn fence_waiters(admin: &PgPool, db_name: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity \
+         WHERE datname = $1 AND wait_event_type = 'Lock' \
+           AND query ILIKE '%FROM tracks%FOR NO KEY UPDATE%'",
+    )
+    .bind(db_name)
+    .fetch_one(admin)
+    .await
+    .unwrap()
+}
+
+/// Polls until at least `n` publications wait on the fence, for at most `limit`; answers the
+/// most seen at once.
+async fn wait_for_fence_waiters(admin: &PgPool, db_name: &str, n: i64, limit: Duration) -> i64 {
+    let deadline = tokio::time::Instant::now() + limit;
+    let mut most = 0;
+    while tokio::time::Instant::now() < deadline {
+        most = most.max(fence_waiters(admin, db_name).await);
+        if most >= n {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    most
+}
+
+/// Holds the tracks' rows `FOR NO KEY UPDATE` without changing them: the claim (`FOR KEY SHARE`)
+/// still takes them, while every publication of one parks on its generation fence, holding its
+/// blocking worker.
+async fn hold_tracks(
+    pool: &PgPool,
+    ids: &[uuid::Uuid],
+) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM tracks WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE")
+        .bind(ids)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+    tx
+}
+
+/// Upstream runs `NUM_WORKERS` analysis processes (default 2, `DEFAULT_WORKERS`): the default
+/// configuration has two tracks in their blocking analysis at once.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs isolated Postgres; run with --ignored"]
+async fn the_default_configuration_analyses_two_tracks_at_once() {
+    let db = isolated_db().await;
+    let pool = db.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let a = seed_track(&pool, &root, "a.wav").await;
+    let b = seed_track(&pool, &root, "b.wav").await;
+    let ctx = ident_ctx_with_embedding_and_analysis(
+        &pool,
+        &root,
+        common::dead_bases(),
+        IdentifySwitch::new(false, true),
+        embedding_config_for_analysis(&root),
+        kima_ident::AnalysisConfig::default(),
+    );
+
+    let holder = hold_tracks(&pool, &[a, b]).await;
+    let worker_ctx = ctx.clone();
+    let batch =
+        tokio::spawn(
+            async move { analysis::run_batch(&worker_ctx, &CancellationToken::new()).await },
+        );
+    let most = wait_for_fence_waiters(&db.admin, &db.name, 2, Duration::from_secs(120)).await;
+    holder.commit().await.unwrap();
+    let report = batch.await.unwrap().expect("analysis batch should succeed");
+
+    assert_eq!(
+        most, 2,
+        "both tracks must be in their blocking analysis at once"
+    );
+    assert_eq!((report.claimed, report.done, report.failed), (2, 2, 0));
+    db.cleanup().await;
+}
+
+/// The worker limit is one per context, not one per claim: blocking work a cancelled batch left
+/// running (it cannot be stopped) keeps its slot, so a later batch never runs more than
+/// `workers` decodes/analyses at once (memory stays bounded).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs isolated Postgres; run with --ignored"]
+async fn cancelled_blocking_analysis_keeps_its_worker_slot() {
+    let db = isolated_db().await;
+    let pool = db.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let a = seed_track(&pool, &root, "a.wav").await;
+    let ctx = ident_ctx_with_embedding_and_analysis(
+        &pool,
+        &root,
+        common::dead_bases(),
+        IdentifySwitch::new(false, true),
+        embedding_config_for_analysis(&root),
+        analysis_config(None), // one worker
+    );
+
+    // The first batch's analysis parks on the fence; the batch is then cancelled.
+    let hold_a = hold_tracks(&pool, &[a]).await;
+    let cancel = CancellationToken::new();
+    let (first_ctx, first_cancel) = (ctx.clone(), cancel.clone());
+    let first = tokio::spawn(async move { analysis::run_batch(&first_ctx, &first_cancel).await });
+    assert_eq!(
+        wait_for_fence_waiters(&db.admin, &db.name, 1, Duration::from_secs(120)).await,
+        1
+    );
+    cancel.cancel();
+    let first = first.await.unwrap().expect("cancelled batch");
+    assert_eq!((first.claimed, first.done), (1, 0));
+
+    // A second batch claims another track while the first one's blocking work still runs.
+    let b = seed_track(&pool, &root, "b.wav").await;
+    let hold_b = hold_tracks(&pool, &[b]).await;
+    let second_ctx = ctx.clone();
+    let second =
+        tokio::spawn(
+            async move { analysis::run_batch(&second_ctx, &CancellationToken::new()).await },
+        );
+    let most = wait_for_fence_waiters(&db.admin, &db.name, 2, Duration::from_secs(30)).await;
+    assert_eq!(
+        most, 1,
+        "a second blocking analysis started while the cancelled one still held the only worker"
+    );
+
+    // Once the first one ends, the second gets the worker.
+    hold_a.commit().await.unwrap();
+    assert_eq!(
+        wait_for_fence_waiters(&db.admin, &db.name, 1, Duration::from_secs(120)).await,
+        1
+    );
+    hold_b.commit().await.unwrap();
+    let second = second.await.unwrap().expect("second batch");
+    assert_eq!((second.claimed, second.done, second.failed), (1, 1, 0));
+    db.cleanup().await;
+}

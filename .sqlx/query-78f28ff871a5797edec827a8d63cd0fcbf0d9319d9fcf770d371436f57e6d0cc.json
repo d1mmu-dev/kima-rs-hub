@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists SET enrichment_status = 'failed', cover_deferrals = $2,\n                enrichment_retry_at = now() + interval '15 minutes'\n         WHERE id = $1 AND enrichment_status = 'completed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "78f28ff871a5797edec827a8d63cd0fcbf0d9319d9fcf770d371436f57e6d0cc"
+}

@@ -60,10 +60,9 @@ pub struct AnalysisRuntimeState {
             >,
         >,
     >,
-    /// Reserved for a future per-process semaphore cache mirroring
-    /// `EmbeddingRuntimeState::workers`; `run_claim_stopping` still allocates a fresh
-    /// `Semaphore` per claim today (tracked as an open item, not part of this fix round).
-    #[allow(dead_code)]
+    /// The blocking analysis workers' permits ([`AnalysisConfig::workers`]), shared by every
+    /// claim and batch of this context like `EmbeddingRuntimeState::workers`: work a cancelled
+    /// batch left running keeps its permit until it really ends.
     pub(crate) workers: std::sync::OnceLock<Arc<tokio::sync::Semaphore>>,
 }
 
@@ -151,8 +150,24 @@ pub struct AnalysisConfig {
     pub disabled: bool,
     /// BoundedSessionPool size for the MusiCNN ONNX sessions.
     pub pool_size: usize,
-    /// Maximum simultaneous blocking analysis workers.
+    /// Maximum simultaneous blocking analysis workers (decode + DSP + MusiCNN + publication),
+    /// shared by clones of one context, including work still running after cancellation. The
+    /// server sets it with [`AnalysisConfig::resolve_workers`].
     pub workers: usize,
+}
+
+/// Analysis workers when `KIMA_ANALYSIS_WORKERS` is unset (upstream `DEFAULT_WORKERS`).
+pub const DEFAULT_ANALYSIS_WORKERS: usize = 2;
+
+impl AnalysisConfig {
+    /// The analysis worker count (upstream `services/audio-analyzer/analyzer.py`): the
+    /// configured `KIMA_ANALYSIS_WORKERS`, else [`DEFAULT_ANALYSIS_WORKERS`], clamped to
+    /// `1..=cores` (upstream `_clamp_workers`).
+    pub fn resolve_workers(configured: Option<usize>, cores: usize) -> usize {
+        configured
+            .unwrap_or(DEFAULT_ANALYSIS_WORKERS)
+            .clamp(1, cores.max(1))
+    }
 }
 
 impl Default for AnalysisConfig {
@@ -161,7 +176,7 @@ impl Default for AnalysisConfig {
             model_dir: None,
             disabled: false,
             pool_size: 1,
-            workers: 1,
+            workers: DEFAULT_ANALYSIS_WORKERS,
         }
     }
 }
@@ -266,6 +281,8 @@ const _: () =
     assert!(kima_core::config::MAX_EMBEDDING_WORKERS as i64 <= crate::stages::embedding::BATCH);
 const _: () =
     assert!(kima_core::config::MAX_CLAP_AUDIO_THREAD_SLOTS < kima_ml::onnx::MAX_THREAD_SLOTS);
+const _: () =
+    assert!(kima_core::config::MAX_ANALYSIS_WORKERS as i64 <= crate::stages::analysis::BATCH);
 
 /// Concurrent input snapshots the server allows: the explicit `KIMA_SNAPSHOT_MAX_CONCURRENT`,
 /// else enough for every embedding and analysis worker to hold one at once (never below the
@@ -411,6 +428,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Upstream `services/audio-analyzer/analyzer.py`: `DEFAULT_WORKERS = 2`, clamped to
+    /// `1..=os.cpu_count()`.
+    #[test]
+    fn analysis_workers_default_to_two_and_never_exceed_the_cores() {
+        assert_eq!(DEFAULT_ANALYSIS_WORKERS, 2);
+        assert_eq!(AnalysisConfig::default().workers, DEFAULT_ANALYSIS_WORKERS);
+        let r = AnalysisConfig::resolve_workers;
+        assert_eq!(r(None, 32), 2);
+        assert_eq!(r(None, 1), 1, "one core: one worker");
+        assert_eq!(r(Some(8), 32), 8);
+        assert_eq!(r(Some(8), 4), 4, "clamped to the cores");
+        assert_eq!(r(Some(1), 0), 1, "never below one");
+        assert_eq!(
+            r(Some(kima_core::config::MAX_ANALYSIS_WORKERS), 256),
+            kima_core::config::MAX_ANALYSIS_WORKERS
+        );
     }
 
     #[test]

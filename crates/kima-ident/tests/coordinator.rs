@@ -859,10 +859,13 @@ async fn paused_similar_sources_end_the_artists_phase(pool: PgPool) {
     }
 }
 
-/// Review I1: a source outage fails an artist once per retry grace, not once per batch: two
-/// cycles in a row leave it at one failure.
+/// D-254 (upstream `artistEnrichment.ts`/`unifiedEnrichment.ts`): a source outage fails the
+/// run and the artist is asked again by the first cycle at least a minute later (upstream's
+/// idle backoff, the slowest it re-queues a completed job); each try counts toward the cap of
+/// 4. The cycles in between leave it alone, so a down source cannot run it to the cap in a few
+/// back-to-back cycles.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn a_short_outage_cannot_make_an_artist_unresolvable(pool: PgPool) {
+async fn an_outage_is_retried_once_a_minute_until_the_cap(pool: PgPool) {
     let id = "66666666-0000-4000-8000-000000000009";
     // Wikidata is not recorded: the replay answers 599, a failure.
     let mut entries = artist_answers("Flaky", id);
@@ -878,10 +881,160 @@ async fn a_short_outage_cannot_make_an_artist_unresolvable(pool: PgPool) {
     ctx.config.fingerprinting = false;
     let (a, _) = pending_artist(&pool, "a.wav", "Flaky", id, None).await;
 
-    for _ in 0..3 {
+    let make_due = || async {
+        sqlx::query(
+            "UPDATE artists SET enrichment_retry_at = now() - interval '1 second' WHERE id = $1",
+        )
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    };
+    for tries in 1..=3 {
         cycle(&ctx).await;
+        assert_eq!(artist_row(&pool, a).await, ("failed".to_string(), tries));
+        cycle(&ctx).await;
+        assert_eq!(
+            artist_row(&pool, a).await,
+            ("failed".to_string(), tries),
+            "the next cycle comes before the minute"
+        );
+        make_due().await;
     }
+    cycle(&ctx).await;
+    assert_eq!(artist_row(&pool, a).await, ("unresolvable".to_string(), 4));
+    cycle(&ctx).await;
+    assert_eq!(artist_row(&pool, a).await, ("unresolvable".to_string(), 4));
+}
 
+/// Upstream `executeArtistsPhase` starts by putting `unresolvable` artists with no real MBID
+/// tried over a day ago back to `pending` with no failures; the same cycle then asks again
+/// (here MusicBrainz does not answer: one fresh failure, not a fifth).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn the_artists_phase_reopens_unresolvable_artists_without_an_mbid(pool: PgPool) {
+    let replay = Replay::start(Recording(vec![])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    let (a, _) = pending_artist(
+        &pool,
+        "a.wav",
+        "Nameless",
+        "66666666-0000-4000-8000-000000000010",
+        None,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE artists SET mbid = NULL, mbid_source = NULL, enrichment_status = 'unresolvable',
+                enrichment_failures = 4, last_enriched_at = now() - interval '25 hours'
+         WHERE id = $1",
+    )
+    .bind(a)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = cycle(&ctx).await;
+    assert_eq!(report.artists.claimed, 1);
+    assert_eq!(artist_row(&pool, a).await, ("failed".to_string(), 1));
+}
+
+/// Review M3 (upstream `executeArtistsPhase`): an artist a crashed or errored run left
+/// `enriching` is set `pending` by the next cycle's artists phase and asked again, unless
+/// another process's cycle runs on a live lease (its claims are real); once that lease has
+/// lapsed (a dead process) the reset happens.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn the_artists_phase_resets_artists_left_enriching_when_no_cycle_runs(pool: PgPool) {
+    let replay = Replay::start(Recording(vec![])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    let (a, _) = pending_artist(
+        &pool,
+        "a.wav",
+        "Stuck",
+        "66666666-0000-4000-8000-000000000011",
+        None,
+    )
+    .await;
+    sqlx::query("UPDATE artists SET enrichment_status = 'enriching' WHERE id = $1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let other = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO jobs (id, queue, payload, state, attempts, locked_until)
+         VALUES ($1, $2, '{\"kind\":\"cycle\"}', 'running', 1, now() + interval '5 minutes')",
+    )
+    .bind(other)
+    .bind(coordinator::QUEUE)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let report = cycle(&ctx).await;
+    assert_eq!(report.artists.claimed, 0, "another cycle may hold it");
+    assert_eq!(artist_row(&pool, a).await, ("enriching".to_string(), 0));
+
+    sqlx::query("UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = $1")
+        .bind(other)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let report = cycle(&ctx).await;
+    assert_eq!(report.artists.claimed, 1);
+    assert_eq!(artist_row(&pool, a).await, ("failed".to_string(), 1));
+}
+
+/// The cycle job a worker runs is itself `running` on a live lease: the handler must not count
+/// it as another cycle, or the reset above could never happen in production.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn the_running_cycle_job_does_not_hold_back_its_own_reset(pool: PgPool) {
+    let replay = Replay::start(Recording(vec![])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = ident_ctx(&pool, &root(&dir), Bases::all(&replay.url()));
+    ctx.config.fingerprinting = false;
+    let (a, _) = pending_artist(
+        &pool,
+        "a.wav",
+        "Stuck",
+        "66666666-0000-4000-8000-000000000012",
+        None,
+    )
+    .await;
+    sqlx::query("UPDATE artists SET enrichment_status = 'enriching' WHERE id = $1")
+        .bind(a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let own = Uuid::new_v4();
+    let payload = json!({"kind": coordinator::CYCLE_KIND});
+    sqlx::query(
+        "INSERT INTO jobs (id, queue, payload, state, attempts, locked_until)
+         VALUES ($1, $2, $3, 'running', 1, now() + interval '5 minutes')",
+    )
+    .bind(own)
+    .bind(coordinator::QUEUE)
+    .bind(&payload)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    forget_last_cycle(&ctx);
+    let job = queue::Job {
+        id: own,
+        queue: coordinator::QUEUE.to_owned(),
+        payload,
+        attempts: 1,
+        max_attempts: coordinator::MAX_ATTEMPTS,
+    };
+    let job_ctx = kima_jobs::worker::JobCtx {
+        cancel: CancellationToken::new(),
+    };
+    coordinator::handler(ctx.clone())(job, job_ctx)
+        .await
+        .unwrap();
     assert_eq!(artist_row(&pool, a).await, ("failed".to_string(), 1));
 }
 

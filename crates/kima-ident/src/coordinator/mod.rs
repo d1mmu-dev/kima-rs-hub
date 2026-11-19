@@ -21,6 +21,7 @@ pub mod control;
 
 use kima_db::PgPool;
 use kima_db::enrichment::{self, Phase, State, Status};
+use kima_db::identity;
 use kima_jobs::queue;
 use kima_jobs::worker::{self, Handler, JobError};
 use kima_library::jobs::OnChange;
@@ -28,6 +29,7 @@ use kima_net::Source;
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::IdentCtx;
 use crate::artist;
@@ -85,7 +87,11 @@ pub fn kick_on_change() -> OnChange {
 }
 
 /// Startup, before the workers start: cycles a dead process left `running` are requeued,
-/// artists it left `enriching` go back to `pending`, and a cycle is kicked.
+/// artists it left `enriching` go back to `pending`, and a cycle is kicked. The artist reset
+/// takes no lease check (unlike `enrichment::reset_enriching_artists_if_idle` in each artists
+/// phase): `requeue_running` has just requeued every running `enrich` job whatever its lease
+/// (one kima process per database), so none is left to check, and checking before it would
+/// only delay the reset after a crash without protecting another process (D-254).
 pub async fn prepare(pool: &PgPool) -> sqlx::Result<()> {
     let recovered = queue::requeue_running(pool, QUEUE).await?;
     if recovered.requeued + recovered.failed > 0 {
@@ -108,7 +114,9 @@ pub fn handler(ctx: IdentCtx) -> Handler {
         let ctx = ctx.clone();
         async move {
             match job.payload.get("kind").and_then(|k| k.as_str()) {
-                Some(CYCLE_KIND) => run_cycle(&ctx, &job_ctx.cancel).await.map(|_| ()),
+                Some(CYCLE_KIND) => run_cycle_as(&ctx, &job_ctx.cancel, Some(job.id))
+                    .await
+                    .map(|_| ()),
                 _ => Err(JobError::Permanent(format!(
                     "invalid enrich job payload: {}",
                     job.payload
@@ -162,6 +170,16 @@ pub async fn run_cycle(
     ctx: &IdentCtx,
     cancel: &CancellationToken,
 ) -> Result<CycleReport, JobError> {
+    run_cycle_as(ctx, cancel, None).await
+}
+
+/// [`run_cycle`] as the `enrich` job `job` (the handler's own running job, which the artists
+/// phase does not count as another cycle; see [`enrichment::reset_enriching_artists_if_idle`]).
+pub async fn run_cycle_as(
+    ctx: &IdentCtx,
+    cancel: &CancellationToken,
+    job: Option<Uuid>,
+) -> Result<CycleReport, JobError> {
     let pool = &ctx.pool;
     wait_min_interval(ctx, cancel).await?;
 
@@ -207,7 +225,7 @@ pub async fn run_cycle(
             fingerprint_phase(ctx, cancel, &stop, &ann),
             embedding_phase(ctx, cancel, &stop, &ann),
             analysis_phase(ctx, cancel, &stop, &ann),
-            network_phases(ctx, cancel, &stop, &ann)
+            network_phases(ctx, cancel, &stop, &ann, job)
         );
         // The library-wide steps read what the phases above made, so they follow them (spec 9.1).
         let vibe = vibe_phases(ctx, cancel, &stop, &ann).await;
@@ -654,8 +672,9 @@ async fn network_phases(
     cancel: &CancellationToken,
     stop: &CancellationToken,
     ann: &Announcer<'_>,
+    job: Option<Uuid>,
 ) -> NetworkOutcome {
-    let artists = artists_phase(ctx, cancel, stop, ann).await;
+    let artists = artists_phase(ctx, cancel, stop, ann, job).await;
     let tracks = tracks_phase(ctx, cancel, stop, ann).await;
     NetworkOutcome { artists, tracks }
 }
@@ -670,9 +689,33 @@ async fn artists_phase(
     cancel: &CancellationToken,
     stop: &CancellationToken,
     ann: &Announcer<'_>,
+    job: Option<Uuid>,
 ) -> PhaseOutcome {
     let mut out = PhaseOutcome::default();
     let mut marked = false;
+    // Upstream `executeArtistsPhase` opens with these two, before it looks for artists to
+    // queue. No artist batch of this process runs here (one cycle at a time, artists only in
+    // this phase), so an `enriching` artist is a crashed or errored run's unless another
+    // process's cycle is running.
+    match identity::reopen_unresolvable_without_mbid(&ctx.pool).await {
+        Ok(0) => {}
+        Ok(n) => info!(
+            reopened = n,
+            "unresolvable artists without an MBID are pending again"
+        ),
+        Err(e) => {
+            out.errors += 1;
+            batch_failed(ctx, Phase::Artists, e).await;
+        }
+    }
+    match enrichment::reset_enriching_artists_if_idle(&ctx.pool, QUEUE, job).await {
+        Ok(0) => {}
+        Ok(n) => info!(reset = n, "artists left enriching are pending again"),
+        Err(e) => {
+            out.errors += 1;
+            batch_failed(ctx, Phase::Artists, e).await;
+        }
+    }
     for _ in 0..ARTIST_BATCHES_PER_CYCLE {
         if !network_may_run(ctx, cancel, stop) {
             break;

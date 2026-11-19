@@ -1382,21 +1382,331 @@ async fn wikidata_image_is_downloaded_and_stored(pool: PgPool) {
     );
 }
 
-/// A `failed` artist waits out the retry grace (15 min, database clock) before it is claimed
-/// again, so a short outage cannot run it to the failure cap.
+/// Seconds from now to the artist's `enrichment_retry_at`, `None` when it has none.
+async fn retry_in(pool: &PgPool, artist: Uuid) -> Option<f64> {
+    sqlx::query_scalar(
+        "SELECT extract(epoch FROM enrichment_retry_at - now())::float8 FROM artists WHERE id = $1",
+    )
+    .bind(artist)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Upstream `artistEnrichment.ts`: a source that does not answer (an outage, a timeout:
+/// `musicbrainzFailed`, `wikidataFailed`, `similarFetchFailed`) records `failedArtistStatus`
+/// and the job completes; the artist is queued again by the first cycle after that, which
+/// comes at most one idle backoff (`ENRICHMENT_IDLE_INTERVAL_MS`, 60 s) later. kima-rs makes
+/// that upper bound the retry time (D-254): due again 60 s after the try, every try counting
+/// toward `STAGE_RETRY_CAP`, the fourth `unresolvable`.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn a_failed_artist_waits_out_the_retry_grace(pool: PgPool) {
+async fn an_unanswered_source_is_asked_again_after_a_minute_until_the_cap(pool: PgPool) {
+    assert_eq!(
+        identity::SOURCE_RETRY_WAIT,
+        std::time::Duration::from_secs(60)
+    );
+    let a = seed(&pool, "Perturbator", "Dangerous Days").await;
+    set_mbid(&pool, a, M, "search").await;
+    let w = World::default().status(&mb_artist_url(M, "aliases"), 500);
+    let f = fx(&pool, w, World::default()).await;
+
+    for (try_no, want) in [
+        (1, "failed"),
+        (2, "failed"),
+        (3, "failed"),
+        (4, "unresolvable"),
+    ] {
+        let report = artist::run_batch(&f.ctx, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(report.claimed, 1, "try {try_no} is due");
+        let r = row(&pool, a).await;
+        assert_eq!(
+            (r.status.as_str(), r.failures),
+            (want, try_no),
+            "try {try_no}"
+        );
+        assert_eq!(r.last_error_code.as_deref(), Some("HTTP_500"));
+        if want == "unresolvable" {
+            assert_eq!(retry_in(&pool, a).await, None);
+            break;
+        }
+        let due = retry_in(&pool, a).await.expect("a retry time");
+        assert!((55.0..=60.0).contains(&due), "try {try_no}: {due}");
+        let report = artist::run_batch(&f.ctx, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(report.claimed, 0, "try {try_no}: not due before the minute");
+        set(
+            &pool,
+            a,
+            "enrichment_retry_at = now() - interval '1 second'",
+        )
+        .await;
+    }
+    assert_eq!(f.asked().len(), 4, "one request per try: {:?}", f.asked());
+    let report = artist::run_batch(&f.ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        report.claimed, 0,
+        "unresolvable is asked again only after a week"
+    );
+}
+
+/// The 15 min grace (upstream `FAILED_JOB_RETRY_GRACE_MS`, which only a thrown run's failed job
+/// holds) is kept for a run that hit kima-rs's whole-run time cap: it is retried after the
+/// grace, not on the next cycle.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_run_over_its_time_cap_waits_out_the_retry_grace(pool: PgPool) {
     assert_eq!(
         identity::FAILED_RETRY_GRACE,
         std::time::Duration::from_secs(15 * 60)
     );
     let a = seed(&pool, "Perturbator", "Dangerous Days").await;
-    set(&pool, a, "enrichment_status = 'failed', enrichment_failures = 1, last_enriched_at = now() - interval '14 minutes'").await;
+    set_mbid(&pool, a, M, "search").await;
+    let mut f = fx(&pool, known("Perturbator", M), World::default()).await;
+    f.ctx.config.artist_timeout = std::time::Duration::ZERO;
+
+    let out = enrich(&f, a).await;
+    assert!(
+        matches!(&out, ArtistResult::Failed { code, .. } if code == "TIMEOUT"),
+        "{out:?}"
+    );
+    assert_eq!(row(&pool, a).await.failures, 1);
     assert!(identity::claim_artists(&pool, 10).await.unwrap().is_empty());
-    set(&pool, a, "last_enriched_at = now() - interval '16 minutes'").await;
+    let due_in: f64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM enrichment_retry_at - now())::float8 FROM artists WHERE id = $1",
+    )
+    .bind(a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!((14.0 * 60.0..=15.0 * 60.0).contains(&due_in), "{due_in}");
+    set(
+        &pool,
+        a,
+        "enrichment_retry_at = now() - interval '1 second'",
+    )
+    .await;
     let claimed = identity::claim_artists(&pool, 10).await.unwrap();
     assert_eq!(claimed.len(), 1);
     assert_eq!(claimed[0].id, a);
+}
+
+/// The claim reads `enrichment_retry_at` on the database clock: a `failed` artist with none is
+/// due now, one with a later time waits for it.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_failed_artist_is_due_at_its_retry_time(pool: PgPool) {
+    let now = seed(&pool, "Now", "A").await;
+    set(
+        &pool,
+        now,
+        "enrichment_status = 'failed', enrichment_failures = 1, last_enriched_at = now()",
+    )
+    .await;
+    let later = seed(&pool, "Later", "A").await;
+    set(&pool, later, "enrichment_status = 'failed', enrichment_failures = 1, last_enriched_at = now() - interval '1 hour', enrichment_retry_at = now() + interval '1 minute'").await;
+    let claimed = identity::claim_artists(&pool, 10).await.unwrap();
+    assert_eq!(claimed.iter().map(|a| a.id).collect::<Vec<_>>(), [now]);
+    set(
+        &pool,
+        later,
+        "enrichment_retry_at = now() - interval '1 second'",
+    )
+    .await;
+    let claimed = identity::claim_artists(&pool, 10).await.unwrap();
+    assert_eq!(claimed.iter().map(|a| a.id).collect::<Vec<_>>(), [later]);
+}
+
+/// Upstream `unifiedEnrichment.ts` `executeArtistsPhase` (2380-2389): an `unresolvable` artist
+/// without a real MBID (upstream a `temp-` placeholder; kima-rs has none, D-117, so `mbid IS
+/// NULL`) last tried over 24 h ago goes back to `pending` with no failures. Nothing else is
+/// touched: an artist with an MBID waits out the week, a recent or never-tried one stays.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn unresolvable_artists_without_an_mbid_are_reopened_after_a_day(pool: PgPool) {
+    let unres = "enrichment_status = 'unresolvable', enrichment_failures = 4, \
+                 last_error_code = 'HTTP_500'";
+    let old = seed(&pool, "Old", "A").await;
+    set(
+        &pool,
+        old,
+        &format!("{unres}, last_enriched_at = now() - interval '25 hours'"),
+    )
+    .await;
+    let recent = seed(&pool, "Recent", "A").await;
+    set(
+        &pool,
+        recent,
+        &format!("{unres}, last_enriched_at = now() - interval '23 hours'"),
+    )
+    .await;
+    let known = seed(&pool, "Known", "A").await;
+    set_mbid(&pool, known, M, "search").await;
+    set(
+        &pool,
+        known,
+        &format!("{unres}, last_enriched_at = now() - interval '25 hours'"),
+    )
+    .await;
+    let never = seed(&pool, "Never", "A").await;
+    set(&pool, never, unres).await;
+    let failed = seed(&pool, "Failed", "A").await;
+    set(&pool, failed, "enrichment_status = 'failed', enrichment_failures = 2, last_enriched_at = now() - interval '25 hours'").await;
+
+    assert_eq!(
+        identity::reopen_unresolvable_without_mbid(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+
+    let r = row(&pool, old).await;
+    assert_eq!((r.status.as_str(), r.failures), ("pending", 0));
+    assert_eq!(
+        r.last_error_code.as_deref(),
+        Some("HTTP_500"),
+        "only status and failures"
+    );
+    for (id, want) in [
+        (recent, ("unresolvable", 4)),
+        (known, ("unresolvable", 4)),
+        (never, ("unresolvable", 4)),
+        (failed, ("failed", 2)),
+    ] {
+        let r = row(&pool, id).await;
+        assert_eq!((r.status.as_str(), r.failures), want);
+    }
+}
+
+async fn cover_deferrals(pool: &PgPool, artist: Uuid) -> i16 {
+    sqlx::query_scalar("SELECT cover_deferrals FROM artists WHERE id = $1")
+        .bind(artist)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// `(completed, pending, owed)` artists in the progress, and the vibe map's `artists_owed`.
+async fn owed(pool: &PgPool) -> ((i64, i64, i64), i64) {
+    let a = kima_db::enrichment::progress(pool, true)
+        .await
+        .unwrap()
+        .artists;
+    let map = kima_db::enrichment::vibe_inputs(pool, false)
+        .await
+        .unwrap()
+        .artists_owed;
+    ((a.completed, a.pending, a.owed), map)
+}
+
+/// The state `identity::defer_completed_artist` leaves: a completed artist whose album covers
+/// wait, `failed` with no failure and no error, due again now. Its MBID (a search result)
+/// names another artist on the next run.
+async fn deferred_with_a_wrong_mbid(pool: &PgPool) -> Uuid {
+    let a = seed(pool, "Alexis Ffrench", "Evolution").await;
+    set_mbid(pool, a, M, "search").await;
+    set(
+        pool,
+        a,
+        "enrichment_status = 'failed', enrichment_failures = 0, cover_deferrals = 1, \
+         last_error = NULL, last_error_code = NULL, last_enriched_at = now(), \
+         enrichment_retry_at = now() - interval '1 second'",
+    )
+    .await;
+    a
+}
+
+/// Re-review M2 minor: an artist whose covers were deferred, re-run, whose MBID the guard drops
+/// and whose name resolves to nothing is `unresolvable` with no failure and no error. Its cover
+/// retries belong to the identity it lost, so they go with it: once the 24 h reopen makes it
+/// `pending`, it is owed (its own enrichment is not done), not counted completed.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn an_unresolvable_run_forgets_the_cover_deferrals_of_the_dropped_mbid(pool: PgPool) {
+    let a = deferred_with_a_wrong_mbid(&pool).await;
+    assert_eq!(owed(&pool).await, ((1, 0, 0), 0), "only its covers wait");
+    let w = World::default()
+        .get(
+            &mb_artist_url(M, "aliases"),
+            held(M, "Sam Cooke", "Cooke, Sam", &[]),
+        )
+        .get(&mb_search_url("Alexis Ffrench"), search(json!([])));
+    let f = fx(&pool, w, World::default()).await;
+
+    assert_eq!(enrich(&f, a).await, ArtistResult::Unresolvable);
+    let r = row(&pool, a).await;
+    assert_eq!(
+        (r.status.as_str(), r.failures, r.mbid),
+        ("unresolvable", 0, None)
+    );
+    assert_eq!(r.last_error_code, None);
+    assert_eq!(cover_deferrals(&pool, a).await, 0);
+
+    set(&pool, a, "last_enriched_at = now() - interval '25 hours'").await;
+    assert_eq!(
+        identity::reopen_unresolvable_without_mbid(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(row(&pool, a).await.status, "pending");
+    assert_eq!(owed(&pool).await, ((0, 1, 1), 1));
+}
+
+/// Re-review M2 minor, the other path: the guard drops the MBID and MusicBrainz's search waits
+/// on its rate limit, so the run is `pending` (no failure, no error) with the MBID and bio
+/// gone. Its own enrichment is owed again, so the cover retries are forgotten with the MBID.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_dropped_mbid_forgets_the_cover_deferrals_while_the_search_waits(pool: PgPool) {
+    let a = deferred_with_a_wrong_mbid(&pool).await;
+    set(&pool, a, "bio = 'Sam Cooke was…'").await;
+    let w = World::default()
+        .get(
+            &mb_artist_url(M, "aliases"),
+            held(M, "Sam Cooke", "Cooke, Sam", &[]),
+        )
+        .status(&mb_search_url("Alexis Ffrench"), 503)
+        .get(&deezer_search_url("Alexis Ffrench"), json!({"data": []}));
+    let f = fx(&pool, w, World::default()).await;
+
+    assert_eq!(enrich(&f, a).await, ArtistResult::Pending);
+    let r = row(&pool, a).await;
+    assert_eq!((r.status.as_str(), r.failures), ("pending", 0));
+    assert_eq!((r.mbid, r.bio, r.last_error_code), (None, None, None));
+    assert_eq!(cover_deferrals(&pool, a).await, 0);
+    assert_eq!(owed(&pool).await, ((0, 1, 1), 1));
+}
+
+/// A stored artist that is `unresolvable` with cover retries recorded (written before the
+/// unresolvable write forgot them) loses them when the 24 h reopen makes it `pending`; one not
+/// reopened keeps them.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn the_day_reopen_forgets_cover_deferrals(pool: PgPool) {
+    let unres = "enrichment_status = 'unresolvable', enrichment_failures = 0, cover_deferrals = 2";
+    let old = seed(&pool, "Old", "A").await;
+    set(
+        &pool,
+        old,
+        &format!("{unres}, last_enriched_at = now() - interval '25 hours'"),
+    )
+    .await;
+    let recent = seed(&pool, "Recent", "A").await;
+    set(
+        &pool,
+        recent,
+        &format!("{unres}, last_enriched_at = now() - interval '23 hours'"),
+    )
+    .await;
+
+    assert_eq!(
+        identity::reopen_unresolvable_without_mbid(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(cover_deferrals(&pool, old).await, 0);
+    assert_eq!(cover_deferrals(&pool, recent).await, 2);
+    assert_eq!(owed(&pool).await, ((1, 1, 1), 1));
 }
 
 /// Task 21 carry: an unchanged local image is not read, re-encoded and rewritten on every

@@ -48,6 +48,10 @@ pub struct Config {
     pub musicnn_model_dir: Option<PathBuf>,
     /// `DISABLE_MUSICNN=true` skips MusiCNN initialization (DSP-only analysis).
     pub disable_musicnn: bool,
+    /// `KIMA_ANALYSIS_WORKERS`: concurrent blocking analysis workers (1..=[`MAX_ANALYSIS_WORKERS`],
+    /// upstream `NUM_WORKERS`); unset resolves to upstream's default of 2, and any value is
+    /// clamped to the machine's cores (`kima_ident::AnalysisConfig::resolve_workers`).
+    pub analysis_workers: Option<usize>,
     /// `KIMA_SNAPSHOT_DIR`: absolute, private (0700, server-owned) directory for unnamed input
     /// snapshots. It must be on the SAME mount as the library, which therefore must be mounted
     /// read-write for the server. Unset: embeddings fail closed with `SNAPSHOT_UNAVAILABLE`.
@@ -101,6 +105,8 @@ pub const MAX_CLAP_INTRA_THREADS: usize = 16;
 /// Embedding claims are taken in batches of 20 (`kima_ident::stages::embedding::BATCH`):
 /// more workers than that never run at once.
 pub const MAX_EMBEDDING_WORKERS: usize = 20;
+/// Analysis claims are taken in batches of 20 (`kima_ident::stages::analysis::BATCH`) as well.
+pub const MAX_ANALYSIS_WORKERS: usize = 20;
 /// 64 GiB, the cap `kima_ml::onnx::set_host_budget_bytes` applies as well.
 pub const MAX_ONNX_HOST_BUDGET_MIB: u64 = 64 * 1024;
 pub const DEFAULT_ONNX_HOST_BUDGET_MIB: u64 = 4096;
@@ -224,6 +230,7 @@ impl std::fmt::Debug for Config {
             .field("disable_clap", &self.disable_clap)
             .field("musicnn_model_dir", &self.musicnn_model_dir)
             .field("disable_musicnn", &self.disable_musicnn)
+            .field("analysis_workers", &self.analysis_workers)
             .field("snapshot_dir", &self.snapshot_dir)
             .field("snapshot_max_bytes", &self.snapshot_max_bytes)
             .field("snapshot_max_concurrent", &self.snapshot_max_concurrent)
@@ -527,6 +534,7 @@ impl Config {
             host_budget_mib: bounded("KIMA_ONNX_HOST_BUDGET_MIB", MAX_ONNX_HOST_BUDGET_MIB)?,
         };
         clap_runtime.validate()?;
+        let analysis_workers = bounded_usize("KIMA_ANALYSIS_WORKERS", MAX_ANALYSIS_WORKERS)?;
         // Upstream compares with `'true'`; any other value leaves AcoustID on.
         let acoustid_disabled =
             value("ACOUSTID_DISABLED").is_some_and(|v| v.eq_ignore_ascii_case("true"));
@@ -564,6 +572,7 @@ impl Config {
             musicnn_model_dir: value("KIMA_MUSICNN_MODEL_DIR").map(PathBuf::from),
             disable_musicnn: value("DISABLE_MUSICNN")
                 .is_some_and(|v| v.eq_ignore_ascii_case("true")),
+            analysis_workers,
             snapshot_dir: value("KIMA_SNAPSHOT_DIR").map(PathBuf::from),
             snapshot_max_bytes,
             snapshot_max_concurrent,
@@ -678,6 +687,34 @@ mod tests {
                     })
                 );
             }
+        }
+    }
+
+    #[test]
+    fn analysis_workers_parse_and_default_to_unset() {
+        let base = ("DATABASE_URL", "postgres://x");
+        let config = Config::from_lookup(lookup(&[base])).unwrap();
+        assert_eq!(config.analysis_workers, None);
+        for (raw, want) in [("1", 1), (" 4 ", 4), ("20", MAX_ANALYSIS_WORKERS)] {
+            let config =
+                Config::from_lookup(lookup(&[base, ("KIMA_ANALYSIS_WORKERS", raw)])).unwrap();
+            assert_eq!(config.analysis_workers, Some(want), "{raw}");
+        }
+        assert_eq!(MAX_ANALYSIS_WORKERS, 20);
+        for bad in ["0", "-1", "21", "two", "1.5"] {
+            let err =
+                Config::from_lookup(lookup(&[base, ("KIMA_ANALYSIS_WORKERS", bad)])).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    ConfigError::OutOfRange {
+                        name: "KIMA_ANALYSIS_WORKERS",
+                        ..
+                    }
+                ),
+                "{bad}: {err:?}"
+            );
+            assert!(err.to_string().contains("1..=20"), "{err}");
         }
     }
 

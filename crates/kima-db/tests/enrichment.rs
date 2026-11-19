@@ -1072,3 +1072,168 @@ async fn podcast_refresh_failure_is_counted_and_listed(pool: PgPool) {
     );
     assert!(rows.is_empty());
 }
+
+// ---- artists left `enriching` (upstream `executeArtistsPhase`, review M3) ----
+
+/// A job on `queue` in state `running` whose lease ends `lease` from now (negative: lapsed).
+async fn running_job(pool: &PgPool, queue: &str, lease_secs: i64) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO jobs (id, queue, payload, state, attempts, locked_until)
+         VALUES ($1, $2, '{\"kind\":\"cycle\"}', 'running', 1, now() + make_interval(secs => $3))",
+    )
+    .bind(id)
+    .bind(queue)
+    .bind(lease_secs as f64)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+async fn artist_status(pool: &PgPool, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT enrichment_status FROM artists WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn set_enriching(pool: &PgPool, id: Uuid) {
+    sqlx::query("UPDATE artists SET enrichment_status = 'enriching' WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Upstream resets every `enriching` artist to `pending` when its artist queue has nothing
+/// waiting or active. kima-rs enriches artists inside the `enrich` cycle, so "nothing active"
+/// is: no other `enrich` job running on a live lease (another process's cycle may hold claims);
+/// the caller's own job and lapsed leases (a dead process) do not count, nor other queues.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn enriching_artists_are_reset_only_while_no_other_cycle_runs(pool: PgPool) {
+    let a = artist(&pool, "Stuck", "enriching").await;
+    let done = artist(&pool, "Done", "completed").await;
+
+    assert_eq!(
+        enrichment::reset_enriching_artists_if_idle(&pool, "enrich", None)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(artist_status(&pool, a).await, "pending");
+    assert_eq!(artist_status(&pool, done).await, "completed");
+
+    set_enriching(&pool, a).await;
+    let other = running_job(&pool, "enrich", 300).await;
+    assert_eq!(
+        enrichment::reset_enriching_artists_if_idle(&pool, "enrich", None)
+            .await
+            .unwrap(),
+        0,
+        "another cycle runs on a live lease"
+    );
+    assert_eq!(artist_status(&pool, a).await, "enriching");
+    assert_eq!(
+        enrichment::reset_enriching_artists_if_idle(&pool, "enrich", Some(other))
+            .await
+            .unwrap(),
+        1,
+        "the caller's own job does not count"
+    );
+
+    set_enriching(&pool, a).await;
+    let own = running_job(&pool, "enrich", 300).await;
+    sqlx::query("UPDATE jobs SET locked_until = now() - interval '1 second' WHERE id = $1")
+        .bind(other)
+        .execute(&pool)
+        .await
+        .unwrap();
+    running_job(&pool, "library", 300).await;
+    assert_eq!(
+        enrichment::reset_enriching_artists_if_idle(&pool, "enrich", Some(own))
+            .await
+            .unwrap(),
+        1,
+        "a lapsed lease and another queue do not count"
+    );
+    assert_eq!(artist_status(&pool, a).await, "pending");
+}
+
+// ---- album-cover deferrals (review M2) ----
+
+/// A `completed` artist whose album covers are left to retry is put to `failed` with no failure
+/// counted (`identity::defer_completed_artist`): its own enrichment is done. Upstream's album
+/// covers never hold an artist back, so it is not owed (the vibe map and `coreComplete` do not
+/// wait for a slow cover host), counts as completed, and is neither a failure in the progress
+/// nor in the failures list. A real failure is still owed and failed.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn cover_deferrals_are_not_owed_or_failed(pool: PgPool) {
+    let deferred = artist(&pool, "Deferred", "completed").await;
+    let deferred_album = album(&pool, deferred).await;
+    track(&pool, deferred_album, "x", false).await;
+    assert!(
+        kima_db::identity::defer_completed_artist(&pool, deferred, 1)
+            .await
+            .unwrap()
+    );
+    let failing = artist(&pool, "Failing", "failed").await;
+    let failing_album = album(&pool, failing).await;
+    track(&pool, failing_album, "x", false).await;
+    sqlx::query("UPDATE artists SET enrichment_failures = 1, last_error = 'x' WHERE id = $1")
+        .bind(failing)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let a = enrichment::progress(&pool, true).await.unwrap().artists;
+    assert_eq!(
+        (a.total, a.completed, a.pending, a.owed, a.failed),
+        (2, 1, 0, 1, 1),
+        "{a:?}"
+    );
+    assert_eq!(a.progress, 50);
+    assert_eq!(
+        enrichment::vibe_inputs(&pool, false)
+            .await
+            .unwrap()
+            .artists_owed,
+        1
+    );
+    assert_eq!(enrichment::failure_counts(&pool).await.unwrap().artist, 1);
+
+    sqlx::query("UPDATE artists SET enrichment_status = 'completed' WHERE id = $1")
+        .bind(failing)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let a = enrichment::progress(&pool, true).await.unwrap().artists;
+    assert_eq!((a.completed, a.owed, a.failed), (2, 0, 0), "{a:?}");
+
+    // Covers waiting on a rate-limited source put it back to `pending`, keeping the deferral
+    // count (`identity::requeue_completed_artist`); its own enrichment is still done.
+    sqlx::query(
+        "UPDATE artists SET enrichment_status = 'pending', cover_deferrals = 2 WHERE id = $1",
+    )
+    .bind(deferred)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let a = enrichment::progress(&pool, true).await.unwrap().artists;
+    assert_eq!((a.completed, a.pending, a.owed), (2, 0, 0), "{a:?}");
+
+    // Run to the cap after its covers were deferred, then reopened (no MBID, a day later): the
+    // reopen keeps the last error, and its own enrichment is owed again.
+    sqlx::query(
+        "UPDATE artists SET enrichment_status = 'pending', enrichment_failures = 0,
+                last_error_code = 'HTTP_500', last_error = 'x'
+         WHERE id = $1",
+    )
+    .bind(deferred)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let a = enrichment::progress(&pool, true).await.unwrap().artists;
+    assert_eq!((a.completed, a.pending, a.owed), (1, 1, 1), "{a:?}");
+}

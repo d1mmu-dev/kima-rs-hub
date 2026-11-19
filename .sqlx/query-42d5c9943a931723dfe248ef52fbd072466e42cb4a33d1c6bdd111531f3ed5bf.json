@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE artists SET enrichment_status = 'pending'\n         WHERE enrichment_status = 'enriching'\n           AND NOT EXISTS (SELECT 1 FROM jobs j\n                           WHERE j.queue = $1 AND j.state = 'running'\n                             AND j.locked_until >= now()\n                             AND j.id IS DISTINCT FROM $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "42d5c9943a931723dfe248ef52fbd072466e42cb4a33d1c6bdd111531f3ed5bf"
+}

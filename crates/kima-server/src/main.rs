@@ -163,8 +163,20 @@ async fn main() -> anyhow::Result<()> {
     let analysis = kima_ident::AnalysisConfig {
         model_dir: config.musicnn_model_dir.clone(),
         disabled: config.disable_musicnn,
+        workers: kima_ident::AnalysisConfig::resolve_workers(config.analysis_workers, cores),
         ..Default::default()
     };
+    if config
+        .analysis_workers
+        .is_some_and(|asked| asked > analysis.workers)
+    {
+        warn!(
+            asked = config.analysis_workers,
+            cores,
+            analysis_workers = analysis.workers,
+            "KIMA_ANALYSIS_WORKERS is above the machine's cores; clamped"
+        );
+    }
     // Every embedding and analysis worker holds one input snapshot while it decodes.
     let max_workers = parallelism
         .workers
@@ -187,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
         ?parallelism,
         ?cpu_fallback,
         snapshot_concurrent,
+        analysis_workers = analysis.workers,
         "CLAP audio runtime configuration"
     );
     let mut embedding = kima_ident::EmbeddingConfig {

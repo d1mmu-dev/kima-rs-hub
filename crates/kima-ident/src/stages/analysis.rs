@@ -136,9 +136,15 @@ async fn run_claim_stopping(
     let root = ctx.library.root.get();
     let path: PathBuf = path_str.into();
     let ctx_blocking = ctx.clone();
-    let permits = Arc::new(tokio::sync::Semaphore::new(
-        ctx.config.analysis.workers.max(1),
-    ));
+    let permits = ctx
+        .analysis_runtime
+        .workers
+        .get_or_init(|| {
+            Arc::new(tokio::sync::Semaphore::new(
+                ctx.config.analysis.workers.max(1),
+            ))
+        })
+        .clone();
     let claim_for_compute = Arc::clone(&claim);
     let claim_for_finish = Arc::clone(&claim);
     let outcome =
@@ -510,7 +516,8 @@ fn evidence(loudness: bool, key: bool, tempo: bool, musicnn: bool) -> Value {
 /// A loaded MusiCNN compute, cached on [`IdentCtx`] alongside [`EmbeddingRuntime`].
 /// Wrapped in a [`Mutex`] because [`MusicnnCompute::compute`] takes `&mut self` (the
 /// mel frontend reuses scratch buffers) while the underlying ONNX session pools are
-/// fixed at size 1 regardless of [`crate::AnalysisConfig::workers`].
+/// fixed at size 1 regardless of [`crate::AnalysisConfig::workers`]: the workers decode and
+/// run the DSP in parallel, and take turns on the MusiCNN inference.
 pub struct AnalysisRuntime {
     compute: Mutex<MusicnnCompute>,
 }

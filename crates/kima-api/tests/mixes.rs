@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use axum::http::StatusCode;
 use axum_test::TestServer;
 use common::library::{Seed, mark_missing, seed};
+use common::mix_keys::{ALBUM_KEYS, TRACK_KEYS, assert_in_order, key_set};
 use kima_core::profile::{AccountId, ProfileId, ProfileKind};
 use kima_db::PgPool;
 use kima_db::profiles::{self, NewProfile};
@@ -511,110 +512,6 @@ async fn sibling_profile_cannot_see_or_save(pool: PgPool) {
         save(&e, &e.ben, &era, json!({})).await.assert_status_ok();
         save(&e, &e.ana, &era, json!({})).await.assert_status_ok();
     }
-}
-
-/// Upstream's Prisma `Track` scalar keys, in model order (Appendix D).
-const TRACK_KEYS: [&str; 58] = [
-    "id",
-    "albumId",
-    "title",
-    "trackNo",
-    "duration",
-    "mime",
-    "filePath",
-    "fileModified",
-    "fileSize",
-    "bpm",
-    "bpmConfidence",
-    "beatsCount",
-    "key",
-    "keyScale",
-    "keyStrength",
-    "energy",
-    "loudness",
-    "dynamicRange",
-    "danceability",
-    "valence",
-    "arousal",
-    "deamValence",
-    "deamArousal",
-    "clapValenceRaw",
-    "clapArousalRaw",
-    "instrumentalness",
-    "acousticness",
-    "speechiness",
-    "danceabilityMl",
-    "moodTags",
-    "essentiaGenres",
-    "analysisStatus",
-    "analysisVersion",
-    "analysisMode",
-    "analyzedAt",
-    "analysisError",
-    "analysisRetryCount",
-    "updatedAt",
-    "displayTitle",
-    "displayTrackNo",
-    "hasUserOverrides",
-    "analysisStartedAt",
-    "vibeAnalysisStatus",
-    "vibeAnalysisStartedAt",
-    "vibeAnalysisError",
-    "vibeAnalysisRetryCount",
-    "vibeAnalysisStatusUpdatedAt",
-    "isrc",
-    "isrcSource",
-    "acoustidFingerprint",
-    "recordingMbid",
-    "corrupt",
-    "missingSince",
-    "scanStatus",
-    "scanError",
-    "scanStartedAt",
-    "discNumber",
-    "discSubtitle",
-];
-
-/// Upstream's Prisma `Album` scalar keys, in model order.
-const ALBUM_KEYS: [&str; 20] = [
-    "id",
-    "rgMbid",
-    "rgMbidSource",
-    "artistId",
-    "title",
-    "identityKey",
-    "sortName",
-    "year",
-    "coverUrl",
-    "primaryType",
-    "label",
-    "genres",
-    "lastSynced",
-    "location",
-    "displayTitle",
-    "displayYear",
-    "hasUserOverrides",
-    "userCoverUrl",
-    "userGenres",
-    "originalYear",
-];
-
-fn key_set(v: &Value) -> BTreeSet<&str> {
-    v.as_object().unwrap().keys().map(String::as_str).collect()
-}
-
-/// The keys appear in this order in the raw reply from `from` on (serde_json's `Value` sorts keys, so the order is
-/// read from the text): each `"key":` after the one before it.
-fn assert_in_order(text: &str, from: usize, keys: &[&str]) -> usize {
-    let mut at = from;
-    for k in keys {
-        let needle = format!("\"{k}\":");
-        let found = text[at..]
-            .find(&needle)
-            .unwrap_or_else(|| panic!("{k} not after offset {at}"));
-        at += found + needle.len();
-    }
-    at
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

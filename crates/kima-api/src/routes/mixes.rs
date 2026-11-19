@@ -12,6 +12,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use kima_api_types::mixes::{MixAlbum, MixArtist, MixTrack};
@@ -19,7 +20,11 @@ use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::mixes::daily::{DailyDraw, DailyInputs, generate_all_mixes};
 use kima_db::mixes::generators::SimilarArtists;
+use kima_db::mixes::mood_mix::{
+    self, MOOD_MIX_LIMIT, MOODS, MoodMix, mood_bucket, page_song_count,
+};
 use kima_db::mixes::night::{night_zone, server_zone};
+use kima_db::mixes::recipe::RecipeContext;
 use kima_db::mixes::save::{SaveMix, save_mix_playlist};
 use kima_db::mixes::track_rows::{TrackRow, track_rows};
 use kima_ident::similar;
@@ -46,6 +51,9 @@ pub fn routes() -> Router<AppState> {
         // `GET /mixes/refresh` is upstream's `GET /:id` with id `refresh` (Express falls through), not a 405.
         .route("/mixes/refresh", post(refresh).get(one_refresh))
         .route("/mixes/{id}/save", post(save))
+        .route("/mixes/mood/buckets/presets", get(presets))
+        .route("/mixes/mood/buckets/{mood}", get(bucket))
+        .route("/mixes/mood/buckets/{mood}/save", post(save_bucket))
         .route("/mixes/{id}", get(one))
 }
 
@@ -285,6 +293,235 @@ async fn save(
     }
 }
 
+// ---- mood pages (M5b Task 10; upstream `moodBucketService`) ---------------------------------------------------
+
+/// Upstream's 400 for a mood that is not a mood page: `{"error": "Invalid mood: <mood>", "validMoods": [...]}`.
+fn invalid_mood(mood: &str) -> Response {
+    let valid: Vec<&str> = MOODS.iter().map(|m| m.id).collect();
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": format!("Invalid mood: {mood}"), "validMoods": valid })),
+    )
+        .into_response()
+}
+
+fn not_enough(mood: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": format!("Not enough tracks for mood: {mood}"),
+            "suggestion": "Wait for more tracks to be analyzed",
+        })),
+    )
+        .into_response()
+}
+
+/// A fresh seed per draw (upstream's `randomUUID()` in `pickPageTracks`).
+fn page_seed() -> String {
+    Uuid::new_v4().to_string()
+}
+
+/// A mood page's mix with its track rows, in upstream's key order.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MoodMixBody {
+    id: String,
+    mood: String,
+    name: String,
+    description: String,
+    track_ids: Vec<Uuid>,
+    cover_urls: Vec<String>,
+    track_count: usize,
+    color: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generated_at: Option<String>,
+    tracks: Vec<MixTrack>,
+}
+
+impl MoodMixBody {
+    fn new(mix: MoodMix, generated_at: Option<OffsetDateTime>, tracks: Vec<MixTrack>) -> Self {
+        Self {
+            track_count: mix.track_ids.len(),
+            id: mix.id,
+            mood: mix.mood,
+            name: mix.name,
+            description: mix.description,
+            track_ids: mix.track_ids,
+            cover_urls: mix.cover_urls,
+            color: mix.color,
+            generated_at: generated_at.map(iso),
+            tracks,
+        }
+    }
+}
+
+/// The save's reply, serialised straight so the track rows keep upstream's key order.
+#[derive(Serialize)]
+struct SavedMoodMix {
+    success: bool,
+    mix: MoodMixBody,
+}
+
+/// Upstream `getMoodPresets`: each page's song count (0 while the heads are absent: no recipe ranks) and how many
+/// tracks still wait for mood scores (the mood snapshot's; 0 while the heads are absent, D-275).
+async fn presets(State(state): State<AppState>, _user: AuthUser) -> Result<Response, ApiError> {
+    const ERROR: &str = "Failed to get mood presets";
+    let ctx = state.ident_ctx();
+    let runtime = moods::runtime(&ctx).await;
+    let heads = runtime.as_ref().map(|rt| rt.heads().clone());
+    let recipe = RecipeContext {
+        heads: heads.as_deref(),
+        boost: None,
+    };
+    let pending = match &runtime {
+        Some(rt) => {
+            rt.snapshots
+                .current(&state.pool, rt.heads())
+                .await
+                .map_err(|e| failure(ERROR, e))?
+                .pending
+        }
+        None => 0,
+    };
+    let mut out = Vec::with_capacity(MOODS.len());
+    for m in &MOODS {
+        let count = page_song_count(&state.pool, recipe, m)
+            .await
+            .map_err(|e| failure(ERROR, e))?;
+        out.push(json!({
+            "id": m.id, "name": m.name, "color": m.color, "icon": m.icon,
+            "trackCount": count, "pendingTracks": pending,
+        }));
+    }
+    Ok(Json(out).into_response())
+}
+
+/// Upstream `GET /mood/buckets/:mood`: the page's mix, skipping what this profile was already served; the ids it
+/// went out with are remembered (only against a saved mix of this mood).
+async fn bucket(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(mood): Path<String>,
+) -> Result<Response, ApiError> {
+    const ERROR: &str = "Failed to get mood mix";
+    let Some(b) = mood_bucket(&mood) else {
+        return Ok(invalid_mood(&mood));
+    };
+    let (heads, _) = engine(&state).await;
+    let ctx = RecipeContext {
+        heads: heads.as_deref(),
+        boost: None,
+    };
+    let remembered = mood_mix::remembered_track_ids(&state.pool, user.profile, b.id)
+        .await
+        .map_err(|e| failure(ERROR, e))?;
+    let mix = mood_mix::mood_mix(
+        &state.pool,
+        ctx,
+        b,
+        MOOD_MIX_LIMIT,
+        &remembered,
+        &page_seed(),
+        OffsetDateTime::now_utc(),
+    )
+    .await
+    .map_err(|e| failure(ERROR, e))?;
+    let Some(mix) = mix else {
+        return Ok(not_enough(b.id));
+    };
+    mood_mix::record_served(&state.pool, user.profile, b.id, &mix.track_ids)
+        .await
+        .map_err(|e| failure(ERROR, e))?;
+    let tracks = mix_tracks(&state.pool, &mix.track_ids)
+        .await
+        .map_err(|e| failure(ERROR, e))?;
+    Ok(Json(MoodMixBody::new(mix, None, tracks)).into_response())
+}
+
+/// Upstream `validateSaveTrackIds`: `Ok(None)` = regenerate the mix (no `trackIds` sent).
+fn save_track_ids(body: &Value) -> Result<Option<Vec<String>>, &'static str> {
+    let Some(raw) = body.get("trackIds") else {
+        return Ok(None);
+    };
+    let Some(items) = raw.as_array() else {
+        return Err("trackIds must be an array");
+    };
+    let ids: Option<Vec<String>> = items
+        .iter()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let Some(ids) = ids else {
+        return Err("Each trackId must be a string");
+    };
+    if ids.len() > MOOD_MIX_LIMIT {
+        return Err("trackIds must not exceed 15 tracks");
+    }
+    Ok(Some(ids))
+}
+
+/// Upstream `POST /mood/buckets/:mood/save`: the profile's mood mix from the songs sent (order kept, unknown and
+/// missing ones dropped) or a fresh page mix, saved; Home's cached lists are dropped so they show it.
+async fn save_bucket(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(mood): Path<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    const ERROR: &str = "Failed to save mood mix";
+    let Some(b) = mood_bucket(&mood) else {
+        return Ok(invalid_mood(&mood));
+    };
+    let body: Value = if body.iter().all(u8::is_ascii_whitespace) {
+        json!({})
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::Invalid(e.to_string()))?
+    };
+    let sent = save_track_ids(&body).map_err(|e| ApiError::BadRequest(e.into()))?;
+    // Ids are UUIDs here (D-016): a string that is not one names no song, as an unknown id upstream.
+    let parsed: Option<Vec<Uuid>> = sent
+        .as_ref()
+        .map(|ids| ids.iter().filter_map(|s| s.parse().ok()).collect());
+    let picked = sent.as_ref().is_some_and(|ids| !ids.is_empty());
+    let (heads, _) = engine(&state).await;
+    let ctx = RecipeContext {
+        heads: heads.as_deref(),
+        boost: None,
+    };
+    let saved = if picked && parsed.as_ref().is_some_and(Vec::is_empty) {
+        None
+    } else {
+        mood_mix::save_user_mood_mix(
+            &state.pool,
+            ctx,
+            user.profile,
+            b,
+            parsed.as_deref(),
+            &page_seed(),
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .map_err(|e| failure(ERROR, e))?
+    };
+    let Some((mix, generated_at)) = saved else {
+        if picked {
+            return Err(ApiError::BadRequest(
+                "None of those songs can be saved: each is missing, corrupt or not in the library"
+                    .into(),
+            ));
+        }
+        return Ok(not_enough(b.id));
+    };
+    state.listeners.drop_mix_lists(user.profile.into_uuid());
+    let tracks = mix_tracks(&state.pool, &mix.track_ids)
+        .await
+        .map_err(|e| failure(ERROR, e))?;
+    Ok(Json(SavedMoodMix {
+        success: true,
+        mix: MoodMixBody::new(mix, Some(generated_at), tracks),
+    })
+    .into_response())
+}
+
 /// Upstream `loadTracksInMixOrder`, as reply rows.
 pub(crate) async fn mix_tracks(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<Vec<MixTrack>> {
     Ok(track_rows(pool, ids)
@@ -440,6 +677,32 @@ mod tests {
         ] {
             assert_eq!(playlist_name(&body, "Mix"), None, "{body}");
         }
+    }
+
+    #[test]
+    fn save_track_ids_validation_matches_upstream() {
+        assert_eq!(save_track_ids(&json!({})), Ok(None));
+        assert_eq!(save_track_ids(&json!({ "trackIds": [] })), Ok(Some(vec![])));
+        assert_eq!(
+            save_track_ids(&json!({ "trackIds": ["a", "b"] })),
+            Ok(Some(vec!["a".to_string(), "b".to_string()]))
+        );
+        for (raw, error) in [
+            (json!(null), "trackIds must be an array"),
+            (json!("a"), "trackIds must be an array"),
+            (json!({}), "trackIds must be an array"),
+            (json!(["a", 1]), "Each trackId must be a string"),
+            (json!(vec!["a"; 16]), "trackIds must not exceed 15 tracks"),
+        ] {
+            assert_eq!(save_track_ids(&json!({ "trackIds": raw })), Err(error));
+        }
+        assert_eq!(
+            save_track_ids(&json!({ "trackIds": vec!["a"; 15] }))
+                .unwrap()
+                .unwrap()
+                .len(),
+            15
+        );
     }
 
     #[test]

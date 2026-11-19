@@ -11,7 +11,6 @@ chrono.workspace = true
 hex.workspace = true
 kima-vibe.workspace = true
 md-5.workspace = true
-sha2.workspace = true
-
-[dev-dependencies]
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true

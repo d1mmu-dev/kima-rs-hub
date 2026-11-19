@@ -39,7 +39,7 @@ pub struct Progress {
     pub completed: i64,
 }
 
-pub(super) fn is_write_conflict(e: &sqlx::Error) -> bool {
+pub(crate) fn is_write_conflict(e: &sqlx::Error) -> bool {
     matches!(
         e.as_database_error().and_then(|d| d.code()).as_deref(),
         Some("40001" | "40P01")

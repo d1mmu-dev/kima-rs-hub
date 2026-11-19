@@ -734,6 +734,10 @@ pub async fn rerun_clears(pool: &PgPool, c: Clears) -> sqlx::Result<RerunCounts>
             counts.tracks = i64::try_from(cleared.rows_affected()).unwrap_or(i64::MAX);
         }
         reopen_stage(&mut tx, "analysis").await?;
+        // Upstream `resetAnalysis` clears the mood tags with the analysis; the mood step writes them again.
+        sqlx::query("UPDATE tracks SET mood_tags = '{}' WHERE mood_tags <> '{}'")
+            .execute(&mut *tx)
+            .await?;
     }
     if c.vectors {
         // The cascade removes feel, map, scores and readings with the vectors.

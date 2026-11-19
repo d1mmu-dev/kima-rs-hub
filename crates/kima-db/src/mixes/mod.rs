@@ -4,3 +4,4 @@
 //! Queries arrive with the tasks that use them (M5b plan Tasks 4, 9, 10, 15, 16).
 
 pub mod recipe;
+pub mod tags;

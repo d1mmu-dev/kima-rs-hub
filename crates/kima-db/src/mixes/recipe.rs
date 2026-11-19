@@ -19,7 +19,7 @@ use std::fmt;
 
 use kima_mixes::artist::{MIN_MIX_TRACKS, NO_ONE_KEYS};
 use kima_mixes::definitions::{
-    DefinitionReading, NEUTRAL_PACE, PACE_BAND, Part, PartKind, definition_of,
+    Definition, DefinitionReading, NEUTRAL_PACE, PACE_BAND, Part, PartKind, definition_of,
 };
 use kima_mixes::recipes::{
     RECIPE_LINE, Recipe, STEADY_BEAT_KIMA, Signal, draw_members, get_recipe,
@@ -116,7 +116,7 @@ pub struct MixDraw<'a> {
 }
 
 /// A spread to score against: above 0 (a NaN has none).
-fn has_spread(sd: f64) -> bool {
+pub(crate) fn has_spread(sd: f64) -> bool {
     sd > 0.0
 }
 
@@ -249,10 +249,10 @@ fn scale_of(recipe_id: &str, state: &MoodState, signal: &Signal) -> Result<MoodS
 /// Upstream `definedCtes` over `library` (alias l): `pace_scale` when a definition reads pace, then `defined` with a
 /// `dscore_<mood>` per row (weighted parts' z-scores over the weights' sizes, NULL when a reading is missing).
 /// `extra_columns`/`extra_joins` extend `defined`.
-fn defined_ctes(
+pub(crate) fn defined_ctes(
     recipe_id: &str,
     state: &MoodState,
-    definitions: &[&kima_mixes::definitions::Definition],
+    definitions: &[&Definition],
     extra_columns: &str,
     extra_joins: &str,
 ) -> Result<String, RecipeError> {
@@ -332,7 +332,7 @@ fn defined_ctes(
 }
 
 /// The input columns the definitions read (upstream `definitionInputs`).
-fn definition_inputs(definitions: &[&kima_mixes::definitions::Definition]) -> Vec<String> {
+pub(crate) fn definition_inputs(definitions: &[&Definition]) -> Vec<String> {
     let mut columns: Vec<(String, String)> = Vec::new();
     for definition in definitions {
         for part in &definition.parts {
@@ -354,6 +354,30 @@ fn definition_inputs(definitions: &[&kima_mixes::definitions::Definition]) -> Ve
         .collect()
 }
 
+/// Upstream `definedStatsCte`: `def_stats` over `defined`, each defined mood's library mean (`<mood>_mean`) and
+/// population SD (`<mood>_sd`).
+pub(crate) fn defined_stats_cte(definitions: &[&Definition]) -> String {
+    let columns = definitions
+        .iter()
+        .flat_map(|d| {
+            let s = score_column(&d.mood);
+            [
+                format!("avg({s}) AS {}_mean", d.mood),
+                format!("stddev_pop({s}) AS {}_sd", d.mood),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("def_stats AS MATERIALIZED (SELECT {columns} FROM defined)")
+}
+
+/// Upstream `definedZSql`: the standardised defined score of `mood` for a row of `defined` under alias `row`, against
+/// `def_stats` (alias ds); NULL if none.
+pub(crate) fn defined_z_sql(mood: &str, row: &str) -> String {
+    let column = score_column(mood);
+    format!("(({row}.{column} - ds.{mood}_mean) / NULLIF(ds.{mood}_sd, 0))")
+}
+
 /// Upstream `recipeRankingSql`: the recipe's score for every song it ranks, as CTEs of a WITH clause: `library`,
 /// `defined` (plus the familiarity boost), `def_stats`, `key_scale`, `eligible`, `spread`, `ranked` (`recipe_z`) and
 /// `placed` (arousal percentile, `in_filters`). `$1` is the heads' version; with an active boost `$2`/`$3` are its
@@ -365,7 +389,7 @@ fn ranking_sql(
 ) -> Result<String, RecipeError> {
     let components = &recipe.components;
     let filters = &recipe.filters;
-    let mut definitions: Vec<&kima_mixes::definitions::Definition> = Vec::new();
+    let mut definitions: Vec<&Definition> = Vec::new();
     for c in components {
         if let Signal::Mood(m) = &c.signal
             && let Some(d) = definition_of(m)
@@ -421,8 +445,7 @@ fn ranking_sql(
             match (&c.signal, &scales[i]) {
                 (Signal::Minor, _) => format!("{weight} * (l.c{i} - k.mean) / NULLIF(k.sd, 0)"),
                 (Signal::Mood(m), _) if is_defined(&c.signal) => {
-                    let column = score_column(m);
-                    format!("{weight} * ((l.{column} - ds.{m}_mean) / NULLIF(ds.{m}_sd, 0))")
+                    format!("{weight} * {}", defined_z_sql(m, "l"))
                 }
                 (_, Some(stats)) => format!(
                     "{weight} * (l.c{i} - {}) / {}",
@@ -501,18 +524,7 @@ fn ranking_sql(
     let def_stats = if definitions.is_empty() {
         String::new()
     } else {
-        let columns = definitions
-            .iter()
-            .flat_map(|d| {
-                let s = score_column(&d.mood);
-                [
-                    format!("avg({s}) AS {}_mean", d.mood),
-                    format!("stddev_pop({s}) AS {}_sd", d.mood),
-                ]
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("def_stats AS MATERIALIZED (SELECT {columns} FROM defined),")
+        format!("{},", defined_stats_cte(&definitions))
     };
     let def_join = if definitions.is_empty() {
         ""

@@ -205,13 +205,14 @@ Reserved rows: D-260 listener state (Q1, Task 6) · D-261 `LIBRARY_PLAYABLE` = p
 ### Task 5: Mood tags writer and the moods-changed hook
 
 **Files:** Modify `crates/kima-ident/src/stages/moods.rs`, `crates/kima-db/src/vibe/moods.rs`; create `crates/kima-ident/tests/mood_tags.rs`.
-- [ ] **RED:** port `tags.test.ts` 6 + `moodTags.integration.test.ts` 17: `tags_follow_defined_ctes`, `untagged_song_has_empty_array`, `tags_rewritten_when_scores_change`, `no_heads_no_tags_written` (degradation), `moods_changed_drops_mood_dependent_mix_caches_only` (energy band + familiarity kept, `cacheKeys.ts:11-13`).
-- [ ] Implement the writer inside the existing moods pass (same transaction discipline as M5), subscribe the mix cache (Task 6) to `subscribe_changes`; GREEN; commit `feat(ident): write mood tags and drop stale mix caches`.
+- [x] **RED:** port `tags.test.ts` 6 + `moodTags.integration.test.ts` 17: `tags_follow_defined_ctes`, `untagged_song_has_empty_array`, `tags_rewritten_when_scores_change`, `no_heads_no_tags_written` (degradation), `moods_changed_drops_mood_dependent_mix_caches_only` (energy band + familiarity kept, `cacheKeys.ts:11-13`).
+- [x] Implement the writer inside the existing moods pass (same transaction discipline as M5), subscribe the mix cache (Task 6) to `subscribe_changes`; GREEN; commit `feat(ident): write mood tags and drop stale mix caches`.
+- Done notes: the writer is `kima_db::mixes::tags::MoodTagger` (it reuses the recipes' definition SQL), run by the kima-ident mood pass after the statistics; tests `kima-db/tests/mixes_tags.rs` (10) and `kima-ident/tests/mood_tags.rs` (2). As upstream's `hashInputs`/`changeSignal`, the statistics' fingerprint now also hashes tempo, its confidence and the key's scale and the signal reads `track_analysis` (the driving definition reads the pace; the tag pass is skipped while the fingerprint stands). An analysis re-run clears the tags (upstream `resetAnalysis`). `moods_changed_drops_mood_dependent_mix_caches_only` moves to Task 6, which builds the cache it drops. Not ported: the two Prisma deadlock cases and the corrupt-song case (no `corrupt`, D-261).
 
 ### Task 6: Listener state store (replaces Redis; per Q1)
 
 **Files:** Create `crates/kima-mixes/src/store.rs` (Q1 = A: in-process, no tables), `crates/kima-mixes/tests/store.rs`; wire into `AppState` (`crates/kima-api/src/state.rs`).
-- [ ] **RED:** `mix_list_cache_per_profile_and_zone_ttl_1h_max_4_zones`, `refresh_replaces_only_its_zone`, `station_sessions_3_kept_12h`, `familiar_scan_single_flight_waits_then_scans_itself`, `energy_band_survives_mood_drop`, `drop_all_and_drop_mood_dependent`, `cover_pick_kept_until_local_day_end_no_cover_600s`.
+- [ ] **RED:** `mix_list_cache_per_profile_and_zone_ttl_1h_max_4_zones`, `refresh_replaces_only_its_zone`, `station_sessions_3_kept_12h`, `familiar_scan_single_flight_waits_then_scans_itself`, `energy_band_survives_mood_drop`, `drop_all_and_drop_mood_dependent`, `cover_pick_kept_until_local_day_end_no_cover_600s`, and from Task 5 `moods_changed_drops_mood_dependent_mix_caches_only` (the store subscribed to `moods::subscribe_changes`).
 - [ ] Implement; GREEN; commit `feat(mixes): in-process listener state store`. D-260 (amend, Q1 = A).
 
 ## Phase B: Mixes

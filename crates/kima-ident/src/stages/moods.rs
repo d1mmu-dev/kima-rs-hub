@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kima_db::PgPool;
+use kima_db::mixes::tags::MoodTagger;
 use kima_db::vibe::moods::{MoodBuild, MoodBuilder, MoodSnapshot, MoodSnapshots};
 use kima_vibe::mood_heads::MoodHeads;
 use tokio::sync::broadcast;
@@ -27,6 +28,8 @@ pub const SNAPSHOT_REFRESH_EVERY: Duration = Duration::from_secs(30);
 pub struct MoodRuntime {
     pub builder: MoodBuilder,
     pub snapshots: MoodSnapshots,
+    /// The mood tags' writer (M5b Task 5), run after the statistics in every pass.
+    pub tagger: MoodTagger,
     /// Fired when scores or statistics changed (M5b drops its cached mixes on it).
     changed: broadcast::Sender<()>,
 }
@@ -36,6 +39,7 @@ impl MoodRuntime {
         Self {
             builder: MoodBuilder::new(heads),
             snapshots: MoodSnapshots::new(),
+            tagger: MoodTagger::new(),
             changed: broadcast::channel(16).0,
         }
     }
@@ -72,7 +76,7 @@ pub async fn runtime(ctx: &IdentCtx) -> Option<Arc<MoodRuntime>> {
     )
 }
 
-/// One run of the step: [`MoodBuilder::build`], then the snapshot refresh. Errors are the caller's to log; a failing
+/// One run of the step: [`MoodBuilder::build`], the mood tags ([`MoodTagger::write`]), then the snapshot refresh. Errors are the caller's to log; a failing
 /// mood pass never stops the enrichment cycle (spec 9.1).
 pub async fn run_pass(ctx: &IdentCtx) -> sqlx::Result<MoodPass> {
     run_pass_with(
@@ -106,6 +110,11 @@ pub async fn run_with(pool: &PgPool, rt: &MoodRuntime) -> sqlx::Result<MoodPass>
     if build.scored > 0 || build.state_changed {
         // No receiver is not an error.
         let _ = rt.changed.send(());
+    }
+    // Upstream `executeMoodPhase`: the tags after the scores and statistics (skipped while the statistics stand).
+    let tagged = rt.tagger.write(pool, rt.heads()).await?;
+    if tagged > 0 {
+        tracing::info!("mood tags changed on {tagged} tracks");
     }
     let (_, snapshot_changed) = rt.snapshots.refresh(pool, rt.heads()).await?;
     Ok(MoodPass::Ran {

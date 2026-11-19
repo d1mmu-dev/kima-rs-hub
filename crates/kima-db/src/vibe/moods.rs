@@ -256,19 +256,23 @@ impl MoodBuilder {
 }
 
 /// The count of covered tracks and the hash of everything about them the statistics read. Covered: eligible, with
-/// scores of these weights for the vector they have now.
+/// scores of these weights for the vector they have now. As upstream's `hashInputs`, the hash also covers the tempo,
+/// its confidence and the key's scale (`track_analysis`): the mood tags' pass is skipped while this fingerprint stands
+/// (`kima_db::mixes::tags`), and the driving definition reads the pace (M5b Task 5).
 async fn hash_inputs(conn: &mut PgConnection, heads: &MoodHeads) -> sqlx::Result<(i64, String)> {
     let eligible: &str = &ELIGIBLE;
     sqlx::query_as(&format!(
-        "WITH e AS (SELECT te.track_id, te.created_at FROM {eligible})
+        "WITH e AS (SELECT te.track_id, te.created_at, t.ml_generation FROM {eligible})
          SELECT count(*)::bigint,
                 coalesce(sum(hashtextextended(
                     m.track_id::text || ':' || extract(epoch FROM m.embedded_at)::text || ':' ||
                     coalesce(r.arousal_raw::text, '') || ':' || coalesce(r.instrumentalness::text, '') || ':' ||
-                    coalesce(r.acousticness::text, ''), 0)::numeric), 0)::text
+                    coalesce(r.acousticness::text, '') || ':' || coalesce(ta.tempo_bpm::text, '') || ':' ||
+                    coalesce(ta.tempo_confidence::text, '') || ':' || coalesce(ta.key_mode, ''), 0)::numeric), 0)::text
          FROM e
          JOIN track_moods m ON m.track_id = e.track_id AND m.embedded_at = e.created_at AND m.weights = $1
-         LEFT JOIN track_clap_readings r ON r.track_id = e.track_id AND r.embedded_at = e.created_at"
+         LEFT JOIN track_clap_readings r ON r.track_id = e.track_id AND r.embedded_at = e.created_at
+         LEFT JOIN track_analysis ta ON ta.track_id = e.track_id AND ta.file_generation = e.ml_generation"
     ))
     .bind(&heads.version)
     .fetch_one(conn)
@@ -276,7 +280,7 @@ async fn hash_inputs(conn: &mut PgConnection, heads: &MoodHeads) -> sqlx::Result
 }
 
 /// Moves when a track is added, removed, rewritten or goes missing, when an eligible vector is written, or when
-/// scores or readings are written. Each part reads one table; none joins.
+/// scores, readings or an analysis result are written. Each part reads one table; none joins.
 async fn change_signal(conn: &mut PgConnection) -> sqlx::Result<String> {
     let eligible: &str = &ELIGIBLE;
     sqlx::query_scalar(&format!(
@@ -284,7 +288,8 @@ async fn change_signal(conn: &mut PgConnection) -> sqlx::Result<String> {
             (SELECT concat_ws(',', count(*), count(*) FILTER (WHERE missing_since IS NULL), max(updated_at)) FROM tracks),
             (SELECT concat_ws(',', count(*), max(te.created_at)) FROM {eligible}),
             (SELECT concat_ws(',', count(*), max(embedded_at)) FROM track_moods),
-            (SELECT concat_ws(',', count(*), max(embedded_at)) FROM track_clap_readings))"
+            (SELECT concat_ws(',', count(*), max(embedded_at)) FROM track_clap_readings),
+            (SELECT concat_ws(',', count(*), max(updated_at)) FROM track_analysis))"
     ))
     .fetch_one(conn)
     .await

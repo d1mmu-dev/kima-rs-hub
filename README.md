@@ -181,7 +181,7 @@ combinations that cannot be admitted stop the server with the allowed range in t
 | `KIMA_CLAP_POOL_SIZE` | CPU 1, CUDA 2 | audio ONNX sessions, 1..=8 |
 | `KIMA_CLAP_INTRA_THREADS` | CPU cores/8 (1..=4), CUDA 1 | threads per audio session, 1..=16; pool × threads at most 48 |
 | `KIMA_EMBEDDING_WORKERS` | CPU cores/8 (1..=4), CUDA cores/4 (2..=8) | tracks decoded and embedded at once, 1..=20 |
-| `KIMA_ANALYSIS_WORKERS` | 2 (upstream `NUM_WORKERS`) | tracks decoded and analysed (DSP, MusiCNN) at once, 1..=20, clamped to the cores; each worker adds about 25 MiB of memory while it decodes (measured ~24 MiB peak RSS per DSP worker; 20 workers ≈ 0.5 GiB) and takes one snapshot slot; the MusiCNN models are loaded once and shared, so they do not grow with the count |
+| `KIMA_ANALYSIS_WORKERS` | 2 (upstream `NUM_WORKERS`) | tracks decoded and analysed (DSP, MusiCNN) at once, 1..=20, clamped to the cores; each worker adds about 35-60 MiB of memory while it decodes (measured peak RSS, DSP only, 240 s track: one worker +36 MiB Opus, +51 MiB MP3/FLAC; 20 workers 0.6-0.85 GiB in total) and takes one snapshot slot; the MusiCNN models are loaded once and shared, so they do not grow with the count |
 | `KIMA_ONNX_HOST_BUDGET_MIB` | 4096 | host-memory estimate for all ONNX sessions, 1..=65536; each CPU audio session needs ~1100 MiB, the text session ~1940 MiB |
 | `KIMA_SNAPSHOT_MAX_CONCURRENT` | embedding + analysis workers | input snapshots at once; workers beyond it wait for a slot |
 

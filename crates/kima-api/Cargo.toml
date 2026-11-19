@@ -20,6 +20,7 @@ kima-api-types.workspace = true
 kima-core.workspace = true
 kima-db.workspace = true
 kima-ident.workspace = true
+kima-mixes.workspace = true
 kima-jobs.workspace = true
 kima-library.workspace = true
 kima-net.workspace = true

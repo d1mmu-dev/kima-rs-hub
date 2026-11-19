@@ -212,8 +212,9 @@ Reserved rows: D-260 listener state (Q1, Task 6) · D-261 `LIBRARY_PLAYABLE` = p
 ### Task 6: Listener state store (replaces Redis; per Q1)
 
 **Files:** Create `crates/kima-mixes/src/store.rs` (Q1 = A: in-process, no tables), `crates/kima-mixes/tests/store.rs`; wire into `AppState` (`crates/kima-api/src/state.rs`).
-- [ ] **RED:** `mix_list_cache_per_profile_and_zone_ttl_1h_max_4_zones`, `refresh_replaces_only_its_zone`, `station_sessions_3_kept_12h`, `familiar_scan_single_flight_waits_then_scans_itself`, `energy_band_survives_mood_drop`, `drop_all_and_drop_mood_dependent`, `cover_pick_kept_until_local_day_end_no_cover_600s`, and from Task 5 `moods_changed_drops_mood_dependent_mix_caches_only` (the store subscribed to `moods::subscribe_changes`).
-- [ ] Implement; GREEN; commit `feat(mixes): in-process listener state store`. D-260 (amend, Q1 = A).
+- [x] **RED:** `mix_list_cache_per_profile_and_zone_ttl_1h_max_4_zones`, `refresh_replaces_only_its_zone`, `station_sessions_3_kept_12h`, `familiar_scan_single_flight_waits_then_scans_itself`, `energy_band_survives_mood_drop`, `drop_all_and_drop_mood_dependent`, `cover_pick_kept_until_local_day_end_no_cover_600s`, and from Task 5 `moods_changed_drops_mood_dependent_mix_caches_only` (the store subscribed to `moods::subscribe_changes`).
+- [x] Implement; GREEN; commit `feat(mixes): in-process listener state store`. D-260 (amend, Q1 = A).
+- Done notes: `kima_mixes::store` (+ `kima_mixes::familiar::FamiliarBoost`, re-exported by `kima_db::mixes::recipe`), `AppState.listeners`, the mood-drop task wired in `kima-server/src/main.rs`; tests `kima-mixes/tests/store.rs` (9). Methods take the time they act at. The familiarity scan's caller loop (take lock, wait, scan) is Task 8; `drop_all` after core/full enrichment (upstream `clearMixCache`) is wired with the mix list's first consumer (Task 9).
 
 ## Phase B: Mixes
 

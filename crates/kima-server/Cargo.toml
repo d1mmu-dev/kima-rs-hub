@@ -18,6 +18,7 @@ kima-api.workspace = true
 kima-core.workspace = true
 kima-db.workspace = true
 kima-ident.workspace = true
+kima-mixes.workspace = true
 kima-ml.workspace = true
 kima-jobs.workspace = true
 kima-library.workspace = true

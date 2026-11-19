@@ -75,12 +75,8 @@ fn unrankable(recipe_id: &str, reason: impl Into<String>) -> RecipeError {
 }
 
 /// Upstream `FamiliarBoost`: per track, how much it sounds like the listener's most-heard songs (familiarity.ts,
-/// M5b Task 8), as parallel lists.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct FamiliarBoost {
-    pub ids: Vec<Uuid>,
-    pub boosts: Vec<f64>,
-}
+/// M5b Task 8); the type lives with the listener store that keeps it.
+pub use kima_mixes::familiar::FamiliarBoost;
 
 /// What a ranking reads besides the recipe: the mood heads (`None` while they are blocked: no recipe ranks) and the
 /// listener's familiarity boost, used only by a recipe that carries a familiarity share.

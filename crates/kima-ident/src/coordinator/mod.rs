@@ -87,7 +87,11 @@ pub fn kick_on_change() -> OnChange {
 }
 
 /// Startup, before the workers start: cycles a dead process left `running` are requeued,
-/// artists it left `enriching` go back to `pending`, and a cycle is kicked.
+/// artists it left `enriching` go back to `pending`, and a cycle is kicked. The artist reset
+/// takes no lease check (unlike `enrichment::reset_enriching_artists_if_idle` in each artists
+/// phase): `requeue_running` has just requeued every running `enrich` job whatever its lease
+/// (one kima process per database), so none is left to check, and checking before it would
+/// only delay the reset after a crash without protecting another process (D-254).
 pub async fn prepare(pool: &PgPool) -> sqlx::Result<()> {
     let recovered = queue::requeue_running(pool, QUEUE).await?;
     if recovered.requeued + recovered.failed > 0 {

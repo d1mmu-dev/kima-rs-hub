@@ -2811,6 +2811,7 @@ dependencies = [
  "futures",
  "hex",
  "kima-core",
+ "kima-mixes",
  "kima-vibe",
  "serde",
  "serde_json",

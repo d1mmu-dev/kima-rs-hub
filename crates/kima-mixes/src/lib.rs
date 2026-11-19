@@ -4,6 +4,7 @@
 
 pub mod artist;
 pub mod day;
+pub mod definitions;
 mod json;
 pub mod recipes;
 pub mod seeded;

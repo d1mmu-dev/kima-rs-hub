@@ -13,6 +13,9 @@ pub const RECIPES_JSON: &str = include_str!("../assets/recipes.json");
 /// `backend/src/services/mixes/moodDefinitions.json` at the pin, unchanged.
 pub const DEFINITIONS_JSON: &str = include_str!("../assets/moodDefinitions.json");
 
+/// Songs in a daily mix (upstream `helpers.ts` `TRACK_LIMIT`).
+pub const TRACK_LIMIT: usize = 20;
+
 /// A song is a member at this many library standard deviations above the average recipe score.
 pub const RECIPE_LINE: f64 = 1.25;
 /// Upstream's steady beat: Essentia's tempo confidence (0 to 5.32) at least 2. kima's confidence is 0 to 1 from

@@ -39,6 +39,15 @@ fn logit(column: &str) -> String {
 /// `track_clap_readings` column behind each of [`READINGS`].
 const READING_COLUMNS: [&str; 3] = ["arousal_raw", "instrumentalness", "acousticness"];
 
+/// The SQL value of one of [`READINGS`] under alias `r` (`track_clap_readings`), exactly as the statistics read it
+/// (upstream `READING_SQL`); `None` for a name that is not a reading. The recipes score against the same values.
+pub(crate) fn reading_sql(reading: &str) -> Option<String> {
+    READINGS
+        .iter()
+        .position(|r| *r == reading)
+        .map(|i| logit(READING_COLUMNS[i]))
+}
+
 /// `"2/<heads version>"`: the re-run key of the `mood_state` row.
 pub fn mood_state_version(heads: &MoodHeads) -> String {
     format!("{STATE_FORMULA_VERSION}/{}", heads.version)

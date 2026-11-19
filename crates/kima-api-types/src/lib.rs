@@ -7,6 +7,7 @@ pub mod app_tokens;
 pub mod auth;
 pub mod error;
 pub mod library;
+pub mod mixes;
 pub mod onboarding;
 pub mod playback_state;
 pub mod playlists;

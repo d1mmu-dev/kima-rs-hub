@@ -12,6 +12,7 @@ mod events;
 mod health;
 mod library;
 mod library_watch;
+mod mixes;
 mod onboarding;
 mod playback_state;
 mod playlists;
@@ -53,6 +54,7 @@ pub fn router(state: AppState) -> Router {
         .merge(profiles::routes())
         .merge(settings::routes())
         .merge(vibe::routes())
+        .merge(mixes::routes())
         .fallback(|| async { ApiError::NotFound("Not found") });
 
     Router::new()

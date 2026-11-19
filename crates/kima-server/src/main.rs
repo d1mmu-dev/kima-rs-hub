@@ -302,9 +302,9 @@ async fn main() -> anyhow::Result<()> {
     registry.register_library(library_ctx.clone());
     let state = state.with_ident(ident_ctx.clone());
     // A moods change drops the cached mixes that depend on the moods (upstream `dropCachedMixes(moodsOnly)`). No
-    // receiver while the mood heads are unavailable: then the moods never change.
+    // receiver while the mood heads are unavailable: then the moods never change. Stopped by the shutdown token.
     if let Some(changes) = kima_ident::stages::moods::subscribe_changes(&ident_ctx).await {
-        kima_mixes::store::spawn_mood_drop(state.listeners.clone(), changes);
+        kima_mixes::store::spawn_mood_drop(state.listeners.clone(), changes, shutdown.clone());
     }
     registry.register_autotag(ident_ctx.clone());
     // The mood snapshot follows the statistics between cycles (every 30 s); stopped by the shutdown token.

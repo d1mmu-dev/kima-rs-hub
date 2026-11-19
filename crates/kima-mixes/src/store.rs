@@ -10,7 +10,8 @@
 //! | `radiocover:<listener>:<day>:<type>:<value>` (`stationCovers.ts`) | [`ListenerStore::cover`] | to the local day's end, 600 s for no cover |
 //!
 //! Every method takes the time it acts at, so lifetimes are tested without waiting. Entries past their life are never
-//! answered and are swept from a map whenever that map is written, so memory stays bounded by the live entries.
+//! answered and are swept from a map whenever that map is read or written, so memory stays bounded by the live
+//! entries. Listeners are profiles (`profile_id`, M-PROF), as every other key here.
 //! `drop_mood_dependent` and `drop_all` are upstream's `dropCachedMixes(moodsOnly)` and `dropCachedMixes()` over the
 //! `mixes:` keys: station sessions and radio covers are not under `mixes:` and neither drop touches them.
 
@@ -21,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::familiar::FamiliarBoost;
@@ -70,7 +72,7 @@ pub struct StationSession {
     pub pass: u64,
     pub length: u64,
     pub last_artist: String,
-    pub ids: Arc<Vec<String>>,
+    pub ids: Arc<Vec<Uuid>>,
 }
 
 /// A session without its ids (upstream `readPass`'s meta).
@@ -124,12 +126,37 @@ struct Inner {
     /// Per profile, its zones in the order written (oldest first).
     mix_lists: HashMap<Uuid, Vec<(String, Zone)>>,
     /// Per listener, its stations' sessions.
-    sessions: HashMap<String, HashMap<String, Session>>,
+    sessions: HashMap<Uuid, HashMap<String, Session>>,
     familiar: HashMap<Uuid, Familiar>,
     familiar_locks: HashMap<Uuid, Lock>,
     energy_band: Option<(Option<(f64, f64)>, Instant)>,
     /// (listener, day, station) -> (cover, kept until).
-    covers: HashMap<(String, String, String), (Option<String>, Instant)>,
+    covers: HashMap<(Uuid, String, String), (Option<String>, Instant)>,
+}
+
+impl Inner {
+    fn sweep_mix_lists(&mut self, now: Instant) {
+        self.mix_lists.retain(|_, zones| {
+            zones.retain(|(_, e)| now.saturating_duration_since(e.at) < MIXES_CACHE_TTL);
+            !zones.is_empty()
+        });
+    }
+
+    fn sweep_sessions(&mut self, now: Instant) {
+        self.sessions.retain(|_, stations| {
+            stations.retain(|_, s| now.saturating_duration_since(s.used) < SESSION_TTL);
+            !stations.is_empty()
+        });
+    }
+
+    fn sweep_familiar(&mut self, now: Instant) {
+        self.familiar.retain(|_, f| now < f.until);
+        self.familiar_locks.retain(|_, l| now < l.until);
+    }
+
+    fn sweep_covers(&mut self, now: Instant) {
+        self.covers.retain(|_, (_, until)| now < *until);
+    }
 }
 
 /// The store; one per process, shared through `AppState`.
@@ -159,13 +186,13 @@ impl ListenerStore {
         zone: &str,
         now: Instant,
     ) -> Option<Arc<serde_json::Value>> {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        inner.sweep_mix_lists(now);
         inner
             .mix_lists
             .get(&profile)?
             .iter()
             .find(|(z, _)| z == zone)
-            .filter(|(_, entry)| now.saturating_duration_since(entry.at) < MIXES_CACHE_TTL)
             .map(|(_, entry)| entry.mixes.clone())
     }
 
@@ -179,13 +206,9 @@ impl ListenerStore {
         now: Instant,
     ) {
         let mut inner = self.lock();
-        inner.mix_lists.retain(|_, zones| {
-            zones
-                .iter()
-                .any(|(_, e)| now.saturating_duration_since(e.at) < MIXES_CACHE_TTL)
-        });
+        inner.sweep_mix_lists(now);
         let zones = inner.mix_lists.entry(profile).or_default();
-        zones.retain(|(z, e)| z != zone && now.saturating_duration_since(e.at) < MIXES_CACHE_TTL);
+        zones.retain(|(z, _)| z != zone);
         zones.push((zone.to_string(), Zone { mixes, at: now }));
         let excess = zones.len().saturating_sub(MAX_CACHED_ZONES);
         zones.drain(..excess);
@@ -203,14 +226,12 @@ impl ListenerStore {
     pub fn touch_session(
         &self,
         station: &str,
-        listener: &str,
+        listener: Uuid,
         now: Instant,
     ) -> Option<SessionMeta> {
         let mut inner = self.lock();
-        let entry = inner.sessions.get_mut(listener)?.get_mut(station)?;
-        if now.saturating_duration_since(entry.used) >= SESSION_TTL {
-            return None;
-        }
+        inner.sweep_sessions(now);
+        let entry = inner.sessions.get_mut(&listener)?.get_mut(station)?;
         entry.used = now;
         let s = &entry.session;
         Some(SessionMeta {
@@ -224,20 +245,23 @@ impl ListenerStore {
 
     /// Upstream `readIds`: positions `from` to `to` (not included) of the session's pass, only while the session is
     /// still that pass of `seed` (`start`); `None` otherwise or past its ids.
+    #[allow(clippy::too_many_arguments)]
     pub fn session_ids(
         &self,
         station: &str,
-        listener: &str,
+        listener: Uuid,
         seed: &str,
         start: u64,
         from: usize,
         to: usize,
-    ) -> Option<Vec<String>> {
+        now: Instant,
+    ) -> Option<Vec<Uuid>> {
         if to <= from {
             return Some(Vec::new());
         }
-        let inner = self.lock();
-        let entry = inner.sessions.get(listener)?.get(station)?;
+        let mut inner = self.lock();
+        inner.sweep_sessions(now);
+        let entry = inner.sessions.get(&listener)?.get(station)?;
         let s = &entry.session;
         if s.seed != seed || s.start != start || to > s.ids.len() {
             return None;
@@ -250,17 +274,14 @@ impl ListenerStore {
     pub fn save_session(
         &self,
         station: &str,
-        listener: &str,
+        listener: Uuid,
         session: StationSession,
         mode: SaveMode,
         now: Instant,
     ) -> bool {
         let mut inner = self.lock();
-        inner.sessions.retain(|_, stations| {
-            stations.retain(|_, s| now.saturating_duration_since(s.used) < SESSION_TTL);
-            !stations.is_empty()
-        });
-        let stations = inner.sessions.entry(listener.to_string()).or_default();
+        inner.sweep_sessions(now);
+        let stations = inner.sessions.entry(listener).or_default();
         match &mode {
             SaveMode::Replace => {}
             SaveMode::Absent => {
@@ -292,9 +313,14 @@ impl ListenerStore {
 
     /// The library's kept energy band: `Some(None)` is a kept "no readings yet", `None` a miss.
     pub fn energy_band(&self, now: Instant) -> Option<Option<(f64, f64)>> {
-        match self.lock().energy_band {
+        let mut inner = self.lock();
+        match inner.energy_band {
             Some((band, until)) if now < until => Some(band),
-            _ => None,
+            Some(_) => {
+                inner.energy_band = None;
+                None
+            }
+            None => None,
         }
     }
 
@@ -316,9 +342,10 @@ impl ListenerStore {
         signature: &str,
         now: Instant,
     ) -> Option<Option<FamiliarBoost>> {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        inner.sweep_familiar(now);
         let kept = inner.familiar.get(&profile)?;
-        (kept.signature == signature && now < kept.until).then(|| kept.boost.clone())
+        (kept.signature == signature).then(|| kept.boost.clone())
     }
 
     /// Upstream `writeKept`: keeps the scan, except that "no boost" is never written over a boost kept for the same
@@ -331,7 +358,7 @@ impl ListenerStore {
         now: Instant,
     ) -> Option<FamiliarBoost> {
         let mut inner = self.lock();
-        inner.familiar.retain(|_, f| now < f.until);
+        inner.sweep_familiar(now);
         if boost.is_none()
             && let Some(kept) = inner.familiar.get(&profile)
             && kept.signature == signature
@@ -363,7 +390,7 @@ impl ListenerStore {
         life: Duration,
     ) -> Option<LockToken> {
         let mut inner = self.lock();
-        inner.familiar_locks.retain(|_, l| now < l.until);
+        inner.sweep_familiar(now);
         if inner.familiar_locks.contains_key(&profile) {
             return None;
         }
@@ -379,10 +406,9 @@ impl ListenerStore {
     }
 
     pub fn familiar_lock_held(&self, profile: Uuid, now: Instant) -> bool {
-        self.lock()
-            .familiar_locks
-            .get(&profile)
-            .is_some_and(|l| now < l.until)
+        let mut inner = self.lock();
+        inner.sweep_familiar(now);
+        inner.familiar_locks.contains_key(&profile)
     }
 
     /// Upstream `RELEASE_LOCK`: frees the lock only if it still holds the caller's token (it may have expired and been
@@ -427,24 +453,24 @@ impl ListenerStore {
     /// The listener's cover pick for a station on `day`: `Some(None)` is a kept "no cover", `None` a miss.
     pub fn cover(
         &self,
-        listener: &str,
+        listener: Uuid,
         day: &str,
         station: &str,
         now: Instant,
     ) -> Option<Option<String>> {
-        let inner = self.lock();
-        let (cover, until) =
-            inner
-                .covers
-                .get(&(listener.to_string(), day.to_string(), station.to_string()))?;
-        (now < *until).then(|| cover.clone())
+        let mut inner = self.lock();
+        inner.sweep_covers(now);
+        let (cover, _) = inner
+            .covers
+            .get(&(listener, day.to_string(), station.to_string()))?;
+        Some(cover.clone())
     }
 
     /// Upstream `dailyCover`'s `SET … NX`: keeps `cover` until the day ends (`day_left`), a "no cover" at most
     /// [`NO_COVER`]; when a live pick is already kept, that one is the answer.
     pub fn put_cover_if_absent(
         &self,
-        listener: &str,
+        listener: Uuid,
         day: &str,
         station: &str,
         cover: Option<String>,
@@ -452,8 +478,8 @@ impl ListenerStore {
         now: Instant,
     ) -> Option<String> {
         let mut inner = self.lock();
-        inner.covers.retain(|_, (_, until)| now < *until);
-        let key = (listener.to_string(), day.to_string(), station.to_string());
+        inner.sweep_covers(now);
+        let key = (listener, day.to_string(), station.to_string());
         if let Some((kept, _)) = inner.covers.get(&key) {
             return kept.clone();
         }
@@ -464,6 +490,18 @@ impl ListenerStore {
         };
         inner.covers.insert(key, (cover.clone(), now + life));
         cover
+    }
+
+    /// How many entries the store holds, live or not yet swept (mix lists per zone, sessions, familiarity scans and
+    /// locks, the energy band, covers): what its memory is bounded by.
+    pub fn held_entries(&self) -> usize {
+        let inner = self.lock();
+        inner.mix_lists.values().map(Vec::len).sum::<usize>()
+            + inner.sessions.values().map(HashMap::len).sum::<usize>()
+            + inner.familiar.len()
+            + inner.familiar_locks.len()
+            + usize::from(inner.energy_band.is_some())
+            + inner.covers.len()
     }
 
     // ---- drops -------------------------------------------------------------------------------------------------
@@ -485,16 +523,22 @@ impl ListenerStore {
 }
 
 /// Drops the mood-dependent entries on every "moods changed" event (`kima_ident::stages::moods::subscribe_changes`),
-/// until the sender is gone. A lagging receiver missed events, so it drops as well.
+/// until the sender is gone or `stop` (the server's shutdown token) is cancelled. A lagging receiver missed events,
+/// so it drops as well.
 pub fn spawn_mood_drop(
     store: Arc<ListenerStore>,
     mut changes: broadcast::Receiver<()>,
+    stop: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            match changes.recv().await {
-                Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => store.drop_mood_dependent(),
-                Err(broadcast::error::RecvError::Closed) => return,
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => return,
+                event = changes.recv() => match event {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => store.drop_mood_dependent(),
+                    Err(broadcast::error::RecvError::Closed) => return,
+                },
             }
         }
     })

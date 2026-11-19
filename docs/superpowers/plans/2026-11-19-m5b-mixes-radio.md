@@ -177,22 +177,22 @@ Reserved rows: D-260 listener state (Q1, Task 6) · D-261 `LIBRARY_PLAYABLE` = p
 ### Task 1: Schema `0063_mixes.sql` and `kima_db::mixes` basics
 
 **Files:** Create `crates/kima-db/migrations/0063_mixes.sql`, `crates/kima-db/src/mixes/mod.rs`, `crates/kima-db/tests/mixes_schema.rs`. Modify `crates/kima-db/src/lib.rs`.
-- [ ] **RED:** `mixes_schema.rs`: `user_mood_mix_is_per_profile_and_cascades`, `playlist_mix_id_is_unique_per_profile_only`, `release_rows_are_per_profile_and_cascade`, `mood_tags_default_empty_on_existing_tracks`, `upgrade_from_0062_keeps_every_row` (seed a 0062 DB with playlists/tracks, migrate, compare full rows). Run `cargo test -p kima-db --test mixes_schema` → fails (no tables).
-- [ ] Write the migration per the model table above (one file; `decided_by` CHECK; partial unique index on `(profile_id, mix_id)`).
-- [ ] GREEN; `cargo sqlx prepare --workspace -- --all-targets`; commit `feat(db): mixes, mood mix and release tables (0063)`.
+- [x] **RED:** `mixes_schema.rs`: `user_mood_mix_is_per_profile_and_cascades`, `playlist_mix_id_is_unique_per_profile_only`, `release_rows_are_per_profile_and_cascade`, `mood_tags_default_empty_on_existing_tracks`, `upgrade_from_0062_keeps_every_row` (seed a 0062 DB with playlists/tracks, migrate, compare full rows). Run `cargo test -p kima-db --test mixes_schema` → fails (no tables).
+- [x] Write the migration per the model table above (one file; `decided_by` CHECK; partial unique index on `(profile_id, mix_id)`).
+- [x] GREEN; `cargo sqlx prepare --workspace -- --all-targets`; commit `feat(db): mixes, mood mix and release tables (0063)`.
 
 ### Task 2: Pure draws with upstream goldens (`kima-mixes` crate)
 
 **Files:** Create `crates/kima-mixes/{Cargo.toml,src/lib.rs,src/seeded.rs,src/artist.rs,src/day.rs}`, `tools/mix-goldens/upstream.mjs` (reads `services/mixes/helpers.ts`, `artistCap.ts`, `mixDay.ts`, `utils/artistSpread.ts` from the pin's git objects like `tools/vibe-goldens/upstream.mjs`, writes JSON), `crates/kima-mixes/tests/fixtures/draw_goldens.json`, `crates/kima-mixes/tests/draws.rs`.
-- [ ] **RED** `draws.rs`: `seeded_random_matches_js_for_ascii_unicode_and_overflow` (incl. a non-BMP string: UTF-16 code units), `daily_pick_indices_match_upstream_lcg`, `seeded_key_is_md5_hex_of_seed_colon_id`, `seeded_order_and_take_agree_and_match_goldens`, `weighted_order_seeded_matches_goldens`, `cap_by_artist_raises_2_3_then_lifts`, `spread_by_artist_matches_goldens`, `mix_day_is_server_local_date_and_weekday_parses_utc`, `song_artist_key_matches_upstream` (ports `seededDraw` 14, `weightedOrder` 3, `mixDay` 5, `mixSampling` pure cases).
-- [ ] Generate goldens (`node tools/mix-goldens/upstream.mjs --pin c7527577 > …`), commit with the pin SHA inside the file.
-- [ ] Implement; GREEN; clippy; commit `feat(mixes): seeded draws and artist cap with upstream goldens`. D-261 (amend): `LIBRARY_PLAYABLE` = present track (no `corrupt`, no `location` until M7). Mix day per Q11 = A (server calendar date).
+- [x] **RED** `draws.rs`: `seeded_random_matches_js_for_ascii_unicode_and_overflow` (incl. a non-BMP string: UTF-16 code units), `daily_pick_indices_match_upstream_lcg`, `seeded_key_is_md5_hex_of_seed_colon_id`, `seeded_order_and_take_agree_and_match_goldens`, `weighted_order_seeded_matches_goldens`, `cap_by_artist_raises_2_3_then_lifts`, `spread_by_artist_matches_goldens`, `mix_day_is_server_local_date_and_weekday_parses_utc`, `song_artist_key_matches_upstream` (ports `seededDraw` 14, `weightedOrder` 3, `mixDay` 5, `mixSampling` pure cases).
+- [x] Generate goldens (`node tools/mix-goldens/upstream.mjs --pin c7527577 > …`), commit with the pin SHA inside the file.
+- [x] Implement; GREEN; clippy; commit `feat(mixes): seeded draws and artist cap with upstream goldens`. D-261 (amend): `LIBRARY_PLAYABLE` = present track (no `corrupt`, no `location` until M7). Mix day per Q11 = A (server calendar date).
 
 ### Task 3: Recipes, definitions and stations (pure)
 
 **Files:** Create `crates/kima-mixes/assets/{recipes.json,moodDefinitions.json}` (byte copies from the pin), `src/recipes.rs`, `src/stations.rs`, `tests/recipes_parse.rs`.
-- [ ] **RED:** `vendored_files_match_pin_sha256` (hashes recorded from `git show c7527577:…`), port `recipes.test.ts` 16 (parse errors: id pattern, unknown component, twice, weights, familiarity bounds, filter ranges), `stations.test.ts` 12 (`station_list_order_and_subtitles`, `retired_values_answer_retired`, `unknown_value_is_unknown`, `late_night_is_personal`).
-- [ ] Implement `parse_recipes`, `get_recipe`, `MOOD_STATIONS`, `station_subtitle`, `resolve_mood_station`, `mood_station_list`; GREEN; commit `feat(mixes): recipes and mood stations`.
+- [x] **RED:** `vendored_files_match_pin_sha256` (hashes recorded from `git show c7527577:…`), port `recipes.test.ts` 16 (parse errors: id pattern, unknown component, twice, weights, familiarity bounds, filter ranges), `stations.test.ts` 12 (`station_list_order_and_subtitles`, `retired_values_answer_retired`, `unknown_value_is_unknown`, `late_night_is_personal`).
+- [x] Implement `parse_recipes`, `get_recipe`, `MOOD_STATIONS`, `station_subtitle`, `resolve_mood_station`, `mood_station_list`; GREEN; commit `feat(mixes): recipes and mood stations`.
 
 ### Task 4: Recipe ranking in SQL on the kima schema
 
@@ -229,6 +229,7 @@ Reserved rows: D-260 listener state (Q1, Task 6) · D-261 `LIBRARY_PLAYABLE` = p
 **Files:** `crates/kima-mixes/src/generators/{recipe,night,familiar}.rs`, `crates/kima-db/src/mixes/{night,familiar}.rs`, `crates/kima-db/tests/{night_plays,familiarity}.rs`.
 - [ ] **RED:** port `nightPlays` 28, `nightMixEligibility` 5, `savedMoodMix` 3, recipe half of `mixGenerators`: `night_is_22_to_04_in_requested_zone`, `bad_zone_falls_back_to_server_zone` (reuse `safe_zone`), `cold_start_tops_up_with_vibe_matches`, `cold_start_without_probe_uses_own_plays_only`, `recipe_mix_seed_is_recipe_day_profile`, `day_mix_only_sunday_and_monday`, `familiar_seeds_200_lookback_365`, `familiar_cache_3h_empty_60s`.
 - [ ] Implement via `matching_context`/`top_scores`; GREEN; commit `feat(mixes): recipe, day, night and familiar mixes`.
+- Remaining `recipes.integration` cases (Task 4 handed the boost in; 16 of the 29 not yet ported), the scan itself: "gives a listener with no plays exactly the ranking of no listener", "lifts an unheard song that sounds like the listener's most-heard song above an unheard one that does not", "gives the listener's own most-heard song the full boost, no smaller than any song's", "lets a song just under the line in when it sounds like what the listener plays, and keeps the one that does not out", "counts only plays marked as heard, and only those of the last 365 days", "keeps the closest songs in Redis for the same seeds, and builds them again when the seeds change", "keeps its result when the listener plays a seed song again, and rebuilds only when a new song becomes a seed", "runs one scan for callers that ask at once", "waits for another process that holds the scan lock and uses its result, without scanning", "scans itself when the lock holder gives no result within the wait, and takes then releases the lock otherwise", "breaks ties between equally heard songs by the most recent listen, not by id", "never writes no-boost over a boost already kept for the same seeds", "frees the scan lock only while it still holds this caller's token", "gives no boost, and keeps that for a minute at most, while the similarity data is not built", "gives no boost, rather than failing, when the scan throws, and keeps that for a minute at most", "still boosts the unheard songs that sound like what was played, and gives every played song the full boost" (large-share library).
 
 ### Task 9: Daily mix list and `/api/mixes`, `/api/mixes/{id}`, refresh, save
 
@@ -241,6 +242,7 @@ Reserved rows: D-260 listener state (Q1, Task 6) · D-261 `LIBRARY_PLAYABLE` = p
 **Files:** `crates/kima-db/src/mixes/mood_mix.rs`, extend `routes/mixes.rs`, `crates/kima-api/tests/mood_buckets.rs`.
 - [ ] **RED:** port `mixesMoodServe` 4, `mixesValidation` 7, `moodBucketService` 13, `moodBucketMixPool` 8: `presets_five_moods_counts_and_pending`, `presets_zero_when_heads_absent`, `invalid_mood_400_with_valid_moods`, `not_enough_tracks_400_with_suggestion`, `served_ids_skipped_while_8_remain`, `record_served_update_only`, `save_with_track_ids_keeps_order_drops_missing`, `save_none_playable_400`, `save_validation_messages`, `save_drops_mix_cache`, `saved_mix_reread_on_home_list`, `bucket_track_rows_use_the_appendix_d_shape` (GET and save responses' `tracks[]`, Q6 = B).
 - [ ] Implement; GREEN; commit `feat(api): mood bucket mixes`.
+- Remaining `recipes.integration` case (1 of the 29): "shows 0 on a mood preset whose page recipe has fewer than 8 members, the count its page plays".
 
 ## Phase C: Radio
 
@@ -255,6 +257,7 @@ Reserved rows: D-260 listener state (Q1, Task 6) · D-261 `LIBRARY_PLAYABLE` = p
 **Files:** `crates/kima-mixes/src/station_order.rs`, `tests/station_order.rs`, goldens from `stationOrder.ts` via `tools/mix-goldens`.
 - [ ] **RED:** port `stationOrder.test.ts` 20: `same_seed_same_order_while_pool_unchanged`, `offset_pages_and_next`, `pass_restarts_without_last_artist_or_seam_window_songs`, `lost_session_rebuilt_by_replay_passes`, `replay_bounds_1000_passes_200k_songs`, `three_stations_kept_per_profile`, `seed_pattern_rejected`.
 - [ ] Implement over the Task 6 store; GREEN; commit `feat(mixes): station play order`.
+- Remaining `recipes.integration` cases (12 of the 29), on the station order and the Wildcard station: "plays the scored songs without a tag, one title by one artist once", "follows the stored tags: a song whose tags were cleared plays until a pass over new statistics", "refills up to the limit, keeps playing while the statistics are rebuilt, and has nothing before any score", "plays every member, the big artist in runs of 1 or 2 (30 songs in 16 runs), each other song alone between", "hands out one seed's order a refill at a time: each member once, in the same order as one long refill", "never ends: after every member it starts over in a new order, not opening with the last artist or songs", "keeps a session's order when songs join or leave the pool mid-session; the next pass takes the pool as it is", "rebuilds a forgotten session, later passes included, or one Redis cannot serve, in the same order", "counts each song on a Various Artists album as its own artist, as the mixes' cap does", "names the artist for the other radios as the SQL does: the song itself on a Various or Unknown Artist album", "orders Wildcard the same way, a seed's order a refill at a time", "refills a station with members in a fresh order each call".
 
 ### Task 13: `GET /api/library/radio`
 

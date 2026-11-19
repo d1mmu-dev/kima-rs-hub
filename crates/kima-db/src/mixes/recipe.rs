@@ -116,10 +116,20 @@ pub(crate) fn has_spread(sd: f64) -> bool {
     sd > 0.0
 }
 
-/// A finite number as an SQL literal.
-fn lit(x: f64) -> String {
-    debug_assert!(x.is_finite());
-    format!("({x})::float8")
+/// A finite number as an SQL literal; anything else (a NaN or infinite weight, bound or statistic) is refused
+/// rather than written into the SQL.
+fn lit(x: f64) -> Result<String, RecipeError> {
+    if !x.is_finite() {
+        return Err(RecipeError::Invalid(format!(
+            "Recipe engine: {x} is not a finite number"
+        )));
+    }
+    Ok(format!("({x})::float8"))
+}
+
+/// One of the engine's own constants as an SQL literal (finite by construction).
+fn const_lit(x: f64) -> String {
+    lit(x).expect("the engine's constants are finite")
 }
 
 // A scale the key extractor did not name is no reading, not major.
@@ -159,15 +169,15 @@ pub fn scored_songs() -> String {
 /// Upstream `PACE_SQL`: 1 inside the band (double or half counts) on a steady beat, 0 outside, else neutral.
 fn pace_sql() -> String {
     let (lo, hi) = PACE_BAND;
-    let steady = lit(STEADY_BEAT_KIMA);
+    let steady = const_lit(STEADY_BEAT_KIMA);
     format!(
         "CASE WHEN ta.tempo_bpm IS NULL OR ta.tempo_confidence IS NULL OR ta.tempo_confidence < {steady} THEN {neutral}
          WHEN ta.tempo_bpm BETWEEN {lo} AND {hi} OR ta.tempo_bpm * 2 BETWEEN {lo} AND {hi}
               OR ta.tempo_bpm / 2 BETWEEN {lo} AND {hi}
          THEN 1::float8 ELSE 0::float8 END",
-        neutral = lit(NEUTRAL_PACE),
-        lo = lit(lo),
-        hi = lit(hi),
+        neutral = const_lit(NEUTRAL_PACE),
+        lo = const_lit(lo),
+        hi = const_lit(hi),
     )
 }
 
@@ -260,7 +270,7 @@ pub(crate) fn defined_ctes(
         let mut terms = Vec::new();
         for part in &definition.parts {
             let column = format!("l.{}", part_column(part));
-            let weight = lit(part.weight);
+            let weight = lit(part.weight)?;
             if part.kind == PartKind::Pace {
                 terms.push(format!(
                     "{weight} * COALESCE(({column} - ps.mean) / NULLIF(ps.sd, 0), 0)"
@@ -291,15 +301,15 @@ pub(crate) fn defined_ctes(
             }
             terms.push(format!(
                 "{weight} * ({column} - {}) / {}",
-                lit(stats.mean),
-                lit(stats.sd)
+                lit(stats.mean)?,
+                lit(stats.sd)?
             ));
         }
         let total: f64 = definition.parts.iter().map(|p| p.weight.abs()).sum();
         scores.push(format!(
             "({}) / {} AS {}",
             terms.join(" + "),
-            lit(total),
+            lit(total)?,
             score_column(&definition.mood)
         ));
     }
@@ -437,21 +447,21 @@ fn ranking_sql(
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let weight = lit(c.weight);
-            match (&c.signal, &scales[i]) {
+            let weight = lit(c.weight)?;
+            Ok(match (&c.signal, &scales[i]) {
                 (Signal::Minor, _) => format!("{weight} * (l.c{i} - k.mean) / NULLIF(k.sd, 0)"),
                 (Signal::Mood(m), _) if is_defined(&c.signal) => {
                     format!("{weight} * {}", defined_z_sql(m, "l"))
                 }
                 (_, Some(stats)) => format!(
                     "{weight} * (l.c{i} - {}) / {}",
-                    lit(stats.mean),
-                    lit(stats.sd)
+                    lit(stats.mean)?,
+                    lit(stats.sd)?
                 ),
                 (_, None) => unreachable!("every plain component has a scale"),
-            }
+            })
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>, RecipeError>>()?
         .join(" + ");
     let total_weight: f64 = components.iter().map(|c| c.weight.abs()).sum();
 
@@ -492,21 +502,25 @@ fn ranking_sql(
     };
     let mut passes: Vec<String> = Vec::new();
     if let Some((lo, hi)) = filters.bpm {
-        let (lo, hi) = (lit(lo), lit(hi));
+        let (lo, hi) = (lit(lo)?, lit(hi)?);
         passes.push(format!(
             "p.bpm_confidence >= {} AND (p.bpm BETWEEN {lo} AND {hi} OR p.bpm * 2 BETWEEN {lo} AND {hi} \
              OR p.bpm / 2 BETWEEN {lo} AND {hi})",
-            lit(STEADY_BEAT_KIMA)
+            lit(STEADY_BEAT_KIMA)?
         ));
     }
     if let Some(max) = filters.instrumental_max {
-        passes.push(format!("p.instrumentalness <= {}", lit(max)));
+        passes.push(format!("p.instrumentalness <= {}", lit(max)?));
     }
     if let Some(min) = filters.instrumental_min {
-        passes.push(format!("p.instrumentalness >= {}", lit(min)));
+        passes.push(format!("p.instrumentalness >= {}", lit(min)?));
     }
     if let Some((lo, hi)) = filters.arousal_pct {
-        passes.push(format!("p.arousal_pct BETWEEN {} AND {}", lit(lo), lit(hi)));
+        passes.push(format!(
+            "p.arousal_pct BETWEEN {} AND {}",
+            lit(lo)?,
+            lit(hi)?
+        ));
     }
     if filters.minor {
         passes.push("p.minor = 1".into());
@@ -528,7 +542,7 @@ fn ranking_sql(
         "CROSS JOIN def_stats ds"
     };
     let fam = match (boost_active, recipe.familiarity) {
-        (true, Some(share)) => format!("+ {} * e.fam", lit(share)),
+        (true, Some(share)) => format!("+ {} * e.fam", lit(share)?),
         _ => String::new(),
     };
     Ok(format!(
@@ -560,7 +574,7 @@ fn ranking_sql(
         )",
         artist = artist_sql(),
         scored = scored_songs(),
-        total = lit(total_weight),
+        total = lit(total_weight)?,
     ))
 }
 
@@ -575,7 +589,7 @@ fn members_sql() -> String {
             WHERE r.recipe_z >= {line} AND r.in_filters AND (SELECT eligible FROM spread) >= {min}
             ORDER BY r.title_key, r.artist_id, r.recipe_z DESC, r.id
         )",
-        line = lit(RECIPE_LINE),
+        line = const_lit(RECIPE_LINE),
         min = MIN_MIX_TRACKS,
     )
 }
@@ -869,4 +883,20 @@ pub async fn page_member_count(
         Some(n) if n >= MIN_MIX_TRACKS => n,
         _ => 0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_number_that_is_not_finite_is_refused_not_written() {
+        assert_eq!(lit(1.5).unwrap(), "(1.5)::float8");
+        for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                matches!(lit(x), Err(RecipeError::Invalid(_))),
+                "{x} was written into the SQL"
+            );
+        }
+    }
 }

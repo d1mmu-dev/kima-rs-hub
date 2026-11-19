@@ -12,6 +12,7 @@ use kima_mixes::store::{
     STATIONS_KEPT, SaveMode, StationSession, spawn_mood_drop,
 };
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 fn profile(n: u128) -> Uuid {
@@ -29,9 +30,17 @@ fn session(seed: &str, start: u64, ids: &[&str]) -> StationSession {
         pass: 0,
         length: ids.len() as u64,
         last_artist: "a".into(),
-        ids: Arc::new(ids.iter().map(|s| s.to_string()).collect()),
+        ids: Arc::new(ids.iter().map(|s| tid(s)).collect()),
     }
 }
+
+/// A track id named by a short string.
+fn tid(name: &str) -> Uuid {
+    Uuid::from_u128(name.bytes().fold(0u128, |a, b| (a << 8) | u128::from(b)))
+}
+
+const ME: Uuid = Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0011);
+const YOU: Uuid = Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0012);
 
 fn boost(ids: &[u128]) -> FamiliarBoost {
     FamiliarBoost {
@@ -114,7 +123,7 @@ fn station_sessions_3_kept_12h() {
     assert_eq!(STATIONS_KEPT, 3);
     let store = ListenerStore::new();
     let t0 = Instant::now();
-    let me = "listener-1";
+    let me = ME;
     assert!(store.save_session(
         "mood:calm",
         me,
@@ -125,14 +134,14 @@ fn station_sessions_3_kept_12h() {
     let meta = store.touch_session("mood:calm", me, t0).unwrap();
     assert_eq!((meta.seed.as_str(), meta.start, meta.length), ("s1", 0, 3));
     assert_eq!(
-        store.session_ids("mood:calm", me, "s1", 0, 1, 3),
-        Some(vec!["b".to_string(), "c".to_string()])
+        store.session_ids("mood:calm", me, "s1", 0, 1, 3, t0),
+        Some(vec![tid("b"), tid("c")])
     );
     // Another seed or start: not this session's pass.
-    assert_eq!(store.session_ids("mood:calm", me, "s2", 0, 0, 1), None);
-    assert_eq!(store.session_ids("mood:calm", me, "s1", 3, 0, 1), None);
+    assert_eq!(store.session_ids("mood:calm", me, "s2", 0, 0, 1, t0), None);
+    assert_eq!(store.session_ids("mood:calm", me, "s1", 3, 0, 1, t0), None);
     // Another listener holds nothing.
-    assert!(store.touch_session("mood:calm", "listener-2", t0).is_none());
+    assert!(store.touch_session("mood:calm", YOU, t0).is_none());
 
     // "absent" writes only when the listener holds no session for the station; "after" only over the pass it follows.
     assert!(!store.save_session(
@@ -206,13 +215,7 @@ fn station_sessions_3_kept_12h() {
     assert!(store.touch_session("s:c", me, now).is_some());
     assert!(store.touch_session("s:d", me, now).is_some());
     // Another listener's stations are their own.
-    store.save_session(
-        "s:a",
-        "listener-2",
-        session("y", 0, &["1"]),
-        SaveMode::Replace,
-        now,
-    );
+    store.save_session("s:a", YOU, session("y", 0, &["1"]), SaveMode::Replace, now);
     assert!(store.touch_session("s:c", me, now).is_some());
 }
 
@@ -243,13 +246,13 @@ fn drop_all_and_drop_mood_dependent() {
         store.put_familiar(a, "sig", Some(boost(&[7])), t0);
         store.save_session(
             "mood:calm",
-            "me",
+            ME,
             session("s", 0, &["x"]),
             SaveMode::Replace,
             t0,
         );
         store.put_cover_if_absent(
-            "me",
+            ME,
             "2026-11-19",
             "mood:calm",
             Some("cover".into()),
@@ -270,9 +273,9 @@ fn drop_all_and_drop_mood_dependent() {
     assert_eq!(store.energy_band(t0), None);
     assert_eq!(store.familiar(a, "sig", t0), None);
     // Station sessions and radio covers are not `mixes:` entries: neither drop touches them.
-    assert!(store.touch_session("mood:calm", "me", t0).is_some());
+    assert!(store.touch_session("mood:calm", ME, t0).is_some());
     assert_eq!(
-        store.cover("me", "2026-11-19", "mood:calm", t0),
+        store.cover(ME, "2026-11-19", "mood:calm", t0),
         Some(Some("cover".into()))
     );
 }
@@ -287,7 +290,6 @@ fn familiar_cache_keeps_a_boost_3h_and_no_boost_60s_per_seed_signature() {
     // Other seeds: a miss. Another profile: a miss.
     assert_eq!(store.familiar(a, "other", t0), None);
     assert_eq!(store.familiar(profile(2), "sig", t0), None);
-    assert_eq!(store.familiar(a, "sig", t0 + 3 * HOUR), None);
     // "No boost" is never written over a boost kept for the same seeds: the kept boost is the answer.
     let t1 = t0 + Duration::from_secs(10);
     assert_eq!(store.put_familiar(a, "sig", None, t1), Some(boost(&[1, 2])));
@@ -299,6 +301,8 @@ fn familiar_cache_keeps_a_boost_3h_and_no_boost_60s_per_seed_signature() {
         Some(None)
     );
     assert_eq!(store.familiar(a, "new", t1 + Duration::from_secs(60)), None);
+    // The boost is kept three hours (read last: a read sweeps what has expired by its time).
+    assert_eq!(store.familiar(a, "sig", t0 + 3 * HOUR), None);
 }
 
 #[tokio::test]
@@ -377,30 +381,16 @@ fn cover_pick_kept_until_local_day_end_no_cover_600s() {
     let left = 2 * HOUR;
     // The first pick of the day is kept to the day's end; a second pick at the same time gets the first one.
     assert_eq!(
-        store.put_cover_if_absent(
-            "me",
-            "2026-11-19",
-            "decade:1990",
-            Some("c1".into()),
-            left,
-            t0
-        ),
+        store.put_cover_if_absent(ME, "2026-11-19", "decade:1990", Some("c1".into()), left, t0),
         Some("c1".into())
     );
     assert_eq!(
-        store.put_cover_if_absent(
-            "me",
-            "2026-11-19",
-            "decade:1990",
-            Some("c2".into()),
-            left,
-            t0
-        ),
+        store.put_cover_if_absent(ME, "2026-11-19", "decade:1990", Some("c2".into()), left, t0),
         Some("c1".into())
     );
     assert_eq!(
         store.cover(
-            "me",
+            ME,
             "2026-11-19",
             "decade:1990",
             t0 + left - Duration::from_secs(1)
@@ -408,32 +398,27 @@ fn cover_pick_kept_until_local_day_end_no_cover_600s() {
         Some(Some("c1".into()))
     );
     assert_eq!(
-        store.cover("me", "2026-11-19", "decade:1990", t0 + left),
+        store.cover(ME, "2026-11-19", "decade:1990", t0 + left),
         None
     );
     // Per listener and per day.
-    assert_eq!(store.cover("you", "2026-11-19", "decade:1990", t0), None);
-    assert_eq!(store.cover("me", "2026-11-20", "decade:1990", t0), None);
+    assert_eq!(store.cover(YOU, "2026-11-19", "decade:1990", t0), None);
+    assert_eq!(store.cover(ME, "2026-11-20", "decade:1990", t0), None);
     // "No cover" is kept ten minutes at most, and never past the day.
     assert_eq!(
-        store.put_cover_if_absent("me", "2026-11-19", "mood:calm", None, left, t0),
+        store.put_cover_if_absent(ME, "2026-11-19", "mood:calm", None, left, t0),
         None
     );
     assert_eq!(
-        store.cover(
-            "me",
-            "2026-11-19",
-            "mood:calm",
-            t0 + Duration::from_secs(599)
-        ),
+        store.cover(ME, "2026-11-19", "mood:calm", t0 + Duration::from_secs(599)),
         Some(None)
     );
     assert_eq!(
-        store.cover("me", "2026-11-19", "mood:calm", t0 + NO_COVER),
+        store.cover(ME, "2026-11-19", "mood:calm", t0 + NO_COVER),
         None
     );
     store.put_cover_if_absent(
-        "me",
+        ME,
         "2026-11-19",
         "genre:rock",
         None,
@@ -442,7 +427,7 @@ fn cover_pick_kept_until_local_day_end_no_cover_600s() {
     );
     assert_eq!(
         store.cover(
-            "me",
+            ME,
             "2026-11-19",
             "genre:rock",
             t0 + Duration::from_secs(120)
@@ -460,7 +445,7 @@ async fn moods_changed_drops_mood_dependent_mix_caches_only() {
     store.put_energy_band(Some((0.1, 0.2)), now);
     store.put_familiar(a, "sig", Some(boost(&[1])), now);
     let (tx, rx) = tokio::sync::broadcast::channel(16);
-    let task = spawn_mood_drop(store.clone(), rx);
+    let task = spawn_mood_drop(store.clone(), rx, CancellationToken::new());
     tx.send(()).unwrap();
     let mut waited = 0;
     while store.mix_list(a, "UTC", Instant::now()).is_some() {
@@ -479,4 +464,47 @@ async fn moods_changed_drops_mood_dependent_mix_caches_only() {
         .await
         .expect("ends")
         .unwrap();
+}
+
+#[tokio::test]
+async fn the_mood_drop_task_stops_with_the_shutdown_token() {
+    let store = Arc::new(ListenerStore::new());
+    let (tx, rx) = tokio::sync::broadcast::channel(16);
+    let stop = CancellationToken::new();
+    let task = spawn_mood_drop(store.clone(), rx, stop.clone());
+    // The sender lives on (the moods step holds it for the process): only the token ends the task.
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("stopped by the token")
+        .unwrap();
+    drop(tx);
+}
+
+#[test]
+fn expired_entries_are_swept_on_read_too() {
+    let store = ListenerStore::new();
+    let t0 = Instant::now();
+    let a = profile(1);
+    store.put_mix_list(a, "UTC", list("l"), t0);
+    store.save_session(
+        "mood:calm",
+        ME,
+        session("s", 0, &["x"]),
+        SaveMode::Replace,
+        t0,
+    );
+    store.put_familiar(a, "sig", None, t0);
+    store.take_familiar_lock(a, t0, Duration::from_secs(60));
+    store.put_energy_band(None, t0);
+    store.put_cover_if_absent(ME, "2026-11-19", "mood:calm", None, HOUR, t0);
+    assert_eq!(store.held_entries(), 6);
+    // Nothing is written again; reads past every entry's life leave the store empty.
+    let late = t0 + 13 * HOUR;
+    assert_eq!(store.mix_list(a, "UTC", late), None);
+    assert!(store.touch_session("mood:calm", ME, late).is_none());
+    assert_eq!(store.familiar(a, "sig", late), None);
+    assert_eq!(store.energy_band(late), None);
+    assert_eq!(store.cover(ME, "2026-11-19", "mood:calm", late), None);
+    assert_eq!(store.held_entries(), 0);
 }

@@ -23,7 +23,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
 | **M-PROF** | **Profile w koncie (Netflix)** | ✅ na `main`; ręczne logowanie właściciela odłożone do wdrożenia |
 | M5 | Vibe (podobne utwory, nastrój) + modele muzyczne CLAP | ✅ scalone do `main` i wdrożone (silnik vibe, natywne modele muzyczne CLAP, automatyczne przejście wektorów D-194). Otwarte bramki odbioru na prawdziwym modelu: parytet na 20 prawdziwych utworach, recall@20 (Task 14) — nieuruchomione. Głowy nastroju nadal zablokowane (licencje) |
-| M5b | Mixy, radio, „co nowego”, rekomendacje | 🟡 w toku na `feature/m5b-mixes`: plan `docs/superpowers/plans/2026-11-19-m5b-mixes-radio.md`, decyzje właściciela Q1–Q11 z 2026-11-19 zapisane (D-260..D-271); faza A (Task 1–6) w realizacji |
+| M5b | Mixy, radio, „co nowego”, rekomendacje | 🟡 w toku na `feature/m5b-mixes`: plan `docs/superpowers/plans/2026-11-19-m5b-mixes-radio.md`, decyzje właściciela Q1–Q11 z 2026-11-19 zapisane (D-260..D-271); faza A (Task 0–6) zrobiona i zrecenzowana (0 Critical; poprawka I1 kolejności blokad w zapisie tagów nastroju + drobne M1–M9), faza B (Task 7–10, mixy) w realizacji; lokalnie, nic nie wypchnięte |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
 | M6b | Audiobooki (Audiobookshelf) | ⏳ ~1 tydz., po M7 |
 | M8 | Utwardzenie: 2FA, klucze API, share, limity | ⏳ 1–2 tyg. |
@@ -130,6 +130,7 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 
 ## Historia etapów (najnowsze na górze)
 
+- 2026-11-19: M5b — faza A (Task 0–6) zakończona lokalnie (silnik przepisów, tagi nastroju, magazyn stanu słuchacza), recenzja: 0 Critical, 1 Important (I1: zapis tagów blokuje utwory w kolejności id) + drobne M1–M9, poprawione jednym commitem.
 - 2026-11-19: M5b — plan i decyzje właściciela Q1–Q11 zapisane (D-260..D-271 zarezerwowane); start fazy A na `feature/m5b-mixes`.
 - 2026-11-19: `0d28f90` — workery analizy (domyślnie 2, `KIMA_ANALYSIS_WORKERS`, D-253) i upstreamowy czas ponowień artystów (D-254); wdrożone. Pomiar zimnego startu (158 utworów): CLAP 3,6 min na GPU, analiza 5,6 min przy 1 workerze, mapa 16,5 min z 15-minutowym ponowieniem artysty — teraz naprawione.
 - 2026-11-18: `95f8f7d` — opcjonalna CUDA dla audio CLAP i konfigurowalna równoległość (D-252).

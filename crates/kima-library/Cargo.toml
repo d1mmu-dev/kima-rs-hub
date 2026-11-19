@@ -32,5 +32,6 @@ walkdir.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+kima-mixes.workspace = true
 kima-test-support.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

@@ -298,6 +298,148 @@ async fn an_analysis_rerun_clears_the_tags(pool: PgPool) {
     assert_eq!(tags_of(&pool, &lib, &first(10)).await, empty);
 }
 
+/// The tag writer locks the tracks it rewrites in id order before it updates any (review I1), as every multi-track
+/// writer does (`library::mark_missing_in`): an unordered UPDATE could hold the larger id while a playlist add
+/// (`add_locked`, `ORDER BY id FOR SHARE`) holds the smaller one and waits for it, a deadlock (40P01) that the writer
+/// would swallow as a write conflict. The heap is laid out larger id first and the writer is parked on a BEFORE UPDATE
+/// trigger at the first track it updates; the add then takes its locks and must wait, and once the gate opens both
+/// complete.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn the_tag_writer_and_a_playlist_add_do_not_deadlock(pool: PgPool) {
+    use std::time::Duration;
+    use tokio::time::{Instant, sleep, timeout};
+
+    let step = Step::new();
+    let lib = seed(&pool, &tagged_library(&[])).await;
+    step.pass(&pool).await;
+    let (mut low, mut high) = (lib.tracks["t03"], lib.tracks["t04"]);
+    if low > high {
+        std::mem::swap(&mut low, &mut high);
+    }
+    // Both lose a wrong tag in the next pass; the heap holds the larger id first (the update scans it first).
+    set_tags(&pool, high, &["happy"]).await;
+    set_tags(&pool, low, &["happy"]).await;
+    sqlx::raw_sql(
+        "CREATE INDEX tracks_id_desc_tmp ON tracks (id DESC);
+         CLUSTER tracks USING tracks_id_desc_tmp;
+         DROP INDEX tracks_id_desc_tmp;
+         ANALYZE tracks;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let account = Uuid::now_v7();
+    let profile = Uuid::now_v7();
+    let playlist = Uuid::now_v7();
+    sqlx::raw_sql(&format!(
+        "INSERT INTO users (id, username, password_hash) VALUES ('{account}', 'tagger-race', 'x');
+         INSERT INTO profiles (id, user_id, name, kind) VALUES ('{profile}', '{account}', 'p', 'kids');
+         INSERT INTO playlists (id, profile_id, name) VALUES ('{playlist}', '{profile}', 'race');"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Parks the first track update of a transaction while the gate (4246) is held.
+    sqlx::raw_sql(
+        "CREATE FUNCTION park_tags() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF current_setting('kima_test.parked', true) IS DISTINCT FROM 'yes' THEN
+                 PERFORM set_config('kima_test.parked', 'yes', true);
+                 PERFORM pg_advisory_xact_lock_shared(4246);
+             END IF;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER park_tags BEFORE UPDATE OF mood_tags ON tracks
+             FOR EACH ROW EXECUTE FUNCTION park_tags();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut gate = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(4246)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+
+    // A backend of this test waiting for a lock: the gate (an advisory lock) or a row whose query matches `what`
+    // (the writer's own statement is longer than pg_stat_activity keeps, so it is found by its advisory wait).
+    let waiting = |what: &'static str, advisory: bool| {
+        let pool = pool.clone();
+        async move {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let found: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+                     AND wait_event_type = 'Lock' AND (wait_event = 'advisory') = $2 AND query LIKE $1
+                     AND pid <> pg_backend_pid())",
+                )
+                .bind(what)
+                .bind(advisory)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if found {
+                    return;
+                }
+                if Instant::now() >= deadline {
+                    let rows: Option<String> = sqlx::query_scalar(
+                        "SELECT string_agg(concat_ws(' | ', state, wait_event_type, wait_event, left(query, 200)), E'\\n')
+                         FROM pg_stat_activity WHERE datname = current_database()",
+                    )
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    panic!("never waited: {what}: {rows:?}");
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        }
+    };
+
+    let tag_pool = pool.clone();
+    let mut tagger =
+        tokio::spawn(async move { MoodTagger::new().write(&tag_pool, &heads()).await });
+    let parked = tokio::select! {
+        () = waiting("%", true) => None,
+        done = &mut tagger => Some(done),
+    };
+    assert!(
+        parked.is_none(),
+        "the tag writer finished unparked: {parked:?}"
+    );
+    let add_pool = pool.clone();
+    let add = tokio::spawn(async move {
+        kima_db::playlists::add_tracks(&add_pool, playlist, &[low, high]).await
+    });
+    waiting("%FOR SHARE%", false).await;
+    sqlx::query("SELECT pg_advisory_unlock(4246)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+
+    let written = timeout(Duration::from_secs(20), tagger)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("the tag writer failed");
+    let added = timeout(Duration::from_secs(20), add)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("the playlist add failed (deadlock)")
+        .unwrap();
+    assert_eq!(
+        written, 2,
+        "the tag writer lost a deadlock and wrote nothing"
+    );
+    assert_eq!(added.added, 2);
+    let none: Vec<Vec<String>> = vec![vec![], vec![]];
+    assert_eq!(
+        tags_of(&pool, &lib, &["t03".into(), "t04".into()]).await,
+        none
+    );
+}
+
 // ---- the tags of a defined mood --------------------------------------------------------------------------------
 
 #[derive(Clone)]

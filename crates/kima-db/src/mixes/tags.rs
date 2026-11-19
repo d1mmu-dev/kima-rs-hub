@@ -92,17 +92,16 @@ impl MoodTagger {
                 }
             }
         }
-        let defined = if scorable.is_empty() {
-            String::new()
-        } else {
-            let ctes = defined_ctes("tags", &state, &scorable, "", "").expect("checked above");
-            format!(
-                "WITH library AS (SELECT t.id, {} {}), {ctes}, {}",
+        let mut ctes: Vec<String> = Vec::new();
+        if !scorable.is_empty() {
+            ctes.push(format!(
+                "library AS (SELECT t.id, {} {})",
                 definition_inputs(&scorable).join(", "),
-                scored_songs(),
-                defined_stats_cte(&scorable)
-            )
-        };
+                scored_songs()
+            ));
+            ctes.push(defined_ctes("tags", &state, &scorable, "", "").expect("checked above"));
+            ctes.push(defined_stats_cte(&scorable));
+        }
         let line = format!("({TAG_LINE_Z})::float8");
         let tags = MOODS
             .iter()
@@ -125,11 +124,8 @@ impl MoodTagger {
             "LEFT JOIN defined d ON d.id = tr.id CROSS JOIN def_stats ds"
         };
         let eligible: &str = &ELIGIBLE;
-        let sql = format!(
-            "{defined}
-            UPDATE tracks t
-            SET mood_tags = n.tags
-            FROM (
+        ctes.push(format!(
+            "n AS (
                 SELECT tr.id,
                        CASE WHEN m.track_id IS NOT NULL
                             THEN array_remove(ARRAY[{tags}]::text[], NULL) ELSE '{{}}'::text[] END AS tags
@@ -140,8 +136,25 @@ impl MoodTagger {
                     JOIN track_moods m ON m.track_id = e.track_id AND m.embedded_at = e.created_at AND m.weights = $1
                 ) m ON m.track_id = tr.id
                 {defined_join}
-            ) n
-            WHERE t.id = n.id AND t.mood_tags IS DISTINCT FROM n.tags"
+            )"
+        ));
+        // The tracks to rewrite are locked in id order before any is updated, as every multi-track writer locks
+        // them (`library::mark_missing_in`): an unordered UPDATE could hold one track while a playlist add holds
+        // another and waits for it (`ORDER BY id FOR SHARE`), a deadlock.
+        ctes.push(
+            "locked AS MATERIALIZED (
+                SELECT t.id, n.tags FROM tracks t JOIN n ON n.id = t.id
+                WHERE t.mood_tags IS DISTINCT FROM n.tags
+                ORDER BY t.id FOR NO KEY UPDATE OF t
+            )"
+            .to_string(),
+        );
+        let sql = format!(
+            "WITH {}
+            UPDATE tracks t SET mood_tags = locked.tags
+            FROM locked
+            WHERE t.id = locked.id AND t.mood_tags IS DISTINCT FROM locked.tags",
+            ctes.join(", ")
         );
         let written = sqlx::query(&sql)
             .bind(&heads.version)

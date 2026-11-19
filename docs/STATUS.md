@@ -1,6 +1,6 @@
 # kima-rs-hub — stan prac
 
-_Ostatnia aktualizacja: 2026-11-18 · `main` = `30d8d16`_
+_Ostatnia aktualizacja: 2026-11-19 · `main` = `0d28f90`_
 
 > Podsumowanie stanu projektu (aktualizowane po każdym etapie, publikowane razem z kolejnym merge'em do `main`). Źródłem prawdy jest historia gita; szczegóły różnic od upstreamu są w `docs/DIVERGENCES.md`, plan w `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md`.
 
@@ -22,17 +22,32 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M9 | kima-web część 1 (logowanie, biblioteka, player, playlisty, ustawienia, SSR) | ✅ (wygląd 1:1 otwarty) |
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
 | **M-PROF** | **Profile w koncie (Netflix)** | ✅ na `main`; ręczne logowanie właściciela odłożone do wdrożenia |
-| M5 | Vibe (podobne utwory, nastrój) | 🟡 Task 0–20 lokalnie; pełna weryfikacja workspace zielona (3362/0/31); audyt Task 20 i ponowny przegląd: 0 Critical/Important, uwagi Minor poprawione; przeglądy poprawek Task 13/18: 0 Critical/Important, Minor poprawione w kodzie (`731ca56`, `19b5a34`, `c619be3`); przegląd tej rundy: 0 Critical/Important (liczba Subsonic poprawiona w `cea1124`); brak `ETag`/304 mapy odłożony przez właściciela do odbioru strony vibe w M10; odbiór real-model otwarty; **modele muzyczne CLAP podłączone natywnie i automatyczne przejście wektorów (D-194; przegląd: 0 Critical/Important, luki testowe zamknięte lokalnie)**; **dołączony `frontend/` usunięty (D-180, `a3d3ac7`), zewnętrzna referencja z weryfikowaną proweniencją (`a0d3377`, czeka na ponowny przegląd)** |
-| M5b | Mixy, radio, „co nowego” | ⏳ ~1 tydz. |
+| M5 | Vibe (podobne utwory, nastrój) + modele muzyczne CLAP | ✅ scalone do `main` i wdrożone (silnik vibe, natywne modele muzyczne CLAP, automatyczne przejście wektorów D-194). Otwarte bramki odbioru na prawdziwym modelu: parytet na 20 prawdziwych utworach, recall@20 (Task 14) — nieuruchomione. Głowy nastroju nadal zablokowane (licencje) |
+| M5b | Mixy, radio, „co nowego”, rekomendacje | ⏳ następny; plan w przygotowaniu |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
 | M6b | Audiobooki (Audiobookshelf) | ⏳ ~1 tydz., po M7 |
 | M8 | Utwardzenie: 2FA, klucze API, share, limity | ⏳ 1–2 tyg. |
-| M10 | kima-web część 2: pozostałe strony + wygląd 1:1 (odbiór strony vibe obejmuje `ETag`/304 mapy, D-185) | ⏳ 3–4 tyg. |
+| M10 | kima-web część 2: pozostałe strony + wygląd 1:1 (odbiór strony vibe obejmuje `ETag`/304 mapy, D-185) | 🟡 pierwszy wycinek: strona vibe scalona (`20e2add`, D-250); reszta stron ⏳ 3–4 tyg. |
 | M11 / M12 | Chromecast/AirPlay; zdalne ML na GPU | ⏳ po ~1 tydz. |
 
 **Szacunek do pełnej aplikacji wg planu: 2,5–3,5 miesiąca** (orientacyjnie, zależy od limitów modeli i decyzji).
 
-Kolejność: **M-PROF** → M5 → M5b → M7 → M6b → M8 → M10 → M11/M12.
+Kolejność: **M5b (następny)** → M7 → M6b → M8 → M10 (reszta stron) → M11/M12.
+
+## Po merge M5 — wdrożenie i pomiary (2026-11-18/19)
+
+Na `main` po M5 (`69ed5ee`) weszły: strona vibe w kima-web jako pierwszy wycinek M10 (`20e2add`, D-250), dekodowanie Opus i limit ponowień analizy (`75af43a`, D-251), opcjonalna CUDA dla audio CLAP i konfigurowalna równoległość (`95f8f7d`, D-252) oraz liczba workerów analizy i upstreamowy czas ponowień artystów (`0d28f90`, D-253/D-254). Wszystko wdrożone na aplikacji właściciela.
+
+**Pomiar zimnego startu (158 utworów, build release, CLAP na GPU):** CLAP 3,6 min; analiza audio (CPU) 5,6 min przy 1 workerze; mapa vibe 16,5 min, z czego ok. 15 min to oczekiwanie na ponowienie artysty po timeoucie zewnętrznego źródła — naprawione w `0d28f90` (D-254: niedostępne źródło zapisuje `failed` i artysta wraca w następnym cyklu jak w upstreamie, zamiast czekać 15 min). Domyślnie analiza ma teraz 2 workery (D-253).
+
+## Odłożone drobne błędy (do zrobienia później)
+
+- **D-254, pozostałość M2:** artysta, którego niezaufany MBID zostaje ZASTĄPIONY (nie wyczyszczony), a potem źródło zwróci limit zapytań, zachowuje `cover_deferrals` i liczy się jako ukończony — może przestać wstrzymywać mapę vibe za wcześnie (rzadkie, samo się naprawia w następnym przebiegu). Poprawka: zerować `cover_deferrals` przy każdej zmianie niezaufanego MBID + test (`save_artist_outcome_in` w `identity.rs`).
+- **D-253:** zakres pamięci dla Opus w tekście wiersza: 36–42 MiB → 35–42 MiB.
+- **Reset `enriching` przy starcie a wieloprocesowe `requeue_running` (kima-jobs):** zachowanie opisane w D-254; do ujednolicenia.
+- **Uwagi Minor z przeglądu D-252:** ścieżka 120-sekundowego timeoutu zajętej migawki (`Busy`) nieprzetestowana; oczekiwanie nie jest sprawiedliwe (brak kolejności FIFO).
+- **kima-web:** `favicon.ico` zwraca 404.
+- **Opus:** pliki z więcej niż 2 kanałami są klasyfikowane jako INCONCLUSIVE (4 próby) zamiast od razu jako błąd końcowy; Opus w kontenerach MP4/MKV nie jest dokładny co do próbki (dokumentacja ogranicza obsługę do Ogg).
 
 ## M6a — podsumowanie
 
@@ -104,7 +119,8 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 
 ## Otwarte pytania
 
-- M5: odbiór wymaga prawdziwego modelu CLAP `laion-clap-music-onnx-v1` (licencje/rozmiary do pokazania przed pobraniem).
+- M5: otwarte bramki odbioru na prawdziwym modelu muzycznym (parytet odczytów na 20 prawdziwych utworach, recall@20 Task 14) — wymagają zgody na użycie prawdziwej biblioteki.
+- M5b: pytania projektowe w planie M5b (sekcja „Otwarte pytania”).
 
 ## Zasady pracy
 
@@ -114,6 +130,11 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 
 ## Historia etapów (najnowsze na górze)
 
+- 2026-11-19: `0d28f90` — workery analizy (domyślnie 2, `KIMA_ANALYSIS_WORKERS`, D-253) i upstreamowy czas ponowień artystów (D-254); wdrożone. Pomiar zimnego startu (158 utworów): CLAP 3,6 min na GPU, analiza 5,6 min przy 1 workerze, mapa 16,5 min z 15-minutowym ponowieniem artysty — teraz naprawione.
+- 2026-11-18: `95f8f7d` — opcjonalna CUDA dla audio CLAP i konfigurowalna równoległość (D-252).
+- 2026-11-18: `75af43a` — dekodowanie Opus dla analizy i embeddingu oraz limit ponowień analizy (D-251).
+- 2026-11-18: `20e2add` — strona vibe w kima-web (pierwszy wycinek M10, D-250).
+- 2026-11-18: **M5 na `main`** (`69ed5ee`): silnik vibe, modele muzyczne CLAP, referencja frontendu tylko zewnętrzna; wdrożone.
 - 2026-11-18: M5 D-194 luki testowe z przeglądu (0 Critical/Important, 4 Minor): test zatrzasku przy trzymanym wierszu na prawdziwym modelu (z mutacją RED), SHA-256 `analyzer.py` w teście promptów odczytów, stempel źródeł w runnerze E2E; `embedding_e2e` 9/9, prompty 1/1; Minor 4 (logowanie) odłożony; tylko testy, bez push/merge.
 - 2026-11-18: M5 proweniencja zewnętrznej referencji frontendu (`a0d3377`): 2 Important i Minor z przeglądu `a3d3ac7` poprawione (weryfikacja kopii manifestem, kanoniczny upstream i HEAD = upstream, raport bez proweniencji nie startuje, lista kluczy konfiguracji, wersje CSS/ikon, goldens z pinu); testy narzędzi 26/26; czeka na ponowny przegląd; bez push/merge.
 - 2026-11-18: M5 usunięcie dołączonego `frontend/` (`a3d3ac7`, D-180); referencja = zewnętrzny checkout upstreamu.

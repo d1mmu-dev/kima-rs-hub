@@ -23,7 +23,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
 | **M-PROF** | **Profile w koncie (Netflix)** | ✅ na `main`; ręczne logowanie właściciela odłożone do wdrożenia |
 | M5 | Vibe (podobne utwory, nastrój) + modele muzyczne CLAP | ✅ scalone do `main` i wdrożone (silnik vibe, natywne modele muzyczne CLAP, automatyczne przejście wektorów D-194). Otwarte bramki odbioru na prawdziwym modelu: parytet na 20 prawdziwych utworach, recall@20 (Task 14) — nieuruchomione. Głowy nastroju nadal zablokowane (licencje) |
-| M5b | Mixy, radio, „co nowego”, rekomendacje | ⏳ następny; plan w przygotowaniu |
+| M5b | Mixy, radio, „co nowego”, rekomendacje | 🟡 w toku na `feature/m5b-mixes`: plan `docs/superpowers/plans/2026-11-19-m5b-mixes-radio.md`, decyzje właściciela Q1–Q11 z 2026-11-19 zapisane (D-260..D-271); faza A (Task 1–6) w realizacji |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
 | M6b | Audiobooki (Audiobookshelf) | ⏳ ~1 tydz., po M7 |
 | M8 | Utwardzenie: 2FA, klucze API, share, limity | ⏳ 1–2 tyg. |
@@ -116,11 +116,11 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 - D-180 (2026-11-18): dołączony `frontend/` usunięty; referencją jest zewnętrzny, świeżo pobrany checkout upstreamu (najnowszy), piny modeli i fixtures zostają na `c7527577`.
 - Push do `main` tylko po pytaniu (prośba właściciela o merge = zgoda); gałęzie feature można wypychać.
 - Commity: `dimmu <3417783+d1mmu-dev@users.noreply.github.com>`, bez `Co-authored-by` i trailerów AI.
+- **M5b (2026-11-19, Q1–Q11):** stan słuchacza w pamięci procesu (Q1 A, D-260); kafelki nastroju/Workout w radiu tylko gdy są statystyki nastroju (Q2 B, D-266); własny katalog „co nowego” kima-rs, pusty na start, flaga `changelog` wyłączona do pierwszego wpisu (Q3 B, D-267); sprawdzanie aktualizacji wobec wydań `d1mmu-dev/kima-rs-hub` przez kima-net z przełącznikiem upstreamu (Q4 B, D-270); bez wyboru GPU, `gpu.accelerate` → 400 `Unknown choice`, wrócić w M12 (Q5 A, D-268); wiersze utworów w mixach i kubełkach nastroju niosą **wszystkie** kolumny Prisma `Track` upstreamu, null gdzie brak danych (Q6 B, wbrew rekomendacji; mapa w Dodatku D planu, D-264); próg stałego rytmu przeskalowany liniowo 2/5,32 ≈ 0,376, kalibracja na bibliotece właściciela później (Q7 A, D-262); brak `energy`/`danceability` = brak jak ścieżki null upstreamu (Q8 A, D-263); „co nowego” per profil, wybory admina tylko profil główny (Q9 A, D-269); cienki wycinek kima-web w M5b: `/radio`, „Made for you”, strona mixu, reszta M10 (Q10 B); dzień mixu = data kalendarzowa serwera, przy wdrożeniu `TZ=Europe/Warsaw` (Q11 A).
 
 ## Otwarte pytania
 
 - M5: otwarte bramki odbioru na prawdziwym modelu muzycznym (parytet odczytów na 20 prawdziwych utworach, recall@20 Task 14) — wymagają zgody na użycie prawdziwej biblioteki.
-- M5b: pytania projektowe w planie M5b (sekcja „Otwarte pytania”).
 
 ## Zasady pracy
 
@@ -130,6 +130,7 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 
 ## Historia etapów (najnowsze na górze)
 
+- 2026-11-19: M5b — plan i decyzje właściciela Q1–Q11 zapisane (D-260..D-271 zarezerwowane); start fazy A na `feature/m5b-mixes`.
 - 2026-11-19: `0d28f90` — workery analizy (domyślnie 2, `KIMA_ANALYSIS_WORKERS`, D-253) i upstreamowy czas ponowień artystów (D-254); wdrożone. Pomiar zimnego startu (158 utworów): CLAP 3,6 min na GPU, analiza 5,6 min przy 1 workerze, mapa 16,5 min z 15-minutowym ponowieniem artysty — teraz naprawione.
 - 2026-11-18: `95f8f7d` — opcjonalna CUDA dla audio CLAP i konfigurowalna równoległość (D-252).
 - 2026-11-18: `75af43a` — dekodowanie Opus dla analizy i embeddingu oraz limit ponowień analizy (D-251).

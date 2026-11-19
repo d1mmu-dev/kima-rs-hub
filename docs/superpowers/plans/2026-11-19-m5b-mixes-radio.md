@@ -17,7 +17,7 @@
 ## Global Constraints
 
 - All earlier milestones' constraints hold: GPL-3.0-only, edition 2024, camelCase JSON on `/api` with `{"error": "<message>"}`, UUIDv7 ids (D-016; upstream cuid), the database is never mocked, **no test reaches the network** (`KIMA_NET_DENY_REAL=1`; the update check's GitHub host is a loopback replay), commits authored **and** committed as `dimmu <3417783+d1mmu-dev@users.noreply.github.com>`, Conventional Commits, **no** `Co-Authored-By`/AI trailers, explicit `git add <paths>` only. Never push `main`; push `feature/m5b-mixes` only with an explicit refspec and only on the owner's go-ahead.
-- **Faithful port.** Constants (`MIN_MIX_TRACKS` 8, `TRACK_LIMIT` 20, `MOOD_MIX_LIMIT` 15, `RECIPE_LINE` 1.25, `STEADY_BEAT` 2 (see Q7), `DAILY_MIX_COUNT` 5, `MIXES_CACHE_TTL` 3600 s, `MAX_CACHED_ZONES` 4, `SESSION_TTL_S` 12 h, `STATIONS_KEPT` 3, `REPLAY_PASSES` 1000, `REPLAY_SONGS` 200 000, `SEED_PATTERN`, `MIN_STATION_SONGS` 15, `MAX_GENRES` 20, `HOME_GENRES` 6, `HOME_DECADES` 4, `NIGHT_START_HOUR` 22, `NIGHT_END_HOUR` 4, `COLD_START_SONGS` 30, `FAMILIAR_*`, `NO_COVER_SECONDS` 600), error strings, status codes and response keys are upstream's. `recipes.json` and `moodDefinitions.json` are vendored **byte for byte** from the pin with a SHA-256 test. Every deliberate difference is a D-row in the **same commit** as the code; rows are amended, never deleted.
+- **Faithful port.** Constants (`MIN_MIX_TRACKS` 8, `TRACK_LIMIT` 20, `MOOD_MIX_LIMIT` 15, `RECIPE_LINE` 1.25, `STEADY_BEAT` 2 (on Essentia's 0–5.32 scale; kima uses `2/5.32` on its 0–1 `tempo_confidence`, Q7 = A), `DAILY_MIX_COUNT` 5, `MIXES_CACHE_TTL` 3600 s, `MAX_CACHED_ZONES` 4, `SESSION_TTL_S` 12 h, `STATIONS_KEPT` 3, `REPLAY_PASSES` 1000, `REPLAY_SONGS` 200 000, `SEED_PATTERN`, `MIN_STATION_SONGS` 15, `MAX_GENRES` 20, `HOME_GENRES` 6, `HOME_DECADES` 4, `NIGHT_START_HOUR` 22, `NIGHT_END_HOUR` 4, `COLD_START_SONGS` 30, `FAMILIAR_*`, `NO_COVER_SECONDS` 600), error strings, status codes and response keys are upstream's. `recipes.json` and `moodDefinitions.json` are vendored **byte for byte** from the pin with a SHA-256 test. Every deliberate difference is a D-row in the **same commit** as the code; rows are amended, never deleted.
 - **Divergence IDs:** M5b uses **D-260 – D-279**. Checked 2026-11-19: `docs/DIVERGENCES.md` on `0d28f90` ends at D-254 and `grep -c 'D-2[67][0-9]'` = 0; only two worktrees exist (`master`, `feature/m5b-mixes`, both at `0d28f90`). D-255–D-259 stay free as a buffer.
 - **Migration numbers:** main ends at `0062_artist_enrichment_retry_at.sql`; no `0063`–`0069` on any branch (checked 2026-11-19 over every worktree and every local branch's `crates/kima-db/migrations`). M-PROF had reserved 0060–0069 but used only 0060; 0061/0062 came from post-M5 fixes. M5b takes **0063–0069**; Task 1 uses `0063_mixes.sql`; a schema fix is a new file, never an edit of an applied one. After a migration change `touch crates/kima-db/src/lib.rs`.
 - **Profiles (M-PROF, binding):** upstream `userId` → kima `profile_id` everywhere a listener owns something: mix lists/caches, station sessions, familiarity scans, radio covers, `user_mood_mix`, `release_acknowledgements`, `release_choices` (Q9), saved mix playlists (`playlists.profile_id` + `mix_id`). Admin-only behaviour = the account's main profile (existing `AdminUser`). A test per personal table proves a sibling profile of the same account and another account see nothing (`profile_isolation`-style).
@@ -31,7 +31,21 @@
 2. Mood heads stay **blocked** behind a capability that reports unavailable until their training-data licences are checked (M5 Q3); moods are `unanalyzed`. M5b must degrade (matrix below), never provision heads.
 3. Personal data is per profile (M-PROF); profile names visible only within the account.
 4. `/system/features` gates sections (D-030/D-170); a flag is flipped only when its routes are implemented.
-5. kima-web pages for mixes/radio are **M10** per the roadmap (M10 row: "mixes/radio"); see Q10 for an optional slice.
+5. kima-web pages for mixes/radio are **M10** per the roadmap (M10 row: "mixes/radio"), **except** the thin slice the owner pulled into M5b (Q10 B below: `/radio` page, home "Made for you" row, mix page = Phase F); MoodMixer, what's-new window, changelog page and the rest stay M10.
+
+Answers to the plan's open questions (owner, **2026-11-19**; the full question text is kept under "Rozstrzygnięte" at the end):
+
+6. **Q1 = A.** Listener state (mix lists, station sessions, familiarity scans, energy band, radio covers) lives in an in-process TTL store in `AppState`, lost on restart; D-260.
+7. **Q2 = B.** The Workout and mood radio tiles are listed only while mood statistics are available (on top of upstream's `vibeEmbeddings` gate), so no tile plays an empty station while the heads are blocked; D-266.
+8. **Q3 = B.** Upstream's release mechanism is ported exactly, but kima-rs ships its **own** catalog, empty at the start (`pending` → `{releases:[]}`, `current` → 404 `No release`, `changelog` → `{releases:[],openCount:0}`, `open` → `{count:0,items:[]}`); the `changelog` feature flag stays off until the first kima-rs entry exists; D-267.
+9. **Q4 = B.** The update check asks the `d1mmu-dev/kima-rs-hub` GitHub releases through `kima-net` (rate limit, `KIMA_NET_DENY_REAL`), with upstream's on/off switch (`updateChecksEnabled`); D-270.
+10. **Q5 = A.** No GPU choice: no catalog item asks `gpu.accelerate`, so `POST /whats-new/{version}/choice` with that key answers 400 `Unknown choice`; revisit with M12; D-268.
+11. **Q6 = B (not the plan's recommendation).** Track rows in `GET /api/mixes/{id}`, `GET /api/mixes/mood/buckets/{mood}` and `POST /api/mixes/mood/buckets/{mood}/save` carry **every** scalar column upstream's Prisma `Track` returns, plus every scalar column of the included `album` and `album.artist{id,name,mbid}`, each mapped to a kima column or `null` where kima has no data. The column inventory and its mapping are Appendix D and D-264.
+12. **Q7 = A.** Steady beat = linear rescale of upstream's `bpmConfidence ≥ 2` (Essentia scale 0–5.32) to kima's 0–1 `tempo_confidence`: `≥ 2/5.32 ≈ 0.376`; D-262. Follow-up (not M5b): calibrate on the owner's library (share of tracks passing vs upstream's typical share) once real-library access is approved.
+13. **Q8 = A.** Missing `energy` and `danceability` are treated as absent, as upstream's null paths (artist-radio term skipped, night energy band 0.5); no CLAP substitute; D-263.
+14. **Q9 = A.** Release acknowledgements and choices are per profile; admin-only choices are made only by the account's main profile; D-269.
+15. **Q10 = B.** Phase F runs in M5b: kima-web API client + `/radio` page, home "Made for you" row and `/mix?id=` page; the rest (MoodMixer, what's-new window, changelog page, artist radio button, for-you row) stays M10.
+16. **Q11 = A.** The mix day is the server's calendar date, as upstream (`mixDay.ts:8-11`); deployment note: set `TZ=Europe/Warsaw` for the container/unit so mixes roll over at local midnight.
 
 ## Review Focus
 
@@ -125,25 +139,26 @@ Mirrors M5 spec §4.4. "Heads" = learned mood heads (`vibe_mood_heads` asset, **
 
 | Missing | Effect in M5b | How the API says so |
 |---|---|---|
-| **Heads (today)** | `mood_state` has no rows/statistics → `recipeMembers` null (`recipes.ts:499-500`) → all **44 recipes** unavailable: 25 recipe mixes, the recipe fallback of the 2 night mixes (Late Night, Midnight Drive still play the listener's own night plays), day mix, Party/Workout/Focus, mood-bucket mixes, 13 mood stations, Workout station, Wildcard (no `mood_tags`, needs `track_moods`), night mixes' recipe fallback, familiarity (recipe-only) | `GET /mixes`: those generators return null, the 5 are filled from the 11 non-recipe generators (Era, Genre, Top Tracks, Rediscover, Artist Similar, Random Discovery, Deep Cuts, Key Journey, Tempo Flow, Vocal Detox, Minor Key Mondays) by `index.ts:271-293`; presets `trackCount:0`, `pendingTracks` from the mood snapshot; bucket GET/save 400 "Not enough tracks…"; radio row still lists Workout + 14 mood tiles when `vibeEmbeddings` is true (upstream gate) and they play `{"tracks":[]}` → **Q2** |
+| **Heads (today)** | `mood_state` has no rows/statistics → `recipeMembers` null (`recipes.ts:499-500`) → all **44 recipes** unavailable: 25 recipe mixes, the recipe fallback of the 2 night mixes (Late Night, Midnight Drive still play the listener's own night plays), day mix, Party/Workout/Focus, mood-bucket mixes, 13 mood stations, Workout station, Wildcard (no `mood_tags`, needs `track_moods`), night mixes' recipe fallback, familiarity (recipe-only) | `GET /mixes`: those generators return null, the 5 are filled from the 11 non-recipe generators (Era, Genre, Top Tracks, Rediscover, Artist Similar, Random Discovery, Deep Cuts, Key Journey, Tempo Flow, Vocal Detox, Minor Key Mondays) by `index.ts:271-293`; presets `trackCount:0`, `pendingTracks` from the mood snapshot; bucket GET/save 400 "Not enough tracks…"; upstream's radio row would still list Workout + 14 mood tiles when `vibeEmbeddings` is true and they would play `{"tracks":[]}`; **Q2 = B**: kima lists them only while mood statistics are available (D-266), so they are hidden today |
 | Probe | No matching state → night cold-start top-up and familiarity have no vectors; `vibeEmbeddings` false → radio row hides Workout and mood tiles (upstream gate) | night mixes from own plays only; stations unchanged |
 | Readings | `arousal`, `instrumental`, `acoustic` components and `arousal_pct`/`instrumental_*` filters have no statistics → recipes using them unrankable (`UnrankableLibraryError` → no mix/empty station); Vocal Detox, Minor Key Mondays (arousal median) empty | as upstream |
-| Analysis (tempo/key) | `bpm` filter (Dance Floor), `minor` component (Happy, Melancholy, stations), Key Journey, Tempo Flow, Minor Key Mondays, night `pace` | rows without analysis are excluded/neutral as upstream; **Q7** for the confidence scale |
-| `energy` (no column in kima) | artist radio vibe score drops the energy term; night energy band = 0.5 for every song (`NightSong.energy` "0.5 when it has no energy reading") | D-row; **Q8** |
-| `danceability` (MusiCNN unprovisioned) | artist radio drops the term | D-row |
+| Analysis (tempo/key) | `bpm` filter (Dance Floor), `minor` component (Happy, Melancholy, stations), Key Journey, Tempo Flow, Minor Key Mondays, night `pace` | rows without analysis are excluded/neutral as upstream; **Q7 = A**: steady beat = `tempo_confidence ≥ 2/5.32 ≈ 0.376` (D-262) |
+| `energy` (no column in kima) | artist radio vibe score drops the energy term; night energy band = 0.5 for every song (`NightSong.energy` "0.5 when it has no energy reading") | D-263; **Q8 = A** (absent, upstream null path) |
+| `danceability` (MusiCNN unprovisioned) | artist radio drops the term | D-263 (Q8 = A) |
 
 Public M5 API used: `kima_db::vibe::{matching_context (rank.rs:203), rank_matches (:448), top_scores (:463)}` [V], `kima_ident::stages::moods::subscribe_changes` [V `coordinator_vibe.rs:324-341`], mood snapshot `pending` (used by `/vibe/mood-summary`), `vibe_embeddings` predicate (`kima_ident::stages::vibe_assets::vibe_embeddings`, used by `/system/features`) [V `routes/system.rs:17-22`].
 
 ## kima-web pages: M10 vs M5b
 
-Per the roadmap M10 row, all pages below are **M10**; M5b ships backend only unless Q10 picks the slice.
+Per the roadmap M10 row these pages are **M10**, except the thin slice the owner pulled into M5b (**Q10 = B**, 2026-11-19): the `/radio` page, the home "Made for you" row and the mix page (Phase F, Tasks 22–23).
 
 | Upstream page/component | Endpoints | Milestone |
 |---|---|---|
-| Home `app/page.tsx` "Made for you" (`MixesGrid`), radio row (`features/home/components/LibraryRadioStations.tsx`), for-you artists | 1, 21, 18 | M10 (no kima-web home yet) |
-| `app/mix/[id]/page.tsx` | 7, 6, 5 | M10 |
+| Home `app/page.tsx` "Made for you" (`MixesGrid`) | 1 | **M5b** Phase F (Task 23) |
+| Home radio row (`features/home/components/LibraryRadioStations.tsx`), for-you artists | 21, 18 | M10 |
+| `app/mix/[id]/page.tsx` | 7, 6, 5 | **M5b** Phase F (Task 23, `/mix?id=`) |
 | `components/MoodMixer.tsx` | 2, 3, 4 | M10 |
-| `app/radio/page.tsx` | 21, 22 | M10 |
+| `app/radio/page.tsx` | 21, 22 | **M5b** Phase F (Task 22) |
 | `components/whats-new/{WhatsNewGate,WhatsNewWindow,MoodMixChoice,…}`, `app/changelog/page.tsx`, TopBar/Sidebar version chip | 8–17 | M10 |
 | Artist page "radio" button (`app/artist/[id]/page.tsx`) | 22 `type=artist` | M10 |
 
@@ -153,9 +168,11 @@ Per the roadmap M10 row, all pages below are **M10**; M5b ships backend only unl
 
 ### Task 0: Record decisions before code (docs only)
 
-**Files:** `docs/DIVERGENCES.md`, this plan's Open questions section.
-- [ ] After the owner answers Q1–Q11, write the answers into "Open questions" (decision + date) and reserve rows D-260.. with status `to-decide` for each divergence named below; grep this plan for text encoding the old option and fix it in the same commit.
-- [ ] Commit `docs(m5b): record owner decisions`.
+**Files:** `docs/DIVERGENCES.md`, `docs/STATUS.md`, this plan's Owner decisions / Open questions sections.
+- [x] After the owner answers Q1–Q11 (2026-11-19), write the answers into "Owner decisions" (6–16) and "Rozstrzygnięte" (decision + date) and reserve rows D-260..D-271 for each divergence named below (status `accepted (owner …); not implemented yet`, not `to-decide`, because every one is decided; each implementing task amends its row); grep this plan for text encoding the old option and fix it in the same commit (Q6 B: Appendix D, Tasks 9/10/19; Q2 B: Task 14; Q3 B/Q5 A: Tasks 15/20; Q10 B: Phase F).
+- [x] Commit `docs(m5b): record owner decisions`.
+
+Reserved rows: D-260 listener state (Q1, Task 6) · D-261 `LIBRARY_PLAYABLE` = present track (Task 2) · D-262 steady beat (Q7, Task 4) · D-263 missing energy/danceability (Q8, Tasks 8/13) · D-264 track rows = full upstream column set (Q6, Tasks 9/10) · D-265 mix/mood-mix cover URLs as native tokens (Tasks 9/10) · D-266 mood/Workout radio tiles gate (Q2, Task 14) · D-267 own release catalog (Q3, Tasks 15/20) · D-268 no GPU choice (Q5, Task 15) · D-269 releases per profile (Q9, Task 15) · D-270 update check target (Q4, Task 17) · D-271 recommendations storage/cover/"owned" (Task 18).
 
 ### Task 1: Schema `0063_mixes.sql` and `kima_db::mixes` basics
 
@@ -169,7 +186,7 @@ Per the roadmap M10 row, all pages below are **M10**; M5b ships backend only unl
 **Files:** Create `crates/kima-mixes/{Cargo.toml,src/lib.rs,src/seeded.rs,src/artist.rs,src/day.rs}`, `tools/mix-goldens/upstream.mjs` (reads `services/mixes/helpers.ts`, `artistCap.ts`, `mixDay.ts`, `utils/artistSpread.ts` from the pin's git objects like `tools/vibe-goldens/upstream.mjs`, writes JSON), `crates/kima-mixes/tests/fixtures/draw_goldens.json`, `crates/kima-mixes/tests/draws.rs`.
 - [ ] **RED** `draws.rs`: `seeded_random_matches_js_for_ascii_unicode_and_overflow` (incl. a non-BMP string: UTF-16 code units), `daily_pick_indices_match_upstream_lcg`, `seeded_key_is_md5_hex_of_seed_colon_id`, `seeded_order_and_take_agree_and_match_goldens`, `weighted_order_seeded_matches_goldens`, `cap_by_artist_raises_2_3_then_lifts`, `spread_by_artist_matches_goldens`, `mix_day_is_server_local_date_and_weekday_parses_utc`, `song_artist_key_matches_upstream` (ports `seededDraw` 14, `weightedOrder` 3, `mixDay` 5, `mixSampling` pure cases).
 - [ ] Generate goldens (`node tools/mix-goldens/upstream.mjs --pin c7527577 > …`), commit with the pin SHA inside the file.
-- [ ] Implement; GREEN; clippy; commit `feat(mixes): seeded draws and artist cap with upstream goldens`. D-row: `LIBRARY_PLAYABLE` = present track (no `corrupt`, no `location` until M7).
+- [ ] Implement; GREEN; clippy; commit `feat(mixes): seeded draws and artist cap with upstream goldens`. D-261 (amend): `LIBRARY_PLAYABLE` = present track (no `corrupt`, no `location` until M7). Mix day per Q11 = A (server calendar date).
 
 ### Task 3: Recipes, definitions and stations (pure)
 
@@ -180,8 +197,8 @@ Per the roadmap M10 row, all pages below are **M10**; M5b ships backend only unl
 ### Task 4: Recipe ranking in SQL on the kima schema
 
 **Files:** Create `crates/kima-db/src/mixes/recipe.rs`, `crates/kima-db/tests/mix_recipes.rs`.
-- [ ] **RED:** port `recipes.integration.test.ts` 63 and `unrankableRecipe` 1 over synthetic `track_moods` + `mood_state` + `track_clap_readings` + `track_analysis` rows: `member_needs_line_1_25_sd_above_mean`, `low_component_pushes_away`, `bpm_filter_counts_double_and_half_on_steady_beat`, `minor_null_when_scale_unknown`, `arousal_pct_band_over_eligible`, `one_copy_per_title_and_artist_furthest_above_line`, `no_mood_state_means_no_members`, `fewer_than_8_scored_means_none`, `zero_spread_is_unrankable`, `familiarity_boost_only_lifts`, plus `heads_absent_every_recipe_is_none` (the live degradation).
-- [ ] Implement `recipe_members`, `recipe_member_count`, `pick_mix_tracks`, `pick_page_tracks`, `pick_station_page` (page source only; order in Task 12), `SCORED_SONGS` on kima tables (`track_moods` joined on `track_embeddings.embedded_at`), readings via the M5 `READING_SQL` equivalent, `PACE_SQL` and `STEADY_BEAT` per Q7 (D-row), key scale from `track_analysis.key_mode`.
+- [ ] **RED:** port `recipes.integration.test.ts` 63 and `unrankableRecipe` 1 over synthetic `track_moods` + `mood_state` + `track_clap_readings` + `track_analysis` rows: `member_needs_line_1_25_sd_above_mean`, `low_component_pushes_away`, `bpm_filter_counts_double_and_half_on_steady_beat`, `steady_beat_is_upstream_2_of_5_32_rescaled` (0.375 excluded, 0.377 included), `minor_null_when_scale_unknown`, `arousal_pct_band_over_eligible`, `one_copy_per_title_and_artist_furthest_above_line`, `no_mood_state_means_no_members`, `fewer_than_8_scored_means_none`, `zero_spread_is_unrankable`, `familiarity_boost_only_lifts`, plus `heads_absent_every_recipe_is_none` (the live degradation).
+- [ ] Implement `recipe_members`, `recipe_member_count`, `pick_mix_tracks`, `pick_page_tracks`, `pick_station_page` (page source only; order in Task 12), `SCORED_SONGS` on kima tables (`track_moods` joined on `track_embeddings.embedded_at`), readings via the M5 `READING_SQL` equivalent, `PACE_SQL` and `STEADY_BEAT` per Q7 = A (`tempo_confidence >= 2.0/5.32`, ≈ 0.376, one named constant with the derivation in its doc comment; D-262), key scale from `track_analysis.key_mode`.
 - [ ] GREEN; sqlx prepare; commit `feat(db): recipe ranking and members`.
 
 ### Task 5: Mood tags writer and the moods-changed hook
@@ -192,9 +209,9 @@ Per the roadmap M10 row, all pages below are **M10**; M5b ships backend only unl
 
 ### Task 6: Listener state store (replaces Redis; per Q1)
 
-**Files:** Create `crates/kima-mixes/src/store.rs` (or `kima-db` tables if Q1 = B), `crates/kima-mixes/tests/store.rs`; wire into `AppState` (`crates/kima-api/src/state.rs`).
+**Files:** Create `crates/kima-mixes/src/store.rs` (Q1 = A: in-process, no tables), `crates/kima-mixes/tests/store.rs`; wire into `AppState` (`crates/kima-api/src/state.rs`).
 - [ ] **RED:** `mix_list_cache_per_profile_and_zone_ttl_1h_max_4_zones`, `refresh_replaces_only_its_zone`, `station_sessions_3_kept_12h`, `familiar_scan_single_flight_waits_then_scans_itself`, `energy_band_survives_mood_drop`, `drop_all_and_drop_mood_dependent`, `cover_pick_kept_until_local_day_end_no_cover_600s`.
-- [ ] Implement; GREEN; commit `feat(mixes): in-process listener state store`. D-row (Q1).
+- [ ] Implement; GREEN; commit `feat(mixes): in-process listener state store`. D-260 (amend, Q1 = A).
 
 ## Phase B: Mixes
 
@@ -213,13 +230,13 @@ Per the roadmap M10 row, all pages below are **M10**; M5b ships backend only unl
 ### Task 9: Daily mix list and `/api/mixes`, `/api/mixes/{id}`, refresh, save
 
 **Files:** `crates/kima-mixes/src/daily.rs`, `crates/kima-api/src/routes/mixes.rs`, `crates/kima-api-types/src/mixes.rs`, `crates/kima-api/tests/mixes.rs`.
-- [ ] **RED:** port `mixesTimeZone` 17, `mixesSave` 5, `mixRotationFailures` 3: `get_mixes_returns_five_plus_saved_mood_mix`, `failed_generator_is_replaced_by_next_untried_type`, `same_day_same_list_refresh_differs`, `zone_keyed_cache`, `get_mix_tracks_in_mix_order_present_only`, `get_mixes_refresh_is_404_mix_not_found_not_405`, `save_creates_playlist_atomically_private_name_or_custom`, `save_twice_409_with_playlist_id_and_name`, `concurrent_saves_one_playlist`, `save_all_missing_422`, `save_announces_playlist_event`, `sibling_profile_cannot_see_or_save`.
-- [ ] Implement; GREEN; commit `feat(api): mixes routes`. D-rows: cover URLs as native tokens; track DTO (Q6).
+- [ ] **RED:** port `mixesTimeZone` 17, `mixesSave` 5, `mixRotationFailures` 3: `get_mixes_returns_five_plus_saved_mood_mix`, `failed_generator_is_replaced_by_next_untried_type`, `same_day_same_list_refresh_differs`, `zone_keyed_cache`, `get_mix_tracks_in_mix_order_present_only`, `get_mixes_refresh_is_404_mix_not_found_not_405`, `save_creates_playlist_atomically_private_name_or_custom`, `save_twice_409_with_playlist_id_and_name`, `concurrent_saves_one_playlist`, `save_all_missing_422`, `save_announces_playlist_event`, `sibling_profile_cannot_see_or_save`, `mix_track_rows_carry_every_upstream_column` (Q6 = B: the key set of each `tracks[]` element, of its `album` and of `album.artist` equals Appendix D exactly; absent data is JSON `null`, never a missing key; mapped values read back from seeded `track_analysis`/`track_clap_readings`/`track_stages` rows).
+- [ ] Implement the Appendix D row (one shared `kima_db::mixes::track_rows` select + `kima-api-types` DTO used by Tasks 9 and 10); GREEN; commit `feat(api): mixes routes`. D-rows (amend): D-264 track rows (Q6 = B), D-265 cover URLs as native tokens.
 
 ### Task 10: Mood buckets and the saved mood mix
 
 **Files:** `crates/kima-db/src/mixes/mood_mix.rs`, extend `routes/mixes.rs`, `crates/kima-api/tests/mood_buckets.rs`.
-- [ ] **RED:** port `mixesMoodServe` 4, `mixesValidation` 7, `moodBucketService` 13, `moodBucketMixPool` 8: `presets_five_moods_counts_and_pending`, `presets_zero_when_heads_absent`, `invalid_mood_400_with_valid_moods`, `not_enough_tracks_400_with_suggestion`, `served_ids_skipped_while_8_remain`, `record_served_update_only`, `save_with_track_ids_keeps_order_drops_missing`, `save_none_playable_400`, `save_validation_messages`, `save_drops_mix_cache`, `saved_mix_reread_on_home_list`.
+- [ ] **RED:** port `mixesMoodServe` 4, `mixesValidation` 7, `moodBucketService` 13, `moodBucketMixPool` 8: `presets_five_moods_counts_and_pending`, `presets_zero_when_heads_absent`, `invalid_mood_400_with_valid_moods`, `not_enough_tracks_400_with_suggestion`, `served_ids_skipped_while_8_remain`, `record_served_update_only`, `save_with_track_ids_keeps_order_drops_missing`, `save_none_playable_400`, `save_validation_messages`, `save_drops_mix_cache`, `saved_mix_reread_on_home_list`, `bucket_track_rows_use_the_appendix_d_shape` (GET and save responses' `tracks[]`, Q6 = B).
 - [ ] Implement; GREEN; commit `feat(api): mood bucket mixes`.
 
 ## Phase C: Radio
@@ -245,16 +262,16 @@ Per the roadmap M10 row, all pages below are **M10**; M5b ships backend only unl
 ### Task 14: `GET /api/library/radio/row`, covers and the warm job
 
 **Files:** `crates/kima-mixes/src/covers.rs`, `routes/library/radio.rs`, `crates/kima-server` (job registration), `crates/kima-api/tests/radio_row.rs`.
-- [ ] **RED:** port `radioRow` 15: `scope_default_home_400_otherwise`, `home_6_genres_4_decades_all_lists_all`, `workout_and_mood_tiles_follow_gate` (gate per Q2), `cover_stable_for_local_day`, `no_cover_retried_after_600s`, `warm_job_picks_for_profiles_seen_within_7_days`, `warm_job_skips_deleted_profile`.
+- [ ] **RED:** port `radioRow` 15: `scope_default_home_400_otherwise`, `home_6_genres_4_decades_all_lists_all`, `workout_and_mood_tiles_need_vibe_embeddings_and_mood_statistics` (Q2 = B: hidden while the heads are blocked even when `vibeEmbeddings` is true; listed once mood statistics exist; D-266), `cover_stable_for_local_day`, `no_cover_retried_after_600s`, `warm_job_picks_for_profiles_seen_within_7_days`, `warm_job_skips_deleted_profile`.
 - [ ] Implement; schedule `radio-covers` (first after 60 s, then 5 min, single-flight); GREEN; commit `feat(api): radio row with daily covers`.
 
 ## Phase D: What's-new and recommendations
 
 ### Task 15: Release catalog and window routes
 
-**Files:** `crates/kima-db/src/releases.rs`, `crates/kima-mixes/src/catalog.rs` (or `kima-api` if Q3 = own catalog), `crates/kima-api/src/routes/whats_new.rs`, `crates/kima-api-types/src/releases.rs`, `crates/kima-api/tests/whats_new.rs`.
-- [ ] **RED:** port `releases.test.ts` 29, `whatsNewChangelog` 6, `whatsNewReopen` 4, `whatsNewGpuChoice` 5 (as far as Q5 keeps it): `pending_is_newest_until_dismissed`, `refile_item_dropped_once_refiled`, `current_404_without_release`, `current_answers_and_done`, `changelog_newest_first_open_count`, `open_lists_owed_items`, `choice_unknown_release_404`, `choice_unknown_key_400`, `choice_zod_400_with_details`, `dismiss_records_defaults_except_explicit`, `dismiss_skips_admin_choices_for_non_main_profile`, `dismiss_is_one_transaction`, `post_mood_mixes_choice_reaches_version_route_404`.
-- [ ] Implement per Q3/Q5/Q9; GREEN; commit `feat(api): whats-new release window`.
+**Files:** `crates/kima-db/src/releases.rs`, `crates/kima-mixes/src/catalog.rs` (Q3 = B: kima-rs's own catalog, empty `RELEASES` in production; the mechanism takes the catalog as a parameter so tests inject entries), `crates/kima-api/src/routes/whats_new.rs`, `crates/kima-api-types/src/releases.rs`, `crates/kima-api/tests/whats_new.rs`.
+- [ ] **RED:** port `releases.test.ts` 29, `whatsNewChangelog` 6, `whatsNewReopen` 4 against an injected test catalog (Q3 = B), and of `whatsNewGpuChoice` 5 only the unknown-key path (Q5 = A: the GPU apply, 403 non-admin and linux/x86_64 400 cases are not ported, D-268); plus `production_catalog_is_empty` (pending `[]`, current 404, changelog `{releases:[],openCount:0}`, open `{count:0,items:[]}`), `choice_gpu_accelerate_is_unknown_choice_400`, `pending_is_newest_until_dismissed`, `refile_item_dropped_once_refiled`, `current_404_without_release`, `current_answers_and_done`, `changelog_newest_first_open_count`, `open_lists_owed_items`, `choice_unknown_release_404`, `choice_unknown_key_400`, `choice_zod_400_with_details`, `dismiss_records_defaults_except_explicit`, `dismiss_skips_admin_choices_for_non_main_profile`, `dismiss_is_one_transaction`, `post_mood_mixes_choice_reaches_version_route_404`.
+- [ ] Implement per Q3 = B / Q5 = A / Q9 = A; GREEN; commit `feat(api): whats-new release window`. D-rows (amend): D-267, D-268, D-269.
 
 ### Task 16: Mood-mix question
 
@@ -266,13 +283,13 @@ Per the roadmap M10 row, all pages below are **M10**; M5b ships backend only unl
 
 **Files:** `crates/kima-net` source `github` (rate limit, deny_real), `crates/kima-api/src/update_check.rs`, `tests/update_status.rs` with a loopback replay.
 - [ ] **RED:** `compare_versions_ignores_v_prefix`, `latest_404_means_none`, `cached_in_settings_and_single_flight`, `disabled_reports_no_update`, `network_failure_keeps_last_known`.
-- [ ] Implement per Q4; GREEN; commit `feat(api): whats-new update status`.
+- [ ] Implement per Q4 = B: `GET https://api.github.com/repos/d1mmu-dev/kima-rs-hub/releases/latest` through `kima-net` (loopback replay in tests), upstream's `updateChecksEnabled` switch in `settings_kv`; test `asks_kima_rs_hub_releases_not_upstream`; GREEN; commit `feat(api): whats-new update status`. D-270 (amend).
 
 ### Task 18: `GET /api/recommendations/for-you`
 
 **Files:** `crates/kima-api/src/routes/recommendations.rs`, `crates/kima-db/src/recommendations.rs`, `crates/kima-api/tests/recommendations.rs`.
 - [ ] **RED:** `no_plays_empty_artists`, `top3_seed_artists_from_last_50_plays`, `ten_similar_each_by_match_deduped`, `library_artists_filtered_out` (upstream "owned"), `album_count_by_release_group`, `cover_from_artist_image_token_else_null`, `limit_parse_like_parseint` (`"abc"` → NaN → `slice(0,NaN)` = `[]` [V `:16,104`]), `profile_isolation`.
-- [ ] Implement; GREEN; commit `feat(api): recommendations for you`. D-rows: similar-artist storage, cover token, "owned" = in library until M7.
+- [ ] Implement; GREEN; commit `feat(api): recommendations for you`. D-271 (amend): similar-artist storage, cover token, "owned" = in library until M7.
 
 ## Phase E: Wire parity, flag, close-out
 
@@ -280,13 +297,13 @@ Per the roadmap M10 row, all pages below are **M10**; M5b ships backend only unl
 
 **Files:** `tools/capture-api-fixtures.sh` (set `m5b`), `crates/kima-api-types/tests/fixtures/m5b/*.json`, `crates/kima-api-types/tests/m5b.rs`, `tools/check-m5b-upstream-keys.py`.
 - [ ] Parent runs `KIMA_CAPTURE_SET=m5b tools/capture-api-fixtures.sh` from a clean committed tip (synthetic library with SQL-seeded `track_moods`/`mood_state` so recipe paths produce non-empty arrays; a second capture with heads absent).
-- [ ] **RED→GREEN:** key sets of all 22 endpoints against upstream handlers (not frontend types), cross-ids (mix → playlist, mood mix → whats-new state), populated optional arrays; grep fixtures for tokens.
+- [ ] **RED→GREEN:** key sets of all 22 endpoints against upstream handlers (not frontend types); the mix/mood-bucket `tracks[]` elements against the full Appendix D inventory (Q6 = B), not only the keys the frontend reads; cross-ids (mix → playlist, mood mix → whats-new state), populated optional arrays; grep fixtures for tokens.
 - [ ] Commit `test(api-types): m5b wire fixtures`.
 
 ### Task 20: Flags, divergences, docs
 
-- [ ] `routes/system.rs`: `"mixes": true`; `changelog` per Q3. Test `features_reports_mixes`.
-- [ ] D-260.. rows final; README; roadmap row M5b; `docs/STATUS.md`.
+- [ ] `routes/system.rs`: `"mixes": true`; `changelog` stays `false` while kima-rs's own catalog is empty (Q3 = B; a test pins that it flips with the first entry). Tests `features_reports_mixes`, `features_changelog_off_while_catalog_empty`.
+- [ ] D-260.. rows final; README; roadmap row M5b; `docs/STATUS.md`; deployment note `TZ=Europe/Warsaw` (Q11 = A) in the README/compose docs.
 - [ ] Commit `docs(m5b): divergences, flags and status`.
 
 ### Task 21: Verification and hand-off
@@ -294,13 +311,13 @@ Per the roadmap M10 row, all pages below are **M10**; M5b ships backend only unl
 - [ ] Fresh parent-made container; full bounded workspace pass (fmt, clippy stable ±pg-publish, sqlx check, all test binaries in batches); upgrade path 0062 → 0063 on a copy with M5/M-PROF data; independent review until 0 Critical/Important; hosted CI on the pushed tip after the owner's go-ahead.
 - [ ] Hand-off to M10: page list above, fixtures path, D-rows.
 
-### Optional Phase F (only if Q10 = slice)
+### Phase F: thin kima-web slice (Q10 = B, owner 2026-11-19)
 
-Task 22 kima-web API client + `/radio` page; Task 23 home "Made for you" row + `/mix?id=`; each with `vertigo build`, CSS `--check`, e2e via `tools/verify-kima-web-e2e.mjs`.
+Task 22 kima-web API client + `/radio` page; Task 23 home "Made for you" row + `/mix?id=`; each with `vertigo build`, CSS `--check`, e2e via `tools/verify-kima-web-e2e.mjs` (follow the skill's `references/kima-web-pages.md`). MoodMixer, what's-new window, changelog page, home radio row, for-you artists and the artist radio button stay M10.
 
 ## Ordering, size and risk
 
-T0 → T1 → T2/T3 (parallel) → T4 → T5/T6 → T7 → T8 → T9 → T10 → T11 → T12 → T13 → T14 → T15 → T16 → T17 → T18 → T19 → T20 → T21. Estimate: T2–T4 3 d (goldens + recipe SQL are the risk), T5–T8 3 d, T9–T10 2 d, T11–T14 3 d, T15–T18 2.5 d, T19–T21 2 d ≈ **15.5 working days (~3 weeks with review rounds)**, above the roadmap's "~1 week" (the roadmap predates the recipe engine inventory). Biggest risks: recipe SQL parity (63 upstream integration tests), station order seam/replay rules, and that every recipe output stays unobservable on real data until the mood heads are unblocked.
+T0 → T1 → T2/T3 (parallel) → T4 → T5/T6 → T7 → T8 → T9 → T10 → T11 → T12 → T13 → T14 → T15 → T16 → T17 → T18 → T19 → T22 → T23 → T20 → T21. Estimate: T2–T4 3 d (goldens + recipe SQL are the risk), T5–T8 3 d, T9–T10 2 d, T11–T14 3 d, T15–T18 2.5 d, T19–T21 2 d, Phase F (T22–T23) ~3 d ≈ **18.5 working days (~3.5–4 weeks with review rounds)**, above the roadmap's "~1 week" (the roadmap predates the recipe engine inventory). Biggest risks: recipe SQL parity (63 upstream integration tests), station order seam/replay rules, and that every recipe output stays unobservable on real data until the mood heads are unblocked.
 
 ## Definition of done
 
@@ -310,20 +327,23 @@ T0 → T1 → T2/T3 (parallel) → T4 → T5/T6 → T7 → T8 → T9 → T10 →
 4. Profile isolation tests for every personal table and cache.
 5. Wire fixtures for all 22 endpoints, keys checked against upstream handlers.
 6. D-260.. rows written; full local workspace pass; independent review 0 Critical/Important; hosted CI green before merge.
+7. Phase F (Q10 = B): `/radio`, home "Made for you" row and `/mix?id=` in kima-web, `vertigo build` + CSS `--check` + browser e2e green.
 
-## Otwarte pytania (owner; recommendation first, upstream behaviour recorded as default)
+## Rozstrzygnięte (owner 2026-11-19; formerly "Otwarte pytania")
 
-1. **Q1 Redis state.** Upstream keeps mix lists (1 h, per zone), station sessions (12 h, 3 per listener), familiarity scans (3 h, lock), the energy band and radio covers (per local day) in Redis. kima has no Redis (D-003). Options: (A) in-process TTL store in `AppState`, lost on restart (upstream already rebuilds a lost session with `replayPasses` and a lost list from the day seed; only a manual refresh's list reverts to the day's list after a restart), like D-014; (B) Postgres tables (survive restarts, one more migration, write traffic on every radio refill). **Recommendation: A**, D-row.
-2. **Q2 Mood and Workout radio tiles while mood heads are blocked.** Upstream shows them whenever `vibeEmbeddings` is true (`radioRow.ts:87-91`); with no heads each plays an empty list. Options: (A) upstream gate (tiles visible, empty stations); (B) kima gate on "mood statistics available" (tiles hidden until heads are unblocked, D-row). **Recommendation: B** (no dead tiles; becomes identical to upstream once heads exist).
-3. **Q3 Release catalog content.** Upstream's `RELEASES` (`catalog.ts:112-539`) is the upstream maintainer's own notes for upstream versions 1.10.1–1.12.3 (engine wipe, re-file, GPU consent, social/commons choices); `9450c94b` already changed its text. Options: (A) port verbatim and refresh on each re-pin; (B) port the mechanism exactly but ship kima-rs's own catalog, starting empty (`pending` → `[]`, `current` → 404, `changelog` → `{releases:[],openCount:0}`), `changelog` feature flag off until the first kima-rs entry; (C) skip what's-new except the mood-mix routes. **Recommendation: B** (D-row); upstream texts describe actions kima-rs users never needed.
-4. **Q4 Update check target.** Upstream asks `api.github.com/repos/Chevron7Locked/kima-hub/releases/latest`. Options: (A) same URL (reports upstream versions to a kima-rs user); (B) `d1mmu-dev/kima-rs-hub` releases through `kima-net` with upstream's enable switch; (C) always `enabled:false`. **Recommendation: B.**
-5. **Q5 GPU choice (`gpu.accelerate`).** kima's CLAP provider is env-configured (`KIMA_ONNX_PROVIDER`, D-252); there is no runtime toggle. Options: (A) no catalog item asks it, so `/choice` with that key answers 400 `Unknown choice` naturally; (B) implement a runtime toggle. **Recommendation: A** (D-row), revisit with M12.
-6. **Q6 Track rows in `GET /mixes/{id}` and mood-bucket replies.** Upstream sends full Prisma `Track` rows with `album` (+ `artist{id,name,mbid}`) — dozens of columns kima does not have. Options: (A) reuse the existing kima library track DTO (as `/library/tracks`) plus `album.artist{id,name,mbid}`; (B) mirror every upstream column, null where absent. **Recommendation: A**, keys the frontend reads checked by Task 19, D-row.
-7. **Q7 Steady-beat threshold.** Upstream counts a tempo only when Essentia's `bpmConfidence ≥ 2` (scale 0–5.32); kima's `track_analysis.tempo_confidence` is 0–1 from a different estimator. Options: (A) linear rescale (≥ 2/5.32 ≈ 0.376); (B) calibrate on the owner's library (fraction of tracks passing should match upstream's typical share) before fixing the number; (C) ignore confidence. **Recommendation: A now with a D-row, B as a follow-up measurement** — this is genuinely undecided and changes Dance Floor, Tempo Flow and night pace.
-8. **Q8 Missing `energy`/`danceability`.** Used by artist radio scoring and the night energy band. Options: (A) treat as absent (upstream's null paths: term skipped, band 0.5), as M5 did for the map; (B) substitute CLAP `arousal_raw` for energy. **Recommendation: A** (faithful null path, D-row).
-9. **Q9 Release acknowledgements/choices scope.** Upstream is per user. Options: (A) per profile (M-PROF rule for personal data; admin-only choices only for the main profile); (B) per account. **Recommendation: A.**
-10. **Q10 kima-web pages.** Roadmap puts mixes/radio pages in M10; M6 precedent pulled podcast pages forward so the owner could use them. Options: (A) M10 as planned (M5b is invisible in the app until then, nothing in Subsonic uses it); (B) optional Phase F in M5b: `/radio` page + home "Made for you" row + mix page (~3 d), the rest (MoodMixer, what's-new window, changelog) in M10. **Recommendation: B** if the owner wants to use radio/mixes before M10, otherwise A.
-11. **Q11 Mix day zone.** Upstream's mix day is the **server's** calendar date (`mixDay.ts:8-11`); kima's container runs in UTC unless `TZ` is set, so mixes would roll over at 01:00/02:00 Polish time. Options: (A) upstream (server local, document setting `TZ`); (B) use the request's `?tz=` for the day too. **Recommendation: A** (faithful; deployment note to set `TZ=Europe/Warsaw`).
+Questions kept as asked (recommendation first, upstream behaviour recorded as default); the binding answer follows each one and is repeated in "Owner decisions" 6–16.
+
+1. **Q1 Redis state.** Upstream keeps mix lists (1 h, per zone), station sessions (12 h, 3 per listener), familiarity scans (3 h, lock), the energy band and radio covers (per local day) in Redis. kima has no Redis (D-003). Options: (A) in-process TTL store in `AppState`, lost on restart (upstream already rebuilds a lost session with `replayPasses` and a lost list from the day seed; only a manual refresh's list reverts to the day's list after a restart), like D-014; (B) Postgres tables (survive restarts, one more migration, write traffic on every radio refill). **Recommendation: A**, D-row. **Decision (owner 2026-11-19): A** — in-process TTL store in `AppState` (D-260).
+2. **Q2 Mood and Workout radio tiles while mood heads are blocked.** Upstream shows them whenever `vibeEmbeddings` is true (`radioRow.ts:87-91`); with no heads each plays an empty list. Options: (A) upstream gate (tiles visible, empty stations); (B) kima gate on "mood statistics available" (tiles hidden until heads are unblocked, D-row). **Recommendation: B** (no dead tiles; becomes identical to upstream once heads exist). **Decision (owner 2026-11-19): B** — tiles only while mood statistics are available (D-266).
+3. **Q3 Release catalog content.** Upstream's `RELEASES` (`catalog.ts:112-539`) is the upstream maintainer's own notes for upstream versions 1.10.1–1.12.3 (engine wipe, re-file, GPU consent, social/commons choices); `9450c94b` already changed its text. Options: (A) port verbatim and refresh on each re-pin; (B) port the mechanism exactly but ship kima-rs's own catalog, starting empty (`pending` → `[]`, `current` → 404, `changelog` → `{releases:[],openCount:0}`), `changelog` feature flag off until the first kima-rs entry; (C) skip what's-new except the mood-mix routes. **Recommendation: B** (D-row); upstream texts describe actions kima-rs users never needed. **Decision (owner 2026-11-19): B** — same mechanism, kima-rs's own catalog, empty at the start; `changelog` flag off until the first entry (D-267).
+4. **Q4 Update check target.** Upstream asks `api.github.com/repos/Chevron7Locked/kima-hub/releases/latest`. Options: (A) same URL (reports upstream versions to a kima-rs user); (B) `d1mmu-dev/kima-rs-hub` releases through `kima-net` with upstream's enable switch; (C) always `enabled:false`. **Recommendation: B.** **Decision (owner 2026-11-19): B** — `d1mmu-dev/kima-rs-hub` releases through `kima-net`, upstream's on/off switch (D-270).
+5. **Q5 GPU choice (`gpu.accelerate`).** kima's CLAP provider is env-configured (`KIMA_ONNX_PROVIDER`, D-252); there is no runtime toggle. Options: (A) no catalog item asks it, so `/choice` with that key answers 400 `Unknown choice` naturally; (B) implement a runtime toggle. **Recommendation: A** (D-row), revisit with M12. **Decision (owner 2026-11-19): A** — no GPU choice, `gpu.accelerate` → 400 `Unknown choice`; revisit with M12 (D-268).
+6. **Q6 Track rows in `GET /mixes/{id}` and mood-bucket replies.** Upstream sends full Prisma `Track` rows with `album` (+ `artist{id,name,mbid}`) — dozens of columns kima does not have. Options: (A) reuse the existing kima library track DTO (as `/library/tracks`) plus `album.artist{id,name,mbid}`; (B) mirror every upstream column, null where absent. **Recommendation: A**, keys the frontend reads checked by Task 19, D-row. **Decision (owner 2026-11-19): B, not the recommendation** — every upstream Prisma `Track` column (and the included `album` and `album.artist{id,name,mbid}`), null where kima has no data; inventory and mapping in Appendix D, D-264. The "Recommendation: A" above is historical only.
+7. **Q7 Steady-beat threshold.** Upstream counts a tempo only when Essentia's `bpmConfidence ≥ 2` (scale 0–5.32); kima's `track_analysis.tempo_confidence` is 0–1 from a different estimator. Options: (A) linear rescale (≥ 2/5.32 ≈ 0.376); (B) calibrate on the owner's library (fraction of tracks passing should match upstream's typical share) before fixing the number; (C) ignore confidence. **Recommendation: A now with a D-row, B as a follow-up measurement** — this is genuinely undecided and changes Dance Floor, Tempo Flow and night pace. **Decision (owner 2026-11-19): A** — `≥ 2/5.32 ≈ 0.376` (D-262); calibration on the owner's library is a noted follow-up.
+8. **Q8 Missing `energy`/`danceability`.** Used by artist radio scoring and the night energy band. Options: (A) treat as absent (upstream's null paths: term skipped, band 0.5), as M5 did for the map; (B) substitute CLAP `arousal_raw` for energy. **Recommendation: A** (faithful null path, D-row). **Decision (owner 2026-11-19): A** — absent, upstream's null paths (D-263).
+9. **Q9 Release acknowledgements/choices scope.** Upstream is per user. Options: (A) per profile (M-PROF rule for personal data; admin-only choices only for the main profile); (B) per account. **Recommendation: A.** **Decision (owner 2026-11-19): A** — per profile; admin-only choices → main profile (D-269).
+10. **Q10 kima-web pages.** Roadmap puts mixes/radio pages in M10; M6 precedent pulled podcast pages forward so the owner could use them. Options: (A) M10 as planned (M5b is invisible in the app until then, nothing in Subsonic uses it); (B) optional Phase F in M5b: `/radio` page + home "Made for you" row + mix page (~3 d), the rest (MoodMixer, what's-new window, changelog) in M10. **Recommendation: B** if the owner wants to use radio/mixes before M10, otherwise A. **Decision (owner 2026-11-19): B** — Phase F in M5b (`/radio`, "Made for you", mix page); the rest M10.
+11. **Q11 Mix day zone.** Upstream's mix day is the **server's** calendar date (`mixDay.ts:8-11`); kima's container runs in UTC unless `TZ` is set, so mixes would roll over at 01:00/02:00 Polish time. Options: (A) upstream (server local, document setting `TZ`); (B) use the request's `?tz=` for the day too. **Recommendation: A** (faithful; deployment note to set `TZ=Europe/Warsaw`). **Decision (owner 2026-11-19): A** — server calendar date; deployment note `TZ=Europe/Warsaw`.
 
 ## Appendix C: Not verified [?]
 
@@ -331,3 +351,59 @@ T0 → T1 → T2/T3 (parallel) → T4 → T5/T6 → T7 → T8 → T9 → T10 →
 - `stationCovers.ts:41-145`, `familiarity.ts:56-219`, `nightPlays.ts:60-331`, `stationOrder.ts:79-399`, `discoveryMixes.ts`, `genreMixes.ts` bodies were read by header/exports only.
 - REST API keys: D-073 says `X-API-Key` on the REST API is M8 ("App tokens work on `/rest` only until M8"), so `requireAuthOrToken` vs `requireAuth` is not observable yet; Tasks 9/15 use `AuthUser` and cite D-073 (the `api_key_auth_allowed`/`jwt_only_auth` tests become M8 hand-off notes, not M5b tests).
 - The existing `/library/genres` artist-name filter's divergence row (candidates D-114/D-166) — Task 11 confirms.
+
+## Appendix D: track row column map (Q6 = B, D-264)
+
+Upstream [V `routes/mixes.ts:93-109` `loadTracksInMixOrder`, used by `GET /mixes/:id`, `GET /mixes/mood/buckets/:mood` and `POST /mixes/mood/buckets/:mood/save`]: `prisma.track.findMany({ where: { id: { in }, ...LIBRARY_PLAYABLE }, include: { album: { include: { artist: { select: { id, name, mbid } } } } } })`. Prisma returns every scalar field of the model and omits `Unsupported` ones (`searchVector`) and relations that are not included. Inventory read from `backend/prisma/schema.prisma` at `c7527577` (`model Track` `:671-760`, `model Album` `:10-46`); the reference checkout `9450c94b` has no `prisma/` change. JSON keys keep upstream's names and order; a key is **never omitted**: where kima has no data its value is `null` (also for upstream's non-nullable columns, e.g. `essentiaGenres`, `scanStatus`, `primaryType`). Upstream cuid ids are kima UUIDs (D-016). "stage(x)" = the `track_stages` row of stage `x` (`analysis`, `embedding`); status map `pending`/`queued` → `"pending"`, running → `"processing"`, done → `"completed"`, failed → `"failed"` (Task 9 confirms kima's exact stage status values and records the map in D-264).
+
+**Track (58 scalar keys + `album`)**
+
+| Upstream | kima-rs | | Upstream | kima-rs |
+|---|---|---|---|---|
+| `id` | `tracks.id` | | `danceabilityMl` | `track_analysis.musicnn_danceability` (unprovisioned → null) |
+| `albumId` | `tracks.album_id` | | `moodTags` | `tracks.mood_tags` (0063, Task 5) |
+| `title` | `tracks.title` | | `essentiaGenres` | null |
+| `trackNo` | `tracks.track_no` | | `analysisStatus` | stage(analysis) status (map above); null without a row |
+| `duration` | `tracks.duration_secs` | | `analysisVersion` | null |
+| `mime` | null (kima stores `codec`, not a MIME type; Task 9 may map it through an existing codec→MIME helper if one exists, recorded in D-264) | | `analysisMode` | null |
+| `filePath` | `tracks.path` (relative to the music root, as upstream) | | `analyzedAt` | stage(analysis) finish time when done, else null |
+| `fileModified` | `tracks.mtime` | | `analysisError` | stage(analysis) last error, else null |
+| `fileSize` | `tracks.size` | | `analysisRetryCount` | stage(analysis) attempts, else null |
+| `bpm` | `track_analysis.tempo_bpm` | | `updatedAt` | `tracks.updated_at` |
+| `bpmConfidence` | `track_analysis.tempo_confidence × 5.32` (the Q7 = A linear map back to upstream's scale) | | `displayTitle` | `tracks.display_title` |
+| `beatsCount` | null | | `displayTrackNo` | null |
+| `key` | `track_analysis.key_tonic` as a pitch-class name (Task 9 matches upstream's Essentia spelling) | | `hasUserOverrides` | `tracks.display_title IS NOT NULL` |
+| `keyScale` | `track_analysis.key_mode` | | `analysisStartedAt` | stage(analysis) start time while running, else null |
+| `keyStrength` | `track_analysis.key_strength` (different estimator, D-008) | | `vibeAnalysisStatus` | stage(embedding) status (map above); null without a row |
+| `energy` | null (Q8 = A, D-263) | | `vibeAnalysisStartedAt` | stage(embedding) start time while running, else null |
+| `loudness` | `track_analysis.integrated_lufs` (upstream: integrated EBU R128, `analyzer.py:598`) | | `vibeAnalysisError` | stage(embedding) last error, else null |
+| `dynamicRange` | `track_analysis.loudness_range_lu` (upstream: loudness range, `analyzer.py:599`) | | `vibeAnalysisRetryCount` | stage(embedding) attempts, else null |
+| `danceability` | `track_analysis.musicnn_danceability` (unprovisioned → null; Q8 = A) | | `vibeAnalysisStatusUpdatedAt` | stage(embedding) last change time, else null |
+| `valence` | null [? Task 9 checks whether upstream's `valence` equals kima's `musicnn_valence`; unprovisioned → null either way] | | `isrc` | `tracks.isrc` |
+| `arousal` | null [? as `valence`, `musicnn_arousal`] | | `isrcSource` | `tracks.isrc_source` |
+| `deamValence` | null | | `acoustidFingerprint` | null (kima keeps no Chromaprint string) |
+| `deamArousal` | null | | `recordingMbid` | `tracks.recording_mbid` |
+| `clapValenceRaw` | `track_clap_readings.valence_raw` (current reading only) | | `corrupt` | `false` (only playable rows are returned; kima has no corrupt flag, D-261) |
+| `clapArousalRaw` | `track_clap_readings.arousal_raw` (current reading only) | | `missingSince` | `tracks.missing_since` (always null here: present tracks only) |
+| `instrumentalness` | `track_clap_readings.instrumentalness` (current reading only) | | `scanStatus` | null |
+| `acousticness` | `track_clap_readings.acousticness` (current reading only) | | `scanError` | null |
+| `speechiness` | null | | `scanStartedAt` | null |
+| | | | `discNumber` | `tracks.disc` |
+| | | | `discSubtitle` | null |
+
+
+**album (20 scalar keys + `artist`)**
+
+| Upstream | kima-rs | | Upstream | kima-rs |
+|---|---|---|---|---|
+| `id` | `albums.id` | | `label` | `albums.label` |
+| `rgMbid` | `albums.release_group_mbid` (nullable in kima) | | `genres` | null |
+| `rgMbidSource` | `albums.release_group_mbid_source` (kima's value set, D-row of 0030) | | `lastSynced` | null |
+| `artistId` | `albums.artist_id` | | `location` | `"LIBRARY"` (every kima album is a library album until M7, D-261) |
+| `title` | `albums.title` | | `displayTitle` | `albums.display_title` |
+| `identityKey` | null | | `displayYear` | `albums.display_year` |
+| `sortName` | `albums.sort_name` | | `hasUserOverrides` | any of `display_title`, `display_year`, `user_genres`, user image set |
+| `year` | `albums.year` | | `userCoverUrl` | album cover token when the image is the user's (`image_source = 'user'`), else null |
+| `coverUrl` | album cover token (album UUID when an image exists, else null; D-265, as D-185/D-193) | | `userGenres` | `albums.user_genres` |
+| `primaryType` | null | | `originalYear` | null |
+| | | | `artist` | `{id: artists.id, name: artists.name, mbid: artists.mbid}` |

@@ -2906,6 +2906,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kima-mixes"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "kima-vibe",
+ "md-5 0.11.0",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "kima-ml"
 version = "0.1.0"
 dependencies = [

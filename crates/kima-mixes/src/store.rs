@@ -221,6 +221,19 @@ impl ListenerStore {
 
     // ---- station sessions --------------------------------------------------------------------------------------
 
+    /// The stations a listener holds a live session for, by name (sorted), without touching them.
+    pub fn held_stations(&self, listener: Uuid, now: Instant) -> Vec<String> {
+        let mut inner = self.lock();
+        inner.sweep_sessions(now);
+        let mut names: Vec<String> = inner
+            .sessions
+            .get(&listener)
+            .map(|stations| stations.keys().cloned().collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
     /// Upstream `TOUCH`: the session's meta, its twelve hours set again and the station marked the listener's most
     /// recently used; `None` when the listener holds no live session for it.
     pub fn touch_session(

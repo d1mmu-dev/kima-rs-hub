@@ -13,5 +13,6 @@ pub mod mix;
 pub mod recipes;
 pub mod seeded;
 pub mod spread;
+pub mod station_order;
 pub mod stations;
 pub mod store;

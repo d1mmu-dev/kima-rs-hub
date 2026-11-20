@@ -6,10 +6,11 @@
 // environment or private tools config). Every module is read from the pin's git objects
 // (../vibe-goldens/upstream.mjs `readPinned`), never from a working tree. Node >= 23.6 (native type stripping).
 //
-// Modules (backend/src/...): services/mixes/{helpers,artistCap,mixDay}.ts, utils/artistSpread.ts and what they import
-// (utils/{shuffle,libraryEligibility,artistNormalization}.ts, services/{artistIdentity,pgTextRules}.ts), copied to a
-// temporary directory with relative imports pointed at the copies (".ts" added). Stubbed: `@prisma/client` (only
-// `Prisma.sql`/`Prisma.join`, which the pure functions never call) and `utils/db` (no database). The daily pick of
+// Modules (backend/src/...): services/mixes/{helpers,artistCap,mixDay,stationOrder}.ts, utils/artistSpread.ts and what
+// they import (utils/{shuffle,libraryEligibility,artistNormalization}.ts, services/{artistIdentity,pgTextRules}.ts),
+// copied to a temporary directory with relative imports pointed at the copies (".ts" added). Stubbed: `@prisma/client`
+// (only `Prisma.sql`/`Prisma.join`, which the pure functions never call), `utils/db` (no database), and `utils/redis`
+// and `utils/logger` for stationOrder.ts (only its pure `replayPasses` and constants are called). The daily pick of
 // services/mixes/index.ts is taken from that file's text (the `selectedIndices` loop and the generator count) and
 // run as written. The single other edit: `FreePlaces`'s constructor parameter property (`constructor(private n:
 // number)`), which type stripping cannot run, becomes a field assigned in the constructor. Nothing else is edited.
@@ -29,6 +30,7 @@ const files = {
     "artistCap.ts": "backend/src/services/mixes/artistCap.ts",
     "mixDay.ts": "backend/src/services/mixes/mixDay.ts",
     "artistSpread.ts": "backend/src/utils/artistSpread.ts",
+    "stationOrder.ts": "backend/src/services/mixes/stationOrder.ts",
     "shuffle.ts": "backend/src/utils/shuffle.ts",
     "libraryEligibility.ts": "backend/src/utils/libraryEligibility.ts",
     "artistNormalization.ts": "backend/src/utils/artistNormalization.ts",
@@ -43,6 +45,9 @@ const imports = {
     "../../utils/artistNormalization": "./artistNormalization.ts",
     "../utils/artistNormalization": "./artistNormalization.ts",
     "../artistIdentity": "./artistIdentity.ts",
+    "../../utils/redis": "./stub_redis.ts",
+    "../../utils/logger": "./stub_logger.ts",
+    "../../utils/artistSpread": "./artistSpread.ts",
     "./artistCap": "./artistCap.ts",
     "./pgTextRules": "./pgTextRules.ts",
 };
@@ -65,12 +70,18 @@ fs.writeFileSync(
     "export const Prisma = { sql: () => { throw new Error('stub'); }, join: () => { throw new Error('stub'); } };\n",
 );
 fs.writeFileSync(path.join(tmp, "stub_db.ts"), "export const prisma = {};\n");
+fs.writeFileSync(path.join(tmp, "stub_redis.ts"), "export const redisClient = {};\n");
+fs.writeFileSync(
+    path.join(tmp, "stub_logger.ts"),
+    "export const logger = { warn: () => {}, debug: () => {}, info: () => {}, error: () => {} };\n",
+);
 
 const helpers = await import(pathToFileURL(path.join(tmp, "helpers.ts")));
 const artistCap = await import(pathToFileURL(path.join(tmp, "artistCap.ts")));
 const mixDay = await import(pathToFileURL(path.join(tmp, "mixDay.ts")));
 const spread = await import(pathToFileURL(path.join(tmp, "artistSpread.ts")));
 const normalization = await import(pathToFileURL(path.join(tmp, "artistNormalization.ts")));
+const station = await import(pathToFileURL(path.join(tmp, "stationOrder.ts")));
 
 // ---- the daily pick, from services/mixes/index.ts as written ------------------------------------------------------
 const index = readPinned("backend/src/services/mixes/index.ts");
@@ -236,6 +247,46 @@ shapes.forEach((counts, s) => {
     }
 });
 goldens.spreadByArtist = spreadCases;
+
+// replayPasses (services/mixes/stationOrder.ts): a seed's passes over a pool, each after the one before it (its last
+// artist and its last songs kept out of the next opening), and a pass past REPLAY_PASSES built alone.
+const stationPools = {
+    one: [[uuid(0), "a0"]],
+    five: Array.from({ length: 5 }, (_, i) => [uuid(i), `a${i}`]),
+    thirty: Array.from({ length: 30 }, (_, i) => [uuid(i), `a${Math.floor(i / 3)}`]),
+    big: Array.from({ length: 45 }, (_, i) => [uuid(i), i < 30 ? "big" : `o${i - 30}`]),
+    mixed: Array.from({ length: 60 }, (_, i) => [uuid(i), i % 5 === 0 ? "a0" : `a${i % 7}`]),
+    many: Array.from({ length: 250 }, (_, i) => [uuid(i), `a${Math.floor(i / 3)}`]),
+};
+const stationCases = [];
+for (const [name, songs] of Object.entries(stationPools)) {
+    const pool = songs.map(([id, artistId]) => ({ id, artistId }));
+    const targets = name === "thirty" ? [0, 1, 2, 5, station.REPLAY_PASSES + 1] : [0, 1, 2, 5];
+    for (const seed of ["x", "listener-1"]) {
+        for (const target of targets) {
+            const pass = station.replayPasses(seed, pool, target);
+            stationCases.push({
+                pool: name,
+                seed,
+                target,
+                start: pass.start,
+                pass: pass.pass,
+                length: pass.length,
+                lastArtist: pass.lastArtist,
+                ids: pass.ids,
+            });
+        }
+    }
+}
+goldens.stationOrder = {
+    sessionTtlS: station.SESSION_TTL_S,
+    stationsKept: station.STATIONS_KEPT,
+    replayPasses: station.REPLAY_PASSES,
+    replaySongs: station.REPLAY_SONGS,
+    seedPattern: station.SEED_PATTERN.source,
+    pools: stationPools,
+    cases: stationCases,
+};
 
 goldens.weekdayOf = [
     "2026-10-25",

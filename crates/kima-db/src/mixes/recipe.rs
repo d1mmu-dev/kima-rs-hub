@@ -15,7 +15,9 @@
 //! decides its shape. Every number spliced into it is a finite `f64` from a parsed recipe or the stored statistics;
 //! the heads' version and the familiarity boost are bind parameters.
 
+use std::collections::HashSet;
 use std::fmt;
+use std::future::Future;
 
 use kima_mixes::artist::{MIN_MIX_TRACKS, NO_ONE_KEYS};
 use kima_mixes::definitions::{
@@ -24,6 +26,10 @@ use kima_mixes::definitions::{
 use kima_mixes::recipes::{
     RECIPE_LINE, Recipe, STEADY_BEAT_KIMA, Signal, draw_members, get_recipe,
 };
+use kima_mixes::station_order::{
+    StationError, StationPage, StationRequest, StationSong, station_page,
+};
+use kima_mixes::store::ListenerStore;
 use kima_vibe::mood_heads::{MOODS, MoodHeads};
 use kima_vibe::moods::MoodStats;
 use sqlx::{PgPool, Row};
@@ -883,6 +889,95 @@ pub async fn page_member_count(
         Some(n) if n >= MIN_MIX_TRACKS => n,
         _ => 0,
     })
+}
+
+fn station_error(e: StationError<RecipeError>) -> RecipeError {
+    match e {
+        StationError::Invalid(message) => RecipeError::Invalid(message),
+        StationError::Source(e) => e,
+    }
+}
+
+/// Upstream `pickStationPage`: a station's refill from the recipe's members in the station order
+/// ([`kima_mixes::station_order`]), the session kept in `store` as `recipe:<id>`; no songs when it has none. A
+/// library the recipe cannot rank answers [`RecipeError::Unrankable`] as upstream's `UnrankableLibraryError`.
+pub async fn pick_station_page<K, KF>(
+    pool: &PgPool,
+    ctx: RecipeContext<'_>,
+    store: &ListenerStore,
+    recipe: &Recipe,
+    playable: K,
+    request: &StationRequest<'_>,
+) -> Result<StationPage, RecipeError>
+where
+    K: FnMut(Vec<Uuid>) -> KF,
+    KF: Future<Output = Result<HashSet<Uuid>, RecipeError>>,
+{
+    let station = format!("recipe:{}", recipe.id);
+    let songs = || async move {
+        Ok::<_, RecipeError>(recipe_members(pool, ctx, recipe).await?.map(|members| {
+            members
+                .into_iter()
+                .map(|m| StationSong {
+                    id: m.id,
+                    artist_id: m.artist_id,
+                })
+                .collect()
+        }))
+    };
+    station_page(store, &station, songs, playable, request)
+        .await
+        .map_err(station_error)
+}
+
+/// Upstream `pickWildcardPage`: the Wildcard station's refill, the songs without a single mood tag from the same songs
+/// every recipe draws from ([`scored_songs`]). It reads the tags the mood step wrote (`tracks.mood_tags`,
+/// [`crate::mixes::tags`]) rather than repeating their rule, and keeps playing them while the statistics are rebuilt.
+/// One title (any case) by one artist once, refilled as any station; no songs before the mood step has scored one,
+/// nor while the heads are absent.
+pub async fn pick_wildcard_page<K, KF>(
+    pool: &PgPool,
+    heads: Option<&MoodHeads>,
+    store: &ListenerStore,
+    playable: K,
+    request: &StationRequest<'_>,
+) -> Result<StationPage, RecipeError>
+where
+    K: FnMut(Vec<Uuid>) -> KF,
+    KF: Future<Output = Result<HashSet<Uuid>, RecipeError>>,
+{
+    let sql = format!(
+        "SELECT id, artist_key FROM (
+             SELECT DISTINCT ON (s.title_key, s.artist_key) s.id, s.artist_key
+             FROM (
+                 SELECT t.id, lower(t.title) AS title_key, {artist} AS artist_key
+                 {scored}
+                 WHERE COALESCE(cardinality(t.mood_tags), 0) = 0
+             ) s
+             ORDER BY s.title_key, s.artist_key, s.id
+         ) untagged
+         ORDER BY id",
+        artist = artist_sql(),
+        scored = scored_songs(),
+    );
+    let sql = sql.as_str();
+    let songs = || async move {
+        let Some(heads) = heads else {
+            return Ok::<_, RecipeError>(None);
+        };
+        let rows: Vec<(Uuid, String)> = sqlx::query_as(sql)
+            .bind(&heads.version)
+            .fetch_all(pool)
+            .await?;
+        Ok(Some(
+            rows.into_iter()
+                .map(|(id, artist_id)| StationSong { id, artist_id })
+                .collect(),
+        ))
+    };
+    station_page(store, "wildcard", songs, playable, request)
+        .await
+        .map_err(station_error)
 }
 
 #[cfg(test)]

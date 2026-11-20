@@ -272,6 +272,7 @@ pub async fn select_radio_tracks(
                             boost: boost.as_ref(),
                         },
                         probe,
+                        store: Some(&state.listeners),
                     };
                     let tz = match query.param("tz") {
                         Param::One(tz) => Some(tz),

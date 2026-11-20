@@ -168,6 +168,20 @@ pub async fn embed(pool: &PgPool, track: Uuid, vector: &[f32]) {
     .unwrap();
 }
 
+/// A current CLAP arousal reading for `track` (a sound vector of the engine's identity and its readings row).
+pub async fn arousal(pool: &PgPool, track: Uuid, value: f64) {
+    embed(pool, track, &clustered(0, 0)).await;
+    sqlx::query(
+        "INSERT INTO track_clap_readings (track_id, embedded_at, instrumentalness, acousticness, valence_raw, arousal_raw)
+         SELECT track_id, created_at, 0.5, 0.5, 0.5, $2 FROM track_embeddings WHERE track_id = $1",
+    )
+    .bind(track)
+    .bind(value as f32)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 fn axis(scale: f64, bias: f64) -> ProbeAxis {
     ProbeAxis {
         alpha: 1.0,

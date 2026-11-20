@@ -9,11 +9,13 @@ use std::collections::{BTreeSet, HashSet};
 
 use kima_db::PgPool;
 use kima_db::mixes::night::{
-    self, COLD_START_SONGS, LATE_NIGHT, MIDNIGHT_DRIVE, NightInputs, night_songs, night_zone,
+    self, COLD_START_SONGS, LATE_NIGHT, MIDNIGHT_DRIVE, NightInputs, energy_band, night_songs,
+    night_songs_ranked_by_energy, night_zone,
 };
 use kima_db::mixes::recipe::{MixDraw, RecipeContext, pick_recipe_tracks};
 use kima_db::mixes::recipe_mixes::{self, RECIPE_MIXES};
 use kima_mixes::mix::mix_color;
+use kima_mixes::store::ListenerStore;
 use mix_seed::*;
 use uuid::Uuid;
 
@@ -146,7 +148,7 @@ async fn a_title_counts_once_across_its_copies(pool: PgPool) {
         (b, 5),
         "plays summed, the most played copy kept"
     );
-    // Energy: no reading kima uses (D-263, owner Q8 = A): every song 0.5.
+    // Energy is read only for Midnight Drive (upstream `nightSongs({energy})`): 0.5 here.
     assert_eq!(songs[0].energy, 0.5);
 }
 
@@ -510,4 +512,116 @@ async fn mixes_heads(pool: &PgPool) -> kima_vibe::mood_heads::MoodHeads {
         .await
         .unwrap();
     heads
+}
+
+/// Upstream `energyBand`: the library's middle half of `Track.arousal` (percentiles 0.25 and 0.75), which is kima's
+/// current CLAP `arousal_raw` (D-264; owner 2026-11-20, D-263): present songs with a reading only; `None` with none.
+/// Kept in the listener store 3 h, a library without readings 60 s (D-260).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn energy_band_is_the_librarys_middle_half_of_clap_arousal(pool: PgPool) {
+    assert_eq!(energy_band(&pool, None).await.unwrap(), None);
+    let store = ListenerStore::new();
+    assert_eq!(energy_band(&pool, Some(&store)).await.unwrap(), None);
+    assert_eq!(store.energy_band(std::time::Instant::now()), Some(None));
+
+    let ar = artist(&pool, "Band").await;
+    let al = album(&pool, ar).await;
+    for i in 1..=8 {
+        let t = track(&pool, al).await;
+        arousal(&pool, t, f64::from(i) / 10.0).await;
+    }
+    let gone = track(&pool, al).await;
+    arousal(&pool, gone, 0.99).await;
+    sqlx::query("UPDATE tracks SET missing_since = now() WHERE id = $1")
+        .bind(gone)
+        .execute(&pool)
+        .await
+        .unwrap();
+    track(&pool, al).await; // no reading
+    let (lo, hi) = energy_band(&pool, None).await.unwrap().unwrap();
+    // percentile_cont over 0.1..0.8 (stored as real): 0.275 and 0.625.
+    assert!(
+        (lo - 0.275).abs() < 1e-6 && (hi - 0.625).abs() < 1e-6,
+        "{lo} {hi}"
+    );
+
+    // A kept band answers until it expires.
+    let store = ListenerStore::new();
+    let kept = energy_band(&pool, Some(&store)).await.unwrap();
+    assert_eq!(store.energy_band(std::time::Instant::now()), Some(kept));
+    sqlx::query("UPDATE track_clap_readings SET arousal_raw = 0.01")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(energy_band(&pool, Some(&store)).await.unwrap(), kept);
+}
+
+/// Upstream `energyOf`: a night song is 1 inside the band (inclusive), 0 outside, 0.5 without a reading.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn night_song_energy_from_its_clap_arousal(pool: PgPool) {
+    let me = listener(&pool, "me").await;
+    let ar = artist(&pool, "Energy").await;
+    let al = album(&pool, ar).await;
+    let mut by_arousal = Vec::new();
+    for a in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8] {
+        let t = track_titled(&pool, al, Some(&format!("a{a}"))).await;
+        arousal(&pool, t, a).await;
+        night_plays(&pool, me, t, 1).await;
+        by_arousal.push((t, a));
+    }
+    let unread = track_titled(&pool, al, Some("unread")).await;
+    night_plays(&pool, me, unread, 1).await;
+    let songs = night_songs_ranked_by_energy(&pool, me, "UTC", None)
+        .await
+        .unwrap();
+    let energy = |t: Uuid| songs.iter().find(|s| s.id == t).unwrap().energy;
+    // Band 0.275..0.625: 0.3-0.6 inside.
+    for (t, a) in by_arousal {
+        let want = if (0.3..=0.6).contains(&a) { 1.0 } else { 0.0 };
+        assert_eq!(energy(t), want, "arousal {a}");
+    }
+    assert_eq!(energy(unread), 0.5);
+    // Without energy every song is 0.5.
+    assert!(
+        night_songs(&pool, me, "UTC")
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.energy == 0.5)
+    );
+}
+
+/// Midnight Drive ranks a cold start by pace + energy (upstream `fit`): with equal pace (no tempo: 0.5), songs inside
+/// the library's middle half of arousal first, then songs without a reading, then songs outside it.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn midnight_drive_ranks_by_energy_band(pool: PgPool) {
+    let me = listener(&pool, "me").await;
+    let own = night_library(&pool, me, 12, 1, |_| 2).await;
+    for (i, t) in own.iter().enumerate() {
+        match i {
+            0..4 => arousal(&pool, *t, 0.5).await,
+            4..8 => arousal(&pool, *t, if i % 2 == 0 { 0.05 } else { 0.95 }).await,
+            _ => {}
+        }
+    }
+    let store = ListenerStore::new();
+    let inputs = NightInputs {
+        store: Some(&store),
+        ..NightInputs::default()
+    };
+    let mix = night::night_mix(&pool, inputs, &MIDNIGHT_DRIVE, me, WED, Some("UTC"))
+        .await
+        .unwrap()
+        .unwrap();
+    let at = |t: &Uuid| own.iter().position(|x| x == t).unwrap();
+    let order: Vec<usize> = mix.track_ids.iter().map(at).collect();
+    assert_eq!(order.len(), 12);
+    assert!(order[..4].iter().all(|i| *i < 4), "{order:?}");
+    assert!(order[4..8].iter().all(|i| *i >= 8), "{order:?}");
+    assert!(order[8..].iter().all(|i| (4..8).contains(i)), "{order:?}");
+    // The band was kept for the next mix.
+    assert!(matches!(
+        store.energy_band(std::time::Instant::now()),
+        Some(Some(_))
+    ));
 }

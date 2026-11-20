@@ -4,9 +4,9 @@
 //! topped up with songs like them (the matching engine), then, still under eight, the fallback recipe, which is empty
 //! while the library has no mood statistics. The Late Night station's pool ([`night_station_pool`], M5b Task 13) is the radio's.
 //!
-//! Energy: upstream places a night song in the library's middle half of `arousal` for Midnight Drive. Per owner
-//! decision Q8 = A (D-263) kima treats the energy reading as absent, so every night song carries upstream's null value
-//! 0.5 and the band is never read.
+//! Energy: as upstream, Midnight Drive places a night song in the library's middle half of `arousal`
+//! ([`energy_band`]), which is kima's current CLAP `arousal_raw` (D-264; owner 2026-11-20, D-263): 1 inside, 0
+//! outside, 0.5 without a reading.
 
 use std::collections::{HashMap, HashSet};
 
@@ -18,12 +18,14 @@ use kima_mixes::station_order::{StationPage, StationRequest, StationSong, statio
 use kima_mixes::store::ListenerStore;
 use kima_vibe::feel_probe::FeelProbe;
 use sqlx::PgPool;
+use std::time::Instant;
 use uuid::Uuid;
 
 use super::familiar::FAMILIAR_SEEDS;
 use super::recipe::{RecipeContext, RecipeError, artist_sql, pace_sql, recipe_members};
 use super::recipe_mixes::{RecipeMixSpec, mix_from_tracks};
 use crate::stats::listens::safe_zone;
+use crate::vibe::ELIGIBLE;
 use crate::vibe::rank::{WeightedInput, matching_context, rank_matches};
 
 /// A play counts as night from this local hour (inclusive) ...
@@ -36,8 +38,51 @@ pub const COLD_START_SONGS: usize = 30;
 pub const STATION_FILL: usize = 100;
 /// Only plays this recent count as night plays.
 pub const NIGHT_LOOKBACK_DAYS: i32 = 365;
-/// A night song's energy when it has no energy reading (always, in kima: D-263).
+/// A night song's energy when it has no arousal reading, or when energy is not asked for.
 pub const NO_ENERGY: f64 = 0.5;
+
+/// Upstream `energyBand`: the current CLAP arousal readings (kima's `Track.arousal`, D-264) that bound the middle
+/// half of the library (percentiles 0.25 and 0.75 over present songs with a reading), or `None` with no readings.
+/// Kept in `store` [`kima_mixes::store::ENERGY_BAND_CACHE`], a library without readings
+/// [`kima_mixes::store::ENERGY_BAND_EMPTY_CACHE`] (D-260); without a store it is read every time.
+pub async fn energy_band(
+    pool: &PgPool,
+    store: Option<&ListenerStore>,
+) -> sqlx::Result<Option<(f64, f64)>> {
+    if let Some(kept) = store.and_then(|s| s.energy_band(Instant::now())) {
+        return Ok(kept);
+    }
+    let band: Option<Vec<f64>> = sqlx::query_scalar(&format!(
+        "SELECT percentile_cont(ARRAY[0.25, 0.75]) WITHIN GROUP (ORDER BY r.arousal_raw::float8)
+         FROM tracks t
+         JOIN (SELECT te.track_id, te.created_at FROM {}) e ON e.track_id = t.id
+         JOIN track_clap_readings r ON r.track_id = e.track_id AND r.embedded_at = e.created_at
+         WHERE t.missing_since IS NULL AND r.arousal_raw IS NOT NULL",
+        *ELIGIBLE
+    ))
+    .fetch_one(pool)
+    .await?;
+    let band = band.and_then(|b| match b.as_slice() {
+        [lo, hi] => Some((*lo, *hi)),
+        _ => None,
+    });
+    if let Some(store) = store {
+        store.put_energy_band(band, Instant::now());
+    }
+    Ok(band)
+}
+
+/// Upstream `nightSongs(…, {energy: true})` for Midnight Drive: [`night_songs`] with each song's energy read against
+/// the library's [`energy_band`] (looked up only when there are night songs): 1 inside the band (inclusive), 0
+/// outside, [`NO_ENERGY`] without a reading or a band.
+pub async fn night_songs_ranked_by_energy(
+    pool: &PgPool,
+    profile: ProfileId,
+    zone: &str,
+    store: Option<&ListenerStore>,
+) -> sqlx::Result<Vec<NightSong>> {
+    read_night_songs(pool, profile, zone, Some(store)).await
+}
 
 /// A song the listener played at night, with how often.
 #[derive(Debug, Clone, PartialEq)]
@@ -99,6 +144,8 @@ pub const MIDNIGHT_DRIVE: NightMixSpec = NightMixSpec {
 pub struct NightInputs<'a> {
     pub recipe: RecipeContext<'a>,
     pub probe: Option<&'a FeelProbe>,
+    /// Where the library's energy band is kept (`None`: read every time).
+    pub store: Option<&'a ListenerStore>,
 }
 
 /// The server's own zone (upstream `Intl.DateTimeFormat().resolvedOptions().timeZone`): the process's `TZ` (D-273),
@@ -133,32 +180,61 @@ pub async fn night_songs(
     profile: ProfileId,
     zone: &str,
 ) -> sqlx::Result<Vec<NightSong>> {
-    let rows: Vec<(Uuid, String, String, f64, i64)> = sqlx::query_as(&format!(
+    read_night_songs(pool, profile, zone, None).await
+}
+
+/// The night songs; `energy`: read each song's energy against the band (kept in the inner store when given).
+async fn read_night_songs(
+    pool: &PgPool,
+    profile: ProfileId,
+    zone: &str,
+    energy: Option<Option<&ListenerStore>>,
+) -> sqlx::Result<Vec<NightSong>> {
+    let rows: Vec<(Uuid, String, String, f64, Option<f64>, i64)> = sqlx::query_as(&format!(
         "WITH night AS (
-             SELECT t.id, {artist} AS artist_key, lower(t.title) AS title_key, {pace} AS pace
+             SELECT t.id, {artist} AS artist_key, lower(t.title) AS title_key, {pace} AS pace,
+                    r.arousal_raw::float8 AS arousal
              FROM plays p
              JOIN tracks t ON t.id = p.track_id
              JOIN albums a ON a.id = t.album_id
              JOIN artists ar ON ar.id = a.artist_id
              LEFT JOIN track_analysis ta ON ta.track_id = t.id AND ta.file_generation = t.ml_generation
+             LEFT JOIN (SELECT te.track_id, te.created_at FROM {eligible}) e ON e.track_id = t.id
+             LEFT JOIN track_clap_readings r ON r.track_id = e.track_id AND r.embedded_at = e.created_at
              WHERE p.profile_id = $1 AND p.played_at >= now() - make_interval(days => $2) AND p.heard
                AND t.missing_since IS NULL
                AND (EXTRACT(HOUR FROM p.played_at AT TIME ZONE $3) >= {NIGHT_START_HOUR}
                     OR EXTRACT(HOUR FROM p.played_at AT TIME ZONE $3) < {NIGHT_END_HOUR})
          )
-         SELECT id, artist_key, title_key, pace, count(*) AS plays
-         FROM night GROUP BY id, artist_key, title_key, pace",
+         SELECT id, artist_key, title_key, pace, arousal, count(*) AS plays
+         FROM night GROUP BY id, artist_key, title_key, pace, arousal",
         artist = artist_sql(),
         pace = pace_sql(),
+        eligible = *ELIGIBLE,
     ))
     .bind(profile)
     .bind(NIGHT_LOOKBACK_DAYS)
     .bind(zone)
     .fetch_all(pool)
     .await?;
+    // The band is looked up only for a listener who has night songs to place in it.
+    let band = match energy {
+        Some(store) if !rows.is_empty() => energy_band(pool, store).await?,
+        _ => None,
+    };
+    let energy_of = |arousal: Option<f64>| match (band, arousal) {
+        (Some((lo, hi)), Some(a)) => {
+            if a >= lo && a <= hi {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        _ => NO_ENERGY,
+    };
     // (title, artist) -> (song, plays of the copy kept)
     let mut by_title: HashMap<(String, String), (NightSong, i64)> = HashMap::new();
-    for (id, artist_key, title_key, pace, plays) in rows {
+    for (id, artist_key, title_key, pace, arousal, plays) in rows {
         let key = (title_key, artist_key.clone());
         match by_title.get_mut(&key) {
             None => {
@@ -170,7 +246,7 @@ pub async fn night_songs(
                             artist_key,
                             plays,
                             pace,
-                            energy: NO_ENERGY,
+                            energy: energy_of(arousal),
                         },
                         plays,
                     ),
@@ -181,6 +257,7 @@ pub async fn night_songs(
                 if plays > *best || (plays == *best && id < seen.id) {
                     seen.id = id;
                     seen.pace = pace;
+                    seen.energy = energy_of(arousal);
                     *best = plays;
                 }
             }
@@ -330,11 +407,15 @@ pub async fn night_mix_tracks(
     limit: usize,
 ) -> Result<Option<Vec<Uuid>>, RecipeError> {
     let zone = night_zone(pool, requested_zone, &server_zone()).await?;
-    let own = night_songs(pool, profile, &zone).await?;
+    let drive = spec.ranking == NightRanking::Drive;
+    let own = if drive {
+        night_songs_ranked_by_energy(pool, profile, &zone, inputs.store).await?
+    } else {
+        night_songs(pool, profile, &zone).await?
+    };
     let recipe = spec.mix.recipe;
     let seed =
         serde_json::to_string(&[recipe, today, &profile.to_string()]).expect("strings serialise");
-    let drive = spec.ranking == NightRanking::Drive;
     let fit = |s: &NightSong| if drive { s.pace + s.energy } else { 0.0 };
     let ordered: Vec<NightSong> = if own.len() >= COLD_START_SONGS {
         let keyed: Vec<(String, NightSong)> =

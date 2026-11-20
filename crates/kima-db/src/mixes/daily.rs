@@ -168,6 +168,7 @@ impl Generator<'_> {
                 boost: boost.as_ref(),
             },
             probe: self.inputs.probe,
+            store: Some(self.inputs.store),
         };
         night_mix(
             self.pool,

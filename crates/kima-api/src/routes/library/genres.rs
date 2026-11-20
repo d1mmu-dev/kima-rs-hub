@@ -1,13 +1,11 @@
-//! `GET /api/library/genres` (user): the genres big enough for the radio page.
-
-use std::collections::HashSet;
+//! `GET /api/library/genres` (user): the genres big enough for the radio page (upstream
+//! `libraryGenres`, `services/mixes/radioRow.ts:40-57`; `kima_db::genres::library_genres`).
 
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use kima_db::genres;
-use kima_ident::text::normalize_artist_name;
-use serde_json::{Value, json};
+use serde::Serialize;
 
 use crate::auth::AuthUser;
 use crate::error::ApiError;
@@ -17,20 +15,28 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/library/genres", get(list))
 }
 
-async fn list(State(state): State<AppState>, _user: AuthUser) -> Result<Json<Value>, ApiError> {
-    let found = genres::library_genres(&state.pool).await?;
-    let names: Vec<String> = found.iter().map(|(n, _)| n.clone()).collect();
-    // A genre that is also an artist's name is that artist, not a genre.
-    let artist_named: HashSet<String> = genres::artist_name_candidates(&state.pool, &names)
-        .await?
-        .into_iter()
-        .filter(|(genre, artist)| normalize_artist_name(genre) == normalize_artist_name(artist))
-        .map(|(genre, _)| genre)
-        .collect();
-    let list: Vec<Value> = found
-        .into_iter()
-        .filter(|(name, _)| !artist_named.contains(name))
-        .map(|(name, count)| json!({ "genre": name.to_lowercase(), "count": count }))
-        .collect();
-    Ok(Json(json!({ "genres": list })))
+#[derive(Serialize)]
+struct GenreRow {
+    genre: String,
+    count: i64,
+}
+
+#[derive(Serialize)]
+struct Genres {
+    genres: Vec<GenreRow>,
+}
+
+/// `{genres: [{genre, count}]}`; 500 `Failed to get genres`.
+async fn list(State(state): State<AppState>, _user: AuthUser) -> Result<Json<Genres>, ApiError> {
+    const ERROR: &str = "Failed to get genres";
+    let found = genres::library_genres(&state.pool).await.map_err(|e| {
+        tracing::error!(error = %e, "{ERROR}");
+        ApiError::Failed(ERROR)
+    })?;
+    Ok(Json(Genres {
+        genres: found
+            .into_iter()
+            .map(|(genre, count)| GenreRow { genre, count })
+            .collect(),
+    }))
 }

@@ -253,8 +253,9 @@ Reserved rows: D-260 listener state (Q1, Task 6) · D-261 `LIBRARY_PLAYABLE` = p
 ### Task 11: Decades, station list, genres parity
 
 **Files:** `crates/kima-api/src/routes/library/radio.rs`, `crates/kima-db/src/radio.rs`, `crates/kima-api/tests/radio_lists.rs`.
-- [ ] **RED:** `decades_effective_year_display_original_year_min15_newest_first`, `stations_list_14_with_subtitles`, `library_genres_matches_upstream_min15_top20` (port `genreSpellings` 10 as far as the existing genres route is concerned; record any existing difference in its row).
-- [ ] Implement; GREEN; commit `feat(api): library decades and radio station list`.
+- [x] **RED:** `decades_effective_year_display_original_year_min15_newest_first`, `stations_list_14_with_subtitles`, `library_genres_matches_upstream_min15_top20` (port `genreSpellings` 10 as far as the existing genres route is concerned; record any existing difference in its row).
+- [x] Implement; GREEN; commit `feat(api): library decades and radio station list`.
+- Done notes: `kima_db::radio::library_decades` (`COALESCE(display_year, year)`, present tracks, ≥ `MIN_STATION_SONGS` 15, newest first; D-276), routes `GET /library/decades` and `GET /library/radio/stations` in `kima-api/src/routes/library/radio.rs` (struct replies, upstream key order; 500 `Failed to get decades`). The genre list's row is **D-114** (with D-166 (2) for the key): `kima_db::genres::genre_totals` now ports v1.12.3 `computeGenreTotals` (self-name tag dropped per artist by upstream's `genreKey`, not every artist-named genre; the spelling with most songs; UTF-16 ties; 500 `Failed to get genres`); spellings still group by kima's key (open option of D-166 (2)), recorded in D-114. Tests `kima-api/tests/radio_lists.rs` (6): 401s, decades, empty decades, stations (14, key order), the `genreSpellings` `GET /genres` cases on kima's key, the 500 messages; `genres.rs::library_genres_drop_only_an_artists_own_name` replaces the v1.11 rule's test; unit tests `upstream_key_folds_spellings`, `totals_count_an_artist_once_per_genre_and_drop_its_own_name`. `genreSpellings`' `GET /radio?type=genre` cases go to Task 13.
 
 ### Task 12: Station play order
 

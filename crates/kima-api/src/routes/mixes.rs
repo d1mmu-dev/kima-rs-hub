@@ -578,8 +578,9 @@ fn mix_track(r: TrackRow) -> MixTrack {
         loudness: r.integrated_lufs,
         dynamic_range: r.loudness_range_lu,
         danceability: r.musicnn_danceability,
-        valence: None,
-        arousal: None,
+        // Upstream `syncSharedValenceArousal` COALESCEs to the CLAP raw pair when there is no DEAM answer (D-264).
+        valence: r.valence_raw,
+        arousal: r.arousal_raw,
         deam_valence: None,
         deam_arousal: None,
         clap_valence_raw: r.valence_raw,

@@ -645,6 +645,11 @@ async fn mix_track_rows_carry_every_upstream_column(pool: PgPool) {
     assert_eq!(a["danceability"], Value::Null);
     assert_eq!(a["clapValenceRaw"], 0.75);
     assert_eq!(a["clapArousalRaw"], -0.5);
+    // Upstream `syncSharedValenceArousal` falls back to the CLAP raw pair when there is no DEAM answer (D-264).
+    assert_eq!(a["valence"], 0.75);
+    assert_eq!(a["arousal"], -0.5);
+    assert_eq!(a["deamValence"], Value::Null);
+    assert_eq!(a["deamArousal"], Value::Null);
     assert_eq!(a["instrumentalness"], 0.25);
     assert_eq!(a["acousticness"], 0.5);
     assert_eq!(a["moodTags"], json!(["calm"]));
@@ -702,6 +707,8 @@ async fn mix_track_rows_carry_every_upstream_column(pool: PgPool) {
         "dynamicRange",
         "clapValenceRaw",
         "clapArousalRaw",
+        "valence",
+        "arousal",
         "instrumentalness",
         "acousticness",
         "analysisStatus",

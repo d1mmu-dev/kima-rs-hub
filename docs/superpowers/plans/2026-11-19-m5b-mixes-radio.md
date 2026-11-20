@@ -389,8 +389,8 @@ Upstream [V `routes/mixes.ts:93-109` `loadTracksInMixOrder`, used by `GET /mixes
 | `loudness` | `track_analysis.integrated_lufs` (upstream: integrated EBU R128, `analyzer.py:598`) | | `vibeAnalysisError` | stage(embedding) last error, else null |
 | `dynamicRange` | `track_analysis.loudness_range_lu` (upstream: loudness range, `analyzer.py:599`) | | `vibeAnalysisRetryCount` | stage(embedding) attempts, else null |
 | `danceability` | `track_analysis.musicnn_danceability` (unprovisioned → null; Q8 = A) | | `vibeAnalysisStatusUpdatedAt` | stage(embedding) last change time, else null |
-| `valence` | null [? Task 9 checks whether upstream's `valence` equals kima's `musicnn_valence`; unprovisioned → null either way] | | `isrc` | `tracks.isrc` |
-| `arousal` | null [? as `valence`, `musicnn_arousal`] | | `isrcSource` | `tracks.isrc_source` |
+| `valence` | `track_clap_readings.valence_raw` (current reading; upstream `syncSharedValenceArousal` COALESCEs to the CLAP raw value when there is no DEAM answer, kima has no DEAM; review I1, D-264) | | `isrc` | `tracks.isrc` |
+| `arousal` | `track_clap_readings.arousal_raw` (current reading, as `valence`) | | `isrcSource` | `tracks.isrc_source` |
 | `deamValence` | null | | `acoustidFingerprint` | null (kima keeps no Chromaprint string) |
 | `deamArousal` | null | | `recordingMbid` | `tracks.recording_mbid` |
 | `clapValenceRaw` | `track_clap_readings.valence_raw` (current reading only) | | `corrupt` | `false` (only playable rows are returned; kima has no corrupt flag, D-261) |

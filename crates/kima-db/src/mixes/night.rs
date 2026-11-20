@@ -2,7 +2,7 @@
 //! the mood heads learn, so the Late Night and Midnight Drive mixes play from the profile's heard plays between
 //! [`NIGHT_START_HOUR`] and [`NIGHT_END_HOUR`] in its time zone. Short of [`COLD_START_SONGS`] night songs a mix is
 //! topped up with songs like them (the matching engine), then, still under eight, the fallback recipe, which is empty
-//! while the library has no mood statistics. The Late Night station's pool is the radio's (Task 13).
+//! while the library has no mood statistics. The Late Night station's pool ([`night_station_pool`], M5b Task 13) is the radio's.
 //!
 //! Energy: upstream places a night song in the library's middle half of `arousal` for Midnight Drive. Per owner
 //! decision Q8 = A (D-263) kima treats the energy reading as absent, so every night song carries upstream's null value
@@ -14,6 +14,8 @@ use kima_core::profile::ProfileId;
 use kima_mixes::artist::{MIN_MIX_TRACKS, cap_by_artist};
 use kima_mixes::mix::{MIX_TRACKS, ProgrammaticMix};
 use kima_mixes::seeded::{seeded_order, weighted_order_seeded};
+use kima_mixes::station_order::{StationPage, StationRequest, StationSong, station_page};
+use kima_mixes::store::ListenerStore;
 use kima_vibe::feel_probe::FeelProbe;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -30,6 +32,8 @@ pub const NIGHT_START_HOUR: u32 = 22;
 pub const NIGHT_END_HOUR: u32 = 4;
 /// Fewer distinct night songs than this is a cold start.
 pub const COLD_START_SONGS: usize = 30;
+/// The Late Night station tops a cold start's night songs up to this many with songs like them.
+pub const STATION_FILL: usize = 100;
 /// Only plays this recent count as night plays.
 pub const NIGHT_LOOKBACK_DAYS: i32 = 365;
 /// A night song's energy when it has no energy reading (always, in kima: D-263).
@@ -195,13 +199,14 @@ struct Song {
 }
 
 /// Upstream `similarSongs`: up to `count` songs that sound like `seeds` (weighted by plays), never a seed, in rank
-/// order; empty without matching data. `counted`: the songs that take places in the album and artist caps.
+/// order; empty without matching data. `counted`: the songs that take places in the album and artist caps (`None`:
+/// the seeds with data, upstream's default).
 async fn similar_songs(
     pool: &PgPool,
     probe: Option<&FeelProbe>,
     seeds: &[NightSong],
     count: i64,
-    counted: &[Uuid],
+    counted: Option<&[Uuid]>,
 ) -> Result<Vec<Song>, String> {
     let Some(probe) = probe else {
         return Ok(Vec::new());
@@ -231,6 +236,8 @@ async fn similar_songs(
             weight: s.plays as f64 / total as f64,
         })
         .collect();
+    let seeded: Vec<Uuid> = with_data.iter().map(|s| s.id).collect();
+    let counted = counted.unwrap_or(&seeded);
     let ranked = rank_matches(pool, &ctx, &inputs, count, counted)
         .await
         .map_err(|e| e.to_string())?;
@@ -382,14 +389,14 @@ pub async fn night_mix_tracks(
             .collect();
         let seeds: Vec<NightSong> = own.iter().take(FAMILIAR_SEEDS).cloned().collect();
         // Nothing is counted: the merged list is capped once, below, with the listener's own songs first.
-        let similar = match similar_songs(pool, inputs.probe, &seeds, (limit * 2) as i64, &[]).await
-        {
-            Ok(similar) => similar,
-            Err(e) => {
-                tracing::debug!("[Mixes] {recipe}: no similar songs: {e}");
-                Vec::new()
-            }
-        };
+        let similar =
+            match similar_songs(pool, inputs.probe, &seeds, (limit * 2) as i64, Some(&[])).await {
+                Ok(similar) => similar,
+                Err(e) => {
+                    tracing::debug!("[Mixes] {recipe}: no similar songs: {e}");
+                    Vec::new()
+                }
+            };
         let extra = without_copies(pool, without(similar, &own_ids), &own_songs).await?;
         let mut merged = have;
         merged.extend(extra);
@@ -438,4 +445,86 @@ pub async fn night_mix(
         Some(ids) => Ok(Some(mix_from_tracks(pool, &spec.mix, today, &ids).await?)),
         None => Ok(None),
     }
+}
+
+/// Upstream `nightStationPool`: the Late Night station's songs for this profile. With [`COLD_START_SONGS`] or more
+/// distinct night songs, those (only the ones played at night twice or more when at least [`COLD_START_SONGS`] of them
+/// were); with fewer, the night songs plus songs like them up to [`STATION_FILL`], and still under [`MIN_MIX_TRACKS`]
+/// the fallback recipe's members.
+pub async fn night_station_pool(
+    pool: &PgPool,
+    inputs: NightInputs<'_>,
+    profile: ProfileId,
+    requested_zone: Option<&str>,
+    fallback_recipe: &str,
+) -> Result<Vec<StationSong>, RecipeError> {
+    let zone = night_zone(pool, requested_zone, &server_zone()).await?;
+    let own = night_songs(pool, profile, &zone).await?;
+    let station = |s: &NightSong| StationSong {
+        id: s.id,
+        artist_id: s.artist_key.clone(),
+    };
+    if own.len() >= COLD_START_SONGS {
+        let repeated: Vec<StationSong> = own.iter().filter(|s| s.plays >= 2).map(station).collect();
+        return Ok(if repeated.len() >= COLD_START_SONGS {
+            repeated
+        } else {
+            own.iter().map(station).collect()
+        });
+    }
+    let own_ids: HashSet<Uuid> = own.iter().map(|s| s.id).collect();
+    let similar = similar_songs(
+        pool,
+        inputs.probe,
+        &own,
+        (STATION_FILL - own.len()) as i64,
+        None,
+    )
+    .await
+    .map_err(RecipeError::Invalid)?;
+    let mut filled: Vec<StationSong> = own.iter().map(station).collect();
+    filled.extend(without(similar, &own_ids).into_iter().map(|s| StationSong {
+        id: s.id,
+        artist_id: s.artist,
+    }));
+    if filled.len() >= MIN_MIX_TRACKS {
+        return Ok(filled);
+    }
+    let have: HashSet<Uuid> = filled.iter().map(|s| s.id).collect();
+    let members = fallback_songs(pool, inputs.recipe, fallback_recipe).await?;
+    filled.extend(without(members, &have).into_iter().map(|s| StationSong {
+        id: s.id,
+        artist_id: s.artist,
+    }));
+    Ok(filled)
+}
+
+/// Upstream `pickNightStationPage`: the Late Night station's refill, the profile's [`night_station_pool`] in the
+/// station's usual order ([`kima_mixes::station_order`]), the session kept in `store` as `night`.
+#[allow(clippy::too_many_arguments)]
+pub async fn pick_night_station_page<K, KF>(
+    pool: &PgPool,
+    inputs: NightInputs<'_>,
+    store: &ListenerStore,
+    profile: ProfileId,
+    requested_zone: Option<&str>,
+    fallback_recipe: &str,
+    playable: K,
+    request: &StationRequest<'_>,
+) -> Result<StationPage, RecipeError>
+where
+    K: FnMut(Vec<Uuid>) -> KF,
+    KF: std::future::Future<Output = Result<std::collections::HashSet<Uuid>, RecipeError>>,
+{
+    let songs = || async move {
+        night_station_pool(pool, inputs, profile, requested_zone, fallback_recipe)
+            .await
+            .map(Some)
+    };
+    station_page(store, "night", songs, playable, request)
+        .await
+        .map_err(|e| match e {
+            kima_mixes::station_order::StationError::Invalid(m) => RecipeError::Invalid(m),
+            kima_mixes::station_order::StationError::Source(e) => e,
+        })
 }

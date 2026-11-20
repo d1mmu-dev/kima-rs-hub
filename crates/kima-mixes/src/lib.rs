@@ -10,6 +10,7 @@ pub mod definitions;
 pub mod familiar;
 mod json;
 pub mod mix;
+pub mod radio;
 pub mod recipes;
 pub mod seeded;
 pub mod spread;

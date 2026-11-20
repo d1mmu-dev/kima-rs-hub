@@ -9,18 +9,24 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use futures::StreamExt as _;
 
 use kima_core::profile::ProfileId;
 use kima_db::PgPool;
 use kima_db::mixes::familiar::familiar_boost;
-use kima_db::mixes::night::{NightInputs, pick_night_station_page};
+use kima_db::mixes::night::{NightInputs, night_zone, pick_night_station_page, server_zone};
 use kima_db::mixes::recipe::{
     FamiliarBoost, RecipeContext, RecipeError, pick_station_page, pick_wildcard_page,
 };
 use kima_db::radio;
 use kima_ident::similar;
 use kima_ident::stages::{moods, similarity};
+use kima_mixes::covers::{
+    COVER_CONCURRENCY, COVER_SAMPLE, RADIO_COVERS_EVERY, RADIO_COVERS_FIRST, RowScope, RowStation,
+    cover_station_key, seconds_left,
+};
 use kima_mixes::radio::{Sound, artist_mix, artist_sound, closeness, js_parse_int};
 use kima_mixes::recipes::get_recipe;
 use kima_mixes::station_order::{StationPage, StationRequest, empty_page, seed_is_valid};
@@ -413,4 +419,262 @@ async fn artist_radio(
     let own: Vec<Uuid> = songs.iter().filter(|s| s.present).map(|s| s.id).collect();
     let mut random = || rand::random::<f64>();
     Ok(Some(artist_mix(&own, &scored, limit, &mut random)))
+}
+
+// ---- the radio row and its covers (M5b Task 14) ------------------------------------------------------------------
+
+/// A tile of `GET /library/radio/row`, upstream's keys in its order; `name`/`description` only for mood stations,
+/// `count` only for genres and decades.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct RowStationReply {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
+    pub cover: Option<String>,
+}
+
+/// Whether Workout and the mood stations get tiles: the vibe analyzer runs (`vibeEmbeddings`) and the mood
+/// statistics exist for the heads (owner Q2 = B, D-266: hidden while the heads are blocked).
+async fn mood_tiles(state: &AppState) -> sqlx::Result<bool> {
+    let ctx = state.ident_ctx();
+    if !kima_ident::stages::vibe_assets::vibe_embeddings(&ctx).await? {
+        return Ok(false);
+    }
+    let (heads, _) = engine(state).await;
+    let Some(heads) = heads else {
+        return Ok(false);
+    };
+    let mut conn = state.pool.acquire().await?;
+    Ok(kima_db::vibe::moods::load_mood_state(&mut conn, &heads)
+        .await?
+        .is_some())
+}
+
+/// Upstream `rowStations`: the page's tiles without covers.
+async fn row_stations(state: &AppState, scope: RowScope) -> sqlx::Result<Vec<RowStation>> {
+    let moods = mood_tiles(state).await?;
+    let genres = kima_db::genres::library_genres(&state.pool).await?;
+    let decades: Vec<(i32, i64)> = radio::library_decades(&state.pool)
+        .await?
+        .into_iter()
+        .map(|d| (d.decade, d.count))
+        .collect();
+    Ok(kima_mixes::covers::row_stations(
+        scope, moods, &genres, &decades,
+    ))
+}
+
+/// Upstream `pickCover`: the cover of the first song, in the order the station would play them, that has one; `None`
+/// when none does or the station has no songs (a retired or unknown mood included).
+async fn pick_cover(
+    state: &AppState,
+    profile: ProfileId,
+    zone: &str,
+    kind: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, RecipeError> {
+    let mut pairs = vec![("tz".to_string(), zone.to_string())];
+    if let Some(value) = value {
+        pairs.push(("value".to_string(), value.to_string()));
+    }
+    let query = RadioQuery::new(pairs);
+    let picked = select_radio_tracks(state, profile, kind, &query, COVER_SAMPLE).await?;
+    let Selection::Picked {
+        track_ids, station, ..
+    } = picked
+    else {
+        return Ok(None);
+    };
+    let ids: Vec<Uuid> = if station {
+        track_ids
+    } else {
+        let keep = radio::playable_ids(&state.pool, &track_ids).await?;
+        track_ids
+            .into_iter()
+            .filter(|id| keep.contains(id))
+            .collect()
+    };
+    Ok(radio::first_cover(&state.pool, &ids).await?)
+}
+
+/// Upstream `dailyCover`: this listener's cover for one station today, kept if already picked, else picked now and
+/// kept (the first kept pick wins).
+async fn daily_cover(
+    state: &AppState,
+    profile: ProfileId,
+    day: &str,
+    day_left: Duration,
+    zone: &str,
+    kind: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, RecipeError> {
+    let key = cover_station_key(kind, value);
+    let listener = profile.into_uuid();
+    if let Some(kept) = state.listeners.cover(listener, day, &key, Instant::now()) {
+        return Ok(kept);
+    }
+    let cover = pick_cover(state, profile, zone, kind, value).await?;
+    Ok(state
+        .listeners
+        .put_cover_if_absent(listener, day, &key, cover, day_left, Instant::now()))
+}
+
+/// Upstream `stationCovers` for a zone already read (`nightZone`): each station's cover for this listener today, in
+/// the order asked, at most [`COVER_CONCURRENCY`] worked out at once. A station that fails has no cover and is not
+/// kept, so the next request tries again.
+pub async fn station_covers(
+    state: &AppState,
+    profile: ProfileId,
+    zone: &str,
+    stations: &[(&str, Option<&str>)],
+) -> Vec<Option<String>> {
+    let (day, used) =
+        match radio::local_day(&state.pool, zone, time::OffsetDateTime::now_utc()).await {
+            Ok(day) => day,
+            Err(e) => {
+                tracing::warn!("[RadioCovers] local day unreadable: {e}");
+                return vec![None; stations.len()];
+            }
+        };
+    let day_left = Duration::from_secs(seconds_left(used));
+    let day = day.as_str();
+    let owned: Vec<(String, Option<String>)> = stations
+        .iter()
+        .map(|(kind, value)| (kind.to_string(), value.map(str::to_string)))
+        .collect();
+    futures::stream::iter(owned)
+        .map(|(kind, value): (String, Option<String>)| async move {
+            let value = value.as_deref();
+            match daily_cover(state, profile, day, day_left, zone, &kind, value).await {
+                Ok(cover) => cover,
+                Err(e) => {
+                    tracing::warn!("[RadioCovers] {kind}/{}: {e}", value.unwrap_or(""));
+                    None
+                }
+            }
+        })
+        .buffered(COVER_CONCURRENCY)
+        .collect()
+        .await
+}
+
+async fn with_covers(
+    state: &AppState,
+    stations: Vec<RowStation>,
+    profile: ProfileId,
+    zone: &str,
+) -> Vec<RowStationReply> {
+    let asked: Vec<(&str, Option<&str>)> = stations
+        .iter()
+        .map(|s| (s.kind, s.value.as_deref()))
+        .collect();
+    let covers = station_covers(state, profile, zone, &asked).await;
+    stations
+        .into_iter()
+        .zip(covers)
+        .map(|(s, cover)| RowStationReply {
+            kind: s.kind,
+            value: s.value,
+            name: s.name,
+            description: s.description,
+            count: s.count,
+            cover,
+        })
+        .collect()
+}
+
+/// Upstream `radioRow`: a page's stations and this listener's covers for them today, in `tz` (`nightZone`: an
+/// unknown zone is the server's); the zone is kept for picking ahead.
+pub async fn radio_row(
+    state: &AppState,
+    profile: ProfileId,
+    tz: Option<&str>,
+    scope: RowScope,
+) -> sqlx::Result<Vec<RowStationReply>> {
+    let zone = night_zone(&state.pool, tz, &server_zone()).await?;
+    state
+        .listeners
+        .keep_cover_zone(profile.into_uuid(), &zone, Instant::now());
+    let stations = row_stations(state, scope).await?;
+    Ok(with_covers(state, stations, profile, &zone).await)
+}
+
+/// Upstream `warmRadioCovers`: picks the day's covers for every listener seen within a week whose local day has begun
+/// since their last pick, in the zone they last asked from; the radio page's list holds the home row's, so one pick
+/// serves both. A listener whose profile is gone is forgotten; a pick that found no cover at all is tried again next
+/// cycle.
+pub async fn warm_radio_covers(state: &AppState) {
+    let zones = state.listeners.cover_zones(Instant::now());
+    if zones.is_empty() {
+        return;
+    }
+    let stations = match row_stations(state, RowScope::All).await {
+        Ok(stations) => stations,
+        Err(e) => {
+            tracing::warn!("[RadioRow] stations unreadable: {e}");
+            return;
+        }
+    };
+    for (listener, zone) in zones {
+        if let Err(e) = warm_one(state, &stations, listener, &zone).await {
+            tracing::warn!("[RadioRow] covers not picked ahead for {listener}: {e}");
+        }
+    }
+}
+
+async fn warm_one(
+    state: &AppState,
+    stations: &[RowStation],
+    listener: Uuid,
+    zone: &str,
+) -> sqlx::Result<()> {
+    let (day, used) = radio::local_day(&state.pool, zone, time::OffsetDateTime::now_utc()).await?;
+    if state
+        .listeners
+        .covers_warmed(listener, &day, Instant::now())
+    {
+        return Ok(());
+    }
+    let Some(profile) = radio::existing_profile(&state.pool, listener).await? else {
+        state.listeners.forget_cover_zone(listener);
+        return Ok(());
+    };
+    let row = with_covers(state, stations.to_vec(), profile, zone).await;
+    if row.iter().any(|s| s.cover.is_some()) {
+        state.listeners.mark_covers_warmed(
+            listener,
+            &day,
+            Duration::from_secs(seconds_left(used)),
+            Instant::now(),
+        );
+    }
+    Ok(())
+}
+
+/// Upstream's `radio-covers` cycle (`workers/index.ts`): [`warm_radio_covers`] first [`RADIO_COVERS_FIRST`] after
+/// start, then [`RADIO_COVERS_EVERY`] after each run ends, so runs never overlap; stopped by `shutdown`.
+pub fn spawn_radio_covers(
+    state: AppState,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut wait = RADIO_COVERS_FIRST;
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = tokio::time::sleep(wait) => {}
+            }
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                () = warm_radio_covers(&state) => {}
+            }
+            wait = RADIO_COVERS_EVERY;
+        }
+    })
 }

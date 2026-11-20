@@ -8,6 +8,8 @@
 //! | `mixes:familiar:<user>` + its lock (`familiarity.ts`) | [`ListenerStore::familiar`] | 3 h, 60 s for no boost; lock 60 s |
 //! | `mixes:energy-band` (`nightPlays.ts`) | [`ListenerStore::energy_band`] | 3 h, 60 s without readings |
 //! | `radiocover:<listener>:<day>:<type>:<value>` (`stationCovers.ts`) | [`ListenerStore::cover`] | to the local day's end, 600 s for no cover |
+//! | `radiocover:tz:<listener>` (`radioRow.ts`) | [`ListenerStore::cover_zones`] | 7 days after the last radio row |
+//! | `radiocover:warm:<listener>:<day>` (`radioRow.ts`) | [`ListenerStore::covers_warmed`] | to the local day's end |
 //!
 //! Every method takes the time it acts at, so lifetimes are tested without waiting. Entries past their life are never
 //! answered and are swept from a map whenever that map is read or written, so memory stays bounded by the live
@@ -43,6 +45,8 @@ pub const ENERGY_BAND_CACHE: Duration = Duration::from_secs(3 * 3600);
 pub const ENERGY_BAND_EMPTY_CACHE: Duration = Duration::from_secs(60);
 /// Upstream `NO_COVER_SECONDS`: a station without a cover is asked again soon.
 pub const NO_COVER: Duration = Duration::from_secs(600);
+/// Upstream `ZONE_SECONDS` (`radioRow.ts`): a listener's covers are picked ahead for a week after their last visit.
+pub const COVER_ZONE_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// Upstream `familiarTiming`: the scan lock's life, and how long (and how often) a caller that finds it held looks for
 /// the holder's result before it scans itself.
@@ -132,6 +136,10 @@ struct Inner {
     energy_band: Option<(Option<(f64, f64)>, Instant)>,
     /// (listener, day, station) -> (cover, kept until).
     covers: HashMap<(Uuid, String, String), (Option<String>, Instant)>,
+    /// listener -> (zone of its last radio row, kept until).
+    cover_zones: HashMap<Uuid, (String, Instant)>,
+    /// (listener, day) whose covers were picked ahead -> kept until.
+    warmed: HashMap<(Uuid, String), Instant>,
 }
 
 impl Inner {
@@ -156,6 +164,11 @@ impl Inner {
 
     fn sweep_covers(&mut self, now: Instant) {
         self.covers.retain(|_, (_, until)| now < *until);
+    }
+
+    fn sweep_cover_zones(&mut self, now: Instant) {
+        self.cover_zones.retain(|_, (_, until)| now < *until);
+        self.warmed.retain(|_, until| now < *until);
     }
 }
 
@@ -505,6 +518,50 @@ impl ListenerStore {
         cover
     }
 
+    /// Upstream `radiocover:tz:<listener>`: the zone the listener asked the radio row from, kept
+    /// [`COVER_ZONE_TTL`] from this visit for picking the next day's covers ahead.
+    pub fn keep_cover_zone(&self, listener: Uuid, zone: &str, now: Instant) {
+        let mut inner = self.lock();
+        inner.sweep_cover_zones(now);
+        inner
+            .cover_zones
+            .insert(listener, (zone.to_string(), now + COVER_ZONE_TTL));
+    }
+
+    /// Every listener with a live zone, by listener id.
+    pub fn cover_zones(&self, now: Instant) -> Vec<(Uuid, String)> {
+        let mut inner = self.lock();
+        inner.sweep_cover_zones(now);
+        let mut zones: Vec<(Uuid, String)> = inner
+            .cover_zones
+            .iter()
+            .map(|(listener, (zone, _))| (*listener, zone.clone()))
+            .collect();
+        zones.sort();
+        zones
+    }
+
+    /// Drops a listener that no longer exists from the zones.
+    pub fn forget_cover_zone(&self, listener: Uuid) {
+        self.lock().cover_zones.remove(&listener);
+    }
+
+    /// Upstream `radiocover:warm:<listener>:<day>`: whether this listener's covers were picked ahead for `day`.
+    pub fn covers_warmed(&self, listener: Uuid, day: &str, now: Instant) -> bool {
+        let mut inner = self.lock();
+        inner.sweep_cover_zones(now);
+        inner.warmed.contains_key(&(listener, day.to_string()))
+    }
+
+    /// Marks this listener's covers picked ahead for `day`, until the day ends (`day_left`).
+    pub fn mark_covers_warmed(&self, listener: Uuid, day: &str, day_left: Duration, now: Instant) {
+        let mut inner = self.lock();
+        inner.sweep_cover_zones(now);
+        inner
+            .warmed
+            .insert((listener, day.to_string()), now + day_left);
+    }
+
     /// How many entries the store holds, live or not yet swept (mix lists per zone, sessions, familiarity scans and
     /// locks, the energy band, covers): what its memory is bounded by.
     pub fn held_entries(&self) -> usize {
@@ -515,6 +572,8 @@ impl ListenerStore {
             + inner.familiar_locks.len()
             + usize::from(inner.energy_band.is_some())
             + inner.covers.len()
+            + inner.cover_zones.len()
+            + inner.warmed.len()
     }
 
     // ---- drops -------------------------------------------------------------------------------------------------

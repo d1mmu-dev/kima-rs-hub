@@ -4,6 +4,7 @@
 //! [`store`], the in-process listener state that replaces upstream's Redis keys (D-260).
 
 pub mod artist;
+pub mod covers;
 pub mod daily;
 pub mod day;
 pub mod definitions;

@@ -9,6 +9,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use kima_api_types::radio::{RadioAlbum, RadioArtist, RadioReply, RadioTrack};
 use kima_db::radio::{self, RadioRow};
+use kima_mixes::covers::RowScope;
 use kima_mixes::radio::{parse_limit, shuffle};
 use kima_mixes::spread::{Follows, spread_by_artist};
 use kima_mixes::stations::mood_station_list;
@@ -17,13 +18,14 @@ use uuid::Uuid;
 
 use crate::auth::AuthUser;
 use crate::error::ApiError;
-use crate::radio::{Param, RadioQuery, Selection, select_radio_tracks};
+use crate::radio::{Param, RadioQuery, RowStationReply, Selection, select_radio_tracks};
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/library/decades", get(decades))
         .route("/library/radio/stations", get(stations))
+        .route("/library/radio/row", get(radio_row))
         .route("/library/radio", get(radio_tracks))
 }
 
@@ -196,4 +198,38 @@ async fn radio_tracks(
         )
     };
     Ok(reply(ordered.into_iter().map(radio_track).collect(), next))
+}
+
+#[derive(Serialize)]
+struct RadioRowReply {
+    stations: Vec<RowStationReply>,
+}
+
+/// Upstream `GET /radio/row`: a page's stations, each with this listener's cover for the local day, in one reply;
+/// `?scope=home` (default) or `all` (400 `scope must be home or all`), `?tz=` the listener's zone. 500 `Failed to get
+/// radio stations`.
+async fn radio_row(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(pairs): Query<Vec<(String, String)>>,
+) -> Result<Json<RadioRowReply>, ApiError> {
+    const ERROR: &str = "Failed to get radio stations";
+    let query = RadioQuery::new(pairs);
+    let scope = match query.param("scope") {
+        Param::Absent => RowScope::Home,
+        Param::One(s) => RowScope::parse(Some(s))
+            .ok_or_else(|| ApiError::BadRequest("scope must be home or all".into()))?,
+        Param::Many => return Err(ApiError::BadRequest("scope must be home or all".into())),
+    };
+    let tz = match query.param("tz") {
+        Param::One(tz) => Some(tz),
+        _ => None,
+    };
+    let stations = crate::radio::radio_row(&state, user.profile, tz, scope)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Radio row endpoint error");
+            ApiError::Failed(ERROR)
+        })?;
+    Ok(Json(RadioRowReply { stations }))
 }

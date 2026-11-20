@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use kima_mixes::familiar::FamiliarBoost;
 use kima_mixes::store::{
-    FamiliarTiming, ListenerStore, MAX_CACHED_ZONES, MIXES_CACHE_TTL, NO_COVER, SESSION_TTL,
-    STATIONS_KEPT, SaveMode, StationSession, spawn_mood_drop,
+    COVER_ZONE_TTL, FamiliarTiming, ListenerStore, MAX_CACHED_ZONES, MIXES_CACHE_TTL, NO_COVER,
+    SESSION_TTL, STATIONS_KEPT, SaveMode, StationSession, spawn_mood_drop,
 };
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -507,4 +507,52 @@ fn expired_entries_are_swept_on_read_too() {
     assert_eq!(store.energy_band(late), None);
     assert_eq!(store.cover(ME, "2026-11-19", "mood:calm", late), None);
     assert_eq!(store.held_entries(), 0);
+}
+
+/// `radiocover:tz:<listener>` (`radioRow.ts`): the zone a listener last asked the row from, kept a week after the last
+/// visit for the warm job; a forgotten listener is dropped.
+#[test]
+fn cover_zone_kept_7_days_from_last_visit_and_forgotten() {
+    assert_eq!(COVER_ZONE_TTL, Duration::from_secs(7 * 24 * 3600));
+    let store = ListenerStore::new();
+    let t0 = Instant::now();
+    store.keep_cover_zone(ME, "Asia/Tokyo", t0);
+    store.keep_cover_zone(YOU, "UTC", t0);
+    assert_eq!(
+        store.cover_zones(t0),
+        sorted(vec![
+            (ME, "Asia/Tokyo".to_string()),
+            (YOU, "UTC".to_string())
+        ])
+    );
+    store.forget_cover_zone(YOU);
+    assert_eq!(store.cover_zones(t0), vec![(ME, "Asia/Tokyo".to_string())]);
+    // A later visit moves the zone and the week (the store sweeps at the time asked, so ask in time order).
+    let later = t0 + Duration::from_secs(3600);
+    store.keep_cover_zone(ME, "Europe/Warsaw", later);
+    store.keep_cover_zone(YOU, "UTC", t0);
+    assert_eq!(
+        store.cover_zones(t0 + COVER_ZONE_TTL),
+        vec![(ME, "Europe/Warsaw".to_string())]
+    );
+    assert!(store.cover_zones(later + COVER_ZONE_TTL).is_empty());
+}
+
+fn sorted(mut v: Vec<(Uuid, String)>) -> Vec<(Uuid, String)> {
+    v.sort();
+    v
+}
+
+/// `radiocover:warm:<listener>:<day>`: once a listener's covers were picked ahead for a local day, the warm job leaves
+/// them until that day ends.
+#[test]
+fn covers_warmed_once_per_listener_and_local_day() {
+    let store = ListenerStore::new();
+    let t0 = Instant::now();
+    assert!(!store.covers_warmed(ME, "2026-11-19", t0));
+    store.mark_covers_warmed(ME, "2026-11-19", 2 * HOUR, t0);
+    assert!(store.covers_warmed(ME, "2026-11-19", t0 + 2 * HOUR - Duration::from_secs(1)));
+    assert!(!store.covers_warmed(ME, "2026-11-19", t0 + 2 * HOUR));
+    assert!(!store.covers_warmed(ME, "2026-11-20", t0));
+    assert!(!store.covers_warmed(YOU, "2026-11-19", t0));
 }

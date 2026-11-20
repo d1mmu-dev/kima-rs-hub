@@ -357,3 +357,45 @@ pub async fn radio_rows(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<Vec<RadioRo
     .fetch_all(pool)
     .await
 }
+
+/// Upstream `localDay`: the calendar day (`YYYY-MM-DD`) at `at` in `zone` (one Postgres knows, `nightZone`) and the
+/// seconds of it already past; [`kima_mixes::covers::seconds_left`] gives the rest.
+pub async fn local_day(
+    pool: &PgPool,
+    zone: &str,
+    at: time::OffsetDateTime,
+) -> sqlx::Result<(String, i64)> {
+    sqlx::query_as(
+        "SELECT to_char($1 AT TIME ZONE $2, 'YYYY-MM-DD'),
+                floor(extract(epoch FROM ($1 AT TIME ZONE $2)::time))::int8",
+    )
+    .bind(at)
+    .bind(zone)
+    .fetch_one(pool)
+    .await
+}
+
+/// The profile with this id, `None` when it no longer exists (the warm job forgets such listeners).
+pub async fn existing_profile(pool: &PgPool, profile: Uuid) -> sqlx::Result<Option<ProfileId>> {
+    sqlx::query_scalar("SELECT id FROM profiles WHERE id = $1")
+        .bind(profile)
+        .fetch_optional(pool)
+        .await
+}
+
+/// The cover token (the album id, D-265) of the first of `ids`, in that order, whose album has a cover image.
+pub async fn first_cover(pool: &PgPool, ids: &[Uuid]) -> sqlx::Result<Option<String>> {
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let cover: Option<Uuid> = sqlx::query_scalar(
+        "SELECT a.id FROM unnest($1::uuid[]) WITH ORDINALITY u(id, ord)
+         JOIN tracks t ON t.id = u.id JOIN albums a ON a.id = t.album_id
+         WHERE a.image_path IS NOT NULL
+         ORDER BY u.ord LIMIT 1",
+    )
+    .bind(ids)
+    .fetch_optional(pool)
+    .await?;
+    Ok(cover.map(|id| id.to_string()))
+}

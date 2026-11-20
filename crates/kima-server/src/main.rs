@@ -306,6 +306,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(changes) = kima_ident::stages::moods::subscribe_changes(&ident_ctx).await {
         kima_mixes::store::spawn_mood_drop(state.listeners.clone(), changes, shutdown.clone());
     }
+    // The day's radio covers are picked ahead for recent listeners (upstream's `radio-covers` cycle: first after 60 s,
+    // then 5 min after each run); stopped by the shutdown token.
+    kima_api::radio::spawn_radio_covers(state.clone(), shutdown.clone());
     registry.register_autotag(ident_ctx.clone());
     // The mood snapshot follows the statistics between cycles (every 30 s); stopped by the shutdown token.
     let mood_snapshots =

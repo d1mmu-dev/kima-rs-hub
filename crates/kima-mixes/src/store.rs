@@ -605,19 +605,41 @@ impl ListenerStore {
 /// so it drops as well.
 pub fn spawn_mood_drop(
     store: Arc<ListenerStore>,
-    mut changes: broadcast::Receiver<()>,
+    changes: broadcast::Receiver<()>,
     stop: CancellationToken,
+) -> JoinHandle<()> {
+    spawn_drop(store, changes, stop, ListenerStore::drop_mood_dependent)
+}
+
+/// Runs `drop` on the store for every signal (a lagging receiver missed some, so it drops as well) until the sender is
+/// gone or `stop` is cancelled.
+fn spawn_drop(
+    store: Arc<ListenerStore>,
+    mut signals: broadcast::Receiver<()>,
+    stop: CancellationToken,
+    drop: fn(&ListenerStore),
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => return,
-                event = changes.recv() => match event {
-                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => store.drop_mood_dependent(),
+                signal = signals.recv() => match signal {
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => drop(&store),
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
             }
         }
     })
+}
+
+/// Drops every cached mix ([`ListenerStore::drop_all`], upstream `clearMixCache`) on each signal of
+/// `kima_ident::events::ProgressEvents::subscribe_mix_clears` (a completed enrichment point), until the sender is gone
+/// or `stop` (the server's shutdown token) is cancelled. A lagging receiver missed signals, so it drops as well.
+pub fn spawn_full_drop(
+    store: Arc<ListenerStore>,
+    clears: broadcast::Receiver<()>,
+    stop: CancellationToken,
+) -> JoinHandle<()> {
+    spawn_drop(store, clears, stop, ListenerStore::drop_all)
 }

@@ -6,12 +6,18 @@
 //! holds a plain mutex only for a few field updates. At most one trailing task is pending at a
 //! time; it holds only a weak reference, so it neither keeps the throttle alive nor, being a
 //! plain sleeping task, the runtime past shutdown.
+//!
+//! The publisher also carries upstream's `clearMixCache` points (D-260): [`ProgressEvents::completion_reached`]
+//! sends one "drop the cached mixes" signal the first time core enrichment is complete and the first time the whole
+//! pipeline is, per process; [`ProgressEvents::subscribe_mix_clears`] receives them.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use kima_core::events::{Audience, Event, EventBus};
 use kima_db::enrichment::{Phase, Status};
+use tokio::sync::broadcast;
 use tokio::time::Instant;
 
 /// The shortest gap between two events.
@@ -29,6 +35,11 @@ pub struct ProgressEvents {
 struct Shared {
     bus: EventBus,
     window: Mutex<Window>,
+    /// The "drop the cached mixes" signal (upstream `clearMixCache`).
+    mix_clears: broadcast::Sender<()>,
+    /// Upstream `coreCacheCleared` / `fullCacheCleared`: each point clears once per process.
+    core_cleared: AtomicBool,
+    full_cleared: AtomicBool,
 }
 
 #[derive(Default)]
@@ -45,6 +56,9 @@ impl ProgressEvents {
             shared: Arc::new(Shared {
                 bus,
                 window: Mutex::new(Window::default()),
+                mix_clears: broadcast::channel(4).0,
+                core_cleared: AtomicBool::new(false),
+                full_cleared: AtomicBool::new(false),
             }),
         }
     }
@@ -74,6 +88,36 @@ impl ProgressEvents {
         drop(w);
         let weak = Arc::downgrade(&self.shared);
         rt.spawn(trailing(weak, due));
+    }
+}
+
+impl ProgressEvents {
+    /// A receiver of the "drop the cached mixes" signal: one `()` per [`Self::completion_reached`] point.
+    pub fn subscribe_mix_clears(&self) -> broadcast::Receiver<()> {
+        self.shared.mix_clears.subscribe()
+    }
+
+    /// Upstream `clearMixCache("core")` when `core` (`progress.coreComplete`) and `clearMixCache("full")` when
+    /// `full` (`isFullyComplete`), each the first time it holds in this process (`coreCacheCleared`,
+    /// `fullCacheCleared`, reset only when the enrichment worker starts).
+    pub fn completion_reached(&self, core: bool, full: bool) {
+        let s = &self.shared;
+        for (reached, cleared, point) in [
+            (core, &s.core_cleared, "core"),
+            (full, &s.full_cleared, "full"),
+        ] {
+            if reached && !cleared.swap(true, Ordering::AcqRel) {
+                tracing::info!("dropping the cached mixes after {point} enrichment complete");
+                // No receiver is not an error.
+                let _ = s.mix_clears.send(());
+            }
+        }
+    }
+
+    /// Both points have cleared: a cycle need not work out the progress any more.
+    pub fn mix_clears_done(&self) -> bool {
+        self.shared.core_cleared.load(Ordering::Acquire)
+            && self.shared.full_cleared.load(Ordering::Acquire)
     }
 }
 

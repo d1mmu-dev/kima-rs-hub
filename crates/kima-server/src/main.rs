@@ -306,6 +306,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(changes) = kima_ident::stages::moods::subscribe_changes(&ident_ctx).await {
         kima_mixes::store::spawn_mood_drop(state.listeners.clone(), changes, shutdown.clone());
     }
+    // Core and then full enrichment complete drop every cached mix, once each per process (upstream `clearMixCache`,
+    // D-260). Subscribed before the enrich worker starts, so no signal is missed. Stopped by the shutdown token.
+    kima_mixes::store::spawn_full_drop(
+        state.listeners.clone(),
+        ident_ctx.progress_events.subscribe_mix_clears(),
+        shutdown.clone(),
+    );
     // The day's radio covers are picked ahead for recent listeners (upstream's `radio-covers` cycle: first after 60 s,
     // then 5 min after each run); stopped by the shutdown token.
     kima_api::radio::spawn_radio_covers(state.clone(), shutdown.clone());

@@ -11,7 +11,7 @@ use kima_mixes::radio::Sound;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::genres::{effective_for_artists, genre_key, merged_for_display, upstream_genre_key};
+use crate::genres::{effective_for_artists, merged_for_display, upstream_genre_key};
 use crate::stats::listens::{Period, listen_rows};
 use crate::vibe::ELIGIBLE;
 
@@ -84,14 +84,14 @@ pub async fn decade_track_ids(pool: &PgPool, start: i64, take: usize) -> sqlx::R
 
 /// Upstream `libraryArtistIdsForGenre` + the genre radio's draw: up to `take` songs (present or not; the route keeps
 /// the playable ones) of the library artists tagged with `value`, drawn uniformly. An artist's genres are its own
-/// list when it has one, else its effective genres (`getMergedGenres`, D-166); a tag matches when its kima
-/// [`genre_key`] equals the value's (D-114: kima's key, exact, not upstream's `genreKey` *contains*). A value with no
-/// letters (upstream's empty `genreKey`) plays nothing.
+/// list when it has one, else its effective genres (`getMergedGenres`, D-166); a tag matches as upstream's
+/// `genreMatchesWanted`: its [`upstream_genre_key`] contains the value's, so every spelling plays and genres that
+/// contain it ("hip hop" plays "alternative hip-hop"). A value with no letters (an empty key) plays nothing.
 pub async fn genre_track_ids(pool: &PgPool, value: &str, take: usize) -> sqlx::Result<Vec<Uuid>> {
-    if upstream_genre_key(value).is_empty() {
+    let wanted = upstream_genre_key(value);
+    if wanted.is_empty() {
         return Ok(Vec::new());
     }
-    let wanted = genre_key(value);
     let artists: Vec<(Uuid, Vec<String>)> = sqlx::query_as(
         "SELECT ar.id, COALESCE(ar.user_genres, '{}')
          FROM artists ar
@@ -107,7 +107,7 @@ pub async fn genre_track_ids(pool: &PgPool, value: &str, take: usize) -> sqlx::R
         .filter(|(id, own)| {
             merged_for_display(own, &effective.remove(id).unwrap_or_default())
                 .iter()
-                .any(|g| genre_key(g) == wanted)
+                .any(|g| upstream_genre_key(g).contains(&wanted))
         })
         .map(|(id, _)| id)
         .collect();

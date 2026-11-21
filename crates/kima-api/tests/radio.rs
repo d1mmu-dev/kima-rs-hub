@@ -357,14 +357,16 @@ async fn decade_default_2000(pool: PgPool) {
     assert_eq!(e.names(e.ids(&e.ana, &q).await), want);
 }
 
-/// `genreSpellings` `GET /radio?type=genre` on kima's genre key (D-166 (2) open, D-278): an artist's genres are its
-/// own list when it has one, else its effective genres; a spelling matches by kima's key (case and spaces), not
-/// upstream's looser *contains*; a name with no letters plays nothing; `%` and `\` are letters.
+/// `genreSpellings` `GET /radio?type=genre` + `radio.integration` "genre rock": every spelling of the genre plays, and
+/// genres that contain it ("hip hop" plays "alternative hip-hop"), compared by upstream's `genreKey` (NFKC,
+/// lower-case, spaces and punctuation stripped); an artist's genres are its own list when it has one, else its
+/// effective genres (D-166); a name with no letters plays nothing; `%` and a backslash are letters, not patterns.
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn genre_by_kima_key_of_the_artists_genres(pool: PgPool) {
+async fn genre_every_spelling_and_containing(pool: PgPool) {
     let mut songs = Vec::new();
     for a in [
-        "tagged", "ownlist", "contains", "hyphen", "rocker", "percent",
+        "tagged", "ownlist", "contains", "hyphen", "rocker", "postrock", "percent", "slash",
+        "replaced", "kana",
     ] {
         songs.extend((0..3).map(|i| song(&format!("{a}{i}")).artist(a)));
     }
@@ -374,40 +376,61 @@ async fn genre_by_kima_key_of_the_artists_genres(pool: PgPool) {
     for (a, tags) in [
         ("tagged", vec!["Hip Hop"]),
         ("ownlist", vec!["rock"]),
-        ("contains", vec!["alternative hip hop"]),
-        ("hyphen", vec!["hip-hop"]),
+        ("contains", vec!["alternative hip-hop"]),
+        ("hyphen", vec!["hip\u{2010}hop"]),
         ("rocker", vec!["rock"]),
+        ("postrock", vec!["Post-Rock"]),
         ("percent", vec!["h%p"]),
+        ("slash", vec!["a\\b"]),
+        ("replaced", vec!["hip hop"]),
+        ("kana", vec!["ロック"]),
     ] {
         let tags: Vec<String> = tags.into_iter().map(String::from).collect();
         genres::replace_artist_genres(&mut c, e.lib.artists[a], GenreSource::File, &tags)
             .await
             .unwrap();
     }
-    // A person's own list replaces the effective genres (D-166).
-    sqlx::query("UPDATE artists SET user_genres = ARRAY['hip  HOP'] WHERE id = $1")
-        .bind(e.lib.artists["ownlist"])
-        .execute(&e.pool)
-        .await
-        .unwrap();
-    let names_of = |a: &str| (0..3).map(|i| format!("{a}{i}")).collect::<BTreeSet<_>>();
-    let mut hip_hop = names_of("tagged");
-    hip_hop.extend(names_of("ownlist"));
-    for value in ["hip hop", "Hip  Hop", " HIP HOP "] {
+    // A person's own list replaces the effective genres (D-166): "ownlist" now plays hip hop, "replaced" no longer.
+    for (a, own) in [("ownlist", "hip  HOP"), ("replaced", "jazz")] {
+        sqlx::query("UPDATE artists SET user_genres = ARRAY[$2] WHERE id = $1")
+            .bind(e.lib.artists[a])
+            .bind(own)
+            .execute(&e.pool)
+            .await
+            .unwrap();
+    }
+    let names_of = |artists: &[&str]| {
+        artists
+            .iter()
+            .flat_map(|a| (0..3).map(move |i| format!("{a}{i}")))
+            .collect::<BTreeSet<_>>()
+    };
+    let hip_hop = names_of(&["tagged", "ownlist", "contains", "hyphen"]);
+    for value in ["hip hop", "Hip-Hop", "hiphop", "HIP_HOP", " Hip  Hop "] {
         let q = [("type", "genre"), ("value", value), ("limit", "100")];
         assert_eq!(e.names(e.ids(&e.ana, &q).await), hip_hop, "{value}");
     }
     let q = [("type", "genre"), ("value", "rock"), ("limit", "100")];
-    assert_eq!(e.names(e.ids(&e.ana, &q).await), names_of("rocker"));
+    assert_eq!(
+        e.names(e.ids(&e.ana, &q).await),
+        names_of(&["rocker", "postrock"])
+    );
+    let q = [("type", "genre"), ("value", "post rock"), ("limit", "100")];
+    assert_eq!(e.names(e.ids(&e.ana, &q).await), names_of(&["postrock"]));
     let q = [("type", "genre"), ("value", "h%p"), ("limit", "100")];
-    assert_eq!(e.names(e.ids(&e.ana, &q).await), names_of("percent"));
-    for value in ["", "-", "...", " / ", "h_p", "\\"] {
+    assert_eq!(e.names(e.ids(&e.ana, &q).await), names_of(&["percent"]));
+    let q = [("type", "genre"), ("value", "\\"), ("limit", "100")];
+    assert_eq!(e.names(e.ids(&e.ana, &q).await), names_of(&["slash"]));
+    let q = [("type", "genre"), ("value", "ロック"), ("limit", "100")];
+    assert_eq!(e.names(e.ids(&e.ana, &q).await), names_of(&["kana"]));
+    for value in ["", "-", "...", " / ", "h.p", "hp_"] {
         let (status, body, _) = e
             .radio(
                 &e.ana,
                 &[("type", "genre"), ("value", value), ("limit", "100")],
             )
             .await;
+        // "h.p" and "hp_" key to "hp", which no tag contains; the rest key to "", no genre.
         assert_eq!(status, 200, "{value}");
         assert_eq!(body, json!({"tracks": []}), "{value}");
     }

@@ -2811,6 +2811,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "hex",
+ "kima-api-types",
  "kima-core",
  "kima-mixes",
  "kima-vibe",
@@ -2915,6 +2916,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hex",
+ "kima-api-types",
  "kima-vibe",
  "md-5 0.11.0",
  "serde",

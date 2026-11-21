@@ -29,6 +29,7 @@ mod system_settings;
 mod vibe;
 mod vibe_encoding;
 mod vibe_matching;
+mod whats_new;
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
@@ -55,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .merge(settings::routes())
         .merge(vibe::routes())
         .merge(mixes::routes())
+        .merge(whats_new::routes())
         .fallback(|| async { ApiError::NotFound("Not found") });
 
     Router::new()

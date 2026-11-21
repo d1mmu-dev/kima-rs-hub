@@ -601,6 +601,39 @@ async fn refile_preserves_display_edits_and_unreadable_song(pool: PgPool) {
         "SELECT ar.display_name, al.display_title FROM albums al JOIN artists ar ON ar.id = al.artist_id WHERE al.id = $1"
     ).bind(before.1).fetch_one(&pool).await.unwrap();
     assert_eq!(edits, (Some("My Artist".into()), Some("My Album".into())));
+    assert_eq!(
+        refiled_at(&pool).await,
+        None,
+        "a re-file with an unread file is not clean"
+    );
+}
+
+/// When the last album re-file that read every file finished (M5b Task 15; upstream `refileProcessor.ts` stamps
+/// `albumsRefiledAt` only when no album failed).
+async fn refiled_at(pool: &PgPool) -> Option<time::OffsetDateTime> {
+    sqlx::query_scalar("SELECT albums_refiled_at FROM system_settings")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn clean_refile_stamps_albums_refiled_at(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    song(root, "Mike/Hist/01.flac", "Hist", Some("Mike"), "Mike");
+    rescan(&pool, root).await;
+    assert_eq!(refiled_at(&pool).await, None, "a scan is not a re-file");
+    let before = time::OffsetDateTime::now_utc();
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    let stamped = refiled_at(&pool).await.expect("a clean re-file is stamped");
+    assert!(stamped >= before - time::Duration::seconds(5), "{stamped}");
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

@@ -9,6 +9,7 @@ description = "Pure parts of mixes and radio (M5b): seeded draws, artist cap and
 [dependencies]
 chrono.workspace = true
 hex.workspace = true
+kima-api-types.workspace = true
 kima-vibe.workspace = true
 md-5.workspace = true
 serde.workspace = true

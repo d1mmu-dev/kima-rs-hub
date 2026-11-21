@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 kima-core = { workspace = true, features = ["sqlx"] }
+kima-api-types.workspace = true
 kima-mixes.workspace = true
 kima-vibe = { workspace = true, features = ["parallel"] }
 futures.workspace = true

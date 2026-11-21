@@ -355,3 +355,125 @@ async fn needs_a_signed_in_user(pool: PgPool) {
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
 }
+
+/// Waits until the replay has seen `n` requests (held ones included).
+async fn arrived(replay: &Replay, n: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while replay.arrived().len() < n {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the request arrives");
+}
+
+/// Long enough for an unshared second request to reach the replay (the GitHub limiter spaces requests a minute
+/// apart, a thousandth of that in tests).
+async fn settle() {
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+}
+
+fn check(e: &Env) -> tokio::task::JoinHandle<kima_api_types::releases::UpdateStatus> {
+    let state = e.state.clone();
+    tokio::spawn(async move {
+        kima_api::update_check::update_status(&state)
+            .await
+            .expect("update status")
+    })
+}
+
+/// Upstream's `inFlight` promise outlives the request that started it: a caller that goes away while the check
+/// runs neither cancels it nor makes the next caller ask GitHub a second time.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_dropped_caller_neither_cancels_the_check_nor_starts_another(pool: PgPool) {
+    let replay = Replay::start(Recording(vec![tag("v98.0.0"), tag("v97.0.0")])).await;
+    let e = env(pool, &replay).await;
+    e.checked_before("1.0.0", 25).await;
+    let held = replay.hold("releases/latest");
+    let first = check(&e);
+    arrived(&replay, 1).await;
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    let next = check(&e);
+    settle().await;
+    assert_eq!(replay.arrived().len(), 1, "{:?}", replay.arrived());
+    held.release();
+    assert_eq!(next.await.unwrap().latest.as_deref(), Some("98.0.0"));
+    assert_eq!(replay.asked().len(), 1, "{:?}", replay.asked());
+}
+
+/// The check finishes and is stored even when every caller has gone.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn the_check_finishes_after_every_caller_left(pool: PgPool) {
+    let replay = Replay::start(Recording(vec![tag("v98.0.0")])).await;
+    let e = env(pool, &replay).await;
+    e.checked_before("1.0.0", 25).await;
+    let held = replay.hold("releases/latest");
+    let (a, b) = (check(&e), check(&e));
+    arrived(&replay, 1).await;
+    a.abort();
+    b.abort();
+    let _ = (a.await, b.await);
+    held.release();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while e.stored().await.0.as_deref() != Some("98.0.0") {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the abandoned check still stores its answer");
+    // The next caller reads it without asking again.
+    assert_eq!(e.status().await["latest"], "98.0.0");
+    assert_eq!(replay.asked().len(), 1, "{:?}", replay.asked());
+}
+
+/// A caller cancelled while it waits for someone else's check changes nothing for the others.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_waiter_cancelled_while_waiting_changes_nothing(pool: PgPool) {
+    let replay = Replay::start(Recording(vec![tag("v98.0.0"), tag("v97.0.0")])).await;
+    let e = env(pool, &replay).await;
+    e.checked_before("1.0.0", 25).await;
+    let held = replay.hold("releases/latest");
+    let first = check(&e);
+    arrived(&replay, 1).await;
+    let waiter = check(&e);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    let late = check(&e);
+    settle().await;
+    held.release();
+    assert_eq!(first.await.unwrap().latest.as_deref(), Some("98.0.0"));
+    assert_eq!(late.await.unwrap().latest.as_deref(), Some("98.0.0"));
+    assert_eq!(replay.arrived().len(), 1, "{:?}", replay.arrived());
+}
+
+/// `KIMA_NET_DENY_REAL=1` with the real GitHub address (CI, browser runs): the check is refused without a panic and
+/// answers like a failed one, stamped, so it is not tried again on every request.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn a_refused_real_host_answers_like_a_failed_check(pool: PgPool) {
+    let mut cfg = NetConfig::for_tests(Bases::production("https://musicbrainz.org/ws/2"));
+    cfg.deny_real = true;
+    let net = Net::new(cfg, pool.clone(), IdentifySwitch::new(true, true));
+    let state = common::state(pool.clone()).with_net(Arc::new(net));
+    let (_, token) = common::user_with_token(&state, "ana").await;
+    let e = Env {
+        server: TestServer::new(kima_api::router(state.clone())).unwrap(),
+        state,
+        pool,
+        token,
+    };
+    e.checked_before("99.0.0", 48).await;
+    let status = e.status().await;
+    assert_eq!(
+        (status["latest"].clone(), status["hasUpdate"].clone()),
+        (json!("99.0.0"), json!(true))
+    );
+    let (latest, checked) = e.stored().await;
+    assert_eq!(latest.as_deref(), Some("99.0.0"));
+    assert!(
+        checked.unwrap() > OffsetDateTime::now_utc() - Duration::hours(1),
+        "the refused check is stamped"
+    );
+    assert_eq!(e.status().await["latest"], "99.0.0");
+}

@@ -112,8 +112,8 @@ pub struct AppState {
     /// The release window's catalog (M5b Task 15): kima-rs's own, empty at the start (owner Q3 = B, D-267);
     /// tests inject releases with [`AppState::with_releases`].
     pub releases: Arc<[kima_api_types::releases::Release]>,
-    /// One update check at a time (M5b Task 17): a caller that arrives while one runs waits and reads its answer.
-    pub update_check: Arc<tokio::sync::Mutex<()>>,
+    /// The update check in flight (M5b Task 17, upstream `inFlight`): callers that arrive while it runs share it.
+    pub update_check: Arc<crate::update_check::UpdateFlight>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
     password_permits: Arc<AtomicU64>,
 }

@@ -9,9 +9,14 @@ fn is_local(url: &reqwest::Url) -> bool {
     )
 }
 
+/// Whether [`check`] would refuse `url`.
+pub(crate) fn refuses(url: &reqwest::Url, deny_real: bool) -> bool {
+    deny_real && !is_local(url)
+}
+
 /// Panics when `deny_real` is set and `url` names a real host.
 pub(crate) fn check(url: &reqwest::Url, deny_real: bool) {
-    if deny_real && !is_local(url) {
+    if refuses(url, deny_real) {
         // Scheme, host and path only: a query may carry an API key.
         panic!(
             "kima-net refused a real host: {}://{}{}",
@@ -49,6 +54,13 @@ mod tests {
         check(&url("http://localhost/x"), true);
         check(&url("http://[::1]:80/x"), true);
         check(&url("https://musicbrainz.org/ws/2"), false);
+    }
+
+    #[test]
+    fn refuses_matches_check() {
+        assert!(refuses(&url("https://api.github.com/repos"), true));
+        assert!(!refuses(&url("https://api.github.com/repos"), false));
+        assert!(!refuses(&url("http://127.0.0.1:4000/repos"), true));
     }
 
     #[test]

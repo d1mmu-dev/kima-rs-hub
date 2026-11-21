@@ -4,8 +4,11 @@
 //! Owner Q4 = B (D-270): kima-rs asks its own repository's releases (`d1mmu-dev/kima-rs-hub`) through `kima-net`
 //! (limits, `KIMA_NET_DENY_REAL`), with upstream's `updateChecksEnabled` switch.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::FutureExt;
+use futures::future::{BoxFuture, Shared};
 use kima_api_types::releases::UpdateStatus;
 use kima_net::{Host, Outcome, Req};
 use time::OffsetDateTime;
@@ -90,44 +93,120 @@ fn status_from(
     }
 }
 
+/// Why an update status could not be answered: the database failed, or the shared check task died.
+#[derive(Debug, Clone)]
+pub enum CheckError {
+    Db(Arc<sqlx::Error>),
+    Aborted(String),
+}
+
+impl std::fmt::Display for CheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CheckError::Db(e) => write!(f, "{e}"),
+            CheckError::Aborted(e) => write!(f, "update check task ended early: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for CheckError {}
+
+impl From<sqlx::Error> for CheckError {
+    fn from(e: sqlx::Error) -> Self {
+        CheckError::Db(Arc::new(e))
+    }
+}
+
+type Flight = Shared<BoxFuture<'static, Result<UpdateStatus, CheckError>>>;
+
+/// The check in flight (upstream's module-level `inFlight` promise). It runs in its own task, so a caller that
+/// goes away neither cancels it nor leaves the next caller to start a second request; every caller that arrives
+/// meanwhile awaits the same answer. The task empties the slot when it ends, even by panic.
+#[derive(Default)]
+pub struct UpdateFlight(Mutex<Option<Flight>>);
+
+impl UpdateFlight {
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Flight>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Empties the in-flight slot when the check task ends.
+struct Landed(Arc<UpdateFlight>);
+
+impl Drop for Landed {
+    fn drop(&mut self) {
+        self.0.slot().take();
+    }
+}
+
 /// Upstream `getUpdateStatus()`: off answers without the network; inside a day the stored answer; otherwise one
-/// check, which callers arriving meanwhile wait for and share.
-pub async fn update_status(state: &AppState) -> sqlx::Result<UpdateStatus> {
+/// check, which callers arriving meanwhile share.
+pub async fn update_status(state: &AppState) -> Result<UpdateStatus, CheckError> {
     let stored = kima_db::update_check::get(&state.pool).await?;
     if !stored.enabled {
         return Ok(status_from(None, None, false));
     }
-    let fresh = |last: Option<OffsetDateTime>| {
-        last.is_some_and(|t| OffsetDateTime::now_utc() - t < CHECK_INTERVAL)
-    };
     if fresh(stored.last_check) {
         return Ok(status_from(stored.latest_known, stored.last_check, true));
     }
-    let _flight = state.update_check.lock().await;
-    // A check that finished while this caller waited answers it (upstream's shared `inFlight`).
-    let stored = kima_db::update_check::get(&state.pool).await?;
-    if fresh(stored.last_check) {
-        return Ok(status_from(stored.latest_known, stored.last_check, true));
+    let flight = state
+        .update_check
+        .slot()
+        .get_or_insert_with(|| start(state.clone()))
+        .clone();
+    flight.await
+}
+
+fn fresh(last: Option<OffsetDateTime>) -> bool {
+    last.is_some_and(|t| OffsetDateTime::now_utc() - t < CHECK_INTERVAL)
+}
+
+/// Spawns the check. Called with the slot locked, so the task's [`Landed`] guard cannot empty it before it is set.
+fn start(state: AppState) -> Flight {
+    let task = tokio::spawn(async move {
+        let _landed = Landed(state.update_check.clone());
+        // A check that finished just before this one started answers it.
+        let stored = kima_db::update_check::get(&state.pool).await?;
+        if !stored.enabled {
+            return Ok(status_from(None, None, false));
+        }
+        if fresh(stored.last_check) {
+            return Ok(status_from(stored.latest_known, stored.last_check, true));
+        }
+        refresh(&state, stored.latest_known).await
+    });
+    async move {
+        task.await
+            .unwrap_or_else(|e| Err(CheckError::Aborted(e.to_string())))
     }
-    refresh(state, stored.latest_known).await
+    .boxed()
+    .shared()
 }
 
 /// Upstream `refresh`: asks GitHub; a tag answers, anything else keeps the last known version. The check is
-/// stamped either way.
-async fn refresh(state: &AppState, known: Option<String>) -> sqlx::Result<UpdateStatus> {
+/// stamped either way. A request the network guard (`KIMA_NET_DENY_REAL=1`) would refuse is not sent: it counts as
+/// a failed lookup instead of panicking the check.
+async fn refresh(state: &AppState, known: Option<String>) -> Result<UpdateStatus, CheckError> {
     let mut latest = known;
-    let req = Req::get(Host::GitHub, LATEST_RELEASE_PATH)
-        .absent_on_404()
-        .no_cache()
-        .no_retry()
-        .user_facing();
-    match state.net.get_json::<serde_json::Value>(req).await {
-        Outcome::Answered(body) => {
-            if let Some(tag) = body.get("tag_name").and_then(serde_json::Value::as_str) {
-                latest = Some(tag.strip_prefix('v').unwrap_or(tag).to_string());
+    if state.net.refuses_real_host(Host::GitHub) {
+        tracing::debug!(outcome = "DENIED", "[UpdateCheck] lookup failed");
+    } else {
+        let req = Req::get(Host::GitHub, LATEST_RELEASE_PATH)
+            .absent_on_404()
+            .no_cache()
+            .no_retry()
+            .user_facing();
+        match state.net.get_json::<serde_json::Value>(req).await {
+            Outcome::Answered(body) => {
+                if let Some(tag) = body.get("tag_name").and_then(serde_json::Value::as_str) {
+                    latest = Some(tag.strip_prefix('v').unwrap_or(tag).to_string());
+                }
             }
+            other => tracing::debug!(outcome = ?other.code(), "[UpdateCheck] lookup failed"),
         }
-        other => tracing::debug!(outcome = ?other.code(), "[UpdateCheck] lookup failed"),
     }
     let now = kima_db::mixes::mood_mix::to_ms(OffsetDateTime::now_utc());
     kima_db::update_check::record(&state.pool, now, latest.as_deref()).await?;

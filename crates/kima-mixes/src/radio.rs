@@ -20,7 +20,8 @@ pub fn parse_limit(raw: Option<&str>, fallback: usize, max: usize) -> usize {
 /// JavaScript `parseInt(s, 10)`: the leading integer after optional white space and a sign, `None` for `NaN`; a value
 /// past `i64` saturates (only its sign and size matter to the callers).
 pub fn js_parse_int(s: &str) -> Option<i64> {
-    let s = s.trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    // ECMAScript white space and line terminators: Rust's `White_Space` plus the byte-order mark, without U+0085.
+    let s = s.trim_start_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
     let (negative, digits) = match s.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, s.strip_prefix('+').unwrap_or(s)),

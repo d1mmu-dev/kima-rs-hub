@@ -32,6 +32,19 @@ fn parse_limit_reads_like_upstream() {
     assert_eq!(js_parse_int("1995x"), Some(1995));
     assert_eq!(js_parse_int("x1995"), None);
     assert_eq!(js_parse_int("-0"), Some(0));
+    // ECMAScript white space and line terminators lead the digits; U+0085 (NEL) is neither, though Rust calls it
+    // white space, so `parseInt("\u0085" + "12")` is NaN.
+    for lead in [
+        "\u{a0}",
+        "\u{2028}",
+        "\u{feff}",
+        "\u{3000}",
+        "\t\n\u{b}\u{c}\r ",
+    ] {
+        assert_eq!(js_parse_int(&format!("{lead}12")), Some(12), "{lead:?}");
+    }
+    assert_eq!(js_parse_int("\u{85}12"), None);
+    assert_eq!(js_parse_int(" \u{85}12"), None);
 }
 
 #[test]

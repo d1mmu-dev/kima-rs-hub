@@ -286,3 +286,48 @@ pub struct DismissReply {
     pub dismissed: bool,
     pub recorded_defaults: Vec<String>,
 }
+
+/// The saved mood mix as the mood-mix question describes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoodMixSummary {
+    pub id: String,
+    pub name: String,
+    pub mood: String,
+    pub track_count: usize,
+    /// Saved under a mood that no longer exists: only save or remove are offered.
+    pub retired: bool,
+}
+
+/// A playlist by id and name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistRef {
+    pub id: String,
+    pub name: String,
+}
+
+/// `GET /api/whats-new/mood-mixes` (upstream `MoodMixState`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoodMixStateReply {
+    pub mix: Option<MoodMixSummary>,
+    /// `rebuild` (cleared by Rebuild or Remove) or `keep`.
+    pub decision: Option<String>,
+    pub playlist: Option<PlaylistRef>,
+}
+
+/// `POST /api/whats-new/mood-mixes/decision`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoodMixDecisionReply {
+    pub decision: String,
+    pub removed: u64,
+}
+
+/// `POST /api/whats-new/mood-mixes/save`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoodMixSaveReply {
+    pub id: String,
+    pub name: String,
+    pub track_count: i64,
+    pub created: bool,
+}

@@ -178,6 +178,147 @@ pub async fn mood_mix_state(pool: &PgPool, profile: ProfileId) -> sqlx::Result<M
     })
 }
 
+/// Upstream `MoodMixCannotKeepError`/`MoodMixNotFoundError`, and a database failure.
+#[derive(Debug)]
+pub enum MoodMixError {
+    /// "keep" on a mix under a mood that no longer exists.
+    CannotKeep,
+    /// No saved mix with that id for this profile.
+    NotFound,
+    Db(sqlx::Error),
+}
+
+impl From<sqlx::Error> for MoodMixError {
+    fn from(e: sqlx::Error) -> Self {
+        MoodMixError::Db(e)
+    }
+}
+
+/// Upstream `decideMoodMixes`: records the answer (`rebuild`/`remove` clear the saved mix, `keep` keeps it; keep on
+/// a retired mix is [`MoodMixError::CannotKeep`] and records nothing). Returns the mixes removed (0 on a repeat); the
+/// caller drops the profile's cached Home lists when `clear`. Answer and removal commit together.
+pub async fn decide_mood_mixes(
+    pool: &PgPool,
+    profile: ProfileId,
+    clear: bool,
+) -> Result<u64, MoodMixError> {
+    if !clear
+        && saved_mood_mix(pool, profile)
+            .await?
+            .is_some_and(|m| m.retired)
+    {
+        return Err(MoodMixError::CannotKeep);
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO release_choices (profile_id, key, version, enabled, decided_by)
+         VALUES ($1, $2, $3, $4, 'EXPLICIT')
+         ON CONFLICT (profile_id, key) DO UPDATE SET enabled = EXCLUDED.enabled, decided_by = 'EXPLICIT',
+             decided_at = now()",
+    )
+    .bind(profile)
+    .bind(MOOD_MIX_DECISION_KEY)
+    .bind(MOOD_MIX_RELEASE)
+    .bind(clear)
+    .execute(&mut *tx)
+    .await?;
+    let removed = if clear {
+        sqlx::query("DELETE FROM user_mood_mix WHERE profile_id = $1")
+            .bind(profile)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+    } else {
+        0
+    };
+    tx.commit().await?;
+    Ok(removed)
+}
+
+/// What a mood-mix save did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedMoodMixPlaylist {
+    pub id: Uuid,
+    pub name: String,
+    pub track_count: i64,
+    pub created: bool,
+    /// Songs this save put in the playlist (a change worth announcing, with `created`).
+    pub added: usize,
+}
+
+/// Upstream `saveMoodMixAsPlaylist`: the profile's saved mix `mix_id` (else [`MoodMixError::NotFound`]) as a private
+/// playlist keyed by that id, so a repeat save reuses it and adds only the songs it lacks; unknown and missing songs
+/// are skipped. A new playlist and its songs commit together; of concurrent first saves one creates the playlist and
+/// the others add to the winner's (upstream's P2002 path). A retired mix is named after its old mood.
+pub async fn save_mood_mix_as_playlist(
+    pool: &PgPool,
+    profile: ProfileId,
+    mix_id: &str,
+) -> Result<SavedMoodMixPlaylist, MoodMixError> {
+    let mix = saved_mood_mix(pool, profile)
+        .await?
+        .filter(|m| m.id == mix_id)
+        .ok_or(MoodMixError::NotFound)?;
+    let (id, name, created, added) = match crate::mixes::save::saved_playlist(
+        pool, profile, &mix.id,
+    )
+    .await?
+    {
+        Some((id, name)) => {
+            let added = crate::playlists::add_tracks(pool, id, &mix.track_ids)
+                .await?
+                .map_or(0, |r| r.added);
+            (id, name, false, added)
+        }
+        None => {
+            let mut tx = pool.begin().await?;
+            let made: Option<Uuid> = sqlx::query_scalar(
+                    "INSERT INTO playlists (id, profile_id, name, is_public, mix_id) VALUES ($1, $2, $3, false, $4)
+                     ON CONFLICT (profile_id, mix_id) WHERE mix_id IS NOT NULL DO NOTHING
+                     RETURNING id",
+                )
+                .bind(Uuid::now_v7())
+                .bind(profile)
+                .bind(&mix.name)
+                .bind(&mix.id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            match made {
+                Some(id) => {
+                    let added = crate::playlists::add_locked(&mut tx, id, &mix.track_ids)
+                        .await?
+                        .added;
+                    tx.commit().await?;
+                    (id, mix.name.clone(), true, added)
+                }
+                None => {
+                    // Another save of this mix committed first: use the winner's playlist.
+                    tx.rollback().await?;
+                    let (id, name) = crate::mixes::save::saved_playlist(pool, profile, &mix.id)
+                        .await?
+                        .ok_or(MoodMixError::NotFound)?;
+                    let added = crate::playlists::add_tracks(pool, id, &mix.track_ids)
+                        .await?
+                        .map_or(0, |r| r.added);
+                    (id, name, false, added)
+                }
+            }
+        }
+    };
+    let track_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM playlist_items WHERE playlist_id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+    Ok(SavedMoodMixPlaylist {
+        id,
+        name,
+        track_count,
+        created,
+        added,
+    })
+}
+
 // ---- what applies to a listener (upstream `forUser`) ----------------------------------------------------------------
 
 /// The facts one request reads, each at most once (upstream's per-request memos, `enrichedBeforeOnce`).

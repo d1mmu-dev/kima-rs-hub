@@ -508,7 +508,7 @@ pub async fn durations(
 }
 
 /// The add rules, with the playlist row already locked.
-async fn add_locked(
+pub(crate) async fn add_locked(
     tx: &mut Transaction<'_, Postgres>,
     playlist: Uuid,
     tracks: &[Uuid],

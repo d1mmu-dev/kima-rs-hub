@@ -2,7 +2,8 @@
 //! window. The server decides what is pending, never the client. kima-rs ships its own catalog, empty at the start
 //! (owner Q3 = B, D-267); acknowledgements and choices are per profile, admin-only items for an admin account's main
 //! profile (owner Q9 = A, D-269); no release asks the GPU choice, so `gpu.accelerate` is an unknown choice (owner
-//! Q5 = A, D-268). `requireAuth` upstream: a signed-in session (`AuthUser`).
+//! Q5 = A, D-268). `requireAuth` upstream: a signed-in session (`AuthUser`). Task 16 adds the saved mood mix's
+//! question (upstream `services/releases/moodMixes.ts`): rebuild, keep, or save it as a playlist.
 
 use axum::Json;
 use axum::Router;
@@ -10,12 +11,14 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use kima_api_types::releases::{
-    ChangelogReply, ChoiceReply, CurrentReply, DismissReply, OpenReply, PendingReply,
+    ChangelogReply, ChoiceReply, CurrentReply, DismissReply, MoodMixDecisionReply,
+    MoodMixSaveReply, MoodMixStateReply, MoodMixSummary, OpenReply, PendingReply, PlaylistRef,
 };
-use kima_db::releases::{self, ChoiceError, Viewer};
+use kima_db::releases::{self, ChoiceError, MoodMixError, Viewer};
 use kima_mixes::catalog::find_release;
 use serde_json::{Value, json};
 
+use super::playlists::announce;
 use crate::auth::AuthUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -26,6 +29,9 @@ pub fn routes() -> Router<AppState> {
         .route("/whats-new/current", get(current))
         .route("/whats-new/changelog", get(changelog))
         .route("/whats-new/open", get(open))
+        .route("/whats-new/mood-mixes", get(mood_mixes))
+        .route("/whats-new/mood-mixes/decision", post(mood_mix_decision))
+        .route("/whats-new/mood-mixes/save", post(mood_mix_save))
         .route("/whats-new/{version}/choice", post(choice))
         .route("/whats-new/{version}/dismiss", post(dismiss))
 }
@@ -206,4 +212,124 @@ async fn dismiss(
         dismissed: true,
         recorded_defaults,
     }))
+}
+
+// ---- the saved mood mix's question (M5b Task 16) -------------------------------------------------------------------
+
+fn invalid(details: Vec<Value>) -> ApiError {
+    ApiError::InvalidWithDetails {
+        message: "Invalid request".into(),
+        details,
+    }
+}
+
+/// GET /whats-new/mood-mixes: the profile's saved mix and what it decided.
+async fn mood_mixes(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Json<MoodMixStateReply>, ApiError> {
+    let s = releases::mood_mix_state(&state.pool, user.profile)
+        .await
+        .map_err(|e| failure("Failed to load your mood mix", e))?;
+    Ok(Json(MoodMixStateReply {
+        mix: s.mix.map(|m| MoodMixSummary {
+            id: m.id,
+            name: m.name,
+            mood: m.mood,
+            track_count: m.track_ids.len(),
+            retired: m.retired,
+        }),
+        decision: s.decision.map(str::to_string),
+        playlist: s.playlist.map(|(id, name)| PlaylistRef {
+            id: id.to_string(),
+            name,
+        }),
+    }))
+}
+
+const DECISIONS: [&str; 3] = ["rebuild", "keep", "remove"];
+
+/// zod's `z.object({ decision: z.enum(["rebuild", "keep", "remove"]) })`.
+fn parse_decision(body: &Value) -> Result<String, ApiError> {
+    let Some(obj) = body.as_object() else {
+        return Err(invalid(vec![invalid_type(&[], "object", Some(body))]));
+    };
+    match obj.get("decision") {
+        Some(Value::String(d)) if DECISIONS.contains(&d.as_str()) => Ok(d.clone()),
+        Some(Value::String(d)) => Err(invalid(vec![json!({
+            "received": d, "code": "invalid_enum_value", "options": DECISIONS, "path": ["decision"],
+            "message": format!("Invalid enum value. Expected 'rebuild' | 'keep' | 'remove', received '{d}'"),
+        })])),
+        other => Err(invalid(vec![invalid_type(
+            &["decision"],
+            "'rebuild' | 'keep' | 'remove'",
+            other,
+        )])),
+    }
+}
+
+/// POST /whats-new/mood-mixes/decision: rebuild or remove (both clear the saved mix and drop the cached Home
+/// lists, which carry it), or keep. Keep is refused for a mix under a removed mood.
+async fn mood_mix_decision(
+    State(state): State<AppState>,
+    user: AuthUser,
+    body: Bytes,
+) -> Result<Json<MoodMixDecisionReply>, ApiError> {
+    const ERROR: &str = "Failed to record your choice";
+    let decision = parse_decision(&json_body(&body)?)?;
+    let clear = decision != "keep";
+    match releases::decide_mood_mixes(&state.pool, user.profile, clear).await {
+        Ok(removed) => {
+            if clear {
+                state.listeners.drop_mix_lists(user.profile.into_uuid());
+            }
+            Ok(Json(MoodMixDecisionReply { decision, removed }))
+        }
+        Err(MoodMixError::CannotKeep) => Err(ApiError::BadRequest(
+            "This mood mix can't be shown any more. Save it as a playlist or remove it.".into(),
+        )),
+        Err(MoodMixError::NotFound) => Err(ApiError::Failed(ERROR)),
+        Err(MoodMixError::Db(e)) => Err(failure(ERROR, e)),
+    }
+}
+
+/// zod's `z.object({ mixId: z.string().min(1) })`.
+fn parse_mix_id(body: &Value) -> Result<String, ApiError> {
+    let Some(obj) = body.as_object() else {
+        return Err(invalid(vec![invalid_type(&[], "object", Some(body))]));
+    };
+    match obj.get("mixId") {
+        Some(Value::String(id)) if !id.is_empty() => Ok(id.clone()),
+        Some(Value::String(_)) => Err(invalid(vec![json!({
+            "code": "too_small", "minimum": 1, "type": "string", "inclusive": true, "exact": false,
+            "message": "String must contain at least 1 character(s)", "path": ["mixId"],
+        })])),
+        other => Err(invalid(vec![invalid_type(&["mixId"], "string", other)])),
+    }
+}
+
+/// POST /whats-new/mood-mixes/save: copies the saved mix into a playlist keyed by its id.
+async fn mood_mix_save(
+    State(state): State<AppState>,
+    user: AuthUser,
+    body: Bytes,
+) -> Result<Json<MoodMixSaveReply>, ApiError> {
+    const ERROR: &str = "Failed to save your mood mix";
+    let mix_id = parse_mix_id(&json_body(&body)?)?;
+    match releases::save_mood_mix_as_playlist(&state.pool, user.profile, &mix_id).await {
+        Ok(saved) => {
+            if saved.created || saved.added > 0 {
+                announce(&state, user.profile, saved.id, false);
+            }
+            Ok(Json(MoodMixSaveReply {
+                id: saved.id.to_string(),
+                name: saved.name,
+                track_count: saved.track_count,
+                created: saved.created,
+            }))
+        }
+        Err(MoodMixError::NotFound) => Err(ApiError::NotFound("Mood mix not found")),
+        Err(MoodMixError::CannotKeep) => Err(ApiError::Failed(ERROR)),
+        Err(MoodMixError::Db(e)) => Err(failure(ERROR, e)),
+    }
 }

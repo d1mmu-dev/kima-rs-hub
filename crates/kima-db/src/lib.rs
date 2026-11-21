@@ -29,6 +29,7 @@ pub mod podcasts;
 pub mod profiles;
 pub mod radio;
 pub mod ratings;
+pub mod recommendations;
 pub mod releases;
 pub mod removal_log;
 pub mod search;

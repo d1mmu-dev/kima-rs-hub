@@ -14,6 +14,7 @@ pub mod playlists;
 pub mod podcasts;
 pub mod profiles;
 pub mod radio;
+pub mod recommendations;
 pub mod releases;
 pub mod search;
 pub mod settings;

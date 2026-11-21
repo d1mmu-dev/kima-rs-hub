@@ -636,6 +636,30 @@ async fn clean_refile_stamps_albums_refiled_at(pool: PgPool) {
     assert!(stamped >= before - time::Duration::seconds(5), "{stamped}");
 }
 
+/// An unmounted disk leaves an empty, readable root: the re-file read nothing, so it is not done (upstream
+/// `refileProcessor.ts` returns before stamping when no song was read).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refile_of_an_empty_root_is_not_stamped(pool: PgPool) {
+    if !require_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    song(root, "Mike/Hist/01.flac", "Hist", Some("Mike"), "Mike");
+    rescan(&pool, root).await;
+    std::fs::remove_dir_all(root.join("Mike")).unwrap();
+    let report = scan::refile_cancellable(&ctx(&pool, root), &Default::default())
+        .await
+        .unwrap();
+    assert!(report.root_empty_guard, "{report:?}");
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(
+        refiled_at(&pool).await,
+        None,
+        "a re-file that read nothing is not clean"
+    );
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn refile_keeps_last_song_and_edits_on_edited_source_album(pool: PgPool) {
     if !require_ffmpeg() {

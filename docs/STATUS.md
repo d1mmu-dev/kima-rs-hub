@@ -47,6 +47,8 @@ Na `main` po M5 (`69ed5ee`) weszły: strona vibe w kima-web jako pierwszy wycine
 - **Reset `enriching` przy starcie a wieloprocesowe `requeue_running` (kima-jobs):** zachowanie opisane w D-254; do ujednolicenia.
 - **Uwagi Minor z przeglądu D-252:** ścieżka 120-sekundowego timeoutu zajętej migawki (`Busy`) nieprzetestowana; oczekiwanie nie jest sprawiedliwe (brak kolejności FIFO).
 - **kima-web:** `favicon.ico` zwraca 404.
+- **Upstream przesunął się na `b927e307`** (871 commitów za referencją M5b `9450c94b`): radio gatunków po gatunkach utworów, odtwarzalne tylko w radiu artysty i licznikach dekad/gatunków, nocne odsłuchy przez `listenRows`, treść 400 `{"error":"Invalid request"}`, filtry okładek stacji — potrzebny ponowny sync (D-279).
+- **M5b, wydajność okładek radia:** `genre_track_ids` wczytuje artystów i ich gatunki przy każdej stacji gatunku (~20× na zimny render strony radia); zbiór otagowanych artystów można liczyć raz na przebieg okładek (Minor z przeglądu fazy C, odłożony).
 - **Opus:** pliki z więcej niż 2 kanałami są klasyfikowane jako INCONCLUSIVE (4 próby) zamiast od razu jako błąd końcowy; Opus w kontenerach MP4/MKV nie jest dokładny co do próbki (dokumentacja ogranicza obsługę do Ogg).
 
 ## M6a — podsumowanie

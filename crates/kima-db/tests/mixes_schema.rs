@@ -365,7 +365,9 @@ async fn upgrade_from_0062_keeps_every_row(pool: PgPool) {
         );
     }
 
-    kima_db::MIGRATOR.run(&pool).await.unwrap();
+    // Up to 0063 only: later migrations change other tables on purpose (0064/0065 add `system_settings` columns,
+    // covered by their own tests).
+    migrator_upto(VERSION).run(&pool).await.unwrap();
     let applied: bool =
         sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = $1")
             .bind(VERSION)

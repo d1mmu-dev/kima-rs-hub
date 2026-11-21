@@ -27,4 +27,4 @@ pub use client::{
 pub use feeds::{Conditional, FeedFetch, MAX_FEED, same_feed};
 pub use outcome::{Evidence, Failure, Outcome};
 pub use req::Req;
-pub use source::{Bases, COMMONS_BASE, Host, ITUNES_BASE, Limits, Source};
+pub use source::{Bases, COMMONS_BASE, GITHUB_API_BASE, Host, ITUNES_BASE, Limits, Source};

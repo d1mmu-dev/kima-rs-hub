@@ -37,6 +37,7 @@ pub mod settings_kv;
 pub mod stages;
 pub mod stars;
 pub mod subsonic;
+pub mod update_check;
 pub mod user_settings;
 pub mod users;
 pub mod vibe;

@@ -112,6 +112,8 @@ pub struct AppState {
     /// The release window's catalog (M5b Task 15): kima-rs's own, empty at the start (owner Q3 = B, D-267);
     /// tests inject releases with [`AppState::with_releases`].
     pub releases: Arc<[kima_api_types::releases::Release]>,
+    /// One update check at a time (M5b Task 17): a caller that arrives while one runs waits and reads its answer.
+    pub update_check: Arc<tokio::sync::Mutex<()>>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
     password_permits: Arc<AtomicU64>,
 }
@@ -157,6 +159,7 @@ impl AppState {
             vibe_text_embedder: Arc::new(kima_ident::stages::embedding::NativeTextEmbedder),
             listeners: Arc::default(),
             releases: kima_mixes::catalog::releases().into(),
+            update_check: Arc::default(),
             password_permits: Arc::new(AtomicU64::new(0)),
         }
     }

@@ -13,6 +13,7 @@ use axum::routing::{get, post};
 use kima_api_types::releases::{
     ChangelogReply, ChoiceReply, CurrentReply, DismissReply, MoodMixDecisionReply,
     MoodMixSaveReply, MoodMixStateReply, MoodMixSummary, OpenReply, PendingReply, PlaylistRef,
+    UpdateStatus,
 };
 use kima_db::releases::{self, ChoiceError, MoodMixError, Viewer};
 use kima_mixes::catalog::find_release;
@@ -29,6 +30,7 @@ pub fn routes() -> Router<AppState> {
         .route("/whats-new/current", get(current))
         .route("/whats-new/changelog", get(changelog))
         .route("/whats-new/open", get(open))
+        .route("/whats-new/update-status", get(update_status))
         .route("/whats-new/mood-mixes", get(mood_mixes))
         .route("/whats-new/mood-mixes/decision", post(mood_mix_decision))
         .route("/whats-new/mood-mixes/save", post(mood_mix_save))
@@ -59,6 +61,17 @@ async fn pending(
         .await
         .map_err(|e| failure("Failed to load releases", e))?;
     Ok(Json(PendingReply { releases }))
+}
+
+/// GET /whats-new/update-status: whether a newer kima-rs release exists (M5b Task 17, D-270).
+async fn update_status(
+    State(state): State<AppState>,
+    _user: AuthUser,
+) -> Result<Json<UpdateStatus>, ApiError> {
+    crate::update_check::update_status(&state)
+        .await
+        .map(Json)
+        .map_err(|e| failure("Failed to check for updates", e))
 }
 
 /// GET /whats-new/current: the newest release with what this profile already settled.

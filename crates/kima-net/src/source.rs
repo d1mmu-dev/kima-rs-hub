@@ -20,6 +20,8 @@ pub enum Source {
     Feeds,
     /// Episode audio on any public host (M6).
     Audio,
+    /// GitHub's REST API: kima-rs's own latest release for the update check (M5b Task 17, D-270).
+    GitHub,
 }
 
 /// How hard kima may use a source: `burst` requests per `period` (GCRA), `concurrency` in
@@ -59,7 +61,7 @@ const fn limits(
 }
 
 impl Source {
-    pub const ALL: [Source; 12] = [
+    pub const ALL: [Source; 13] = [
         Source::MusicBrainz,
         Source::AcoustId,
         Source::Wikidata,
@@ -72,6 +74,7 @@ impl Source {
         Source::Apple,
         Source::Feeds,
         Source::Audio,
+        Source::GitHub,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -88,6 +91,7 @@ impl Source {
             Source::Apple => "apple",
             Source::Feeds => "feeds",
             Source::Audio => "audio",
+            Source::GitHub => "github",
         }
     }
 
@@ -113,7 +117,10 @@ impl Source {
             // The shortest Apple answer (a chart, `podcastCatalog.ts:161`); a lookup absence is
             // remembered a week (`:255`). Each request names its own with `Req::ttl`.
             Source::Apple => pair(6 * HOUR, 7 * DAY),
-            Source::Lrclib | Source::Images | Source::Feeds | Source::Audio => None,
+            // The update check keeps its answer in the system settings for a day (upstream `updateCheck.ts`).
+            Source::Lrclib | Source::Images | Source::Feeds | Source::Audio | Source::GitHub => {
+                None
+            }
         }
     }
 
@@ -135,6 +142,9 @@ impl Source {
             // 30 s (`rss-parser.ts:105`, `podcasts.ts:1041`); a host's 429 is its own answer.
             Source::Feeds => limits(0, 8, 4, 30, 0),
             Source::Audio => limits(0, 16, 16, 30, 0),
+            // One anonymous request a day per server (`updateCheck.ts`: 10 s timeout); GitHub allows 60 an
+            // hour unauthenticated, so a minute's spacing can never exhaust it. A rate-limited answer is not retried.
+            Source::GitHub => limits(60_000, 1, 1, 10, 0),
         }
     }
 }
@@ -153,10 +163,12 @@ pub enum Host {
     Lrclib,
     CoverArtArchive,
     Itunes,
+    /// `api.github.com` (the update check, D-270).
+    GitHub,
 }
 
 impl Host {
-    pub const ALL: [Host; 11] = [
+    pub const ALL: [Host; 12] = [
         Host::MusicBrainz,
         Host::AcoustId,
         Host::WikidataSparql,
@@ -168,6 +180,7 @@ impl Host {
         Host::Lrclib,
         Host::CoverArtArchive,
         Host::Itunes,
+        Host::GitHub,
     ];
 
     /// The name a fixture request file uses (`musicbrainz`, `wikidata_sparql`, ...).
@@ -184,6 +197,7 @@ impl Host {
             Host::Lrclib => "lrclib",
             Host::CoverArtArchive => "coverartarchive",
             Host::Itunes => "itunes",
+            Host::GitHub => "github",
         }
     }
 
@@ -202,6 +216,7 @@ impl Host {
             Host::Lrclib => Source::Lrclib,
             Host::CoverArtArchive => Source::CoverArtArchive,
             Host::Itunes => Source::Apple,
+            Host::GitHub => Source::GitHub,
         }
     }
 }
@@ -221,6 +236,8 @@ pub struct Bases {
     pub coverartarchive: String,
     /// Apple's iTunes API (`KIMA_ITUNES_BASE_URL`, upstream `ITUNES_BASE_URL`).
     pub itunes: String,
+    /// GitHub's REST API.
+    pub github: String,
     /// Wikimedia Commons' file host. Not a [`Host`] (no JSON is read from it): only the base of
     /// the image URLs Wikidata's `P18` claims become, which are downloaded with `get_bytes`.
     pub commons: String,
@@ -228,6 +245,9 @@ pub struct Bases {
 
 /// Wikimedia Commons' file host in production.
 pub const COMMONS_BASE: &str = "https://upload.wikimedia.org";
+
+/// GitHub's REST API in production (`updateCheck.ts:14`).
+pub const GITHUB_API_BASE: &str = "https://api.github.com";
 
 /// Apple's iTunes API in production (`podcastCatalog.ts:64`).
 pub const ITUNES_BASE: &str = "https://itunes.apple.com";
@@ -247,6 +267,7 @@ impl Bases {
             lrclib: "https://lrclib.net/api".into(),
             coverartarchive: "https://coverartarchive.org".into(),
             itunes: ITUNES_BASE.into(),
+            github: GITHUB_API_BASE.into(),
             commons: COMMONS_BASE.into(),
         }
     }
@@ -266,6 +287,7 @@ impl Bases {
             lrclib: url.clone(),
             coverartarchive: url.clone(),
             itunes: url.clone(),
+            github: url.clone(),
             commons: url,
         }
     }
@@ -283,6 +305,7 @@ impl Bases {
             Host::Lrclib => &self.lrclib,
             Host::CoverArtArchive => &self.coverartarchive,
             Host::Itunes => &self.itunes,
+            Host::GitHub => &self.github,
         }
     }
 }
@@ -314,6 +337,7 @@ mod tests {
         assert_eq!(row(Source::Lrclib), (s(3), 1, 1, s(5), 1));
         assert_eq!(row(Source::CoverArtArchive), (s(1), 2, 2, s(15), 1));
         assert_eq!(row(Source::Images), (s(1), 4, 2, s(30), 0));
+        assert_eq!(row(Source::GitHub), (s(60), 1, 1, s(10), 0));
     }
 
     /// `rateLimiter.ts:121-127` (itunes: 1 request per 3000 ms, concurrency 1, `maxRetries: 2`)

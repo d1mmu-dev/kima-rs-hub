@@ -331,3 +331,15 @@ pub struct MoodMixSaveReply {
     pub track_count: i64,
     pub created: bool,
 }
+
+/// `GET /api/whats-new/update-status` (upstream `UpdateStatus`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatus {
+    pub enabled: bool,
+    pub current: String,
+    pub latest: Option<String>,
+    pub has_update: bool,
+    /// `toISOString()` of the last check.
+    pub last_checked_at: Option<String>,
+}

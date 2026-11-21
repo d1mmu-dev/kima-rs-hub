@@ -42,7 +42,9 @@ fn version_part(n: &str) -> f64 {
     sign * digits.parse::<f64>().unwrap_or(0.0)
 }
 
-/// Upstream `compareVersions`: positive when `a` is newer (here its sign: -1, 0 or 1). A leading `v` is ignored.
+/// Upstream `compareVersions`: positive when `a` is newer (here its sign: -1, 0 or 1). A leading `v` is ignored. A
+/// part too long for a double is Infinity, as in JavaScript; two such parts differ by NaN, which upstream returns at
+/// once and every caller reads as "not newer": 0 here.
 pub fn compare_versions(a: &str, b: &str) -> i64 {
     let parts = |v: &str| -> Vec<f64> {
         v.strip_prefix('v')
@@ -54,6 +56,9 @@ pub fn compare_versions(a: &str, b: &str) -> i64 {
     let (ap, bp) = (parts(a), parts(b));
     for i in 0..ap.len().max(bp.len()) {
         let d = ap.get(i).copied().unwrap_or(0.0) - bp.get(i).copied().unwrap_or(0.0);
+        if d.is_nan() {
+            return 0;
+        }
         if d > 0.0 {
             return 1;
         }

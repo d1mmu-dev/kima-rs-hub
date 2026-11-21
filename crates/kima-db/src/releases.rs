@@ -326,6 +326,9 @@ struct Facts<'a> {
     pool: &'a PgPool,
     viewer: Viewer,
     enriched: HashMap<OffsetDateTime, bool>,
+    /// How often the library was asked (tests: once per release date).
+    #[cfg(test)]
+    enriched_queries: usize,
     installed_at: Option<Option<OffsetDateTime>>,
     mix_state: Option<MoodMixState>,
     mix_saved_at: Option<Option<OffsetDateTime>>,
@@ -338,6 +341,8 @@ impl<'a> Facts<'a> {
             pool,
             viewer,
             enriched: HashMap::new(),
+            #[cfg(test)]
+            enriched_queries: 0,
             installed_at: None,
             mix_state: None,
             mix_saved_at: None,
@@ -353,6 +358,10 @@ impl<'a> Facts<'a> {
             return Ok(*v);
         }
         let v = library_enriched_before(self.pool, at).await?;
+        #[cfg(test)]
+        {
+            self.enriched_queries += 1;
+        }
         self.enriched.insert(at, v);
         Ok(v)
     }
@@ -820,5 +829,27 @@ mod tests {
             Some(time::macros::datetime!(2026-07-01 00:00 UTC))
         );
         assert_eq!(release_instant("soon"), None);
+    }
+
+    /// Upstream `enrichedBeforeOnce`: one request asks the library once per release date, however many items and
+    /// releases share it; a date JavaScript cannot read asks nothing.
+    #[sqlx::test(migrator = "crate::MIGRATOR")]
+    async fn library_asked_once_per_release_date(pool: PgPool) {
+        let viewer = Viewer {
+            profile: ProfileId::new(Uuid::now_v7()),
+            is_admin: false,
+        };
+        let mut facts = Facts::new(&pool, viewer);
+        for date in [
+            "2026-07-01",
+            "2026-07-01",
+            "2026-08-01",
+            "2026-07-01",
+            "soon",
+            "2026-08-01",
+        ] {
+            assert!(!facts.enriched_before(date).await.unwrap());
+        }
+        assert_eq!(facts.enriched_queries, 2);
     }
 }

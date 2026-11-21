@@ -119,6 +119,12 @@ fn compare_versions_ignores_v_prefix() {
     ] {
         assert_eq!(compare_versions(a, b).signum(), expected, "{a} vs {b}");
     }
+    // A part too long for a double is Infinity in JavaScript; Infinity - Infinity is NaN, which upstream returns at
+    // once and `> 0` reads as "not newer", whatever the later parts say.
+    let huge = "9".repeat(400);
+    let (a, b) = (format!("1.{huge}.5"), format!("1.{huge}.0"));
+    assert_eq!(compare_versions(&a, &b), 0);
+    assert_eq!(compare_versions(&b, &a), 0);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

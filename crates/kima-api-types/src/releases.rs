@@ -107,10 +107,10 @@ pub struct ChoiceItem {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub links: Option<Vec<ReleaseLink>>,
-    pub default_value: bool,
-    /// What actually leaves the machine.
+    /// What actually leaves the machine. Before `defaultValue`, as in upstream's catalog literal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discloses: Option<String>,
+    pub default_value: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<ChoiceRequires>,
 }
@@ -342,4 +342,39 @@ pub struct UpdateStatus {
     pub has_update: bool,
     /// `toISOString()` of the last check.
     pub last_checked_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keys in upstream's catalog literal order (`catalog.ts`, the GPU choice): `discloses` before `defaultValue`.
+    #[test]
+    fn choice_keys_follow_upstream_literal_order() {
+        let item = ReleaseItem::Choice(ChoiceItem {
+            key: "k".into(),
+            title: "t".into(),
+            summary: "s".into(),
+            body: "b".into(),
+            discloses: Some("d".into()),
+            requires: Some(ChoiceRequires::Admin),
+            ..Default::default()
+        });
+        let text = serde_json::to_string(&item).unwrap();
+        let keys = [
+            "kind",
+            "key",
+            "title",
+            "summary",
+            "body",
+            "discloses",
+            "defaultValue",
+            "requires",
+        ];
+        let at: Vec<usize> = keys
+            .iter()
+            .map(|k| text.find(&format!("\"{k}\":")).unwrap())
+            .collect();
+        assert!(at.windows(2).all(|w| w[0] < w[1]), "{text}");
+    }
 }

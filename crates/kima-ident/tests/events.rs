@@ -220,3 +220,42 @@ async fn cycle_emits_on_count_change_only(pool: PgPool) {
     let got = drain(&mut rx);
     assert!(progress(&got).is_empty(), "{got:?}");
 }
+
+/// Upstream `clearMixCache("core" | "full")` (`workers/unifiedEnrichment.ts:1263-1276,1842-1867`, reference
+/// `9450c94b`): the cached mixes are dropped once when core enrichment is first complete and once when the whole
+/// pipeline is, per process (`coreCacheCleared` / `fullCacheCleared`, reset only when the worker starts).
+#[tokio::test]
+async fn mix_clears_once_per_completion_point() {
+    let events = ProgressEvents::new(EventBus::new(4));
+    let mut rx = events.subscribe_mix_clears();
+    let count = |rx: &mut tokio::sync::broadcast::Receiver<()>| {
+        let mut n = 0;
+        while rx.try_recv().is_ok() {
+            n += 1;
+        }
+        n
+    };
+    assert!(!events.mix_clears_done());
+    events.completion_reached(false, false);
+    assert_eq!(count(&mut rx), 0);
+    events.completion_reached(true, false);
+    assert_eq!(count(&mut rx), 1, "core complete");
+    events.completion_reached(true, false);
+    assert_eq!(count(&mut rx), 0, "core is cleared once");
+    assert!(!events.mix_clears_done());
+    events.completion_reached(true, true);
+    assert_eq!(count(&mut rx), 1, "fully complete");
+    assert!(events.mix_clears_done());
+    events.completion_reached(true, true);
+    assert_eq!(count(&mut rx), 0, "full is cleared once");
+    // Clones share the points (the HTTP side and the coordinator hold one publisher).
+    let fresh = ProgressEvents::new(EventBus::new(4));
+    let mut rx = fresh.subscribe_mix_clears();
+    fresh.clone().completion_reached(true, true);
+    assert_eq!(
+        count(&mut rx),
+        2,
+        "both points in one cycle: two clears, as upstream"
+    );
+    assert!(fresh.mix_clears_done());
+}

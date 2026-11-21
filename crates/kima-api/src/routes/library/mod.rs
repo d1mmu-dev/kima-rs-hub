@@ -20,6 +20,7 @@ mod autotag;
 mod genres;
 mod lyrics;
 mod organizer;
+mod radio;
 mod removals;
 mod scan;
 mod stream;
@@ -36,6 +37,7 @@ pub fn routes() -> Router<AppState> {
         .merge(genres::routes())
         .merge(lyrics::routes())
         .merge(organizer::routes())
+        .merge(radio::routes())
         .merge(removals::routes())
         .merge(stream::routes())
 }

@@ -6,6 +6,7 @@ pub mod events;
 pub mod extract;
 pub mod login_limit;
 pub mod media;
+pub mod radio;
 pub mod range;
 mod routes;
 pub mod state;

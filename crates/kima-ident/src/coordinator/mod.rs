@@ -260,6 +260,7 @@ pub async fn run_cycle_as(
     enrichment::end_cycle(pool, idle).await.map_err(db)?;
     let st = enrichment::state(pool).await.map_err(db)?;
     ann.settle(&st);
+    clear_mixes_when_complete(ctx).await;
     if st.halted || st.status == Status::Paused {
         return Ok(report);
     }
@@ -274,6 +275,26 @@ pub async fn run_cycle_as(
         .map_err(db)?;
     report.next = Some(next);
     Ok(report)
+}
+
+/// Upstream's cycle end (`workers/unifiedEnrichment.ts:1842-1867`, D-260): the progress, worked out once a cycle, tells
+/// whether core enrichment or the whole pipeline is complete; the first time each holds in this process the cached
+/// mixes are dropped ([`crate::events::ProgressEvents::completion_reached`]). Once both have, nothing is worked out.
+/// A failure is logged only, as upstream's.
+async fn clear_mixes_when_complete(ctx: &IdentCtx) {
+    if ctx.progress_events.mix_clears_done() {
+        return;
+    }
+    let progress = async {
+        let vibe = similarity::vibe_progress(ctx).await?;
+        enrichment::progress_with(&ctx.pool, ctx.config.fingerprinting, vibe).await
+    };
+    match progress.await {
+        Ok(p) => ctx
+            .progress_events
+            .completion_reached(p.core_complete, p.is_fully_complete),
+        Err(error) => warn!(%error, "working out the enrichment progress for the mix cache failed"),
+    }
 }
 
 fn db(e: sqlx::Error) -> JobError {

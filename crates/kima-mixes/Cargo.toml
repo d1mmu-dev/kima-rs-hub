@@ -1,0 +1,19 @@
+[package]
+name = "kima-mixes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Pure parts of mixes and radio (M5b): seeded draws, artist cap and spread, mix day, recipes, stations"
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+kima-vibe.workspace = true
+md-5.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true

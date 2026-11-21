@@ -452,3 +452,80 @@ async fn schedule_entries_prune_and_kick(pool: PgPool) {
     (entries[1].2)(pool.clone()).await.unwrap();
     assert_eq!(enrich_jobs(&pool).await, 1);
 }
+
+/// Upstream `clearMixCache` (`workers/unifiedEnrichment.ts:1263-1276`, reference `9450c94b`, D-260): a completed
+/// enrichment cycle drops every cached mix (the lists, the energy band, the familiarity scans) from the listener
+/// store, once per completion point per process; station sessions and radio covers are not mixes and stay.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn completed_enrichment_cycle_drops_the_cached_mixes(pool: PgPool) {
+    use kima_mixes::store::{ListenerStore, SaveMode, StationSession};
+    let ctx = ident_ctx(&pool);
+    let store = std::sync::Arc::new(ListenerStore::new());
+    let stop = CancellationToken::new();
+    kima_mixes::store::spawn_full_drop(
+        store.clone(),
+        ctx.progress_events.subscribe_mix_clears(),
+        stop.clone(),
+    );
+    let me = Uuid::from_u128(1);
+    let fill = |store: &ListenerStore| {
+        let now = std::time::Instant::now();
+        store.put_mix_list(me, "UTC", std::sync::Arc::new(json!([{"id": "l"}])), now);
+        store.put_energy_band(Some((0.1, 0.2)), now);
+        store.put_familiar(me, "sig", None, now);
+        store.save_session(
+            "mood:calm",
+            me,
+            StationSession {
+                seed: "s".into(),
+                start: 0,
+                pass: 0,
+                length: 1,
+                last_artist: "a".into(),
+                ids: std::sync::Arc::new(vec![Uuid::from_u128(2)]),
+            },
+            SaveMode::Replace,
+            now,
+        );
+    };
+    let cached = |store: &ListenerStore| {
+        let now = std::time::Instant::now();
+        (
+            store.mix_list(me, "UTC", now).is_some(),
+            store.energy_band(now).is_some(),
+            store.familiar(me, "sig", now).is_some(),
+        )
+    };
+    fill(&store);
+    assert_eq!(cached(&store), (true, true, true));
+    // An empty library: core and full enrichment are complete after the first cycle.
+    let report = kima_ident::coordinator::run_cycle(&ctx, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(report.ran);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while cached(&store) != (false, false, false) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        cached(&store),
+        (false, false, false),
+        "dropped after the cycle"
+    );
+    assert!(
+        store
+            .touch_session("mood:calm", me, std::time::Instant::now())
+            .is_some(),
+        "a station session is not a mix"
+    );
+    // Once per point per process: a later completed cycle (the same publisher, no minimum gap) drops nothing.
+    fill(&store);
+    let mut again = ident_ctx(&pool);
+    again.progress_events = ctx.progress_events.clone();
+    kima_ident::coordinator::run_cycle(&again, &CancellationToken::new())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(cached(&store), (true, true, true));
+    stop.cancel();
+}

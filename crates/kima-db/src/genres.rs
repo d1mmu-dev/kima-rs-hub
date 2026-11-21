@@ -374,39 +374,141 @@ fn unique_by_key(names: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Artist genres with the number of distinct present tracks of the artist's albums that sit
-/// under them, at least [`LIBRARY_GENRES_MIN_TRACKS`], most first (ties by name), at most
-/// [`LIBRARY_GENRES_LIMIT`] (spec §13.2). An artist's genres are a person's own list when it has
-/// any name (D-166), else its effective genres; so a genre a person removed counts under none.
-pub async fn library_genres(pool: &PgPool) -> sqlx::Result<Vec<(String, i64)>> {
-    sqlx::query_as(
-        "WITH own AS (
-             SELECT ar.id AS artist_id, btrim(u.name) AS name,
-                    lower(regexp_replace(btrim(u.name), '\\s+', ' ', 'g')) AS key,
-                    min(u.ord) AS ord
-             FROM artists ar, unnest(ar.user_genres) WITH ORDINALITY AS u(name, ord)
-             WHERE btrim(u.name) <> ''
-             GROUP BY ar.id, 2, 3),
-         ag AS (
-             SELECT artist_id, name, key FROM own
-             UNION ALL
-             SELECT e.artist_id, g.name, g.key
-             FROM artist_genres_effective e JOIN genres g ON g.id = e.genre_id
-             WHERE NOT EXISTS (SELECT 1 FROM own WHERE own.artist_id = e.artist_id))
-         SELECT min(ag.name) AS name, count(DISTINCT t.id) AS n
-         FROM ag
-         JOIN albums b ON b.artist_id = ag.artist_id
+/// One artist as the genre list reads it (upstream `GenreCountedArtist`): its name, its genres (a
+/// person's own list when it has any name, else the effective genres; D-166) and its present
+/// library songs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GenreArtist {
+    pub name: String,
+    /// `artists.name_key`, kima's normalized name (upstream's `normalizedName`).
+    pub name_key: String,
+    pub genres: Vec<String>,
+    pub songs: i64,
+}
+
+/// Upstream `genreKey` (`utils/genreSql.ts`): NFKC, lower-case, without spaces (any width),
+/// hyphens, dashes, the minus sign, underscores, slashes, dots, middle dots, apostrophes and the
+/// invisible soft hyphen, zero-width space and byte-order mark. kima groups genres by its own
+/// [`genre_key`] (D-166 (2)); this key only tells an artist's tag of its own name, and a name
+/// made of nothing else, as upstream does.
+pub fn upstream_genre_key(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    // JavaScript's `\s` is Rust's `White_Space` without U+0085 (the byte-order mark is listed below).
+    let stripped = |c: char| {
+        (c.is_whitespace() && c != '\u{85}')
+            || matches!(
+                c,
+                '\u{a0}'
+                    | '\u{202f}'
+                    | '\u{ad}'
+                    | '\u{200b}'
+                    | '\u{feff}'
+                    | '_'
+                    | '/'
+                    | '.'
+                    | '\u{b7}'
+                    | '\''
+                    | '\u{2018}'
+                    | '\u{2019}'
+                    | '\u{2010}'..='\u{2015}' | '\u{2043}' | '\u{2212}' | '-'
+            )
+    };
+    name.nfkc()
+        .collect::<String>()
+        .to_lowercase()
+        .chars()
+        .filter(|c| !stripped(*c))
+        .collect()
+}
+
+/// JavaScript's `<` on strings: UTF-16 code units.
+fn js_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.encode_utf16().cmp(b.encode_utf16())
+}
+
+/// Upstream `computeGenreTotals` + `libraryGenres` (`services/mixes/radioRow.ts:40-57`): each
+/// artist's songs count once under every genre it carries; a tag naming the artist itself (its
+/// name or its `name_key`, upstream's `normalizedName`, by upstream's `genreKey`), a name starting with `_` and a name with no letters are no genre;
+/// spellings of one genre (kima's [`genre_key`], D-166 (2)) are listed under the one carrying
+/// the most songs (ties: the first in UTF-16 order); a genre needs [`LIBRARY_GENRES_MIN_TRACKS`]
+/// songs; names lower-cased, most songs first then by name, at most [`LIBRARY_GENRES_LIMIT`].
+pub fn genre_totals(artists: &[GenreArtist]) -> Vec<(String, i64)> {
+    // Per genre key: its songs and its spellings with theirs, in first-seen order.
+    let mut totals: Vec<(i64, Vec<(String, i64)>)> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
+    for artist in artists {
+        let own = [
+            upstream_genre_key(&artist.name),
+            upstream_genre_key(&artist.name_key),
+        ];
+        let mut seen = HashSet::new();
+        for raw in &artist.genres {
+            let name = raw.trim();
+            if name.is_empty() || name.starts_with('_') {
+                continue;
+            }
+            let loose = upstream_genre_key(name);
+            if loose.is_empty() || own.contains(&loose) {
+                continue;
+            }
+            let key = genre_key(name);
+            let i = *at.entry(key.clone()).or_insert_with(|| {
+                totals.push((0, Vec::new()));
+                totals.len() - 1
+            });
+            let entry = &mut totals[i];
+            if seen.insert(key) {
+                entry.0 += artist.songs;
+            }
+            match entry.1.iter_mut().find(|(n, _)| n == name) {
+                Some((_, songs)) => *songs += artist.songs,
+                None => entry.1.push((name.to_string(), artist.songs)),
+            }
+        }
+    }
+    let mut out: Vec<(String, i64)> = totals
+        .into_iter()
+        .filter(|(songs, _)| *songs >= LIBRARY_GENRES_MIN_TRACKS)
+        .map(|(songs, mut spellings)| {
+            spellings.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| js_cmp(&x.0, &y.0)));
+            (spellings[0].0.to_lowercase(), songs)
+        })
+        .collect();
+    out.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| js_cmp(&x.0, &y.0)));
+    out.truncate(usize::try_from(LIBRARY_GENRES_LIMIT).unwrap_or(usize::MAX));
+    out
+}
+
+/// The artists with present tracks and their genres, for [`genre_totals`] (spec §13.2): a
+/// person's own list when it has any name (D-166), else the effective genres. Songs are the
+/// present tracks of the artist's albums (D-114).
+pub async fn library_genre_artists(pool: &PgPool) -> sqlx::Result<Vec<GenreArtist>> {
+    let rows: Vec<(Uuid, String, String, Vec<String>, i64)> = sqlx::query_as(
+        "SELECT ar.id, ar.name, ar.name_key, COALESCE(ar.user_genres, '{}'), count(t.id) AS n
+         FROM artists ar
+         JOIN albums b ON b.artist_id = ar.id
          JOIN tracks t ON t.album_id = b.id AND t.missing_since IS NULL
-         WHERE ag.name NOT LIKE '\\_%'
-         GROUP BY ag.key
-         HAVING count(DISTINCT t.id) >= $1
-         ORDER BY n DESC, min(ag.name), ag.key
-         LIMIT $2",
+         GROUP BY ar.id
+         ORDER BY ar.id",
     )
-    .bind(LIBRARY_GENRES_MIN_TRACKS)
-    .bind(LIBRARY_GENRES_LIMIT)
     .fetch_all(pool)
-    .await
+    .await?;
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+    let mut effective = effective_for_artists(pool, &ids).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, name_key, own, songs)| GenreArtist {
+            genres: merged_for_display(&own, &effective.remove(&id).unwrap_or_default()),
+            name,
+            name_key,
+            songs,
+        })
+        .collect())
+}
+
+/// `GET /library/genres`' list: [`genre_totals`] over [`library_genre_artists`].
+pub async fn library_genres(pool: &PgPool) -> sqlx::Result<Vec<(String, i64)>> {
+    Ok(genre_totals(&library_genre_artists(pool).await?))
 }
 
 /// Candidates for "this genre is an artist's name": `(genre, artist name)` pairs where the two
@@ -485,6 +587,73 @@ pub async fn prune_unused(pool: &PgPool) -> sqlx::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn artist(name: &str, songs: i64, genres: &[&str]) -> GenreArtist {
+        GenreArtist {
+            name: name.into(),
+            name_key: name.to_lowercase(),
+            genres: genres.iter().map(|g| g.to_string()).collect(),
+            songs,
+        }
+    }
+
+    /// Upstream `computeGenreTotals`: `own = {genreKey(name), genreKey(normalizedName)}`; kima's normalized name is
+    /// `name_key` (accents and `&` folded), so a tag spelling the artist without its accent or with "and" is its own
+    /// name too.
+    #[test]
+    fn totals_drop_a_tag_naming_the_artist_by_its_name_key() {
+        let keyed = |name: &str, key: &str, songs: i64, genres: &[&str]| GenreArtist {
+            name_key: key.into(),
+            ..artist(name, songs, genres)
+        };
+        let got = genre_totals(&[
+            keyed("Sigur Rós", "sigur ros", 20, &["Sigur Ros", "post-rock"]),
+            keyed(
+                "Simon & Garfunkel",
+                "simon and garfunkel",
+                20,
+                &["simon and garfunkel", "folk"],
+            ),
+        ]);
+        assert_eq!(got, vec![("folk".into(), 20), ("post-rock".into(), 20)]);
+    }
+
+    #[test]
+    fn upstream_key_folds_spellings() {
+        for s in [
+            "Hip Hop",
+            "hip-hop",
+            "HipHop",
+            "HIP_HOP",
+            "hip\u{2010}hop",
+            "hip\u{a0}hop",
+            "hip\u{ad}hop",
+            "hip\u{2212}hop",
+        ] {
+            assert_eq!(upstream_genre_key(s), "hiphop", "{s}");
+        }
+        assert_eq!(
+            upstream_genre_key("e\u{301}lectro"),
+            upstream_genre_key("\u{e9}lectro")
+        );
+        assert_eq!(upstream_genre_key(" / "), "");
+        // JavaScript's `\s` has no U+0085 (NEL), though Rust's `White_Space` has: it stays a letter of the key.
+        assert_eq!(upstream_genre_key("hip\u{85}hop"), "hip\u{85}hop");
+        assert_eq!(upstream_genre_key("hip\u{2028}hop\u{3000}"), "hiphop");
+        assert_eq!(upstream_genre_key("ロック"), "ロック");
+    }
+
+    #[test]
+    fn totals_count_an_artist_once_per_genre_and_drop_its_own_name() {
+        let got = genre_totals(&[
+            artist("A", 10, &["Rock", "rock"]),
+            artist("B", 5, &["rock"]),
+            artist("Synth-Wave", 30, &["synth wave", "pop"]),
+            artist("C", 14, &["solo"]),
+        ]);
+        // "Rock" carries 10 songs, "rock" 15: the genre is named by the latter.
+        assert_eq!(got, vec![("pop".into(), 30), ("rock".into(), 15)]);
+    }
 
     #[test]
     fn keys_collapse_whitespace_and_case() {

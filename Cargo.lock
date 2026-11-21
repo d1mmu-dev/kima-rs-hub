@@ -2748,6 +2748,7 @@ dependencies = [
  "kima-ident",
  "kima-jobs",
  "kima-library",
+ "kima-mixes",
  "kima-ml",
  "kima-net",
  "kima-podcast",
@@ -2811,6 +2812,7 @@ dependencies = [
  "futures",
  "hex",
  "kima-core",
+ "kima-mixes",
  "kima-vibe",
  "serde",
  "serde_json",
@@ -2819,6 +2821,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -2886,6 +2889,7 @@ dependencies = [
  "kima-core",
  "kima-db",
  "kima-jobs",
+ "kima-mixes",
  "kima-test-support",
  "libc",
  "lofty",
@@ -2903,6 +2907,22 @@ dependencies = [
  "unicode-normalization",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "kima-mixes"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "kima-vibe",
+ "md-5 0.11.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tokio-util",
+ "uuid",
 ]
 
 [[package]]
@@ -2996,6 +3016,7 @@ dependencies = [
  "kima-ident",
  "kima-jobs",
  "kima-library",
+ "kima-mixes",
  "kima-ml",
  "kima-net",
  "kima-podcast",

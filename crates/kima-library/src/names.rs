@@ -74,6 +74,15 @@ pub fn better_caps<'a>(stored: &'a str, new: &'a str) -> &'a str {
 mod tests {
     use super::*;
 
+    /// The mixes' artist cap and the plays/browse "no one" rows match these names by their key (D-261): the keys must
+    /// be what this module makes of the scanner's canonical Various Artists name and its Unknown Artist fallback.
+    #[test]
+    fn no_one_keys_are_the_keys_of_the_canonical_names() {
+        let canonical = [key(VARIOUS_ARTISTS), key("Unknown Artist")];
+        assert_eq!(kima_mixes::artist::NO_ONE_KEYS, canonical);
+        assert_eq!(kima_db::browse::NO_ONE_KEYS, canonical);
+    }
+
     #[test]
     fn key_normalises() {
         assert_eq!(key("  Sigur   R\u{f3}s "), "sigur r\u{f3}s");

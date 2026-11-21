@@ -107,6 +107,8 @@ pub struct AppState {
     pub vibe_map_cache: Arc<crate::vibe_cache::VibeMapCache>,
     /// Verified native text inference in production; injectable for synthetic tests only.
     pub vibe_text_embedder: Arc<dyn kima_ident::stages::embedding::TextEmbedder>,
+    /// The mixes' and radio's listener state (M5b, D-260): what upstream keeps in Redis, per profile, in process.
+    pub listeners: Arc<kima_mixes::store::ListenerStore>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
     password_permits: Arc<AtomicU64>,
 }
@@ -150,6 +152,7 @@ impl AppState {
             login_limit: Arc::new(LoginLimiter::new()),
             vibe_map_cache: Arc::default(),
             vibe_text_embedder: Arc::new(kima_ident::stages::embedding::NativeTextEmbedder),
+            listeners: Arc::default(),
             password_permits: Arc::new(AtomicU64::new(0)),
         }
     }

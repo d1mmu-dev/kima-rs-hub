@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 pub mod library;
+pub mod mix_keys;
 
 use axum_test::TestServer;
 use kima_api::AppState;

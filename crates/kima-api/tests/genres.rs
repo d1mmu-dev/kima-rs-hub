@@ -96,14 +96,19 @@ async fn library_genres_threshold_15_and_limit_20(pool: PgPool) {
     assert_eq!(g[19], json!({"genre": "g01", "count": 21}));
 }
 
+/// Upstream v1.12.3 `computeGenreTotals`: a tag naming the artist itself is dropped from that
+/// artist only; a genre that happens to be another artist's name stays (D-114, M5b Task 11).
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
-async fn library_genres_drops_artist_named_genres(pool: PgPool) {
-    artist_with(&pool, "Jazz", 15, "Jazz").await; // genre equals an artist's name
-    artist_with(&pool, "Someone", 16, "Beyonce").await;
-    artist_with(&pool, "Beyoncé", 1, "Pop").await; // accented artist drops "Beyonce"
+async fn library_genres_drop_only_an_artists_own_name(pool: PgPool) {
+    artist_with(&pool, "Jazz", 15, "Jazz").await; // its own name: no genre
+    artist_with(&pool, "Someone", 16, "Beyonce").await; // another artist's name: a genre
+    artist_with(&pool, "Beyoncé", 1, "Pop").await;
     artist_with(&pool, "Other", 17, "Blues").await;
     let v = list(pool).await;
-    assert_eq!(v, json!({"genres": [{"genre": "blues", "count": 17}]}));
+    assert_eq!(
+        v,
+        json!({"genres": [{"genre": "blues", "count": 17}, {"genre": "beyonce", "count": 16}]})
+    );
 }
 
 async fn mb_genres(pool: &PgPool, artist: Uuid, names: &[&str]) {

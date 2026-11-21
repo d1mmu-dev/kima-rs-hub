@@ -301,6 +301,21 @@ async fn main() -> anyhow::Result<()> {
     let mut registry = kima_server::jobs::Registry::new();
     registry.register_library(library_ctx.clone());
     let state = state.with_ident(ident_ctx.clone());
+    // A moods change drops the cached mixes that depend on the moods (upstream `dropCachedMixes(moodsOnly)`). No
+    // receiver while the mood heads are unavailable: then the moods never change. Stopped by the shutdown token.
+    if let Some(changes) = kima_ident::stages::moods::subscribe_changes(&ident_ctx).await {
+        kima_mixes::store::spawn_mood_drop(state.listeners.clone(), changes, shutdown.clone());
+    }
+    // Core and then full enrichment complete drop every cached mix, once each per process (upstream `clearMixCache`,
+    // D-260). Subscribed before the enrich worker starts, so no signal is missed. Stopped by the shutdown token.
+    kima_mixes::store::spawn_full_drop(
+        state.listeners.clone(),
+        ident_ctx.progress_events.subscribe_mix_clears(),
+        shutdown.clone(),
+    );
+    // The day's radio covers are picked ahead for recent listeners (upstream's `radio-covers` cycle: first after 60 s,
+    // then 5 min after each run); stopped by the shutdown token.
+    kima_api::radio::spawn_radio_covers(state.clone(), shutdown.clone());
     registry.register_autotag(ident_ctx.clone());
     // The mood snapshot follows the statistics between cycles (every 30 s); stopped by the shutdown token.
     let mood_snapshots =

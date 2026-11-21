@@ -20,6 +20,7 @@ kima-net = { path = "crates/kima-net" }
 kima-podcast = { path = "crates/kima-podcast" }
 kima-subsonic = { path = "crates/kima-subsonic" }
 kima-ml = { path = "crates/kima-ml" }
+kima-mixes = { path = "crates/kima-mixes" }
 kima-vibe = { path = "crates/kima-vibe" }
 kima-test-support = { path = "crates/kima-test-support" }
 

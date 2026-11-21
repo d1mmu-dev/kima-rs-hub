@@ -24,6 +24,9 @@ pub enum ApiError {
     BadGateway(&'static str),
     #[error("Podcast feed could not be read")]
     BadFeed(String),
+    /// 422 `{"error": message}`.
+    #[error("{0}")]
+    Unprocessable(&'static str),
     #[error("{0}")]
     Unauthorized(&'static str),
     #[error("{0}")]
@@ -100,7 +103,7 @@ impl ApiError {
             | Self::InvalidWithDetails { .. }
             | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
-            Self::BadFeed(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::BadFeed(_) | Self::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,

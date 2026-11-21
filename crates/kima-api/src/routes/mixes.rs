@@ -52,7 +52,11 @@ pub fn routes() -> Router<AppState> {
         .route("/mixes/refresh", post(refresh).get(one_refresh))
         .route("/mixes/{id}/save", post(save))
         .route("/mixes/mood/buckets/presets", get(presets))
-        .route("/mixes/mood/buckets/{mood}", get(bucket))
+        // Upstream removed `POST /mood/buckets/backfill`; Express answers any other method here 404, not 405.
+        .route(
+            "/mixes/mood/buckets/{mood}",
+            get(bucket).fallback(|| async { ApiError::NotFound("Not found") }),
+        )
         .route("/mixes/mood/buckets/{mood}/save", post(save_bucket))
         .route("/mixes/{id}", get(one))
 }

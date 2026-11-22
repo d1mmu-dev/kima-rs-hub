@@ -92,8 +92,8 @@ pub fn trigger_key(index: usize, track_id: &str) -> String {
     format!("{index}:{track_id}")
 }
 
-/// Whether the playing entry is the last one in play order (upstream `isLastInPlayOrder`). kima-web's shuffle picks
-/// a random next entry instead of keeping a shuffled order, so the queue's own order is the play order (D-282).
+/// Whether the playing entry is the last one in play order (upstream `isLastInPlayOrder`). A station turns shuffle
+/// off and keeps it off while it runs (D-282), so the queue's own order is its play order.
 pub fn is_last_in_play_order(len: usize, index: usize) -> bool {
     len > 0 && index + 1 >= len
 }

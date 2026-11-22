@@ -276,6 +276,8 @@ struct Inner {
     sleep_open: Value<bool>,
     /// The station the queue came from, while it may still refill (upstream `stationRef`).
     station: RefCell<Option<Rc<Station>>>,
+    /// Whether a station runs, for the bar (the shuffle button is disabled meanwhile).
+    station_live: Value<bool>,
     /// The last queued track ended and playback stopped by itself (cleared when the playing entry changes).
     queue_ended: Cell<bool>,
 }
@@ -340,6 +342,7 @@ impl Player {
             sleep_left: Value::new(None),
             sleep_open: Value::new(false),
             station: RefCell::new(None),
+            station_live: Value::new(false),
             queue_ended: Cell::new(false),
         }))
     }
@@ -388,22 +391,32 @@ impl Player {
 
     /// Plays a station: when its last track starts, `fetch` is asked for more and the new tracks are appended
     /// (upstream `playStation`). `server_ordered`: the batches come in the server's order (they carry `next`).
+    ///
+    /// Shuffle goes off and stays off while the station runs (owner 2026-11-22, D-282): kima-web's shuffle picks a
+    /// random next with replacement and keeps no shuffled order, so it would repeat songs and rarely reach the
+    /// queue's end, where the refill happens. A no-repeat shuffled station is M10.
     pub fn play_station(&self, tracks: Vec<QueueItem>, fetch: StationFetch, server_ordered: bool) {
         if tracks.is_empty() {
             return;
         }
         let session = StationSession::start(tracks.iter().map(|t| t.id.as_str()), server_ordered);
+        // Before `play_queue`, so its save already carries shuffle off.
+        self.0.shuffle.set(false);
         self.play_queue(tracks, 0);
         *self.0.station.borrow_mut() = Some(Rc::new(Station {
             session: RefCell::new(session),
             fetch,
         }));
+        self.0.station_live.set(true);
         self.refill_station();
     }
 
     /// Drops the station: the queue was replaced, cleared or left library tracks.
     fn end_station(&self) {
         *self.0.station.borrow_mut() = None;
+        if Self::read(&self.0.station_live) {
+            self.0.station_live.set(false);
+        }
     }
 
     /// Tries a refill in the background (upstream's effect on every player change). Only in the browser: native
@@ -569,7 +582,11 @@ impl Player {
         }
     }
 
+    /// Flips shuffle; a no-op while a station runs (its button is disabled then, D-282).
     pub fn toggle_shuffle(&self) {
+        if self.0.station.borrow().is_some() {
+            return;
+        }
         let on = !Self::read(&self.0.shuffle);
         self.0.shuffle.set(on);
         self.persist();
@@ -629,15 +646,23 @@ impl Player {
             // tracks if it brings any, otherwise replay as before (upstream `playOrRefill`).
             let me = self.clone();
             get_driver().spawn(async move {
-                if !me.refill_station_now().await {
-                    me.request_play();
-                    me.play_initialized();
-                }
+                me.play_or_refill().await;
             });
         } else {
             self.request_play();
             self.play_initialized();
         }
+    }
+
+    /// Upstream `playOrRefill` after a station's queue ended: `true` when the refill started its first new track,
+    /// otherwise the last track plays again.
+    pub async fn play_or_refill(&self) -> bool {
+        if self.refill_station_now().await {
+            return true;
+        }
+        self.request_play();
+        self.play_initialized();
+        false
     }
 
     fn request_play(&self) {
@@ -761,16 +786,27 @@ impl Player {
                     &queue[index].id,
                     queue[index].duration,
                 );
-                me.0.intent.set(AudioIntent::default());
-                me.0.pending_seek.set(resume);
-                vertigo::transaction(|_| {
-                    me.0.queue.set(queue);
-                    me.0.index.set(index);
-                    me.0.shuffle.set(state.is_shuffle);
-                    if let Some(secs) = resume {
-                        me.0.position.set(secs);
-                    }
-                });
+                me.apply_saved_state(queue, index, state.is_shuffle, resume);
+            }
+        });
+    }
+
+    /// Puts the saved queue back (paused), with its shuffle flag and the client-side resume point.
+    fn apply_saved_state(
+        &self,
+        queue: Vec<QueueItem>,
+        index: usize,
+        is_shuffle: bool,
+        resume: Option<f64>,
+    ) {
+        self.0.intent.set(AudioIntent::default());
+        self.0.pending_seek.set(resume);
+        vertigo::transaction(|_| {
+            self.0.queue.set(queue);
+            self.0.index.set(index);
+            self.0.shuffle.set(is_shuffle);
+            if let Some(secs) = resume {
+                self.0.position.set(secs);
             }
         });
     }
@@ -787,7 +823,8 @@ impl Player {
         }
         self.0.intent.set(AudioIntent::default());
         self.0.pending_seek.set(None);
-        self.end_station();
+        // Not `end_station`: this runs from a render callback, so the bar's flag is reset in the deferred part.
+        *self.0.station.borrow_mut() = None;
         self.0.queue_ended.set(false);
         self.0.episode_marks.borrow_mut().clear();
         self.0.sleep_deadline.set(None);
@@ -796,6 +833,7 @@ impl Player {
         let me = self.clone();
         get_driver().spawn(async move {
             vertigo::transaction(|_| {
+                me.0.station_live.set(false);
                 me.0.queue.set(Vec::new());
                 me.0.index.set(0);
                 me.0.playing.set(false);
@@ -1274,6 +1312,19 @@ impl Player {
             .to_owned()
         });
         let shuffle_pressed = shuffle_on.map(|on| on.to_string());
+        // Shuffle is off while a radio station plays (D-282): the button says so and stays disabled.
+        let station_live = self.0.station_live.clone();
+        let shuffle_title = station_live.map(|live| {
+            if live {
+                "shuffle is off while a radio station plays".to_owned()
+            } else {
+                "shuffle".to_owned()
+            }
+        });
+        let shuffle_disabled = flag({
+            let has_track = has_track.clone();
+            Computed::from(move |ctx| !has_track.get(ctx) || station_live.get(ctx))
+        });
         let repeat_value = self.0.repeat.clone();
         let repeat_class = repeat_value.map(|r| {
             if r != Repeat::Off {
@@ -1324,8 +1375,8 @@ impl Player {
                         </div>
                         <div class="flex-1 flex flex-col items-center gap-2">
                             <div class="flex items-center gap-5" role="group" aria-label="Playback controls">
-                                <button class={shuffle_class} aria-label="Shuffle" title="shuffle" aria-pressed={shuffle_pressed}
-                                    disabled={no_track.clone()} on_click={bind!(me, |_| me.toggle_shuffle())}>
+                                <button class={shuffle_class} aria-label="Shuffle" title={shuffle_title} aria-pressed={shuffle_pressed}
+                                    disabled={shuffle_disabled} on_click={bind!(me, |_| me.toggle_shuffle())}>
                                     {icon("shuffle", "w-4 h-4")}
                                 </button>
                                 <button class="transition-all duration-200 hover:scale-110 relative disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:scale-100 text-[var(--text-secondary)] hover:text-white"
@@ -1536,6 +1587,13 @@ mod tests {
         })
     }
 
+    fn poll_ready<F: Future>(fut: &mut std::pin::Pin<Box<F>>) -> F::Output {
+        match poll_once(fut) {
+            std::task::Poll::Ready(out) => out,
+            std::task::Poll::Pending => panic!("a ready fetch left the future pending"),
+        }
+    }
+
     fn refill(player: &Player) -> bool {
         match poll_once(&mut Box::pin(player.refill_station_now())) {
             std::task::Poll::Ready(started) => started,
@@ -1656,6 +1714,119 @@ mod tests {
         assert!(!refill(&p));
         assert_eq!(calls.get(), 2);
         assert_eq!(ids(&p), ["a", "b"]);
+    }
+
+    #[test]
+    fn a_station_turns_restored_shuffle_off_and_plays_its_batches_in_order() {
+        let p = player();
+        // A reload restored a shuffled queue.
+        p.apply_saved_state(vec![plain_item("r1"), plain_item("r2")], 0, true, None);
+        assert!(Player::read(&p.0.shuffle));
+        let calls = Rc::new(Cell::new(0));
+        p.play_station(
+            vec![plain_item("a"), plain_item("b")],
+            fetch_from(vec![vec!["c", "d"], vec!["e"]], calls.clone()),
+            false,
+        );
+        // Owner 2026-11-22: a station plays in order, so it neither repeats nor skips its refill point.
+        assert!(!Player::read(&p.0.shuffle));
+        let mut played = vec![Player::read(&p.0.index)];
+        for _ in 0..4 {
+            p.next();
+            refill(&p);
+            played.push(Player::read(&p.0.index));
+        }
+        assert_eq!(played, [0, 1, 2, 3, 4]);
+        assert_eq!(ids(&p), ["a", "b", "c", "d", "e"]);
+        // Starting "e" asked once more; the empty answer ended the station.
+        assert_eq!(calls.get(), 3);
+        assert!(
+            p.0.station
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .session
+                .borrow()
+                .exhausted()
+        );
+    }
+
+    #[test]
+    fn shuffle_stays_off_while_a_station_plays() {
+        let p = player();
+        p.play_station(
+            vec![plain_item("a"), plain_item("b")],
+            fetch_from(vec![], Rc::new(Cell::new(0))),
+            false,
+        );
+        p.toggle_shuffle();
+        assert!(
+            !Player::read(&p.0.shuffle),
+            "the toggle is off while a station runs"
+        );
+        assert!(Player::read(&p.0.station_live));
+        // Another queue ends the station: shuffle works again.
+        p.play_queue(vec![plain_item("x"), plain_item("y")], 0);
+        assert!(!Player::read(&p.0.station_live));
+        p.toggle_shuffle();
+        assert!(Player::read(&p.0.shuffle));
+    }
+
+    #[test]
+    fn an_exhausted_station_never_fetches_again() {
+        let p = player();
+        let calls = Rc::new(Cell::new(0));
+        p.play_station(
+            vec![plain_item("a")],
+            fetch_from(vec![vec![], vec!["late"]], calls.clone()),
+            true,
+        );
+        assert!(!refill(&p));
+        assert_eq!(calls.get(), 1);
+        assert!(
+            p.0.station
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .session
+                .borrow()
+                .exhausted()
+        );
+        // Neither the same position nor a press of play after the end asks again; play replays the last track.
+        assert!(!refill(&p));
+        p.0.queue_ended.set(true);
+        assert!(!poll_ready(&mut Box::pin(p.play_or_refill())));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(ids(&p), ["a"]);
+        assert!(Player::read(&p.0.playing));
+    }
+
+    #[test]
+    fn play_after_the_end_retries_a_failed_refill_and_starts_its_first_new_track() {
+        let p = player();
+        let calls = Rc::new(Cell::new(0));
+        let counted = calls.clone();
+        let fail_first: StationFetch = Rc::new(move || {
+            counted.set(counted.get() + 1);
+            let answer = if counted.get() == 1 {
+                Err(ApiError {
+                    status: None,
+                    message: "offline".into(),
+                })
+            } else {
+                Ok(vec![plain_item("b"), plain_item("c")])
+            };
+            Box::pin(std::future::ready(answer))
+        });
+        p.play_station(vec![plain_item("a")], fail_first, false);
+        assert!(!refill(&p));
+        // The song ended by itself; a press of play asks again and starts the first new song.
+        p.0.queue_ended.set(true);
+        assert!(poll_ready(&mut Box::pin(p.play_or_refill())));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(ids(&p), ["a", "b", "c"]);
+        assert_eq!(Player::read(&p.0.index), 1);
+        assert!(!p.0.queue_ended.get());
     }
 
     #[test]

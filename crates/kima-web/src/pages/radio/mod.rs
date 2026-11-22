@@ -6,7 +6,7 @@
 
 pub mod data;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use kima_api_types::radio::RadioReply;
@@ -59,6 +59,26 @@ pub fn start_problem(station: &RadioStation, found: usize) -> Option<String> {
     None
 }
 
+thread_local! {
+    /// The generation of the page's background loops (row retry, mood-note poll).
+    static LOOPS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Starts a new generation of the page's background loops: every older loop stops at its next wake. Each visit
+/// (render) and each Retry starts one, so leaving and coming back or pressing Retry never leaves two loops asking.
+fn new_loop_generation() -> u32 {
+    LOOPS.with(|g| {
+        let next = g.get().wrapping_add(1);
+        g.set(next);
+        next
+    })
+}
+
+/// Whether the loop started as generation `generation` is still the page's current one.
+fn loop_is_current(generation: u32) -> bool {
+    LOOPS.with(|g| g.get() == generation)
+}
+
 fn on_radio(ctx: &Ctx) -> bool {
     vertigo::transaction(|c| ctx.router.get(c)) == Route::Radio
 }
@@ -67,48 +87,58 @@ fn is_ready(state: &Value<Resource<Rc<RadioRow>>>) -> bool {
     matches!(vertigo::transaction(|c| state.get(c)), Resource::Ready(_))
 }
 
-/// Loads the row into `state`; while it keeps failing and the page is open, asks again every 30 s.
+/// Loads the row into `state`; while it keeps failing and the page is open, asks again every 30 s. Starts a new
+/// loop generation, so a Retry or a new visit retires the older loop.
 fn load_row(ctx: &Ctx, state: &Value<Resource<Rc<RadioRow>>>, note: &Value<Option<String>>) {
     if !get_driver().is_browser() {
         return;
     }
+    let generation = new_loop_generation();
     let (ctx, state, note) = (ctx.clone(), state.clone(), note.clone());
     get_driver().spawn(async move {
         loop {
             let tz = browser_time_zone();
-            match radio_row(&ctx.client, &tz).await {
+            let answer = radio_row(&ctx.client, &tz).await;
+            if !loop_is_current(generation) {
+                return;
+            }
+            match answer {
                 Ok(reply) => {
                     let row = Rc::new(build_radio_row(&reply.stations));
                     let has_moods = !row.moods.is_empty();
                     state.set(Resource::Ready(row));
                     if has_moods {
-                        watch_rebuild(&ctx, &note).await;
+                        watch_rebuild(&ctx, &note, generation).await;
                     }
                     return;
                 }
                 Err(err) => state.set(Resource::Error(err.message)),
             }
             get_driver().sleep(RETRY_MS).await;
-            if !on_radio(&ctx) || is_ready(&state) {
+            if !loop_is_current(generation) || !on_radio(&ctx) || is_ready(&state) {
                 return;
             }
         }
     });
 }
 
-/// Upstream `useSoundRebuild` for the "By Mood" note: read while the page is open and the features are built.
-async fn watch_rebuild(ctx: &Ctx, note: &Value<Option<String>>) {
+/// Upstream `useSoundRebuild` for the "By Mood" note: read while the page is open and the features are built. A
+/// failed read keeps the last note and tries again on the next tick (React Query keeps polling too).
+async fn watch_rebuild(ctx: &Ctx, note: &Value<Option<String>>, generation: u32) {
     loop {
-        let Ok(progress) = enrichment_progress(&ctx.client).await else {
-            return;
-        };
-        let rebuild = sound_rebuild(&progress);
-        note.set(mood_note(rebuild));
-        if rebuild.is_none() {
+        let answer = enrichment_progress(&ctx.client).await;
+        if !loop_is_current(generation) {
             return;
         }
+        if let Ok(progress) = answer {
+            let rebuild = sound_rebuild(&progress);
+            note.set(mood_note(rebuild));
+            if rebuild.is_none() {
+                return;
+            }
+        }
         get_driver().sleep(REBUILD_POLL_MS).await;
-        if !on_radio(ctx) {
+        if !loop_is_current(generation) || !on_radio(ctx) {
             return;
         }
     }
@@ -437,6 +467,18 @@ pub fn render(ctx: &Ctx) -> DomNode {
 mod tests {
     use super::*;
     use data::quick_stations;
+
+    #[test]
+    fn a_new_visit_or_retry_retires_the_older_loops() {
+        let first = new_loop_generation();
+        assert!(loop_is_current(first));
+        let second = new_loop_generation();
+        assert!(
+            !loop_is_current(first),
+            "the older loop stops at its next wake"
+        );
+        assert!(loop_is_current(second));
+    }
 
     #[test]
     fn the_header_counts_every_station_once_loaded() {

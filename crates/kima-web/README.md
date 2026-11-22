@@ -377,7 +377,7 @@ station), shuffle play, **Save as Playlist** (`POST /api/mixes/<id>/save?tz=`: "
 and the new playlist opens after a second; when the server answers 409 the toast says "You've already saved this mix
 as a playlist." and the existing playlist opens), and the track rows (play from a row, add to the queue).
 
-**Compromises** (each in D-283, accepted for this slice with destination M10): no other Home sections and no Mood
+**Compromises** (each in D-283; only the Home-row placement and the previously scoped Mood Mixer deferral are approved; the other differences await the owner's decision, with M10 as the proposed destination): no other Home sections and no Mood
 Mixer button; the row shows an error with Retry instead of hiding; Refresh uses the refresh reply instead of refetching;
 no 5-minute cache (fetched per visit); a scrolling flex row instead of the carousel component; play always starts the
 mix (no pause/resume of the same mix); rows play from a button (no double-click/double-tap); the saved playlist opens

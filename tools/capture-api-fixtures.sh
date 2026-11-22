@@ -7,7 +7,9 @@
 # larger library and seeded mood data would change the other sets' captures); other sets retain their
 # existing dependency chain. Only the named
 # sets are copied, so a run for one milestone never rewrites another's fixtures with new ids.
-set -euo pipefail
+set -Eeuo pipefail
+# Never exit silently: any command that stops the run under set -e names its file, line and (unexpanded) text.
+trap 'echo "capture-api-fixtures: failed (exit $?) at ${BASH_SOURCE[0]##*/}:${LINENO}: ${BASH_COMMAND}" >&2' ERR
 if [[ -n "${DATABASE_URL:-}" || -n "${PGDATABASE:-}" ]]; then
   echo 'No external DATABASE_URL or PGDATABASE allowed; this script owns a fresh database.' >&2; exit 2
 fi
@@ -104,7 +106,8 @@ for _ in {1..90}; do
   sleep 1
 done
 [[ "$(cat "$tmp/identity")" == 'kima|kima' ]] || { echo 'Isolated PostgreSQL identity check failed' >&2; exit 1; }
-[[ "$(docker inspect -f '{{index .Config.Labels "kima.run"}}' "$container_name")" == "$container_name" ]] || exit 1
+[[ "$(docker inspect -f '{{index .Config.Labels "kima.run"}}' "$container_name")" == "$container_name" ]] \
+  || { echo 'Capture container label check failed' >&2; exit 1; }
 echo "capture provenance: HEAD=$(git rev-parse HEAD), container=$container_name, host-port=$port, db=kima, role=kima" >&2
 "$root/tools/make-fixture-library.sh" "$tmp/music"
 if [[ "$KIMA_CAPTURE_SET" == m5b ]]; then
@@ -221,7 +224,7 @@ fi
 # Validate the entire staged set before copying any file into the worktree.
 for f in "${copy[@]}"; do
   [[ -s "$stage/$f" ]] || { echo "Missing staged fixture: $f" >&2; exit 1; }
-  jq -e . "$stage/$f" >/dev/null
+  jq -e . "$stage/$f" >/dev/null || { echo "Staged fixture is not JSON (or is null/false): $f" >&2; exit 1; }
 done
 for f in "${copy[@]}"; do
   cp "$stage/$f" "crates/kima-api-types/tests/fixtures/$f"

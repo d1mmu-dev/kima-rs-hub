@@ -34,6 +34,32 @@ mcall() {
   echo "m5b_$name [$variant] $method $path $status" >&2
 }
 fx() { echo "$stage/m5b_$1_response.json"; }
+# check WHAT FILTER FILE [JQ_ARGS...]: one post-capture assertion (jq -e); a failure names it, the filter and the
+# start of the reply, then exits. Never a bare `jq -e` under set -e: that exits without saying which check failed.
+check() {
+  local what="$1" filter="$2" file="$3"; shift 3
+  if ! jq -e "$@" "$filter" "$file" > /dev/null; then
+    echo "m5b capture check failed: $what" >&2
+    echo "  jq -e $* '$filter' ${file##*/}" >&2
+    echo "  reply: $(head -c 600 "$file")" >&2
+    exit 1
+  fi
+}
+# pick WHAT FILTER FILE [JQ_ARGS...]: one value read from a captured reply (jq -er), or a named failure.
+pick() {
+  local what="$1" filter="$2" file="$3" value; shift 3
+  if ! value="$(jq -er "$@" "$filter" "$file")"; then
+    echo "m5b capture: no $what in ${file##*/} (jq -er '$filter'): $(head -c 600 "$file")" >&2
+    exit 1
+  fi
+  printf '%s\n' "$value"
+}
+
+# Determinism. The live and heads Home lists are drawn per day AND per profile (seed "<day>-<profile>", the profile
+# a fresh UUID each run), and every mix's song order is a seeded draw over random track UUIDs, so which mixes come
+# back and in which order differs between runs. Nothing below may depend on a mix's position in the list or on a
+# song's position in a mix: the mix pages take the first mix of at least 8 songs and the checks look it up by id;
+# artist radio takes a named artist ("Nineties A") and checks exact counts that hold for every draw.
 
 # --- The library: scan it, then play some of the M5b songs (recommendations, discovery and favorites read plays).
 scan="$(request POST /library/scan '{}')"; job="$(jq -er '.jobId' <<< "$scan")"
@@ -47,6 +73,10 @@ done
 tracks="$(request GET '/library/tracks?limit=100')"
 m5b_ids="$(jq -c '[.tracks[] | select(.title | test("^(Nineties|Noughties) ")) | .id] | sort' <<< "$tracks")"
 [[ "$(jq length <<< "$m5b_ids")" == 40 ]] || { echo 'Expected the 40 M5b fixture songs' >&2; exit 1; }
+# Artist radio's artist: Nineties A (5 songs, user genre Rock shared only with Nineties B-D, see the seed).
+artist="$(jq -er '[.tracks[] | select(.album.artist.name == "Nineties A") | .album.artist.id] | unique
+  | if length == 1 then .[0] else error("Nineties A: \(length) artist ids") end' <<< "$tracks")" \
+  || { echo 'm5b capture: no single Nineties A artist id in the library tracks' >&2; exit 1; }
 for id in $(jq -r '.[0:6][]' <<< "$m5b_ids"); do
   request POST /plays "$(jq -nc --arg id "$id" '{trackId:$id,secondsListened:35}')" >/dev/null
 done
@@ -63,7 +93,7 @@ grep -F 'm5b capture seed: ' "$tmp/seed.log" >&2
 
 # --- Variant live (the shipped server).
 mcall live mixes 'GET /mixes' GET "/mixes?tz=$tz"
-mix="$(jq -er '[.[] | select(.trackCount >= 8)][0].id' "$(fx mixes)")"
+mix="$(pick 'mix of at least 8 songs' '[.[] | select(.trackCount >= 8)][0].id' "$(fx mixes)")"
 mcall live mix 'GET /mixes/:id' GET "/mixes/$mix?tz=$tz"
 mcall live mix_save 'POST /mixes/:id/save' POST "/mixes/$mix/save?tz=$tz" '{"name":"Saved capture mix"}'
 mcall live mixes_refresh 'POST /mixes/refresh' POST "/mixes/refresh?tz=$tz" '{}'
@@ -77,11 +107,11 @@ mcall live decades 'GET /library/decades' GET /library/decades
 mcall live radio_stations 'GET /library/radio/stations' GET /library/radio/stations
 mcall live radio_row 'GET /library/radio/row' GET "/library/radio/row?tz=$tz"
 mcall live radio_row_all 'GET /library/radio/row' GET "/library/radio/row?scope=all&tz=$tz"
-artist="$(jq -er '.tracks[0].album.artist.id' "$(fx mix)")"
-decade="$(jq -er '.decades[0].decade' "$(fx decades)")"
-genre="$(jq -er '[.stations[] | select(.type == "genre")][0].value' "$(fx radio_row_all)")"
+decade="$(pick decade '.decades[0].decade' "$(fx decades)")"
+genre="$(pick 'genre station' '[.stations[] | select(.type == "genre")][0].value' "$(fx radio_row_all)")"
 # A recipe station (not Wildcard, not the personal Late Night one).
-station="$(jq -er '[.stations[] | select(.value != "wildcard" and .value != "late-night")][0].value' "$(fx radio_stations)")"
+station="$(pick 'recipe station' '[.stations[] | select(.value != "wildcard" and .value != "late-night")][0].value' \
+  "$(fx radio_stations)")"
 mcall live radio_all 'GET /library/radio' GET '/library/radio?type=all&limit=10'
 mcall live radio_genre 'GET /library/radio' GET "/library/radio?type=genre&value=$genre&limit=10"
 mcall live radio_decade 'GET /library/radio' GET "/library/radio?type=decade&value=$decade&limit=10"
@@ -95,7 +125,7 @@ mcall live whats_new_changelog 'GET /whats-new/changelog' GET /whats-new/changel
 mcall live whats_new_open 'GET /whats-new/open' GET /whats-new/open
 mcall live update_status 'GET /whats-new/update-status' GET /whats-new/update-status
 mcall live mood_mixes 'GET /whats-new/mood-mixes' GET /whats-new/mood-mixes
-mood_mix="$(jq -er '.mix.id' "$(fx mood_mixes)")"
+mood_mix="$(pick 'mood mix id' '.mix.id' "$(fx mood_mixes)")"
 mcall live mood_mixes_decision 'POST /whats-new/mood-mixes/decision' POST /whats-new/mood-mixes/decision '{"decision":"keep"}'
 mcall live mood_mixes_save 'POST /whats-new/mood-mixes/save' POST /whats-new/mood-mixes/save \
   "$(jq -nc --arg m "$mood_mix" '{mixId:$m}')"
@@ -122,7 +152,7 @@ curl -fsS "$hbase/health" >/dev/null
 htoken="$(curl --fail-with-body -sS -X POST -H 'Content-Type: application/json' \
   -d '{"username":"fixtureadmin","password":"fixture-pass-18"}' "$hbase/auth/login" | jq -er '.token')"
 mcall heads heads_mixes 'GET /mixes' GET "/mixes?tz=$tz"
-hmix="$(jq -er '[.[] | select(.trackCount >= 8)][0].id' "$(fx heads_mixes)")"
+hmix="$(pick 'heads mix of at least 8 songs' '[.[] | select(.trackCount >= 8)][0].id' "$(fx heads_mixes)")"
 mcall heads heads_mix 'GET /mixes/:id' GET "/mixes/$hmix?tz=$tz"
 mcall heads heads_presets 'GET /mixes/mood/buckets/presets' GET /mixes/mood/buckets/presets
 mcall heads heads_bucket 'GET /mixes/mood/buckets/:mood' GET /mixes/mood/buckets/chill
@@ -156,16 +186,33 @@ jq -Rn --arg head "$(git rev-parse HEAD)" --arg tz "$tz" '
 if grep -l 'eyJ' "$stage"/m5b_*_response.json "$stage/m5b_capture_manifest.json"; then
   echo 'A token-like string is in an m5b fixture' >&2; exit 1
 fi
-jq -e --slurpfile m "$(fx mix)" '.[0].id == $m[0].id' "$(fx mixes)" >/dev/null
-jq -e '.trackIds == [.tracks[].id]' "$(fx mix)" >/dev/null
-jq -e --slurpfile m "$(fx mix)" '.trackCount == $m[0].trackCount and .name == "Saved capture mix"' "$(fx mix_save)" >/dev/null
-jq -e --argjson ids "$picked" '.mix.trackIds == $ids and .success == true' "$(fx bucket_save)" >/dev/null
-jq -e --slurpfile b "$(fx bucket_save)" 'any(.[]; .id == $b[0].mix.id and .type == "mood")' "$(fx mixes_with_mood)" >/dev/null
-jq -e --slurpfile b "$(fx bucket_save)" '.mix.id == $b[0].mix.id' "$(fx mood_mixes)" >/dev/null
-jq -e --slurpfile s "$(fx mood_mixes_save)" '.playlist.id == $s[0].id and .decision == "keep"' "$(fx mood_mixes_saved)" >/dev/null
-jq -e --arg a "$artist" '(.tracks | length) > 0 and all(.tracks[]; .artist.id == $a)' "$(fx radio_artist)" >/dev/null
-jq -e '(.artists | length) > 0' "$(fx recommendations)" >/dev/null
-jq -e '.trackIds == [.tracks[].id] and (.tracks | length) >= 8' "$(fx heads_bucket)" >/dev/null
-jq -e '(.tracks | length) > 0' "$(fx heads_radio_mood)" >/dev/null
-jq -e '.release.version == "0.2.0"' "$(fx heads_whats_new_current)" >/dev/null
-jq -e '.version == "0.2.0" and .dismissed == true' "$(fx heads_whats_new_dismiss)" >/dev/null
+check 'the mix page is a mix on Home, same id, name and song count' \
+  'any(.[]; .id == $m[0].id and .name == $m[0].name and .trackCount == $m[0].trackCount)' "$(fx mixes)" \
+  --slurpfile m "$(fx mix)"
+check 'the mix page lists its trackIds in order' '.trackIds == [.tracks[].id] and (.tracks | length) >= 8' "$(fx mix)"
+check 'the saved mix keeps the song count and takes the given name' \
+  '.trackCount == $m[0].trackCount and .name == "Saved capture mix"' "$(fx mix_save)" --slurpfile m "$(fx mix)"
+check 'the saved mood mix holds the picked songs in order' '.mix.trackIds == $ids and .success == true' \
+  "$(fx bucket_save)" --argjson ids "$picked"
+check 'the saved mood mix is on Home' 'any(.[]; .id == $b[0].mix.id and .type == "mood")' "$(fx mixes_with_mood)" \
+  --slurpfile b "$(fx bucket_save)"
+check "the what's-new mood-mix question asks about the saved mix" '.mix.id == $b[0].mix.id' "$(fx mood_mixes)" \
+  --slurpfile b "$(fx bucket_save)"
+check 'the mood mix saved as a playlist is remembered with decision keep' \
+  '.playlist.id == $s[0].id and .decision == "keep"' "$(fx mood_mixes_saved)" --slurpfile s "$(fx mood_mixes_save)"
+# Artist radio (limit 10): ceil(40 % of 10) = 4 of the artist's own 5 songs, the other 6 drawn from the songs of its
+# similar library artists. Its stored similar list resolves only Faraway Band (no songs), fewer than 5, so the genre
+# fallback adds the artists sharing Rock: Nineties B-D (15 songs). Exact for every draw.
+check 'artist radio: 10 songs, 4 of the artist, 6 of Nineties B-D' \
+  '(.tracks | length) == 10 and ([.tracks[] | select(.artist.id == $a)] | length) == 4
+   and all(.tracks[]; .artist.id == $a or (.artist.name | test("^Nineties [BCD]$")))' \
+  "$(fx radio_artist)" --arg a "$artist"
+check 'recommendations name the seeded similar artists' \
+  '[.artists[].name] == ["Faraway Band", "Nowhere Collective"]' "$(fx recommendations)"
+check 'the heads chill page has at least 8 songs in trackIds order' \
+  '.trackIds == [.tracks[].id] and (.tracks | length) >= 8' "$(fx heads_bucket)"
+check 'the heads mood station plays songs' '(.tracks | length) > 0' "$(fx heads_radio_mood)"
+check "the heads what's-new window shows the synthetic release" '.release.version == "0.2.0"' \
+  "$(fx heads_whats_new_current)"
+check "the heads what's-new release is dismissed" '.version == "0.2.0" and .dismissed == true' \
+  "$(fx heads_whats_new_dismiss)"

@@ -6,7 +6,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// One track row of `GET /api/mixes/{id}`, `GET /api/mixes/mood/buckets/{mood}` and the mood-mix save.
+/// One track row of `GET /api/mixes/{id}`, `GET /api/mixes/mood/buckets/{mood}` and the mood-mix save. Its floats go
+/// out as JavaScript numbers (a whole value such as 80 bpm as `80`, not `80.0`), as upstream's Prisma `Float`s do.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MixTrack {
@@ -19,25 +20,42 @@ pub struct MixTrack {
     pub file_path: String,
     pub file_modified: String,
     pub file_size: i64,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub bpm: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub bpm_confidence: Option<f64>,
     pub beats_count: Option<i32>,
     pub key: Option<String>,
     pub key_scale: Option<String>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub key_strength: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub energy: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub loudness: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub dynamic_range: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub danceability: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub valence: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub arousal: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub deam_valence: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub deam_arousal: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub clap_valence_raw: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub clap_arousal_raw: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub instrumentalness: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub acousticness: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub speechiness: Option<f64>,
+    #[serde(serialize_with = "crate::stats::js_optional_f64")]
     pub danceability_ml: Option<f64>,
     pub mood_tags: Vec<String>,
     pub essentia_genres: Option<Vec<String>>,

@@ -403,7 +403,8 @@ pub struct HourlyEnergy {
     pub energy: f64,
 }
 
-fn js_optional_f64<S: Serializer>(v: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+/// [`js_f64`] for an optional value (`null` stays `null`).
+pub fn js_optional_f64<S: Serializer>(v: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
     match v {
         Some(n) => js_f64(n, s),
         None => s.serialize_none(),

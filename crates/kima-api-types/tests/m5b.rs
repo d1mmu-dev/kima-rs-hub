@@ -856,6 +856,27 @@ fn cross_ids_and_populated_values() {
     assert_eq!(recs["artists"][0]["albumCount"], 1);
 }
 
+/// Upstream sends a whole-valued Prisma `Float` (a song at 80 bpm) as the JavaScript number `80`; serde's `f64`
+/// would write `80.0`. Re-serializing the captured rows through `MixTrack` must not produce an integral float.
+#[test]
+fn mix_track_floats_serialize_like_javascript_numbers() {
+    let mut found = Vec::new();
+    for (name, at) in [
+        ("mix", "/tracks"),
+        ("heads_mix", "/tracks"),
+        ("heads_bucket", "/tracks"),
+        ("bucket_save", "/mix/tracks"),
+        ("heads_bucket_save", "/mix/tracks"),
+    ] {
+        let rows = fixture(name).pointer(at).unwrap().clone();
+        let tracks: Vec<MixTrack> = serde_json::from_value(rows).unwrap();
+        assert!(!tracks.is_empty(), "{name}: no track rows");
+        let wire: Value = serde_json::from_str(&serde_json::to_string(&tracks).unwrap()).unwrap();
+        integral_floats(&wire, format!("{name}{at}"), &mut found);
+    }
+    assert!(found.is_empty(), "integral floats on the wire: {found:?}");
+}
+
 #[test]
 #[ignore = "the 81ee883 capture predates the MixTrack JS-number fix (bpm 80.0): recapture, then un-ignore"]
 fn no_integral_floats_and_no_tokens_on_the_wire() {

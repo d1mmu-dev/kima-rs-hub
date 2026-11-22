@@ -3,12 +3,12 @@
   "tracks": [
     {
       "album": {
-        "coverArt": "01a20246-0c78-739c-85a1-b9dbfe03fd53",
-        "id": "01a20246-0c78-739c-85a1-b9dbfe03fd53",
+        "coverArt": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "id": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
         "title": "Nineties A Album"
       },
       "artist": {
-        "id": "01a20246-0c78-739c-85a1-b9da01ac05aa",
+        "id": "01a2027e-4d33-70ad-bc9e-ead0bd5f9aeb",
         "name": "Nineties A"
       },
       "discNumber": 0,
@@ -16,18 +16,18 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Nineties A/1994 - Nineties A Album/05 - Nineties A 5.mp3",
-      "id": "01a20246-0cbf-7465-9ed6-a27a7090bfbd",
+      "id": "01a2027e-4d7f-7432-8dab-91873ed5d0c2",
       "title": "Nineties A 5",
       "trackNo": 5
     },
     {
       "album": {
-        "coverArt": "01a20246-0fdf-735b-82c0-749fb218677c",
-        "id": "01a20246-0fdf-735b-82c0-749fb218677c",
+        "coverArt": "01a2027e-508a-707e-95db-64dfcb38b7a5",
+        "id": "01a2027e-508a-707e-95db-64dfcb38b7a5",
         "title": "The Woods"
       },
       "artist": {
-        "id": "01a20246-0fde-74a0-b90d-841ffbe304d1",
+        "id": "01a2027e-508a-707e-95db-64dec48517ab",
         "name": "Sleater-Kinney"
       },
       "discNumber": 0,
@@ -35,18 +35,18 @@
       "displayTitle": null,
       "duration": 6,
       "filePath": "Sleater-Kinney/2005 - The Woods/01 - Woods 1.mp3",
-      "id": "01a20246-0fe0-720c-a3e2-fdf978b2fa38",
+      "id": "01a2027e-508b-74a7-889e-c4ec23167b90",
       "title": "Woods 1",
       "trackNo": 1
     },
     {
       "album": {
-        "coverArt": "01a20246-0b87-778b-8e7e-0d23772ca499",
-        "id": "01a20246-0b87-778b-8e7e-0d23772ca499",
+        "coverArt": "01a2027e-4c54-75f1-9389-1e2016a0a272",
+        "id": "01a2027e-4c54-75f1-9389-1e2016a0a272",
         "title": "Mixed Bag"
       },
       "artist": {
-        "id": "01a20246-0b84-70dd-be33-968ff48612d9",
+        "id": "01a2027e-4c51-7699-9e83-4f69be23dafc",
         "name": "Various Artists"
       },
       "discNumber": 0,
@@ -54,18 +54,18 @@
       "displayTitle": null,
       "duration": 6,
       "filePath": "Compilations/Mixed Bag/02 - Tune 2.mp3",
-      "id": "01a20246-0ba3-732a-8c03-1980cd3d0775",
+      "id": "01a2027e-4c70-779c-93f9-f9a52f8a16fa",
       "title": "Tune 2",
       "trackNo": 2
     },
     {
       "album": {
-        "coverArt": "01a20246-0e39-76e8-bf49-7398ca9904d3",
-        "id": "01a20246-0e39-76e8-bf49-7398ca9904d3",
+        "coverArt": "01a2027e-4eff-75f9-b52e-8cc68dd04d55",
+        "id": "01a2027e-4eff-75f9-b52e-8cc68dd04d55",
         "title": "Noughties A Album"
       },
       "artist": {
-        "id": "01a20246-0e39-76e8-bf49-73978543d26f",
+        "id": "01a2027e-4eff-75f9-b52e-8cc515bba29f",
         "name": "Noughties A"
       },
       "discNumber": 0,
@@ -73,18 +73,18 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Noughties A/2003 - Noughties A Album/01 - Noughties A 1.mp3",
-      "id": "01a20246-0e39-76e8-bf49-73993fd67ddc",
+      "id": "01a2027e-4f00-740a-90cf-167cb8ae5e5f",
       "title": "Noughties A 1",
       "trackNo": 1
     },
     {
       "album": {
-        "coverArt": "01a20246-0cf2-712b-9305-81921b11c4db",
-        "id": "01a20246-0cf2-712b-9305-81921b11c4db",
+        "coverArt": "01a2027e-4db0-741b-8094-e758d79cfb10",
+        "id": "01a2027e-4db0-741b-8094-e758d79cfb10",
         "title": "Nineties B Album"
       },
       "artist": {
-        "id": "01a20246-0cf1-7126-b52f-67663203ab86",
+        "id": "01a2027e-4daf-70dc-b32b-8341528a3dc5",
         "name": "Nineties B"
       },
       "discNumber": 0,
@@ -92,18 +92,18 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Nineties B/1994 - Nineties B Album/04 - Nineties B 4.mp3",
-      "id": "01a20246-0d2d-7333-a7ab-cd7983eb9911",
+      "id": "01a2027e-4de5-74b1-b5f5-f860bc7bd9ed",
       "title": "Nineties B 4",
       "trackNo": 4
     },
     {
       "album": {
-        "coverArt": "01a20246-0be3-718e-864c-d50d878750ba",
-        "id": "01a20246-0be3-718e-864c-d50d878750ba",
+        "coverArt": "01a2027e-4cb1-72fd-83eb-21b5625011f5",
+        "id": "01a2027e-4cb1-72fd-83eb-21b5625011f5",
         "title": "Double Album"
       },
       "artist": {
-        "id": "01a20246-0be0-7067-be14-8146225d4a94",
+        "id": "01a2027e-4cae-73c2-9255-bb0aec204524",
         "name": "Disc Band"
       },
       "discNumber": 1,
@@ -111,18 +111,18 @@
       "displayTitle": null,
       "duration": 6,
       "filePath": "Disc Band/Double Album/CD1/03 - Song 1-3.mp3",
-      "id": "01a20246-0c10-72a6-ad35-a6a7a51d6529",
+      "id": "01a2027e-4cdc-745a-9673-2333fdd40d47",
       "title": "Song 1-3",
       "trackNo": 3
     },
     {
       "album": {
-        "coverArt": "01a20246-0f6d-74ca-a02c-5ec460a641f6",
-        "id": "01a20246-0f6d-74ca-a02c-5ec460a641f6",
+        "coverArt": "01a2027e-502b-711f-9fe8-f281e5ccd740",
+        "id": "01a2027e-502b-711f-9fe8-f281e5ccd740",
         "title": "Noughties D Album"
       },
       "artist": {
-        "id": "01a20246-0f6c-7693-96cc-3615d6441dc2",
+        "id": "01a2027e-502b-711f-9fe8-f280456b4c70",
         "name": "Noughties D"
       },
       "discNumber": 0,
@@ -130,18 +130,18 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Noughties D/2003 - Noughties D Album/02 - Noughties D 2.mp3",
-      "id": "01a20246-0f83-737e-917f-e2f4af76c576",
+      "id": "01a2027e-5038-767b-b500-62ddc061b4f0",
       "title": "Noughties D 2",
       "trackNo": 2
     },
     {
       "album": {
-        "coverArt": "01a20246-0d67-74f2-a96c-bb8d11f8bbdb",
-        "id": "01a20246-0d67-74f2-a96c-bb8d11f8bbdb",
+        "coverArt": "01a2027e-4e1d-7565-99d1-c1350f1f6cf9",
+        "id": "01a2027e-4e1d-7565-99d1-c1350f1f6cf9",
         "title": "Nineties C Album"
       },
       "artist": {
-        "id": "01a20246-0d66-75ff-8880-6bea0fb0f96e",
+        "id": "01a2027e-4e1c-75db-af9b-a236582cb79f",
         "name": "Nineties C"
       },
       "discNumber": 0,
@@ -149,18 +149,18 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Nineties C/1994 - Nineties C Album/03 - Nineties C 3.mp3",
-      "id": "01a20246-0d85-7069-b67a-fcf700bad6a0",
+      "id": "01a2027e-4e3b-724e-96ba-5ed1d786499c",
       "title": "Nineties C 3",
       "trackNo": 3
     },
     {
       "album": {
-        "coverArt": "01a20246-0c78-739c-85a1-b9dbfe03fd53",
-        "id": "01a20246-0c78-739c-85a1-b9dbfe03fd53",
+        "coverArt": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "id": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
         "title": "Nineties A Album"
       },
       "artist": {
-        "id": "01a20246-0c78-739c-85a1-b9da01ac05aa",
+        "id": "01a2027e-4d33-70ad-bc9e-ead0bd5f9aeb",
         "name": "Nineties A"
       },
       "discNumber": 0,
@@ -168,18 +168,18 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Nineties A/1994 - Nineties A Album/01 - Nineties A 1.mp3",
-      "id": "01a20246-0c79-7695-9b46-0dc9093b895e",
+      "id": "01a2027e-4d36-70cd-9be5-1f6b36b4e576",
       "title": "Nineties A 1",
       "trackNo": 1
     },
     {
       "album": {
-        "coverArt": "01a20246-0ef6-73d6-ab41-1a5c35ceb2a8",
-        "id": "01a20246-0ef6-73d6-ab41-1a5c35ceb2a8",
+        "coverArt": "01a2027e-4fc1-76da-b11d-384ecc5ac42a",
+        "id": "01a2027e-4fc1-76da-b11d-384ecc5ac42a",
         "title": "Noughties C Album"
       },
       "artist": {
-        "id": "01a20246-0ef5-7667-a983-0e691ad5f620",
+        "id": "01a2027e-4fc0-723e-ac59-a3501b3b3b5c",
         "name": "Noughties C"
       },
       "discNumber": 0,
@@ -187,18 +187,18 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Noughties C/2003 - Noughties C Album/03 - Noughties C 3.mp3",
-      "id": "01a20246-0f1a-706e-9478-6a42b17217e2",
+      "id": "01a2027e-4fdc-7422-a042-bb6ea2a718d6",
       "title": "Noughties C 3",
       "trackNo": 3
     },
     {
       "album": {
-        "coverArt": "01a20246-0e39-76e8-bf49-7398ca9904d3",
-        "id": "01a20246-0e39-76e8-bf49-7398ca9904d3",
+        "coverArt": "01a2027e-4eff-75f9-b52e-8cc68dd04d55",
+        "id": "01a2027e-4eff-75f9-b52e-8cc68dd04d55",
         "title": "Noughties A Album"
       },
       "artist": {
-        "id": "01a20246-0e39-76e8-bf49-73978543d26f",
+        "id": "01a2027e-4eff-75f9-b52e-8cc515bba29f",
         "name": "Noughties A"
       },
       "discNumber": 0,
@@ -206,18 +206,18 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Noughties A/2003 - Noughties A Album/05 - Noughties A 5.mp3",
-      "id": "01a20246-0e6d-7455-8072-44f358bebb00",
+      "id": "01a2027e-4f40-725e-bc97-9fc453309eff",
       "title": "Noughties A 5",
       "trackNo": 5
     },
     {
       "album": {
-        "coverArt": "01a20246-0e8e-7259-8f88-944674f43a09",
-        "id": "01a20246-0e8e-7259-8f88-944674f43a09",
+        "coverArt": "01a2027e-4f62-70f3-9527-78bc93714fe2",
+        "id": "01a2027e-4f62-70f3-9527-78bc93714fe2",
         "title": "Noughties B Album"
       },
       "artist": {
-        "id": "01a20246-0e8e-7259-8f88-944562e7a129",
+        "id": "01a2027e-4f62-70f3-9527-78bbff47e86c",
         "name": "Noughties B"
       },
       "discNumber": 0,
@@ -225,18 +225,18 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Noughties B/2003 - Noughties B Album/04 - Noughties B 4.mp3",
-      "id": "01a20246-0ebd-75af-8115-66f1543f4a17",
+      "id": "01a2027e-4f91-7083-a5f1-c4a7a8e023e8",
       "title": "Noughties B 4",
       "trackNo": 4
     },
     {
       "album": {
-        "coverArt": "01a20246-0dd1-70f0-b839-fdb468f82978",
-        "id": "01a20246-0dd1-70f0-b839-fdb468f82978",
+        "coverArt": "01a2027e-4e96-774e-b264-ecf0f9b17f08",
+        "id": "01a2027e-4e96-774e-b264-ecf0f9b17f08",
         "title": "Nineties D Album"
       },
       "artist": {
-        "id": "01a20246-0dd1-70f0-b839-fdb35af5e608",
+        "id": "01a2027e-4e96-774e-b264-ecef27ee8c03",
         "name": "Nineties D"
       },
       "discNumber": 0,
@@ -244,18 +244,18 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Nineties D/1994 - Nineties D Album/02 - Nineties D 2.mp3",
-      "id": "01a20246-0de4-71f4-a98a-9c6f3d25de0d",
+      "id": "01a2027e-4ea6-7558-8c70-f26a9275d76c",
       "title": "Nineties D 2",
       "trackNo": 2
     },
     {
       "album": {
-        "coverArt": "01a20246-1013-74df-be6a-a5b77e786fe2",
-        "id": "01a20246-1013-74df-be6a-a5b77e786fe2",
+        "coverArt": "01a2027e-50b6-76b5-a0dc-954809f06e78",
+        "id": "01a2027e-50b6-76b5-a0dc-954809f06e78",
         "title": "Plain Album"
       },
       "artist": {
-        "id": "01a20246-1012-7763-999b-69e741b69789",
+        "id": "01a2027e-50b6-76b5-a0dc-954763a9b357",
         "name": "Untagged Artist"
       },
       "discNumber": 0,
@@ -263,7 +263,7 @@
       "displayTitle": null,
       "duration": 6,
       "filePath": "Untagged Artist/1999 - Plain Album/03 - Third.mp3",
-      "id": "01a20246-102d-704d-8081-2c8e54e93c07",
+      "id": "01a2027e-50d4-746b-ae0e-ccf7936af4b6",
       "title": "Third",
       "trackNo": 3
     }

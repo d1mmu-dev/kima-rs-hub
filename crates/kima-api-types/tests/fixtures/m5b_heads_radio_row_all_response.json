@@ -1,41 +1,41 @@
 {
   "stations": [
     {
-      "cover": "01a20246-0cf2-712b-9305-81921b11c4db",
+      "cover": "01a2027e-4f62-70f3-9527-78bc93714fe2",
       "type": "all",
       "value": null
     },
     {
-      "cover": "01a20246-0ef6-73d6-ab41-1a5c35ceb2a8",
+      "cover": "01a2027e-4fc1-76da-b11d-384ecc5ac42a",
       "type": "discovery",
       "value": null
     },
     {
-      "cover": "01a20246-0c78-739c-85a1-b9dbfe03fd53",
+      "cover": "01a2027e-4db0-741b-8094-e758d79cfb10",
       "type": "favorites",
       "value": null
     },
     {
       "count": 20,
-      "cover": "01a20246-0ef6-73d6-ab41-1a5c35ceb2a8",
+      "cover": "01a2027e-4fc1-76da-b11d-384ecc5ac42a",
       "type": "genre",
       "value": "electronic"
     },
     {
       "count": 20,
-      "cover": "01a20246-0cf2-712b-9305-81921b11c4db",
+      "cover": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
       "type": "genre",
       "value": "rock"
     },
     {
       "count": 28,
-      "cover": "01a20246-0be3-718e-864c-d50d878750ba",
+      "cover": "01a2027e-4cb1-72fd-83eb-21b5625011f5",
       "type": "decade",
       "value": "2000"
     },
     {
       "count": 23,
-      "cover": "01a20246-0d67-74f2-a96c-bb8d11f8bbdb",
+      "cover": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
       "type": "decade",
       "value": "1990"
     }

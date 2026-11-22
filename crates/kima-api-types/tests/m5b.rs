@@ -754,14 +754,22 @@ fn cross_ids_and_populated_values() {
     let decades = fixture("decades");
     let decades = decades["decades"].as_array().unwrap();
     assert!(decades.len() >= 2 && decades.iter().all(|d| d["count"].as_u64().unwrap() >= 15));
-    let artist = &fixture("mix")["tracks"][0]["album"]["artist"]["id"];
+    // Artist radio of "Nineties A" (capture seed): 4 of its own songs, then the 6 the genre
+    // fallback draws from the artists sharing Rock (Nineties B-D). Exact for every draw.
     let by_artist = fixture("radio_artist");
+    let tracks = by_artist["tracks"].as_array().unwrap();
+    let own = tracks
+        .iter()
+        .filter(|t| t["artist"]["name"] == "Nineties A")
+        .count();
+    assert_eq!(tracks.len(), 10, "artist radio length");
+    assert_eq!(own, 4, "artist radio: songs of the artist itself");
     assert!(
-        by_artist["tracks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|t| &t["artist"]["id"] == artist)
+        tracks.iter().all(|t| matches!(
+            t["artist"]["name"].as_str(),
+            Some("Nineties A" | "Nineties B" | "Nineties C" | "Nineties D")
+        )),
+        "artist radio: only the artist and the artists sharing its genre"
     );
     for name in [
         "radio_all",
@@ -878,7 +886,6 @@ fn mix_track_floats_serialize_like_javascript_numbers() {
 }
 
 #[test]
-#[ignore = "the 81ee883 capture predates the MixTrack JS-number fix (bpm 80.0): recapture, then un-ignore"]
 fn no_integral_floats_and_no_tokens_on_the_wire() {
     let mut found = Vec::new();
     for name in FIXTURES {

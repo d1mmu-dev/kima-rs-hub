@@ -2,69 +2,12 @@
   "tracks": [
     {
       "album": {
-        "coverArt": "01a20246-0ef6-73d6-ab41-1a5c35ceb2a8",
-        "id": "01a20246-0ef6-73d6-ab41-1a5c35ceb2a8",
-        "title": "Noughties C Album"
-      },
-      "artist": {
-        "id": "01a20246-0ef5-7667-a983-0e691ad5f620",
-        "name": "Noughties C"
-      },
-      "discNumber": 0,
-      "discSubtitle": null,
-      "displayTitle": null,
-      "duration": 35,
-      "filePath": "M5b/Noughties C/2003 - Noughties C Album/01 - Noughties C 1.mp3",
-      "id": "01a20246-0ef7-76ca-aa5f-3f844dfeec48",
-      "title": "Noughties C 1",
-      "trackNo": 1
-    },
-    {
-      "album": {
-        "coverArt": "01a20246-0e39-76e8-bf49-7398ca9904d3",
-        "id": "01a20246-0e39-76e8-bf49-7398ca9904d3",
-        "title": "Noughties A Album"
-      },
-      "artist": {
-        "id": "01a20246-0e39-76e8-bf49-73978543d26f",
-        "name": "Noughties A"
-      },
-      "discNumber": 0,
-      "discSubtitle": null,
-      "displayTitle": null,
-      "duration": 35,
-      "filePath": "M5b/Noughties A/2003 - Noughties A Album/02 - Noughties A 2.mp3",
-      "id": "01a20246-0e47-7759-b2c9-06acf6076b24",
-      "title": "Noughties A 2",
-      "trackNo": 2
-    },
-    {
-      "album": {
-        "coverArt": "01a20246-0e8e-7259-8f88-944674f43a09",
-        "id": "01a20246-0e8e-7259-8f88-944674f43a09",
-        "title": "Noughties B Album"
-      },
-      "artist": {
-        "id": "01a20246-0e8e-7259-8f88-944562e7a129",
-        "name": "Noughties B"
-      },
-      "discNumber": 0,
-      "discSubtitle": null,
-      "displayTitle": null,
-      "duration": 35,
-      "filePath": "M5b/Noughties B/2003 - Noughties B Album/02 - Noughties B 2.mp3",
-      "id": "01a20246-0e9b-75c8-8ee2-3b6cad178853",
-      "title": "Noughties B 2",
-      "trackNo": 2
-    },
-    {
-      "album": {
-        "coverArt": "01a20246-0f6d-74ca-a02c-5ec460a641f6",
-        "id": "01a20246-0f6d-74ca-a02c-5ec460a641f6",
+        "coverArt": "01a2027e-502b-711f-9fe8-f281e5ccd740",
+        "id": "01a2027e-502b-711f-9fe8-f281e5ccd740",
         "title": "Noughties D Album"
       },
       "artist": {
-        "id": "01a20246-0f6c-7693-96cc-3615d6441dc2",
+        "id": "01a2027e-502b-711f-9fe8-f280456b4c70",
         "name": "Noughties D"
       },
       "discNumber": 0,
@@ -72,37 +15,132 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Noughties D/2003 - Noughties D Album/02 - Noughties D 2.mp3",
-      "id": "01a20246-0f83-737e-917f-e2f4af76c576",
+      "id": "01a2027e-5038-767b-b500-62ddc061b4f0",
       "title": "Noughties D 2",
       "trackNo": 2
     },
     {
       "album": {
-        "coverArt": "01a20246-0fdf-735b-82c0-749fb218677c",
-        "id": "01a20246-0fdf-735b-82c0-749fb218677c",
-        "title": "The Woods"
+        "coverArt": "01a2027e-4eff-75f9-b52e-8cc68dd04d55",
+        "id": "01a2027e-4eff-75f9-b52e-8cc68dd04d55",
+        "title": "Noughties A Album"
       },
       "artist": {
-        "id": "01a20246-0fde-74a0-b90d-841ffbe304d1",
-        "name": "Sleater-Kinney"
+        "id": "01a2027e-4eff-75f9-b52e-8cc515bba29f",
+        "name": "Noughties A"
       },
       "discNumber": 0,
       "discSubtitle": null,
       "displayTitle": null,
+      "duration": 35,
+      "filePath": "M5b/Noughties A/2003 - Noughties A Album/03 - Noughties A 3.mp3",
+      "id": "01a2027e-4f1e-7063-9628-914bde2fe371",
+      "title": "Noughties A 3",
+      "trackNo": 3
+    },
+    {
+      "album": {
+        "coverArt": "01a2027e-4cb1-72fd-83eb-21b5625011f5",
+        "id": "01a2027e-4cb1-72fd-83eb-21b5625011f5",
+        "title": "Double Album"
+      },
+      "artist": {
+        "id": "01a2027e-4cae-73c2-9255-bb0aec204524",
+        "name": "Disc Band"
+      },
+      "discNumber": 1,
+      "discSubtitle": null,
+      "displayTitle": null,
       "duration": 6,
-      "filePath": "Sleater-Kinney/2005 - The Woods/02 - Woods 2.mp3",
-      "id": "01a20246-0fee-741f-bd6d-c55943469fa1",
-      "title": "Woods 2",
+      "filePath": "Disc Band/Double Album/CD1/01 - Song 1-1.mp3",
+      "id": "01a2027e-4cb2-7541-a696-c125695a87a6",
+      "title": "Song 1-1",
+      "trackNo": 1
+    },
+    {
+      "album": {
+        "coverArt": "01a2027e-4f62-70f3-9527-78bc93714fe2",
+        "id": "01a2027e-4f62-70f3-9527-78bc93714fe2",
+        "title": "Noughties B Album"
+      },
+      "artist": {
+        "id": "01a2027e-4f62-70f3-9527-78bbff47e86c",
+        "name": "Noughties B"
+      },
+      "discNumber": 0,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 35,
+      "filePath": "M5b/Noughties B/2003 - Noughties B Album/02 - Noughties B 2.mp3",
+      "id": "01a2027e-4f70-70fb-b1dd-23fe7e79843f",
+      "title": "Noughties B 2",
       "trackNo": 2
     },
     {
       "album": {
-        "coverArt": "01a20246-0e39-76e8-bf49-7398ca9904d3",
-        "id": "01a20246-0e39-76e8-bf49-7398ca9904d3",
+        "coverArt": "01a2027e-4fc1-76da-b11d-384ecc5ac42a",
+        "id": "01a2027e-4fc1-76da-b11d-384ecc5ac42a",
+        "title": "Noughties C Album"
+      },
+      "artist": {
+        "id": "01a2027e-4fc0-723e-ac59-a3501b3b3b5c",
+        "name": "Noughties C"
+      },
+      "discNumber": 0,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 35,
+      "filePath": "M5b/Noughties C/2003 - Noughties C Album/02 - Noughties C 2.mp3",
+      "id": "01a2027e-4fcf-77e9-ad8d-f6fe2d20d642",
+      "title": "Noughties C 2",
+      "trackNo": 2
+    },
+    {
+      "album": {
+        "coverArt": "01a2027e-4cb1-72fd-83eb-21b5625011f5",
+        "id": "01a2027e-4cb1-72fd-83eb-21b5625011f5",
+        "title": "Double Album"
+      },
+      "artist": {
+        "id": "01a2027e-4cae-73c2-9255-bb0aec204524",
+        "name": "Disc Band"
+      },
+      "discNumber": 1,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 6,
+      "filePath": "Disc Band/Double Album/CD1/03 - Song 1-3.mp3",
+      "id": "01a2027e-4cdc-745a-9673-2333fdd40d47",
+      "title": "Song 1-3",
+      "trackNo": 3
+    },
+    {
+      "album": {
+        "coverArt": "01a2027e-502b-711f-9fe8-f281e5ccd740",
+        "id": "01a2027e-502b-711f-9fe8-f281e5ccd740",
+        "title": "Noughties D Album"
+      },
+      "artist": {
+        "id": "01a2027e-502b-711f-9fe8-f280456b4c70",
+        "name": "Noughties D"
+      },
+      "discNumber": 0,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 35,
+      "filePath": "M5b/Noughties D/2003 - Noughties D Album/03 - Noughties D 3.mp3",
+      "id": "01a2027e-5045-7145-8105-d69462bc9db3",
+      "title": "Noughties D 3",
+      "trackNo": 3
+    },
+    {
+      "album": {
+        "coverArt": "01a2027e-4eff-75f9-b52e-8cc68dd04d55",
+        "id": "01a2027e-4eff-75f9-b52e-8cc68dd04d55",
         "title": "Noughties A Album"
       },
       "artist": {
-        "id": "01a20246-0e39-76e8-bf49-73978543d26f",
+        "id": "01a2027e-4eff-75f9-b52e-8cc515bba29f",
         "name": "Noughties A"
       },
       "discNumber": 0,
@@ -110,85 +148,47 @@
       "displayTitle": null,
       "duration": 35,
       "filePath": "M5b/Noughties A/2003 - Noughties A Album/05 - Noughties A 5.mp3",
-      "id": "01a20246-0e6d-7455-8072-44f358bebb00",
+      "id": "01a2027e-4f40-725e-bc97-9fc453309eff",
       "title": "Noughties A 5",
       "trackNo": 5
     },
     {
       "album": {
-        "coverArt": "01a20246-0f6d-74ca-a02c-5ec460a641f6",
-        "id": "01a20246-0f6d-74ca-a02c-5ec460a641f6",
-        "title": "Noughties D Album"
+        "coverArt": "01a2027e-508a-707e-95db-64dfcb38b7a5",
+        "id": "01a2027e-508a-707e-95db-64dfcb38b7a5",
+        "title": "The Woods"
       },
       "artist": {
-        "id": "01a20246-0f6c-7693-96cc-3615d6441dc2",
-        "name": "Noughties D"
+        "id": "01a2027e-508a-707e-95db-64dec48517ab",
+        "name": "Sleater-Kinney"
       },
       "discNumber": 0,
-      "discSubtitle": null,
-      "displayTitle": null,
-      "duration": 35,
-      "filePath": "M5b/Noughties D/2003 - Noughties D Album/01 - Noughties D 1.mp3",
-      "id": "01a20246-0f6e-713a-8d8b-01f916e16116",
-      "title": "Noughties D 1",
-      "trackNo": 1
-    },
-    {
-      "album": {
-        "coverArt": "01a20246-0be3-718e-864c-d50d878750ba",
-        "id": "01a20246-0be3-718e-864c-d50d878750ba",
-        "title": "Double Album"
-      },
-      "artist": {
-        "id": "01a20246-0be0-7067-be14-8146225d4a94",
-        "name": "Disc Band"
-      },
-      "discNumber": 2,
       "discSubtitle": null,
       "displayTitle": null,
       "duration": 6,
-      "filePath": "Disc Band/Double Album/CD2/01 - Song 2-1.mp3",
-      "id": "01a20246-0c26-7333-96ea-303889902348",
-      "title": "Song 2-1",
+      "filePath": "Sleater-Kinney/2005 - The Woods/01 - Woods 1.mp3",
+      "id": "01a2027e-508b-74a7-889e-c4ec23167b90",
+      "title": "Woods 1",
       "trackNo": 1
     },
     {
       "album": {
-        "coverArt": "01a20246-0e8e-7259-8f88-944674f43a09",
-        "id": "01a20246-0e8e-7259-8f88-944674f43a09",
-        "title": "Noughties B Album"
+        "coverArt": "01a2027e-4cb1-72fd-83eb-21b5625011f5",
+        "id": "01a2027e-4cb1-72fd-83eb-21b5625011f5",
+        "title": "Double Album"
       },
       "artist": {
-        "id": "01a20246-0e8e-7259-8f88-944562e7a129",
-        "name": "Noughties B"
+        "id": "01a2027e-4cae-73c2-9255-bb0aec204524",
+        "name": "Disc Band"
       },
-      "discNumber": 0,
+      "discNumber": 1,
       "discSubtitle": null,
       "displayTitle": null,
-      "duration": 35,
-      "filePath": "M5b/Noughties B/2003 - Noughties B Album/03 - Noughties B 3.mp3",
-      "id": "01a20246-0eab-7528-b42a-dc95128ac27d",
-      "title": "Noughties B 3",
-      "trackNo": 3
-    },
-    {
-      "album": {
-        "coverArt": "01a20246-0f6d-74ca-a02c-5ec460a641f6",
-        "id": "01a20246-0f6d-74ca-a02c-5ec460a641f6",
-        "title": "Noughties D Album"
-      },
-      "artist": {
-        "id": "01a20246-0f6c-7693-96cc-3615d6441dc2",
-        "name": "Noughties D"
-      },
-      "discNumber": 0,
-      "discSubtitle": null,
-      "displayTitle": null,
-      "duration": 35,
-      "filePath": "M5b/Noughties D/2003 - Noughties D Album/05 - Noughties D 5.mp3",
-      "id": "01a20246-0fb9-7658-8c5d-49fb743064d5",
-      "title": "Noughties D 5",
-      "trackNo": 5
+      "duration": 6,
+      "filePath": "Disc Band/Double Album/CD1/02 - Song 1-2.mp3",
+      "id": "01a2027e-4cc9-7172-a365-585c501aa184",
+      "title": "Song 1-2",
+      "trackNo": 2
     }
   ]
 }

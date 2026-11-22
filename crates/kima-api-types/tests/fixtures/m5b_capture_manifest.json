@@ -1,6 +1,6 @@
 {
   "source": {
-    "head": "81ee883e8f3a20144d7185ae37573033a7fc6f20",
+    "head": "62e1b7a415e068ac219597eb1d9f537759661a2b",
     "tz": "Europe/Warsaw",
     "live": "the run's kima server: no mood heads, the shipped empty release catalog, KIMA_NET_DENY_REAL=1",
     "heads": "crates/kima-api/tests/m5b_capture.rs m5b_capture_serve: same router and database, synthetic mood heads and a one-release synthetic catalog",
@@ -20,7 +20,7 @@
       "variant": "live",
       "route": "GET /mixes/:id",
       "method": "GET",
-      "path": "/mixes/era-2000-2026-11-22?tz=Europe/Warsaw",
+      "path": "/mixes/deep-cuts-2026-11-22?tz=Europe/Warsaw",
       "status": 200
     },
     {
@@ -28,7 +28,7 @@
       "variant": "live",
       "route": "POST /mixes/:id/save",
       "method": "POST",
-      "path": "/mixes/era-2000-2026-11-22/save?tz=Europe/Warsaw",
+      "path": "/mixes/deep-cuts-2026-11-22/save?tz=Europe/Warsaw",
       "status": 200
     },
     {
@@ -132,7 +132,7 @@
       "variant": "live",
       "route": "GET /library/radio",
       "method": "GET",
-      "path": "/library/radio?type=artist&value=01a20246-0be0-7067-be14-8146225d4a94&limit=10",
+      "path": "/library/radio?type=artist&value=01a2027e-4d33-70ad-bc9e-ead0bd5f9aeb&limit=10",
       "status": 200
     },
     {
@@ -268,7 +268,7 @@
       "variant": "heads",
       "route": "GET /mixes/:id",
       "method": "GET",
-      "path": "/mixes/nostalgic-2026-11-22?tz=Europe/Warsaw",
+      "path": "/mixes/rage-cleaning-2026-11-22?tz=Europe/Warsaw",
       "status": 200
     },
     {

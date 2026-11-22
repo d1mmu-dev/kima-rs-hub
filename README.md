@@ -22,7 +22,7 @@ login, kima-rs now scans and watches a music folder, shows it as Artist, then Ye
 browse, search, stream (with transcodes), keep playlists and resume playback. An admin can also
 preview and apply a tidy on-disk layout. Music apps that speak Subsonic/OpenSubsonic can connect
 with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Identification and the album
-autotagger and CLAP/analysis plumbing are built. Podcasts (M6a) are served, see [Podcasts](#podcasts); the vibe engine (M5) is ported but not enabled until the music CLAP checkpoint and its private assets exist, see [Vibe engine](#vibe-engine-m5-not-yet-enabled); mixes, radio and what's new (M5b) are served, see [Mixes, radio and what's new](#mixes-radio-and-whats-new-m5b);
+autotagger and CLAP/analysis plumbing are built. Podcasts (M6a) are served, see [Podcasts](#podcasts); the vibe engine (M5) is ported but not enabled until the music CLAP checkpoint and its private assets exist, see [Vibe engine](#vibe-engine-m5); mixes, radio and what's new (M5b) are served, see [Mixes, radio and what's new](#mixes-radio-and-whats-new-m5b);
 private-model inference acceptance, audiobooks (M6b) and integrations are still open. See
 `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` for what comes next.
 
@@ -335,7 +335,7 @@ New in kima-rs:
 | `KIMA_NET_DENY_REAL` | unset | `1` makes any outbound request to a host other than this machine panic. Set in CI so no test reaches the network. |
 | `KIMA_TRANSCODE_CACHE_MB` | `2048` | Size cap of the transcode cache under `KIMA_DATA_DIR`, in MB. |
 | `KIMA_ARTWORK_CACHE_MB` | `512` | Size cap of the cover-art cache under `KIMA_DATA_DIR/artwork`, in MB. The oldest albums are dropped first. `0` means nothing is kept, so every request rebuilds. |
-| `KIMA_VIBE_ASSET_DIR` | unset | Directory with the private vibe assets `feel_probe.json` and `mood_heads.json` (see [Vibe engine](#vibe-engine-m5-not-yet-enabled)). Unset, missing or unpinned files turn off only the vibe capabilities. |
+| `KIMA_VIBE_ASSET_DIR` | unset | Directory with the private vibe assets `feel_probe.json` and `mood_heads.json` (see [Vibe engine](#vibe-engine-m5)). Unset, missing or unpinned files turn off only the vibe capabilities. |
 | `TZ` | unset (UTC) | Server time zone (standard C library variable). The day of the daily mixes follows it; set `TZ=Europe/Warsaw` so mixes roll over at local midnight (M5b, owner Q11 = A). |
 | `KIMA_VIBE_EXACT_MAX` | `200000` | Vibe text search scans exactly up to this many eligible tracks and uses the HNSW index above it (D-184). A whole number; `0` always uses the index; anything else stops startup. |
 

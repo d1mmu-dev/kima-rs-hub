@@ -33,7 +33,7 @@ use uuid::Uuid;
 const HEADS_VERSION: &str = "m5b-capture-heads";
 /// When every seeded vector was embedded.
 const EMBEDDED_AT: &str = "2026-11-01T00:00:00Z";
-/// Ports of databases this harness must never touch (dev, kima-web dev, live app, shared test cluster).
+/// Well-known local database ports this harness refuses outright (the `fixtureadmin`-only check is the real guard).
 const FORBIDDEN_PORTS: [u16; 4] = [5456, 55433, 52064, 58826];
 
 fn heads() -> MoodHeads {

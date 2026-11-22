@@ -2,6 +2,9 @@
 //! the album's `artist{id,name,mbid}`, every scalar key in upstream's model order and name. Where kima has no data
 //! the value is `null`, never a missing key (also for upstream's non-nullable columns). The column-by-column map is
 //! Appendix D of the M5b plan.
+//!
+//! The mixes themselves ([`Mix`], [`MixDetail`], the refresh and save replies) are typed for kima-web's Home "Made
+//! for you" row and `/mix?id=` page (Phase F Task 23).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -123,4 +126,58 @@ pub struct MixArtist {
     pub id: String,
     pub name: String,
     pub mbid: Option<String>,
+}
+
+/// One Home mix (upstream `ProgrammaticMix`, `GET /api/mixes`): `coverUrls` are album cover tokens (D-265). `extra`
+/// keeps the keys a saved mood mix adds (`mood`, ...), so nothing is lost on the way through.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mix {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    pub description: String,
+    pub track_ids: Vec<String>,
+    pub cover_urls: Vec<String>,
+    pub track_count: i64,
+    /// A CSS gradient (upstream `getMixColor`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// `GET /api/mixes/{id}`: the mix with its track rows in mix order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MixDetail {
+    #[serde(flatten)]
+    pub mix: Mix,
+    pub tracks: Vec<MixTrack>,
+}
+
+/// `POST /api/mixes/refresh`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MixesRefreshReply {
+    pub message: String,
+    pub mixes: Vec<Mix>,
+}
+
+/// `POST /api/mixes/{id}/save`: the new playlist.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MixSaveReply {
+    pub id: String,
+    pub name: String,
+    pub track_count: i64,
+}
+
+/// The 409 body of `POST /api/mixes/{id}/save` when this mix is already a playlist.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MixSaveConflict {
+    pub error: String,
+    pub playlist_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }

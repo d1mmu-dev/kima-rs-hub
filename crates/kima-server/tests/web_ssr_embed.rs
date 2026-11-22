@@ -162,6 +162,7 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
         "/vibe",
         "/vibe?track=0b1c2d3e",
         "/radio",
+        "/mix?id=deep-cuts-2026-11-22",
         ASSETS[0],
         ASSETS[1],
     ] {
@@ -198,6 +199,7 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
         "/searching",
         "/vibes",
         "/radios",
+        "/mixes",
         "/collections",
         "/playlist",
         "/x/login",
@@ -371,6 +373,13 @@ async fn login_is_server_rendered_markup(pool: PgPool) {
         home.contains("data-vertigo-run-wasm") && !home.contains("legacy home"),
         "{home}"
     );
+    // `/` is the artists collection with the "Made for you" row above it (M5b Phase F; the row loads in the browser).
+    assert!(
+        home.contains(r#"data-testid="home-page""#)
+            && home.contains(r#"data-testid="made-for-you""#)
+            && home.contains("Made For You"),
+        "{home}"
+    );
     let playlist = reqwest::get(format!(
         "{base}/playlists/00000000-0000-0000-0000-000000000000"
     ))
@@ -400,6 +409,13 @@ async fn login_is_server_rendered_markup(pool: PgPool) {
         "{radio}"
     );
     assert!(radio.contains(r#"href="/radio""#), "{radio}");
+    // A mix's page (M5b Phase F): its public shell (the mix loads in the browser).
+    let mix = reqwest::get(format!("{base}/mix?id=deep-cuts-2026-11-22"))
+        .await
+        .unwrap();
+    assert_eq!(mix.status(), StatusCode::OK);
+    let mix = mix.text().await.unwrap();
+    assert!(mix.contains(r#"data-testid="mix-loading""#), "{mix}");
 
     // The two files the page names are served through the proxy; others in the directory are not.
     let attr = |name: &str| -> String {

@@ -26,10 +26,16 @@ pub fn kima_mark(size: u32, class: &'static str) -> DomNode {
     dom! { <span role="img" aria-label="Kima" class={class} style={style}></span> }
 }
 
+/// The collection item is lit on the artists, albums and tracks pages, on `/` (the artists with the mixes above
+/// them) and on a mix's page (upstream `NAV.collection.match` includes `/mix`).
 fn is_collection(route: &Route) -> bool {
     matches!(
         route,
-        Route::Artists | Route::Albums { .. } | Route::Tracks { .. }
+        Route::Home
+            | Route::Artists
+            | Route::Albums { .. }
+            | Route::Tracks { .. }
+            | Route::Mix { .. }
     )
 }
 
@@ -312,14 +318,14 @@ fn top_bar_desktop(ctx: &Ctx, route: Computed<Route>) -> DomNode {
     dom! {
         <header class="fixed top-0 left-0 right-0 bg-black flex items-center px-3 z-(--z-header) h-16 tablet:hidden">
             <div class="w-72 flex items-center px-2">
-                <a class="flex items-center gap-2 group" href={Route::Artists.to_string()}>
+                <a class="flex items-center gap-2 group" href={Route::Home.to_string()}>
                     {kima_mark(32, "kima-mark inline-block shrink-0 group-hover:scale-105 transition-transform")}
                 </a>
                 <span class="ml-2 px-1.5 py-0.5 text-micro font-medium text-brand/80 bg-brand/[0.06] rounded border border-brand/25">{format!("v{}", env!("CARGO_PKG_VERSION"))}</span>
             </div>
             <div class="flex-1 flex items-center justify-center gap-3 max-w-3xl mx-auto">
                 <a class="w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200 flex-shrink-0 bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-white hover:scale-105"
-                    aria-label="Home" title="home" href={Route::Artists.to_string()}>
+                    aria-label="Home" title="home" href={Route::Home.to_string()}>
                     {icon("house", "w-6 h-6")}
                 </a>
                 <form class="flex-1 max-w-md" on_submit={on_submit}>
@@ -356,7 +362,7 @@ fn top_bar_mobile(ctx: &Ctx) -> DomNode {
                 {icon("menu", "w-5 h-5")}
             </button>
             <a class="w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200 flex-shrink-0 mr-2 bg-[var(--bg-primary)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-white"
-                aria-label="Home" title="home" href={Route::Artists.to_string()}>
+                aria-label="Home" title="home" href={Route::Home.to_string()}>
                 {icon("house", "w-5 h-5")}
             </a>
             <form class="flex-1 min-w-0" on_submit={on_submit}>
@@ -754,7 +760,7 @@ fn drawer(ctx: &Ctx) -> DomNode {
                     <div class="fixed inset-0 bg-black/60 z-(--z-drawer-backdrop) transition-opacity duration-200" on_click={close.clone()}></div>
                     <div class="fixed inset-y-0 left-0 w-[280px] bg-[var(--bg-primary)] z-(--z-drawer) flex flex-col overflow-hidden border-r border-white/[0.06]">
                         <div class="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
-                            <a class="flex items-center gap-3" href={Route::Artists.to_string()} on_click={close.clone()}>
+                            <a class="flex items-center gap-3" href={Route::Home.to_string()} on_click={close.clone()}>
                                 {kima_mark(32, "kima-mark inline-block shrink-0")}
                                 <span class="text-lg font-bold text-white tracking-tight">"Kima"</span>
                             </a>

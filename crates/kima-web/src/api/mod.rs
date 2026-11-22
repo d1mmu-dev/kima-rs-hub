@@ -3,6 +3,7 @@
 pub mod app_tokens;
 pub mod client;
 pub mod codec;
+pub mod mixes;
 pub mod podcasts;
 pub mod profiles;
 pub mod radio;

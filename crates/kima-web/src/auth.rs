@@ -257,7 +257,7 @@ impl Session {
 /// `/setup` is reachable; the page itself redirects to `/login` once an admin exists.
 pub fn effective_route(requested: &Route, signed_in: bool) -> Route {
     match (requested, signed_in) {
-        (Route::Login | Route::Setup, true) => Route::Artists,
+        (Route::Login | Route::Setup, true) => Route::Home,
         (r, false) if r.requires_auth() => Route::Login,
         (r, _) => r.clone(),
     }
@@ -499,6 +499,10 @@ mod tests {
     #[test]
     fn guarded_routes_render_login_without_a_token() {
         for r in [
+            Route::Home,
+            Route::Mix {
+                id: "deep-cuts-2026-11-22".into(),
+            },
             Route::Artists,
             Route::Albums { artist: None },
             Route::Tracks { album: None },
@@ -515,8 +519,8 @@ mod tests {
     fn public_routes_and_login_redirect() {
         assert_eq!(effective_route(&Route::Setup, false), Route::Setup);
         assert_eq!(effective_route(&Route::Login, false), Route::Login);
-        assert_eq!(effective_route(&Route::Login, true), Route::Artists);
-        assert_eq!(effective_route(&Route::Setup, true), Route::Artists);
+        assert_eq!(effective_route(&Route::Login, true), Route::Home);
+        assert_eq!(effective_route(&Route::Setup, true), Route::Home);
         assert_eq!(effective_route(&Route::NotFound, false), Route::NotFound);
     }
 

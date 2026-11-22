@@ -356,6 +356,34 @@ destination M10 (2026-11-22). Checked with native tests and a DB-free mocked
 API on the real WASM in headless Chrome (private evidence, wiring only); a real-server/library/playback browser run
 is still to do.
 
+## Made for you and mix pages (M5b Phase F Task 23, D-283)
+
+kima-web has no Home page yet (owner 2026-11-22: a proper Home is M10), so `/` shows the **Made For You** row above the
+existing artists collection; `/collection` stays the collection alone, and the logo, the top bar's home button and the
+redirect after signing in go to `/`. Reference: upstream `frontend/app/page.tsx` (its "Made For You" section),
+`features/home/components/MixesGrid.tsx` and `app/mix/[id]/page.tsx` at the external checkout's `b927e307`.
+
+The row asks `GET /api/mixes?tz=<browser zone>` on its own: six placeholders while it loads, "Could not load your mixes."
+with Retry when it fails (the artists below are unaffected), nothing when there are no mixes, otherwise a sideways row
+of cards (the first four cover tokens as a mosaic, `N tracks`) linking to `/mix?id=<mix id>`. **Refresh**
+(`POST /api/mixes/refresh?tz=`) shows "Refreshing..." and replaces the cards with the reply's mixes; a failure toasts
+"Failed to refresh mixes".
+
+`/mix?id=<mix id>` accepts the ids the server generates (1-200 ASCII letters, digits, `-`, `_`; anything else is the
+404 page) and asks `GET /api/mixes/<id>?tz=`: a spinner, "Mix not found" (404, link Home), "Couldn't load this mix"
+(other failures, Try again), or the mix: hero on the mix's colour with its covers, name, description and
+`N songs, H hr M min`; play (the mix from its first song through `Player::play_queue`, an ordinary queue, not a
+station), shuffle play, **Save as Playlist** (`POST /api/mixes/<id>/save?tz=`: "Saving...", the playlist list refreshes
+and the new playlist opens after a second; when the server answers 409 the toast says "You've already saved this mix
+as a playlist." and the existing playlist opens), and the track rows (play from a row, add to the queue).
+
+**Compromises** (each in D-283, accepted for this slice with destination M10): no other Home sections and no Mood
+Mixer button; the row shows an error with Retry instead of hiding; Refresh uses the refresh reply instead of refetching;
+no 5-minute cache (fetched per visit); a scrolling flex row instead of the carousel component; play always starts the
+mix (no pause/resume of the same mix); rows play from a button (no double-click/double-tap); the saved playlist opens
+only while the listener is still on the mix. Checked with native tests and a DB-free mocked API on the real WASM in
+headless Chrome (private evidence, wiring only); a real-server/library/playback browser run is still to do.
+
 ## Visual parity: compromises and assets
 
 kima-web does **not** reproduce the upstream UI as a finished goal. The target is the upstream kima-hub **v1.12.3** UI,

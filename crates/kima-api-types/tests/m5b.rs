@@ -11,7 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use kima_api_types::mixes::MixTrack;
+use kima_api_types::mixes::{
+    Mix, MixDetail, MixSaveConflict, MixSaveReply, MixTrack, MixesRefreshReply,
+};
 use kima_api_types::radio::{MoodStationsReply, RadioReply, RadioRowReply};
 use kima_api_types::recommendations::ForYouReply;
 use kima_api_types::releases::{
@@ -638,6 +640,70 @@ fn radio_row_and_station_list_round_trip() {
         serde_json::to_value(&stations).unwrap(),
         fixture("radio_stations")
     );
+}
+
+/// The Home "Made for you" mixes, one mix with its tracks, the refresh and the save: typed for kima-web (Phase F
+/// Task 23), re-serialised equal to the captured JSON (keys sorted), so no key is dropped or invented.
+#[test]
+fn mix_replies_round_trip() {
+    for name in ["mixes", "heads_mixes", "mixes_with_mood"] {
+        let mixes: Vec<Mix> = decode(name);
+        assert!(!mixes.is_empty(), "{name}");
+        assert_eq!(
+            serde_json::to_value(&mixes).unwrap(),
+            fixture(name),
+            "{name}"
+        );
+        for mix in &mixes {
+            assert_eq!(
+                mix.track_count,
+                mix.track_ids.len() as i64,
+                "{name} {}",
+                mix.id
+            );
+        }
+    }
+    let with_mood: Vec<Mix> = decode("mixes_with_mood");
+    assert!(
+        with_mood.iter().any(|m| m.extra.contains_key("mood")),
+        "saved mood mix keeps its keys"
+    );
+    for name in ["mix", "heads_mix"] {
+        let detail: MixDetail = decode(name);
+        assert_eq!(
+            serde_json::to_value(&detail).unwrap(),
+            fixture(name),
+            "{name}"
+        );
+        let ids: Vec<&str> = detail.tracks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            detail
+                .mix
+                .track_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "{name}"
+        );
+        assert!(detail.mix.color.is_some(), "{name}");
+    }
+    let refreshed: MixesRefreshReply = decode("mixes_refresh");
+    assert_eq!(refreshed.message, "Mixes refreshed");
+    assert!(!refreshed.mixes.is_empty());
+    assert_eq!(
+        serde_json::to_value(&refreshed).unwrap(),
+        fixture("mixes_refresh")
+    );
+    let saved: MixSaveReply = decode("mix_save");
+    assert_eq!(saved.name, "Saved capture mix");
+    assert_eq!(serde_json::to_value(&saved).unwrap(), fixture("mix_save"));
+    // The 409 of a second save (upstream `{error, playlistId, name}`), from the server's `ConflictWith`.
+    let conflict: MixSaveConflict = serde_json::from_value(serde_json::json!({
+        "error": "Mix already saved as playlist", "playlistId": saved.id, "name": saved.name
+    }))
+    .unwrap();
+    assert_eq!(conflict.playlist_id, saved.id);
 }
 
 /// The ids agree across replies, and the optional arrays and values the keys check could only call unobservable

@@ -3,6 +3,7 @@
 pub mod albums;
 pub mod artists;
 pub mod login;
+pub mod mixes;
 pub mod onboarding;
 pub mod playlists;
 pub mod podcasts;

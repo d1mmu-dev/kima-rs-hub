@@ -119,11 +119,32 @@ impl ApiClient {
         self.send::<(), T>(FetchMethod::POST, path, None).await
     }
 
+    /// A POST without a body whose answer `decode` reads (for replies whose error bodies carry data, such as a
+    /// save's 409 naming the existing playlist).
+    pub async fn post_empty_with<T>(
+        &self,
+        path: &str,
+        decode: fn(u32, JsJson) -> Result<T, ApiError>,
+    ) -> Result<T, ApiError> {
+        self.send_with::<(), T>(FetchMethod::POST, path, None, decode)
+            .await
+    }
+
     async fn send<B: Serialize, T: DeserializeOwned>(
         &self,
         method: FetchMethod,
         path: &str,
         body: Option<&B>,
+    ) -> Result<T, ApiError> {
+        self.send_with(method, path, body, decode_response).await
+    }
+
+    async fn send_with<B: Serialize, T>(
+        &self,
+        method: FetchMethod,
+        path: &str,
+        body: Option<&B>,
+        decode: fn(u32, JsJson) -> Result<T, ApiError>,
     ) -> Result<T, ApiError> {
         let token = vertigo::transaction(|c| self.token.get(c));
         if !self.accepts_response(&token) {
@@ -150,7 +171,7 @@ impl ApiClient {
                 status: None,
                 message,
             })?;
-        let result = decode_response(status, json);
+        let result = decode(status, json);
         if let Err(err) = &result
             && err.is_unauthorized()
         {

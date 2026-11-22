@@ -15,7 +15,7 @@ import { toolsEnv } from './tools-env.mjs';
 
 const ICONS = ['arrow-left', 'audio-lines', 'audio-waveform', 'bell', 'check', 'chevron-down', 'chevron-left', 'chevron-right', 'chevron-up', 'circle-alert', 'compass',
   'download', 'ellipsis', 'eye', 'eye-off', 'file-music', 'globe', 'grip-vertical', 'heart', 'history', 'house', 'info', 'library', 'link-2', 'list-music', 'list-plus', 'loader-circle',
-  'lock', 'maximize-2', 'menu', 'mic-vocal', 'music', 'orbit', 'pause', 'pencil', 'play', 'plus', 'power', 'radio', 'refresh-cw', 'repeat', 'repeat-1', 'rotate-ccw', 'rotate-cw', 'search',
+  'lock', 'maximize-2', 'menu', 'mic-vocal', 'music', 'orbit', 'pause', 'pencil', 'play', 'plus', 'power', 'radio', 'refresh-cw', 'repeat', 'repeat-1', 'rotate-ccw', 'rotate-cw', 'save', 'search',
   'settings', 'share-2', 'shuffle', 'skip-back', 'skip-forward', 'sliders-horizontal', 'sparkles', 'timer', 'trash-2', 'user', 'volume-2', 'volume-x', 'x'];
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');

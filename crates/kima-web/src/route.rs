@@ -2,7 +2,8 @@
 //!
 //! Login, setup (onboarding), the library browse root with its albums / tracks drill-downs, search,
 //! playlists (list and detail), settings and podcasts (home, a followed show or an Apple preview,
-//! a category's chart) and the vibe map.
+//! a category's chart), the vibe map, radio, and the Home root `/` (the artists collection with the "Made for you"
+//! mixes above it) with a mix's page `/mix?id=<mix id>`.
 
 use std::fmt;
 
@@ -11,6 +12,9 @@ pub enum Route {
     Login,
     Setup,
     Profiles,
+    /// `/`: the artists collection with the "Made for you" mixes above it (owner 2026-11-22: no separate Home page
+    /// until M10).
+    Home,
     /// `/collection`: the browse root (artists).
     Artists,
     /// `/collection/albums`, optionally `?artist=<uuid>`.
@@ -52,6 +56,11 @@ pub enum Route {
     },
     /// `/radio`: every station (upstream `app/radio/page.tsx`).
     Radio,
+    /// `/mix?id=<mix id>`: one Home mix (upstream `app/mix/[id]/page.tsx`). Mix ids are generated per day and
+    /// profile (`deep-cuts-2026-11-22`, `genre-<uuid>-<day>`, `your-mood-mix-<ms>`), not UUIDs.
+    Mix {
+        id: String,
+    },
     NotFound,
 }
 
@@ -89,7 +98,12 @@ impl Route {
             }
         };
         match path {
-            "" | "/" | "/collection" => Route::Artists,
+            "" | "/" => Route::Home,
+            "/collection" => Route::Artists,
+            "/mix" => match raw(query, "id") {
+                Some(id) if is_mix_id(id) => Route::Mix { id: id.to_owned() },
+                _ => Route::NotFound,
+            },
             "/login" => Route::Login,
             "/setup" => Route::Setup,
             "/profiles" => Route::Profiles,
@@ -139,6 +153,15 @@ fn is_number(s: &str) -> bool {
     !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// A mix id: what the server generates (ASCII letters, digits, `-`, `_`), bounded, so a query value can never
+/// smuggle anything into a URL or an API path.
+fn is_mix_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 200
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Ids are UUIDs; accept only their alphabet so a query value can never smuggle anything into a URL.
 fn is_id(s: &str) -> bool {
     !s.is_empty() && s.len() <= 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
@@ -150,6 +173,7 @@ impl fmt::Display for Route {
             Route::Login => f.write_str("/login"),
             Route::Setup => f.write_str("/setup"),
             Route::Profiles => f.write_str("/profiles"),
+            Route::Home => f.write_str("/"),
             Route::Artists => f.write_str("/collection"),
             Route::Albums { artist: None } => f.write_str("/collection/albums"),
             Route::Albums { artist: Some(id) } => write!(f, "/collection/albums?artist={id}"),
@@ -166,6 +190,7 @@ impl fmt::Display for Route {
             Route::Vibe { track: None } => f.write_str("/vibe"),
             Route::Vibe { track: Some(id) } => write!(f, "/vibe?track={id}"),
             Route::Radio => f.write_str("/radio"),
+            Route::Mix { id } => write!(f, "/mix?id={id}"),
             Route::NotFound => f.write_str("/404"),
         }
     }
@@ -239,10 +264,58 @@ mod tests {
 
     #[test]
     fn root_and_trailing_slashes_land_on_the_browse_root() {
-        for url in ["", "/", "/collection/", "/collection#x"] {
+        for url in ["/collection/", "/collection#x"] {
             assert_eq!(Route::new(url), Route::Artists, "{url:?}");
         }
         assert_eq!(Route::new("/login/"), Route::Login);
+    }
+
+    #[test]
+    fn the_root_is_home_with_the_artists_and_mixes() {
+        for url in ["", "/", "/#x", "/?x=1"] {
+            assert_eq!(Route::new(url), Route::Home, "{url:?}");
+        }
+        assert_eq!(Route::Home.to_string(), "/");
+        assert!(Route::Home.requires_auth());
+        assert_eq!(Route::Home.page(), Route::Home);
+    }
+
+    #[test]
+    fn a_mix_page_takes_a_generated_mix_id() {
+        for id in [
+            "deep-cuts-2026-11-22",
+            "genre-01a2027e-4f00-740a-90cf-167d671a4839-2026-11-22-1795338182252",
+            "your-mood-mix-1795338182354",
+            "top-tracks",
+            "era_2000",
+        ] {
+            let route = Route::Mix { id: id.into() };
+            assert_eq!(route.to_string(), format!("/mix?id={id}"));
+            assert_eq!(Route::from(route.to_string()), route, "{id}");
+            assert!(route.requires_auth());
+        }
+        let long = "a".repeat(200);
+        assert_eq!(
+            Route::new(&format!("/mix?id={long}")),
+            Route::Mix { id: long }
+        );
+        for url in [
+            "/mix",
+            "/mix?id=",
+            "/mix?id=<script>",
+            "/mix?id=a/b",
+            "/mix?id=a%2Fb",
+            "/mix?id=a.b",
+            "/mix?id=a b",
+            "/mix?id=zażółć",
+            "/mix/deep-cuts",
+        ] {
+            assert_eq!(Route::new(url), Route::NotFound, "{url}");
+        }
+        assert_eq!(
+            Route::new(&format!("/mix?id={}", "a".repeat(201))),
+            Route::NotFound
+        );
     }
 
     #[test]

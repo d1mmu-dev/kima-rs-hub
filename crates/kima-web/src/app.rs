@@ -78,6 +78,7 @@ pub fn render() -> DomNode {
                 Route::Login => pages::login::render(&ctx),
                 Route::Setup => pages::onboarding::render(&ctx),
                 Route::Profiles => pages::profiles::render(&ctx),
+                Route::Home => pages::mixes::home(&ctx),
                 Route::Artists => pages::artists::render(&ctx),
                 Route::Albums { artist } => pages::albums::render(&ctx, artist),
                 Route::Tracks { album } => pages::tracks::render(&ctx, album),
@@ -91,6 +92,7 @@ pub fn render() -> DomNode {
                 Route::PodcastCategory { id } => pages::podcasts::category(&ctx, id),
                 Route::Vibe { .. } => pages::vibe::render(&ctx),
                 Route::Radio => pages::radio::render(&ctx),
+                Route::Mix { id } => pages::mixes::mix_page(&ctx, id),
                 Route::NotFound => pages::not_found(),
             }
         }))

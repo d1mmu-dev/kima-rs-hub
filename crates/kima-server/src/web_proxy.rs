@@ -29,10 +29,11 @@ pub const WEB_ROUTES: &[&str] = &[
     "/podcasts",
     "/vibe",
     "/radio",
+    "/mix",
 ];
 
-/// Pages matched by the exact path only. `/` is `kima-web`'s browse root (`Route::new` maps it to
-/// the artists page); a prefix match on it would swallow every path.
+/// Pages matched by the exact path only. `/` is `kima-web`'s home (`Route::new` maps it to the artists
+/// collection with the "Made for you" mixes above it); a prefix match on it would swallow every path.
 pub const WEB_EXACT_ROUTES: &[&str] = &["/"];
 
 /// Headers that describe one connection, not the message (RFC 9110 §7.6.1), plus `host`
@@ -170,6 +171,7 @@ mod tests {
             "/podcasts/category",
             "/vibe",
             "/radio",
+            "/mix",
         ] {
             assert!(is_web_route(ok), "{ok}");
         }
@@ -182,6 +184,8 @@ mod tests {
             "/podcastsx",
             "/vibes",
             "/radios",
+            "/mixes",
+            "/api/mixes",
             "/api/library/radio",
             "/api/vibe/map",
             "/api/podcasts",

@@ -1,0 +1,80 @@
+{
+  "tracks": [
+    {
+      "album": {
+        "coverArt": "01a20246-0be3-718e-864c-d50d878750ba",
+        "id": "01a20246-0be3-718e-864c-d50d878750ba",
+        "title": "Double Album"
+      },
+      "artist": {
+        "id": "01a20246-0be0-7067-be14-8146225d4a94",
+        "name": "Disc Band"
+      },
+      "discNumber": 2,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 6,
+      "filePath": "Disc Band/Double Album/CD2/01 - Song 2-1.mp3",
+      "id": "01a20246-0c26-7333-96ea-303889902348",
+      "title": "Song 2-1",
+      "trackNo": 1
+    },
+    {
+      "album": {
+        "coverArt": "01a20246-0be3-718e-864c-d50d878750ba",
+        "id": "01a20246-0be3-718e-864c-d50d878750ba",
+        "title": "Double Album"
+      },
+      "artist": {
+        "id": "01a20246-0be0-7067-be14-8146225d4a94",
+        "name": "Disc Band"
+      },
+      "discNumber": 1,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 6,
+      "filePath": "Disc Band/Double Album/CD1/01 - Song 1-1.mp3",
+      "id": "01a20246-0be5-7322-8e3e-2652499fcbcd",
+      "title": "Song 1-1",
+      "trackNo": 1
+    },
+    {
+      "album": {
+        "coverArt": "01a20246-0be3-718e-864c-d50d878750ba",
+        "id": "01a20246-0be3-718e-864c-d50d878750ba",
+        "title": "Double Album"
+      },
+      "artist": {
+        "id": "01a20246-0be0-7067-be14-8146225d4a94",
+        "name": "Disc Band"
+      },
+      "discNumber": 1,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 6,
+      "filePath": "Disc Band/Double Album/CD1/02 - Song 1-2.mp3",
+      "id": "01a20246-0bfc-7328-81df-ef666e0b39c2",
+      "title": "Song 1-2",
+      "trackNo": 2
+    },
+    {
+      "album": {
+        "coverArt": "01a20246-0be3-718e-864c-d50d878750ba",
+        "id": "01a20246-0be3-718e-864c-d50d878750ba",
+        "title": "Double Album"
+      },
+      "artist": {
+        "id": "01a20246-0be0-7067-be14-8146225d4a94",
+        "name": "Disc Band"
+      },
+      "discNumber": 1,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 6,
+      "filePath": "Disc Band/Double Album/CD1/03 - Song 1-3.mp3",
+      "id": "01a20246-0c10-72a6-ad35-a6a7a51d6529",
+      "title": "Song 1-3",
+      "trackNo": 3
+    }
+  ]
+}

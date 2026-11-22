@@ -1,0 +1,20 @@
+{
+  "artists": [
+    {
+      "albumCount": 1,
+      "coverArt": "01a20246-1546-7760-877c-d0b85cdd1a6b",
+      "heroUrl": null,
+      "id": "01a20246-1546-7760-877c-d0b85cdd1a6b",
+      "mbid": "f0000000-0000-4000-8000-000000000001",
+      "name": "Faraway Band"
+    },
+    {
+      "albumCount": 0,
+      "coverArt": null,
+      "heroUrl": null,
+      "id": "Nowhere Collective",
+      "mbid": null,
+      "name": "Nowhere Collective"
+    }
+  ]
+}

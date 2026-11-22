@@ -6,8 +6,7 @@
 //! re-checked against the upstream sources by `tools/check-m5b-upstream-keys.py`); the mix track rows against the full
 //! Prisma `Track`/`Album` inventory (owner Q6 = B, Appendix D, D-264).
 //!
-//! The fixtures are committed as captured (never hand-written; recapture, do not edit). The key-file and machinery
-//! tests need no fixture; the rest are ignored until the parent's capture run commits them.
+//! The fixtures are committed as captured (never hand-written; recapture, do not edit).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -499,7 +498,6 @@ fn key_comparison_catches_drift_and_unlisted_extras() {
 // Captured fixtures.
 
 #[test]
-#[ignore = "waits for the parent's KIMA_CAPTURE_SET=m5b capture"]
 fn manifest_answers_every_upstream_route() {
     let m = manifest();
     assert!(m["source"]["head"].as_str().is_some_and(|h| h.len() == 40));
@@ -539,7 +537,6 @@ fn manifest_answers_every_upstream_route() {
 }
 
 #[test]
-#[ignore = "waits for the parent's KIMA_CAPTURE_SET=m5b capture"]
 fn m5b_fixtures_cover_upstream_keys() {
     let keys = keys();
     let problems: Vec<String> = FIXTURES
@@ -550,7 +547,6 @@ fn m5b_fixtures_cover_upstream_keys() {
 }
 
 #[test]
-#[ignore = "waits for the parent's KIMA_CAPTURE_SET=m5b capture"]
 fn every_track_row_has_exactly_the_appendix_d_keys() {
     let key_set =
         |v: &Value| -> BTreeSet<String> { v.as_object().unwrap().keys().cloned().collect() };
@@ -591,7 +587,6 @@ fn decode<T: DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
-#[ignore = "waits for the parent's KIMA_CAPTURE_SET=m5b capture"]
 fn m5b_types_parse_the_fixtures() {
     for name in [
         "radio_all",
@@ -626,7 +621,6 @@ fn m5b_types_parse_the_fixtures() {
 /// The ids agree across replies, and the optional arrays and values the keys check could only call unobservable
 /// are populated somewhere.
 #[test]
-#[ignore = "waits for the parent's KIMA_CAPTURE_SET=m5b capture"]
 fn cross_ids_and_populated_values() {
     let ids = |v: &Value| -> Vec<Value> {
         v.as_array()
@@ -863,7 +857,7 @@ fn cross_ids_and_populated_values() {
 }
 
 #[test]
-#[ignore = "waits for the parent's KIMA_CAPTURE_SET=m5b capture"]
+#[ignore = "the 81ee883 capture predates the MixTrack JS-number fix (bpm 80.0): recapture, then un-ignore"]
 fn no_integral_floats_and_no_tokens_on_the_wire() {
     let mut found = Vec::new();
     for name in FIXTURES {

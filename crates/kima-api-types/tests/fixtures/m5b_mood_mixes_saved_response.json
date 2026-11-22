@@ -1,0 +1,14 @@
+{
+  "decision": "keep",
+  "mix": {
+    "id": "your-mood-mix-1795334477455",
+    "mood": "chill",
+    "name": "Your Calm Mix",
+    "retired": false,
+    "trackCount": 5
+  },
+  "playlist": {
+    "id": "01a20246-18bf-735a-8bfe-7ba1ad63bff8",
+    "name": "Your Calm Mix"
+  }
+}

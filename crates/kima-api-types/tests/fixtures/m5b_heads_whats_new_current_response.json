@@ -1,0 +1,28 @@
+{
+  "answers": {},
+  "done": [],
+  "release": {
+    "date": "2026-11-01",
+    "items": [
+      {
+        "body": "Synthetic text.",
+        "key": "capture.note",
+        "kind": "note",
+        "summary": "Daily mixes, mood mixes and radio stations.",
+        "title": "Mixes and radio"
+      },
+      {
+        "body": "Synthetic text.",
+        "defaultValue": false,
+        "discloses": "Nothing leaves this machine.",
+        "key": "capture.choice",
+        "kind": "choice",
+        "summary": "Asked so the window has something to answer.",
+        "title": "A synthetic choice"
+      }
+    ],
+    "summary": "A synthetic release for the wire fixtures.",
+    "title": "Kima 0.2.0",
+    "version": "0.2.0"
+  }
+}

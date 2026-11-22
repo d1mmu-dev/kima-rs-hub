@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Capture M-SYNC, M-STATS, M6 and profiles wire fixtures from THIS checkout's server and a fresh
+# Capture M-SYNC, M-STATS, M6, profiles and M5b wire fixtures from THIS checkout's server and a fresh
 # run-owned pgvector cluster. No caller database is accepted. Requires docker, ffmpeg, jq, curl,
 # psql, python3, git and cargo.
 # KIMA_CAPTURE_SET (required) names the fixture sets copied into the tree: a comma list of
-# msync, mstats, m6, profiles. Profiles-only skips unrelated captures; other sets retain their
+# msync, mstats, m6, profiles, m5b. Profiles-only skips unrelated captures; m5b runs alone (its own
+# larger library and seeded mood data would change the other sets' captures); other sets retain their
 # existing dependency chain. Only the named
 # sets are copied, so a run for one milestone never rewrites another's fixtures with new ids.
 set -euo pipefail
@@ -11,7 +12,7 @@ if [[ -n "${DATABASE_URL:-}" || -n "${PGDATABASE:-}" ]]; then
   echo 'No external DATABASE_URL or PGDATABASE allowed; this script owns a fresh database.' >&2; exit 2
 fi
 if [[ "${1:-}" == --help ]]; then
-  echo 'KIMA_CAPTURE_SET=msync,mstats,m6,profiles (any subset); --list prints targets without running. No external DATABASE_URL or PGDATABASE allowed.'; exit 0
+  echo 'KIMA_CAPTURE_SET=msync,mstats,m6,profiles (any subset) or m5b (alone); --list prints targets without running. No external DATABASE_URL or PGDATABASE allowed.'; exit 0
 fi
 [[ $# == 0 || ( $# == 1 && "$1" == --list ) ]] || { echo 'Only --help or --list accepted' >&2; exit 2; }
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -25,6 +26,15 @@ m6_names=(categories subscribe list list_ai_show detail episodes progress next n
   ai_label_episode unsubscribe)
 profiles_names=(login me list create update switch me_switched settings settings_switched
   playlist playlist_switched delete list_after_delete)
+# M5b (tools/capture-m5b-fixtures.inc.sh): 31 captures from the shipped server, 14 from the heads harness.
+m5b_names=(mixes mix mix_save mixes_refresh presets bucket_no_heads bucket_save mixes_with_mood decades
+  radio_stations radio_row radio_row_all radio_all radio_genre radio_decade radio_artist radio_discovery
+  radio_favorites radio_mood_no_heads whats_new_pending whats_new_current_none whats_new_changelog
+  whats_new_open update_status mood_mixes mood_mixes_decision mood_mixes_save mood_mixes_saved
+  choice_unknown_release dismiss_unknown_release recommendations
+  heads_mixes heads_mix heads_presets heads_bucket heads_bucket_save heads_radio_row_all heads_radio_mood
+  heads_radio_workout heads_whats_new_pending heads_whats_new_current heads_whats_new_choice
+  heads_whats_new_changelog heads_whats_new_open heads_whats_new_dismiss)
 copy=()
 IFS=',' read -r -a sets <<< "${KIMA_CAPTURE_SET:-}"
 for set in "${sets[@]}"; do
@@ -35,10 +45,13 @@ for set in "${sets[@]}"; do
         copy+=(podcasts_capture_manifest.json) ;;
     profiles) for n in "${profiles_names[@]}"; do copy+=("profiles_${n}_response.json"); done
         copy+=(profiles_capture_manifest.json) ;;
-    *) echo "KIMA_CAPTURE_SET: unknown set '$set' (msync, mstats, m6, profiles)" >&2; exit 2 ;;
+    m5b) [[ "${KIMA_CAPTURE_SET}" == m5b ]] || { echo 'KIMA_CAPTURE_SET: m5b runs alone' >&2; exit 2; }
+        for n in "${m5b_names[@]}"; do copy+=("m5b_${n}_response.json"); done
+        copy+=(m5b_capture_manifest.json) ;;
+    *) echo "KIMA_CAPTURE_SET: unknown set '$set' (msync, mstats, m6, profiles, m5b)" >&2; exit 2 ;;
   esac
 done
-[[ ${#copy[@]} -gt 0 ]] || { echo 'Set KIMA_CAPTURE_SET (msync, mstats, m6, profiles; comma-separated)' >&2; exit 2; }
+[[ ${#copy[@]} -gt 0 ]] || { echo 'Set KIMA_CAPTURE_SET (msync, mstats, m6, profiles; comma-separated; or m5b alone)' >&2; exit 2; }
 if [[ "${1:-}" == --list ]]; then printf '%s\n' "${copy[@]}"; exit 0; fi
 for cmd in docker ffmpeg jq curl psql python3 git cargo; do command -v "$cmd" >/dev/null || { echo "Missing $cmd" >&2; exit 1; }; done
 # Refuse before anything expensive when a fixture this run would overwrite has uncommitted
@@ -60,11 +73,16 @@ container_name="msync18-capture-${run}"
 tmp="$(mktemp -d "${TMPDIR:-$HOME/.hermes/cache/scratch}/msync18-capture.XXXXXXXX")"
 server_pid=''
 mock_pid=''
+harness_pid=''
 cleanup() {
-  # The server must release all database connections before its DB disappears.
+  # The server (and the M5b harness) must release all database connections before its DB disappears.
   if [[ -n "$server_pid" ]]; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
+  fi
+  if [[ -n "$harness_pid" ]]; then
+    kill "$harness_pid" 2>/dev/null || true
+    wait "$harness_pid" 2>/dev/null || true
   fi
   if [[ -n "$mock_pid" ]]; then
     kill "$mock_pid" 2>/dev/null || true
@@ -89,6 +107,20 @@ done
 [[ "$(docker inspect -f '{{index .Config.Labels "kima.run"}}' "$container_name")" == "$container_name" ]] || exit 1
 echo "capture provenance: HEAD=$(git rev-parse HEAD), container=$container_name, host-port=$port, db=kima, role=kima" >&2
 "$root/tools/make-fixture-library.sh" "$tmp/music"
+if [[ "$KIMA_CAPTURE_SET" == m5b ]]; then
+  # M5b: 40 more songs (35 s sine tones, tagged): two decades of four artists with five songs each, so the decade
+  # and genre stations (15 songs) and every mix (8 songs) have enough.
+  for artist in 'Nineties A' 'Nineties B' 'Nineties C' 'Nineties D' 'Noughties A' 'Noughties B' 'Noughties C' 'Noughties D'; do
+    case "$artist" in Nineties*) year=1994; genre=Rock ;; *) year=2003; genre=Electronic ;; esac
+    for n in 1 2 3 4 5; do
+      dir="$tmp/music/M5b/$artist/$year - $artist Album"; mkdir -p "$dir"
+      ffmpeg -nostdin -loglevel error -y -f lavfi -i "sine=frequency=$((600 + ${#artist} * 7 + n * 11)):duration=35" \
+        -map_metadata -1 -c:a libmp3lame -b:a 64k -metadata "artist=$artist" -metadata "album_artist=$artist" \
+        -metadata "album=$artist Album" -metadata "title=$artist $n" -metadata "track=$n" -metadata "date=$year" \
+        -metadata "genre=$genre" "$dir/0$n - $artist $n.mp3"
+    done
+  done
+fi
 export MUSIC_PATH="$tmp/music" KIMA_DATA_DIR="$tmp/data" KIMA_IDENTIFY=off KIMA_BIND_HOST=127.0.0.1
 export KIMA_DISABLE_CLAP=1
 mkdir -p "$KIMA_DATA_DIR"
@@ -130,7 +162,10 @@ if [[ ",${KIMA_CAPTURE_SET}," == *,profiles,* ]]; then
   # Captures only real 2xx bodies. Tokens stay private; only documented secret fields redact.
   source "$root/tools/capture-profile-fixtures.inc.sh"
 fi
-if [[ "$KIMA_CAPTURE_SET" != profiles ]]; then
+if [[ "$KIMA_CAPTURE_SET" == m5b ]]; then
+  # shellcheck source=tools/capture-m5b-fixtures.inc.sh
+  source "$root/tools/capture-m5b-fixtures.inc.sh"
+elif [[ "$KIMA_CAPTURE_SET" != profiles ]]; then
 capture() { local name="$1" method="$2" path="$3" payload="${4:-}"; request "$method" "$path" "$payload" | jq -eS . > "$stage/${name}_response.json"; echo "$name $method $path" >&2; }
 capture me GET /auth/me
 capture settings GET /settings

@@ -138,3 +138,32 @@ route count. `tools/check-podcast-upstream-keys.py <kima-hub checkout>` re-check
 against the cited upstream source lines at `c7527577`, independently of the key file's claims.
 
 Status (2026-11-13): fixtures captured with `KIMA_CAPTURE_SET=m6` from `b204515` (container `msync18-capture-1794611746-3183913`, loopback host port 32788, Apple/feed/audio mock on loopback; not an Apple recording, not SQL seeding). 31 files copied (30 responses + manifest); fixture tests un-ignored, 10/10 pass; `tools/check-podcast-upstream-keys.py` reports 0 problems on 255 upstream key names. Dynamic UUIDs, timestamps and the mock's port in feed/cover URLs are kept as observed.
+
+## M5b mixes, radio, what's-new and recommendations (plan `2026-11-19-m5b-mixes-radio.md`, Task 19)
+
+`env -u DATABASE_URL -u PGDATABASE -u CARGO_TARGET_DIR KIMA_CAPTURE_SET=m5b tools/capture-api-fixtures.sh`
+(m5b runs alone) adds 40 tagged 35 s songs to the synthetic library (two decades, eight artists, five songs each,
+genres Rock/Electronic), scans, plays six of them, then sources `tools/capture-m5b-fixtures.inc.sh`:
+
+1. **Seed** (`crates/kima-api/tests/m5b_capture.rs` `m5b_capture_seed`, plain SQL; refuses any database but the
+   run's own loopback `kima` with the single `fixtureadmin` account): sound vectors of the engine's identity, mood
+   scores in four groups (calm, upbeat, intense, melancholic), CLAP readings, DSP tempo/key, mood tags, the mood
+   statistics, album/artist cover tokens, owner genres of the M5b artists and two similar artists (one held as an
+   artist row without songs). The same seed is exercised by the default test
+   `seed_then_heads_answer_every_recipe_page`.
+2. **live** (31 captures): the run's own server as shipped (no mood heads, empty release catalog, network denied).
+   Four real non-2xx answers are kept on purpose: `bucket_no_heads` (400), `whats_new_current_none`,
+   `choice_unknown_release`, `dismiss_unknown_release` (404).
+3. **heads** (14 captures): the server is stopped and `m5b_capture_serve` serves the same router on the same
+   database with synthetic mood heads and a one-release synthetic catalog, so the recipe pages, mood/workout
+   stations and the release window answer 2xx with data.
+
+The script fails before copying unless all 45 captures exist, all 22 upstream routes answered 2xx, no body holds a
+token-like string and the cross-ids hold (mix list/detail/save, saved mood mix on Home and in the what's-new
+question and its playlist, artist radio, heads mood page). `crates/kima-api-types/tests/m5b.rs` checks key paths
+against `m5b_upstream_keys.json` (upstream shapes at the M5b reference `9450c94b`; mix track rows = every Prisma
+`Track`/`Album` column, owner Q6 = B), the DTOs, cross-ids, populated values and integral floats; its fixture tests
+stay ignored until the capture is committed. `tools/check-m5b-upstream-keys.py <kima-hub checkout>` re-checks the
+key file against the cited upstream lines and the reference's Prisma models.
+
+Status (2026-11-22): prepared, not yet captured (the parent runs the script; it starts Docker).

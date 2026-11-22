@@ -1,0 +1,845 @@
+{
+  "_about": "Upstream response shapes of the 22 M5b routes at the M5b reference 9450c94b (backend handlers, services and, for the mix track rows, the Prisma Track and Album models: owner Q6 = B). Types: JSON types joined with |, a trailing ? = the key may be absent; `[]` = array element, `{}` = record value. Track and album columns allow null (D-264). Re-checked against the cited lines by tools/check-m5b-upstream-keys.py; fixtures by tests/m5b.rs.",
+  "mixes": {
+    "sources": [
+      "backend/src/services/mixes/helpers.ts:8-17",
+      "backend/src/routes/mixes.ts:111-120",
+      "backend/src/services/moodBucketService.ts:397-422"
+    ],
+    "upstream": {
+      "": "array",
+      "[]": "object",
+      "[].id": "string",
+      "[].type": "string",
+      "[].name": "string",
+      "[].description": "string",
+      "[].trackIds": "array",
+      "[].trackIds[]": "string",
+      "[].coverUrls": "array",
+      "[].coverUrls[]": "string",
+      "[].trackCount": "number",
+      "[].color": "string",
+      "[].mood": "string?"
+    },
+    "kimaOnly": {}
+  },
+  "mixes_with_mood": {
+    "sameShapeAs": "mixes"
+  },
+  "heads_mixes": {
+    "sameShapeAs": "mixes"
+  },
+  "mix": {
+    "sources": [
+      "backend/src/services/mixes/helpers.ts:8-17",
+      "backend/src/routes/mixes.ts:93-109",
+      "backend/src/routes/mixes.ts:337-361",
+      "backend/src/services/moodBucketService.ts:397-422",
+      "backend/prisma/schema.prisma:671-773",
+      "backend/prisma/schema.prisma:10-46"
+    ],
+    "upstream": {
+      "": "object",
+      ".id": "string",
+      ".type": "string",
+      ".name": "string",
+      ".description": "string",
+      ".trackIds": "array",
+      ".trackIds[]": "string",
+      ".coverUrls": "array",
+      ".coverUrls[]": "string",
+      ".trackCount": "number",
+      ".color": "string",
+      ".mood": "string?",
+      ".tracks": "array",
+      ".tracks[]": "object",
+      ".tracks[].id": "string|null",
+      ".tracks[].albumId": "string|null",
+      ".tracks[].title": "string|null",
+      ".tracks[].trackNo": "number|null",
+      ".tracks[].duration": "number|null",
+      ".tracks[].mime": "string|null",
+      ".tracks[].filePath": "string|null",
+      ".tracks[].fileModified": "string|null",
+      ".tracks[].fileSize": "number|null",
+      ".tracks[].bpm": "number|null",
+      ".tracks[].bpmConfidence": "number|null",
+      ".tracks[].beatsCount": "number|null",
+      ".tracks[].key": "string|null",
+      ".tracks[].keyScale": "string|null",
+      ".tracks[].keyStrength": "number|null",
+      ".tracks[].energy": "number|null",
+      ".tracks[].loudness": "number|null",
+      ".tracks[].dynamicRange": "number|null",
+      ".tracks[].danceability": "number|null",
+      ".tracks[].valence": "number|null",
+      ".tracks[].arousal": "number|null",
+      ".tracks[].deamValence": "number|null",
+      ".tracks[].deamArousal": "number|null",
+      ".tracks[].clapValenceRaw": "number|null",
+      ".tracks[].clapArousalRaw": "number|null",
+      ".tracks[].instrumentalness": "number|null",
+      ".tracks[].acousticness": "number|null",
+      ".tracks[].speechiness": "number|null",
+      ".tracks[].danceabilityMl": "number|null",
+      ".tracks[].moodTags": "array|null",
+      ".tracks[].moodTags[]": "string",
+      ".tracks[].essentiaGenres": "array|null",
+      ".tracks[].essentiaGenres[]": "string",
+      ".tracks[].analysisStatus": "string|null",
+      ".tracks[].analysisVersion": "string|null",
+      ".tracks[].analysisMode": "string|null",
+      ".tracks[].analyzedAt": "string|null",
+      ".tracks[].analysisError": "string|null",
+      ".tracks[].analysisRetryCount": "number|null",
+      ".tracks[].updatedAt": "string|null",
+      ".tracks[].displayTitle": "string|null",
+      ".tracks[].displayTrackNo": "number|null",
+      ".tracks[].hasUserOverrides": "boolean|null",
+      ".tracks[].analysisStartedAt": "string|null",
+      ".tracks[].vibeAnalysisStatus": "string|null",
+      ".tracks[].vibeAnalysisStartedAt": "string|null",
+      ".tracks[].vibeAnalysisError": "string|null",
+      ".tracks[].vibeAnalysisRetryCount": "number|null",
+      ".tracks[].vibeAnalysisStatusUpdatedAt": "string|null",
+      ".tracks[].isrc": "string|null",
+      ".tracks[].isrcSource": "string|null",
+      ".tracks[].acoustidFingerprint": "string|null",
+      ".tracks[].recordingMbid": "string|null",
+      ".tracks[].corrupt": "boolean|null",
+      ".tracks[].missingSince": "string|null",
+      ".tracks[].scanStatus": "string|null",
+      ".tracks[].scanError": "string|null",
+      ".tracks[].scanStartedAt": "string|null",
+      ".tracks[].discNumber": "number|null",
+      ".tracks[].discSubtitle": "string|null",
+      ".tracks[].album": "object",
+      ".tracks[].album.id": "string|null",
+      ".tracks[].album.rgMbid": "string|null",
+      ".tracks[].album.rgMbidSource": "string|null",
+      ".tracks[].album.artistId": "string|null",
+      ".tracks[].album.title": "string|null",
+      ".tracks[].album.identityKey": "string|null",
+      ".tracks[].album.sortName": "string|null",
+      ".tracks[].album.year": "number|null",
+      ".tracks[].album.coverUrl": "string|null",
+      ".tracks[].album.primaryType": "string|null",
+      ".tracks[].album.label": "string|null",
+      ".tracks[].album.genres": "object|array|string|number|boolean|null",
+      ".tracks[].album.genres[]": "string|number|object|boolean|null?",
+      ".tracks[].album.lastSynced": "string|null",
+      ".tracks[].album.location": "string|null",
+      ".tracks[].album.displayTitle": "string|null",
+      ".tracks[].album.displayYear": "number|null",
+      ".tracks[].album.hasUserOverrides": "boolean|null",
+      ".tracks[].album.userCoverUrl": "string|null",
+      ".tracks[].album.userGenres": "object|array|string|number|boolean|null",
+      ".tracks[].album.userGenres[]": "string|number|object|boolean|null?",
+      ".tracks[].album.originalYear": "number|null",
+      ".tracks[].album.artist": "object",
+      ".tracks[].album.artist.id": "string",
+      ".tracks[].album.artist.name": "string",
+      ".tracks[].album.artist.mbid": "string|null"
+    },
+    "kimaOnly": {}
+  },
+  "heads_mix": {
+    "sameShapeAs": "mix"
+  },
+  "mix_save": {
+    "sources": [
+      "backend/src/routes/mixes.ts:326-330"
+    ],
+    "upstream": {
+      "": "object",
+      ".id": "string",
+      ".name": "string",
+      ".trackCount": "number"
+    },
+    "kimaOnly": {}
+  },
+  "mixes_refresh": {
+    "sources": [
+      "backend/src/services/mixes/helpers.ts:8-17",
+      "backend/src/routes/mixes.ts:236-255",
+      "backend/src/services/moodBucketService.ts:397-422"
+    ],
+    "upstream": {
+      "": "object",
+      ".message": "string",
+      ".mixes": "array",
+      ".mixes[]": "object",
+      ".mixes[].id": "string",
+      ".mixes[].type": "string",
+      ".mixes[].name": "string",
+      ".mixes[].description": "string",
+      ".mixes[].trackIds": "array",
+      ".mixes[].trackIds[]": "string",
+      ".mixes[].coverUrls": "array",
+      ".mixes[].coverUrls[]": "string",
+      ".mixes[].trackCount": "number",
+      ".mixes[].color": "string",
+      ".mixes[].mood": "string?"
+    },
+    "kimaOnly": {}
+  },
+  "presets": {
+    "sources": [
+      "backend/src/services/moodBucketService.ts:283-305"
+    ],
+    "upstream": {
+      "": "array",
+      "[]": "object",
+      "[].id": "string",
+      "[].name": "string",
+      "[].color": "string",
+      "[].icon": "string",
+      "[].trackCount": "number",
+      "[].pendingTracks": "number"
+    },
+    "kimaOnly": {}
+  },
+  "heads_presets": {
+    "sameShapeAs": "presets"
+  },
+  "bucket_no_heads": {
+    "sources": [
+      "backend/src/routes/mixes.ts:154-159"
+    ],
+    "upstream": {
+      "": "object",
+      ".error": "string",
+      ".suggestion": "string"
+    },
+    "kimaOnly": {}
+  },
+  "heads_bucket": {
+    "sources": [
+      "backend/src/routes/mixes.ts:93-109",
+      "backend/src/routes/mixes.ts:163-168",
+      "backend/src/services/moodBucketService.ts:263-273",
+      "backend/src/services/moodBucketService.ts:333-343",
+      "backend/prisma/schema.prisma:671-773",
+      "backend/prisma/schema.prisma:10-46"
+    ],
+    "upstream": {
+      "": "object",
+      ".id": "string",
+      ".mood": "string",
+      ".name": "string",
+      ".description": "string",
+      ".trackIds": "array",
+      ".trackIds[]": "string",
+      ".coverUrls": "array",
+      ".coverUrls[]": "string",
+      ".trackCount": "number",
+      ".color": "string",
+      ".tracks": "array",
+      ".tracks[]": "object",
+      ".tracks[].id": "string|null",
+      ".tracks[].albumId": "string|null",
+      ".tracks[].title": "string|null",
+      ".tracks[].trackNo": "number|null",
+      ".tracks[].duration": "number|null",
+      ".tracks[].mime": "string|null",
+      ".tracks[].filePath": "string|null",
+      ".tracks[].fileModified": "string|null",
+      ".tracks[].fileSize": "number|null",
+      ".tracks[].bpm": "number|null",
+      ".tracks[].bpmConfidence": "number|null",
+      ".tracks[].beatsCount": "number|null",
+      ".tracks[].key": "string|null",
+      ".tracks[].keyScale": "string|null",
+      ".tracks[].keyStrength": "number|null",
+      ".tracks[].energy": "number|null",
+      ".tracks[].loudness": "number|null",
+      ".tracks[].dynamicRange": "number|null",
+      ".tracks[].danceability": "number|null",
+      ".tracks[].valence": "number|null",
+      ".tracks[].arousal": "number|null",
+      ".tracks[].deamValence": "number|null",
+      ".tracks[].deamArousal": "number|null",
+      ".tracks[].clapValenceRaw": "number|null",
+      ".tracks[].clapArousalRaw": "number|null",
+      ".tracks[].instrumentalness": "number|null",
+      ".tracks[].acousticness": "number|null",
+      ".tracks[].speechiness": "number|null",
+      ".tracks[].danceabilityMl": "number|null",
+      ".tracks[].moodTags": "array|null",
+      ".tracks[].moodTags[]": "string",
+      ".tracks[].essentiaGenres": "array|null",
+      ".tracks[].essentiaGenres[]": "string",
+      ".tracks[].analysisStatus": "string|null",
+      ".tracks[].analysisVersion": "string|null",
+      ".tracks[].analysisMode": "string|null",
+      ".tracks[].analyzedAt": "string|null",
+      ".tracks[].analysisError": "string|null",
+      ".tracks[].analysisRetryCount": "number|null",
+      ".tracks[].updatedAt": "string|null",
+      ".tracks[].displayTitle": "string|null",
+      ".tracks[].displayTrackNo": "number|null",
+      ".tracks[].hasUserOverrides": "boolean|null",
+      ".tracks[].analysisStartedAt": "string|null",
+      ".tracks[].vibeAnalysisStatus": "string|null",
+      ".tracks[].vibeAnalysisStartedAt": "string|null",
+      ".tracks[].vibeAnalysisError": "string|null",
+      ".tracks[].vibeAnalysisRetryCount": "number|null",
+      ".tracks[].vibeAnalysisStatusUpdatedAt": "string|null",
+      ".tracks[].isrc": "string|null",
+      ".tracks[].isrcSource": "string|null",
+      ".tracks[].acoustidFingerprint": "string|null",
+      ".tracks[].recordingMbid": "string|null",
+      ".tracks[].corrupt": "boolean|null",
+      ".tracks[].missingSince": "string|null",
+      ".tracks[].scanStatus": "string|null",
+      ".tracks[].scanError": "string|null",
+      ".tracks[].scanStartedAt": "string|null",
+      ".tracks[].discNumber": "number|null",
+      ".tracks[].discSubtitle": "string|null",
+      ".tracks[].album": "object",
+      ".tracks[].album.id": "string|null",
+      ".tracks[].album.rgMbid": "string|null",
+      ".tracks[].album.rgMbidSource": "string|null",
+      ".tracks[].album.artistId": "string|null",
+      ".tracks[].album.title": "string|null",
+      ".tracks[].album.identityKey": "string|null",
+      ".tracks[].album.sortName": "string|null",
+      ".tracks[].album.year": "number|null",
+      ".tracks[].album.coverUrl": "string|null",
+      ".tracks[].album.primaryType": "string|null",
+      ".tracks[].album.label": "string|null",
+      ".tracks[].album.genres": "object|array|string|number|boolean|null",
+      ".tracks[].album.genres[]": "string|number|object|boolean|null?",
+      ".tracks[].album.lastSynced": "string|null",
+      ".tracks[].album.location": "string|null",
+      ".tracks[].album.displayTitle": "string|null",
+      ".tracks[].album.displayYear": "number|null",
+      ".tracks[].album.hasUserOverrides": "boolean|null",
+      ".tracks[].album.userCoverUrl": "string|null",
+      ".tracks[].album.userGenres": "object|array|string|number|boolean|null",
+      ".tracks[].album.userGenres[]": "string|number|object|boolean|null?",
+      ".tracks[].album.originalYear": "number|null",
+      ".tracks[].album.artist": "object",
+      ".tracks[].album.artist.id": "string",
+      ".tracks[].album.artist.name": "string",
+      ".tracks[].album.artist.mbid": "string|null"
+    },
+    "kimaOnly": {}
+  },
+  "bucket_save": {
+    "sources": [
+      "backend/src/routes/mixes.ts:93-109",
+      "backend/src/routes/mixes.ts:217-229",
+      "backend/src/services/moodBucketService.ts:263-273",
+      "backend/src/services/moodBucketService.ts:380-390",
+      "backend/prisma/schema.prisma:671-773",
+      "backend/prisma/schema.prisma:10-46"
+    ],
+    "upstream": {
+      "": "object",
+      ".success": "boolean",
+      ".mix": "object",
+      ".mix.generatedAt": "string",
+      ".mix.id": "string",
+      ".mix.mood": "string",
+      ".mix.name": "string",
+      ".mix.description": "string",
+      ".mix.trackIds": "array",
+      ".mix.trackIds[]": "string",
+      ".mix.coverUrls": "array",
+      ".mix.coverUrls[]": "string",
+      ".mix.trackCount": "number",
+      ".mix.color": "string",
+      ".mix.tracks": "array",
+      ".mix.tracks[]": "object",
+      ".mix.tracks[].id": "string|null",
+      ".mix.tracks[].albumId": "string|null",
+      ".mix.tracks[].title": "string|null",
+      ".mix.tracks[].trackNo": "number|null",
+      ".mix.tracks[].duration": "number|null",
+      ".mix.tracks[].mime": "string|null",
+      ".mix.tracks[].filePath": "string|null",
+      ".mix.tracks[].fileModified": "string|null",
+      ".mix.tracks[].fileSize": "number|null",
+      ".mix.tracks[].bpm": "number|null",
+      ".mix.tracks[].bpmConfidence": "number|null",
+      ".mix.tracks[].beatsCount": "number|null",
+      ".mix.tracks[].key": "string|null",
+      ".mix.tracks[].keyScale": "string|null",
+      ".mix.tracks[].keyStrength": "number|null",
+      ".mix.tracks[].energy": "number|null",
+      ".mix.tracks[].loudness": "number|null",
+      ".mix.tracks[].dynamicRange": "number|null",
+      ".mix.tracks[].danceability": "number|null",
+      ".mix.tracks[].valence": "number|null",
+      ".mix.tracks[].arousal": "number|null",
+      ".mix.tracks[].deamValence": "number|null",
+      ".mix.tracks[].deamArousal": "number|null",
+      ".mix.tracks[].clapValenceRaw": "number|null",
+      ".mix.tracks[].clapArousalRaw": "number|null",
+      ".mix.tracks[].instrumentalness": "number|null",
+      ".mix.tracks[].acousticness": "number|null",
+      ".mix.tracks[].speechiness": "number|null",
+      ".mix.tracks[].danceabilityMl": "number|null",
+      ".mix.tracks[].moodTags": "array|null",
+      ".mix.tracks[].moodTags[]": "string",
+      ".mix.tracks[].essentiaGenres": "array|null",
+      ".mix.tracks[].essentiaGenres[]": "string",
+      ".mix.tracks[].analysisStatus": "string|null",
+      ".mix.tracks[].analysisVersion": "string|null",
+      ".mix.tracks[].analysisMode": "string|null",
+      ".mix.tracks[].analyzedAt": "string|null",
+      ".mix.tracks[].analysisError": "string|null",
+      ".mix.tracks[].analysisRetryCount": "number|null",
+      ".mix.tracks[].updatedAt": "string|null",
+      ".mix.tracks[].displayTitle": "string|null",
+      ".mix.tracks[].displayTrackNo": "number|null",
+      ".mix.tracks[].hasUserOverrides": "boolean|null",
+      ".mix.tracks[].analysisStartedAt": "string|null",
+      ".mix.tracks[].vibeAnalysisStatus": "string|null",
+      ".mix.tracks[].vibeAnalysisStartedAt": "string|null",
+      ".mix.tracks[].vibeAnalysisError": "string|null",
+      ".mix.tracks[].vibeAnalysisRetryCount": "number|null",
+      ".mix.tracks[].vibeAnalysisStatusUpdatedAt": "string|null",
+      ".mix.tracks[].isrc": "string|null",
+      ".mix.tracks[].isrcSource": "string|null",
+      ".mix.tracks[].acoustidFingerprint": "string|null",
+      ".mix.tracks[].recordingMbid": "string|null",
+      ".mix.tracks[].corrupt": "boolean|null",
+      ".mix.tracks[].missingSince": "string|null",
+      ".mix.tracks[].scanStatus": "string|null",
+      ".mix.tracks[].scanError": "string|null",
+      ".mix.tracks[].scanStartedAt": "string|null",
+      ".mix.tracks[].discNumber": "number|null",
+      ".mix.tracks[].discSubtitle": "string|null",
+      ".mix.tracks[].album": "object",
+      ".mix.tracks[].album.id": "string|null",
+      ".mix.tracks[].album.rgMbid": "string|null",
+      ".mix.tracks[].album.rgMbidSource": "string|null",
+      ".mix.tracks[].album.artistId": "string|null",
+      ".mix.tracks[].album.title": "string|null",
+      ".mix.tracks[].album.identityKey": "string|null",
+      ".mix.tracks[].album.sortName": "string|null",
+      ".mix.tracks[].album.year": "number|null",
+      ".mix.tracks[].album.coverUrl": "string|null",
+      ".mix.tracks[].album.primaryType": "string|null",
+      ".mix.tracks[].album.label": "string|null",
+      ".mix.tracks[].album.genres": "object|array|string|number|boolean|null",
+      ".mix.tracks[].album.genres[]": "string|number|object|boolean|null?",
+      ".mix.tracks[].album.lastSynced": "string|null",
+      ".mix.tracks[].album.location": "string|null",
+      ".mix.tracks[].album.displayTitle": "string|null",
+      ".mix.tracks[].album.displayYear": "number|null",
+      ".mix.tracks[].album.hasUserOverrides": "boolean|null",
+      ".mix.tracks[].album.userCoverUrl": "string|null",
+      ".mix.tracks[].album.userGenres": "object|array|string|number|boolean|null",
+      ".mix.tracks[].album.userGenres[]": "string|number|object|boolean|null?",
+      ".mix.tracks[].album.originalYear": "number|null",
+      ".mix.tracks[].album.artist": "object",
+      ".mix.tracks[].album.artist.id": "string",
+      ".mix.tracks[].album.artist.name": "string",
+      ".mix.tracks[].album.artist.mbid": "string|null"
+    },
+    "kimaOnly": {}
+  },
+  "heads_bucket_save": {
+    "sameShapeAs": "bucket_save"
+  },
+  "decades": {
+    "sources": [
+      "backend/src/routes/library/tracks.ts:582-589",
+      "backend/src/services/mixes/radioRow.ts:59-75"
+    ],
+    "upstream": {
+      "": "object",
+      ".decades": "array",
+      ".decades[]": "object",
+      ".decades[].decade": "number",
+      ".decades[].count": "number"
+    },
+    "kimaOnly": {}
+  },
+  "radio_stations": {
+    "sources": [
+      "backend/src/routes/library/tracks.ts:592-594",
+      "backend/src/services/mixes/stations.ts:110-117"
+    ],
+    "upstream": {
+      "": "object",
+      ".stations": "array",
+      ".stations[]": "object",
+      ".stations[].value": "string",
+      ".stations[].name": "string",
+      ".stations[].description": "string"
+    },
+    "kimaOnly": {}
+  },
+  "radio_row": {
+    "sources": [
+      "backend/src/routes/library/tracks.ts:600-611",
+      "backend/src/services/mixes/radioRow.ts:28-37"
+    ],
+    "upstream": {
+      "": "object",
+      ".stations": "array",
+      ".stations[]": "object",
+      ".stations[].type": "string",
+      ".stations[].value": "string|null",
+      ".stations[].name": "string?",
+      ".stations[].description": "string?",
+      ".stations[].count": "number?",
+      ".stations[].cover": "string|null"
+    },
+    "kimaOnly": {}
+  },
+  "radio_row_all": {
+    "sameShapeAs": "radio_row"
+  },
+  "heads_radio_row_all": {
+    "sameShapeAs": "radio_row"
+  },
+  "radio_all": {
+    "sources": [
+      "backend/src/routes/library/tracks.ts:613-686",
+      "backend/src/services/mixes/stationSelection.ts:190-197"
+    ],
+    "upstream": {
+      "": "object",
+      ".tracks": "array",
+      ".tracks[]": "object",
+      ".tracks[].id": "string",
+      ".tracks[].title": "string",
+      ".tracks[].displayTitle": "string|null",
+      ".tracks[].duration": "number",
+      ".tracks[].trackNo": "number",
+      ".tracks[].discNumber": "number|null",
+      ".tracks[].discSubtitle": "string|null",
+      ".tracks[].filePath": "string",
+      ".tracks[].artist": "object",
+      ".tracks[].artist.id": "string",
+      ".tracks[].artist.name": "string",
+      ".tracks[].album": "object",
+      ".tracks[].album.id": "string",
+      ".tracks[].album.title": "string",
+      ".tracks[].album.coverArt": "string|null",
+      ".next": "number?",
+      ".message": "string?"
+    },
+    "kimaOnly": {}
+  },
+  "radio_genre": {
+    "sameShapeAs": "radio_all"
+  },
+  "radio_decade": {
+    "sameShapeAs": "radio_all"
+  },
+  "radio_artist": {
+    "sameShapeAs": "radio_all"
+  },
+  "radio_discovery": {
+    "sameShapeAs": "radio_all"
+  },
+  "radio_favorites": {
+    "sameShapeAs": "radio_all"
+  },
+  "radio_mood_no_heads": {
+    "sameShapeAs": "radio_all"
+  },
+  "heads_radio_mood": {
+    "sameShapeAs": "radio_all"
+  },
+  "heads_radio_workout": {
+    "sameShapeAs": "radio_all"
+  },
+  "whats_new_pending": {
+    "sources": [
+      "backend/src/services/releases/catalog.ts:9-81",
+      "backend/src/routes/whatsNew.ts:35-42",
+      "backend/src/services/releases/index.ts:48-57"
+    ],
+    "upstream": {
+      "": "object",
+      ".releases": "array",
+      ".releases[]": "object",
+      ".releases[].version": "string",
+      ".releases[].title": "string",
+      ".releases[].summary": "string",
+      ".releases[].date": "string",
+      ".releases[].note": "object?",
+      ".releases[].note.from": "string",
+      ".releases[].note.body": "string",
+      ".releases[].items": "array",
+      ".releases[].items[]": "object",
+      ".releases[].items[].key": "string",
+      ".releases[].items[].kind": "string",
+      ".releases[].items[].title": "string",
+      ".releases[].items[].summary": "string",
+      ".releases[].items[].body": "string",
+      ".releases[].items[].links": "array?",
+      ".releases[].items[].links[]": "object",
+      ".releases[].items[].links[].label": "string",
+      ".releases[].items[].links[].href": "string",
+      ".releases[].items[].olderLibraryOnly": "boolean?",
+      ".releases[].items[].cta": "string?",
+      ".releases[].items[].run": "string?",
+      ".releases[].items[].confirmTitle": "string?",
+      ".releases[].items[].confirmMessage": "string?",
+      ".releases[].items[].confirmLabel": "string?",
+      ".releases[].items[].ifClosed": "string?",
+      ".releases[].items[].requires": "string?",
+      ".releases[].items[].installedBeforeOnly": "boolean?",
+      ".releases[].items[].defaultValue": "boolean?",
+      ".releases[].items[].discloses": "string?"
+    },
+    "kimaOnly": {}
+  },
+  "heads_whats_new_pending": {
+    "sameShapeAs": "whats_new_pending"
+  },
+  "whats_new_current_none": {
+    "sources": [
+      "backend/src/routes/whatsNew.ts:56-65"
+    ],
+    "upstream": {
+      "": "object",
+      ".error": "string"
+    },
+    "kimaOnly": {}
+  },
+  "heads_whats_new_current": {
+    "sources": [
+      "backend/src/services/releases/catalog.ts:9-81",
+      "backend/src/routes/whatsNew.ts:56-65",
+      "backend/src/services/releases/index.ts:68-86"
+    ],
+    "upstream": {
+      "": "object",
+      ".release": "object",
+      ".answers": "object",
+      ".answers{}": "boolean",
+      ".done": "array",
+      ".done[]": "string",
+      ".release.version": "string",
+      ".release.title": "string",
+      ".release.summary": "string",
+      ".release.date": "string",
+      ".release.note": "object?",
+      ".release.note.from": "string",
+      ".release.note.body": "string",
+      ".release.items": "array",
+      ".release.items[]": "object",
+      ".release.items[].key": "string",
+      ".release.items[].kind": "string",
+      ".release.items[].title": "string",
+      ".release.items[].summary": "string",
+      ".release.items[].body": "string",
+      ".release.items[].links": "array?",
+      ".release.items[].links[]": "object",
+      ".release.items[].links[].label": "string",
+      ".release.items[].links[].href": "string",
+      ".release.items[].olderLibraryOnly": "boolean?",
+      ".release.items[].cta": "string?",
+      ".release.items[].run": "string?",
+      ".release.items[].confirmTitle": "string?",
+      ".release.items[].confirmMessage": "string?",
+      ".release.items[].confirmLabel": "string?",
+      ".release.items[].ifClosed": "string?",
+      ".release.items[].requires": "string?",
+      ".release.items[].installedBeforeOnly": "boolean?",
+      ".release.items[].defaultValue": "boolean?",
+      ".release.items[].discloses": "string?"
+    },
+    "kimaOnly": {}
+  },
+  "whats_new_changelog": {
+    "sources": [
+      "backend/src/routes/whatsNew.ts:68-75",
+      "backend/src/services/releases/index.ts:141-174",
+      "backend/src/services/releases/index.ts:212-271"
+    ],
+    "upstream": {
+      "": "object",
+      ".releases": "array",
+      ".releases[]": "object",
+      ".releases[].version": "string",
+      ".releases[].title": "string",
+      ".releases[].summary": "string",
+      ".releases[].date": "string",
+      ".releases[].note": "object?",
+      ".releases[].note.from": "string",
+      ".releases[].note.body": "string",
+      ".releases[].dismissed": "boolean",
+      ".releases[].items": "array",
+      ".releases[].items[]": "object",
+      ".openCount": "number",
+      ".releases[].items[].key": "string",
+      ".releases[].items[].kind": "string",
+      ".releases[].items[].title": "string",
+      ".releases[].items[].summary": "string",
+      ".releases[].items[].body": "string",
+      ".releases[].items[].cta": "string?",
+      ".releases[].items[].run": "string?",
+      ".releases[].items[].requires": "string?",
+      ".releases[].items[].confirmTitle": "string?",
+      ".releases[].items[].confirmMessage": "string?",
+      ".releases[].items[].confirmLabel": "string?",
+      ".releases[].items[].ifClosed": "string?",
+      ".releases[].items[].discloses": "string?",
+      ".releases[].items[].links": "array?",
+      ".releases[].items[].links[]": "object",
+      ".releases[].items[].links[].label": "string",
+      ".releases[].items[].links[].href": "string",
+      ".releases[].items[].answer": "object?",
+      ".releases[].items[].answer.enabled": "boolean",
+      ".releases[].items[].answer.decidedBy": "string",
+      ".releases[].items[].done": "boolean?",
+      ".releases[].items[].open": "boolean?"
+    },
+    "kimaOnly": {}
+  },
+  "heads_whats_new_changelog": {
+    "sameShapeAs": "whats_new_changelog"
+  },
+  "whats_new_open": {
+    "sources": [
+      "backend/src/routes/whatsNew.ts:78-85",
+      "backend/src/services/releases/index.ts:274-278"
+    ],
+    "upstream": {
+      "": "object",
+      ".count": "number",
+      ".items": "array",
+      ".items[]": "object",
+      ".items[].version": "string",
+      ".items[].key": "string",
+      ".items[].title": "string"
+    },
+    "kimaOnly": {}
+  },
+  "heads_whats_new_open": {
+    "sameShapeAs": "whats_new_open"
+  },
+  "update_status": {
+    "sources": [
+      "backend/src/services/updateCheck.ts:17-23"
+    ],
+    "upstream": {
+      "": "object",
+      ".enabled": "boolean",
+      ".current": "string",
+      ".latest": "string|null",
+      ".hasUpdate": "boolean",
+      ".lastCheckedAt": "string|null"
+    },
+    "kimaOnly": {}
+  },
+  "mood_mixes": {
+    "sources": [
+      "backend/src/services/releases/moodMixes.ts:76-107"
+    ],
+    "upstream": {
+      "": "object",
+      ".mix": "object|null",
+      ".mix.id": "string",
+      ".mix.name": "string",
+      ".mix.mood": "string",
+      ".mix.trackCount": "number",
+      ".mix.retired": "boolean",
+      ".decision": "string|null",
+      ".playlist": "object|null",
+      ".playlist.id": "string",
+      ".playlist.name": "string"
+    },
+    "kimaOnly": {}
+  },
+  "mood_mixes_saved": {
+    "sameShapeAs": "mood_mixes"
+  },
+  "mood_mixes_decision": {
+    "sources": [
+      "backend/src/services/releases/moodMixes.ts:116-142"
+    ],
+    "upstream": {
+      "": "object",
+      ".decision": "string",
+      ".removed": "number"
+    },
+    "kimaOnly": {}
+  },
+  "mood_mixes_save": {
+    "sources": [
+      "backend/src/services/releases/moodMixes.ts:151-185"
+    ],
+    "upstream": {
+      "": "object",
+      ".id": "string",
+      ".name": "string",
+      ".trackCount": "number",
+      ".created": "boolean"
+    },
+    "kimaOnly": {}
+  },
+  "choice_unknown_release": {
+    "sources": [
+      "backend/src/routes/whatsNew.ts:145-148"
+    ],
+    "upstream": {
+      "": "object",
+      ".error": "string"
+    },
+    "kimaOnly": {}
+  },
+  "dismiss_unknown_release": {
+    "sources": [
+      "backend/src/routes/whatsNew.ts:184-187"
+    ],
+    "upstream": {
+      "": "object",
+      ".error": "string"
+    },
+    "kimaOnly": {}
+  },
+  "heads_whats_new_choice": {
+    "sources": [
+      "backend/src/routes/whatsNew.ts:163-164"
+    ],
+    "upstream": {
+      "": "object",
+      ".key": "string",
+      ".enabled": "boolean",
+      ".decidedBy": "string"
+    },
+    "kimaOnly": {}
+  },
+  "heads_whats_new_dismiss": {
+    "sources": [
+      "backend/src/routes/whatsNew.ts:189-190"
+    ],
+    "upstream": {
+      "": "object",
+      ".version": "string",
+      ".dismissed": "boolean",
+      ".recordedDefaults": "array",
+      ".recordedDefaults[]": "string"
+    },
+    "kimaOnly": {}
+  },
+  "recommendations": {
+    "sources": [
+      "backend/src/routes/recommendations.ts:59-75",
+      "backend/src/routes/recommendations.ts:142-152"
+    ],
+    "upstream": {
+      "": "object",
+      ".artists": "array",
+      ".artists[]": "object",
+      ".artists[].id": "string",
+      ".artists[].mbid": "string|null",
+      ".artists[].name": "string",
+      ".artists[].heroUrl": "string|null",
+      ".artists[].coverArt": "string|null",
+      ".artists[].albumCount": "number"
+    },
+    "kimaOnly": {}
+  }
+}

@@ -377,12 +377,14 @@ station), shuffle play, **Save as Playlist** (`POST /api/mixes/<id>/save?tz=`: "
 and the new playlist opens after a second; when the server answers 409 the toast says "You've already saved this mix
 as a playlist." and the existing playlist opens), and the track rows (play from a row, add to the queue).
 
-**Compromises** (each in D-283; only the Home-row placement and the previously scoped Mood Mixer deferral are approved; the other differences await the owner's decision, with M10 as the proposed destination): no other Home sections and no Mood
-Mixer button; the row shows an error with Retry instead of hiding; Refresh uses the refresh reply instead of refetching;
-no 5-minute cache (fetched per visit); a scrolling flex row instead of the carousel component; play always starts the
-mix (no pause/resume of the same mix); rows play from a button (no double-click/double-tap); the saved playlist opens
-only while the listener is still on the mix. Checked with native tests and a DB-free mocked API on the real WASM in
-headless Chrome (private evidence, wiring only); a real-server/library/playback browser run is still to do.
+**Compromises** (each in D-283). Approved by the owner (2026-11-22) until M10: no other Home sections and no Mood
+Mixer button (the row sits above the artists at `/`); no 5-minute cache (fetched per visit) and a scrolling flex row
+instead of the carousel component; play always restarts the mix from its first song (no pause/resume of the same mix);
+rows play from a button (no double-click/double-tap); the row shows an error with Retry instead of hiding; the saved
+playlist opens only while the listener is still on the mix. **Not approved yet** (owner decision pending, proposed
+destination M10): Refresh uses the refresh reply instead of refetching; add to queue is the only row action.
+Checked with native tests and a DB-free mocked API on the real WASM in headless Chrome (private evidence, wiring
+only); see `docs/STATUS.md` for the real-server/library/playback browser run.
 
 ## Visual parity: compromises and assets
 

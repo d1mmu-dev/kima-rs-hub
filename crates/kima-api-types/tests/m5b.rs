@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use kima_api_types::mixes::MixTrack;
-use kima_api_types::radio::RadioReply;
+use kima_api_types::radio::{MoodStationsReply, RadioReply, RadioRowReply};
 use kima_api_types::recommendations::ForYouReply;
 use kima_api_types::releases::{
     ChangelogReply, ChoiceReply, CurrentReply, DismissReply, MoodMixDecisionReply,
@@ -616,6 +616,28 @@ fn m5b_types_parse_the_fixtures() {
     let _: MoodMixDecisionReply = decode("mood_mixes_decision");
     let _: MoodMixSaveReply = decode("mood_mixes_save");
     let _: UpdateStatus = decode("update_status");
+}
+
+/// The radio page's row (`GET /library/radio/row`) and the mood-station list: typed for kima-web (Phase F Task 22),
+/// re-serialised byte-equal to the captured JSON (keys sorted), so no key is dropped or invented.
+#[test]
+fn radio_row_and_station_list_round_trip() {
+    for name in ["radio_row", "radio_row_all", "heads_radio_row_all"] {
+        let row: RadioRowReply = decode(name);
+        assert!(!row.stations.is_empty(), "{name}");
+        assert_eq!(serde_json::to_value(&row).unwrap(), fixture(name), "{name}");
+    }
+    let all: RadioRowReply = decode("radio_row_all");
+    let kinds: Vec<&str> = all.stations.iter().map(|s| s.kind.as_str()).collect();
+    assert!(kinds.contains(&"all") && kinds.contains(&"genre") && kinds.contains(&"decade"));
+    let genre = all.stations.iter().find(|s| s.kind == "genre").unwrap();
+    assert!(genre.value.is_some() && genre.count.is_some() && genre.name.is_none());
+    let stations: MoodStationsReply = decode("radio_stations");
+    assert_eq!(stations.stations.len(), 14);
+    assert_eq!(
+        serde_json::to_value(&stations).unwrap(),
+        fixture("radio_stations")
+    );
 }
 
 /// The ids agree across replies, and the optional arrays and values the keys check could only call unobservable

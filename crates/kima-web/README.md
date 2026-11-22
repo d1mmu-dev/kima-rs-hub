@@ -353,8 +353,8 @@ visit or a Retry retires the page's older retry/poll loop, so leaving and coming
 no-repeat shuffled order; that mode is M10), one-line toasts, numbered rail item, Radio as the only phone quick link, no TV-focus attributes
 or image cache, `.t-page-title`/`.page-end` added from the newer reference; accepted by the owner for this slice with
 destination M10 (2026-11-22). Checked with native tests and a DB-free mocked
-API on the real WASM in headless Chrome (private evidence, wiring only); a real-server/library/playback browser run
-is still to do.
+API on the real WASM in headless Chrome (private evidence, wiring only), then on a real kima-server with a synthetic
+library (stations, refill at the queue end, shuffle rule, profile switch; private evidence).
 
 ## Made for you and mix pages (M5b Phase F Task 23, D-283)
 
@@ -384,7 +384,8 @@ rows play from a button (no double-click/double-tap); the row shows an error wit
 playlist opens only while the listener is still on the mix. **Not approved yet** (owner decision pending, proposed
 destination M10): Refresh uses the refresh reply instead of refetching; add to queue is the only row action.
 Checked with native tests and a DB-free mocked API on the real WASM in headless Chrome (private evidence, wiring
-only); see `docs/STATUS.md` for the real-server/library/playback browser run.
+only), then on a real kima-server with a synthetic library (row, Refresh, mix playback, Save 200/409 read back from the
+database; private evidence).
 
 ## Visual parity: compromises and assets
 

@@ -42,6 +42,7 @@ fn body(settings: SystemSettings) -> Json<Value> {
 async fn show(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<Value>, ApiError> {
     let system = settings::get(&state.pool).await?;
     let kv = state.settings.get().await?;
+    let updates = kima_db::update_check::get(&state.pool).await?;
     Ok(Json(json!({
         "registrationOpen": system.registration_open,
         "libraryRoot": system.library_root,
@@ -55,6 +56,8 @@ async fn show(State(state): State<AppState>, _admin: AdminUser) -> Result<Json<V
         "enrichmentConcurrency": kv.enrichment_concurrency,
         "autotagAutoApply": kv.autotag_auto_apply.as_str(),
         "podcastChartCountry": kv.podcast_chart_country,
+        // Upstream's switch for the daily update check (M5b Task 17, D-270).
+        "updateChecksEnabled": updates.enabled,
     })))
 }
 
@@ -153,6 +156,14 @@ async fn update(
 ) -> Result<Json<Value>, ApiError> {
     // Validate everything first, so a rejected body stores nothing.
     let (registration_open, changes) = changes(&fields, state.identify.locked())?;
+    let update_checks = match fields.get("updateChecksEnabled") {
+        None => None,
+        Some(Value::Bool(on)) => Some(*on),
+        Some(_) => return Err(invalid("updateChecksEnabled must be a boolean".into())),
+    };
+    if let Some(on) = update_checks {
+        kima_db::update_check::set_enabled(&state.pool, on).await?;
+    }
     let mut switch = None;
     let mut concurrency = None;
     for change in changes {

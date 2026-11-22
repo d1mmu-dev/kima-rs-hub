@@ -342,10 +342,11 @@ async fn features_m1_flags(pool: PgPool) {
     server.get("/api/system/features").authorization_bearer(token).await.assert_json(&json!({
         "musicCNN": false, "vibeEmbeddings": false, "audiobookshelfEnabled": false, "fpcalc": false,
         "library": true, "podcasts": true, "audiobooks": false, "discover": false,
-        "mixes": false, "downloads": false, "imports": false,
-        // M-STATS S1: every `/stats/*` route the v1.12.3 page calls is served. `changelog`
-        // and `accountDeletion` stay unsent (= off in the frontend, D-170).
-        "stats": true
+        "mixes": true, "downloads": false, "imports": false,
+        // M-STATS S1: every `/stats/*` route the v1.12.3 page calls is served. `changelog` is
+        // off while kima-rs's own release catalog is empty (D-267); `accountDeletion` stays
+        // unsent (= off in the frontend, D-170).
+        "stats": true, "changelog": false
     }));
     let stub: Value = server
         .get("/api/notifications/downloads/active")
@@ -362,6 +363,46 @@ async fn features_m1_flags(pool: PgPool) {
         .get("/api/discover/batch-status")
         .await
         .assert_status(StatusCode::UNAUTHORIZED);
+}
+
+async fn features_of(state: kima_api::state::AppState, user: &str) -> Value {
+    let (_, token) = common::user_with_token(&state, user).await;
+    TestServer::new(kima_api::router(state))
+        .unwrap()
+        .get("/api/system/features")
+        .authorization_bearer(&token)
+        .await
+        .json()
+}
+
+/// M5b: every `/api/mixes`, radio, decades, what's-new and recommendations route is served (D-030/D-170).
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn features_reports_mixes(pool: PgPool) {
+    assert_eq!(features_of(common::state(pool), "ana").await["mixes"], true);
+}
+
+/// Owner Q3 = B (D-267): the changelog section stays hidden while kima-rs's own catalog is empty, and shows
+/// with its first entry.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn features_changelog_off_while_catalog_empty(pool: PgPool) {
+    assert!(
+        kima_mixes::catalog::releases().is_empty(),
+        "the shipped catalog"
+    );
+    assert_eq!(
+        features_of(common::state(pool.clone()), "ana").await["changelog"],
+        false
+    );
+    let first = kima_api_types::releases::Release {
+        version: "0.2.0".into(),
+        title: "Kima 0.2.0".into(),
+        summary: "The first entry.".into(),
+        date: "2026-12-01".into(),
+        note: None,
+        items: vec![],
+    };
+    let state = common::state(pool).with_releases(vec![first]);
+    assert_eq!(features_of(state, "bob").await["changelog"], true);
 }
 
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]

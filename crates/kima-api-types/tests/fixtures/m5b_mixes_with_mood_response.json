@@ -1,0 +1,165 @@
+[
+  {
+    "color": "linear-gradient(to bottom, rgba(55, 48, 163, 0.5), rgba(76, 29, 149, 0.4), rgba(15, 23, 42, 0.4))",
+    "coverUrls": [
+      "01a2027e-4fc1-76da-b11d-384ecc5ac42a",
+      "01a2027e-508a-707e-95db-64dfcb38b7a5",
+      "01a2027e-4db0-741b-8094-e758d79cfb10",
+      "01a2027e-4eff-75f9-b52e-8cc68dd04d55"
+    ],
+    "description": "Hidden gems waiting to be discovered",
+    "id": "deep-cuts-2026-11-22",
+    "name": "Deep Cuts",
+    "trackCount": 20,
+    "trackIds": [
+      "01a2027e-4fcf-77e9-ad8d-f6fe2d20d642",
+      "01a2027e-5095-741e-af3c-a7e2612b1d83",
+      "01a2027e-4df3-70a7-b164-4f85f6fd9fe7",
+      "01a2027e-4f1e-7063-9628-914bde2fe371",
+      "01a2027e-4ffa-7147-a0ce-b002250b9982",
+      "01a2027e-5052-7592-bbc1-4fb4c4b18307",
+      "01a2027e-4eba-7580-b264-fdafe937dc2f",
+      "01a2027e-5045-7145-8105-d69462bc9db3",
+      "01a2027e-4f70-70fb-b1dd-23fe7e79843f",
+      "01a2027e-4e1d-7565-99d1-c136adbd35d9",
+      "01a2027e-4f0c-751e-a3f4-f259eed2a957",
+      "01a2027e-4f9f-70f4-8708-aa9129ebec42",
+      "01a2027e-4dc3-7515-8f93-643f6e057e0a",
+      "01a2027e-4cc9-7172-a365-585c501aa184",
+      "01a2027e-4eca-7613-b1f7-012c24854622",
+      "01a2027e-508b-74a7-889e-c4ec23167b90",
+      "01a2027e-4e5d-7411-b557-daae7958213c",
+      "01a2027e-50b7-710f-9fd6-d9c14c8969f2",
+      "01a2027e-4d0f-72e1-8b5d-b85785fc549c",
+      "01a2027e-50c5-744b-b6e3-7f5d73528c66"
+    ],
+    "type": "deep-cuts"
+  },
+  {
+    "color": "linear-gradient(to bottom, rgba(68, 64, 60, 0.5), rgba(38, 38, 38, 0.4), rgba(39, 39, 42, 0.4))",
+    "coverUrls": [
+      "01a2027e-4fc1-76da-b11d-384ecc5ac42a",
+      "01a2027e-4f62-70f3-9527-78bc93714fe2",
+      "01a2027e-502b-711f-9fe8-f281e5ccd740",
+      "01a2027e-4cb1-72fd-83eb-21b5625011f5"
+    ],
+    "description": "Random picks from the 2000s",
+    "id": "era-2000-2026-11-22",
+    "name": "Your 2000s Mix",
+    "trackCount": 12,
+    "trackIds": [
+      "01a2027e-4ffa-7147-a0ce-b002250b9982",
+      "01a2027e-4f91-7083-a5f1-c4a7a8e023e8",
+      "01a2027e-4f9f-70f4-8708-aa9129ebec42",
+      "01a2027e-5045-7145-8105-d69462bc9db3",
+      "01a2027e-4cf0-70d0-a834-9f2f63101973",
+      "01a2027e-505f-7268-a753-e4afa1e43a44",
+      "01a2027e-4fcf-77e9-ad8d-f6fe2d20d642",
+      "01a2027e-4d01-7422-a717-c4883baf9240",
+      "01a2027e-4f1e-7063-9628-914bde2fe371",
+      "01a2027e-4f0c-751e-a3f4-f259eed2a957",
+      "01a2027e-508b-74a7-889e-c4ec23167b90",
+      "01a2027e-5095-741e-af3c-a7e2612b1d83"
+    ],
+    "type": "era"
+  },
+  {
+    "color": "linear-gradient(to bottom, rgba(63, 63, 70, 0.5), rgba(30, 41, 59, 0.4), rgba(17, 24, 39, 0.4))",
+    "coverUrls": [
+      "01a2027e-4db0-741b-8094-e758d79cfb10",
+      "01a2027e-4e96-774e-b264-ecf0f9b17f08",
+      "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+      "01a2027e-4e1d-7565-99d1-c1350f1f6cf9"
+    ],
+    "description": "Random Rock picks",
+    "id": "genre-01a2027e-4d38-7289-9f8c-0d2c928b4882-2026-11-22",
+    "name": "Your Rock Mix",
+    "trackCount": 8,
+    "trackIds": [
+      "01a2027e-4df3-70a7-b164-4f85f6fd9fe7",
+      "01a2027e-4ea6-7558-8c70-f26a9275d76c",
+      "01a2027e-4db2-778a-b677-09912c78a846",
+      "01a2027e-4d6a-738c-9db9-1e0c358dcf01",
+      "01a2027e-4d36-70cd-9be5-1f6b36b4e576",
+      "01a2027e-4e3b-724e-96ba-5ed1d786499c",
+      "01a2027e-4e1d-7565-99d1-c136adbd35d9",
+      "01a2027e-4ed9-7686-b6ee-6dfbcb63249d"
+    ],
+    "type": "genre"
+  },
+  {
+    "color": "linear-gradient(to bottom, rgba(6, 95, 70, 0.5), rgba(17, 94, 89, 0.4), rgba(15, 23, 42, 0.4))",
+    "coverUrls": [
+      "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+      "01a2027e-4db0-741b-8094-e758d79cfb10"
+    ],
+    "description": "Your most played tracks",
+    "id": "top-tracks",
+    "name": "Your Top 20",
+    "trackCount": 6,
+    "trackIds": [
+      "01a2027e-4d36-70cd-9be5-1f6b36b4e576",
+      "01a2027e-4d49-7375-ae1a-643650fb6eda",
+      "01a2027e-4d59-752b-b7a3-89d9889bf0da",
+      "01a2027e-4d6a-738c-9db9-1e0c358dcf01",
+      "01a2027e-4d7f-7432-8dab-91873ed5d0c2",
+      "01a2027e-4db2-778a-b677-09912c78a846"
+    ],
+    "type": "top-tracks"
+  },
+  {
+    "color": "linear-gradient(to bottom, rgba(55, 48, 163, 0.5), rgba(76, 29, 149, 0.4), rgba(15, 23, 42, 0.4))",
+    "coverUrls": [
+      "01a2027e-4c54-75f1-9389-1e2016a0a272",
+      "01a2027e-4e1d-7565-99d1-c1350f1f6cf9",
+      "01a2027e-4f62-70f3-9527-78bc93714fe2",
+      "01a2027e-4cb1-72fd-83eb-21b5625011f5"
+    ],
+    "description": "Hidden gems you rarely play",
+    "id": "rediscover-2026-11-22",
+    "name": "Rediscover",
+    "trackCount": 20,
+    "trackIds": [
+      "01a2027e-4c82-7577-ad11-588374c278e7",
+      "01a2027e-4e5d-7411-b557-daae7958213c",
+      "01a2027e-4f63-736e-b2c2-376baad3486e",
+      "01a2027e-4cdc-745a-9673-2333fdd40d47",
+      "01a2027e-4ffa-7147-a0ce-b002250b9982",
+      "01a2027e-4de5-74b1-b5f5-f860bc7bd9ed",
+      "01a2027e-5095-741e-af3c-a7e2612b1d83",
+      "01a2027e-4d6a-738c-9db9-1e0c358dcf01",
+      "01a2027e-4eca-7613-b1f7-012c24854622",
+      "01a2027e-4db2-778a-b677-09912c78a846",
+      "01a2027e-50c5-744b-b6e3-7f5d73528c66",
+      "01a2027e-4ea6-7558-8c70-f26a9275d76c",
+      "01a2027e-4f40-725e-bc97-9fc453309eff",
+      "01a2027e-4d59-752b-b7a3-89d9889bf0da",
+      "01a2027e-4dd6-73c2-8980-33ed74322670",
+      "01a2027e-4c56-711a-beb9-ec6bfeb348f0",
+      "01a2027e-4e2c-77b3-8cfe-9d33fd62cc2f",
+      "01a2027e-50d4-746b-ae0e-ccf7936af4b6",
+      "01a2027e-502c-733e-a42e-f6e72ec0ead4",
+      "01a2027e-50b7-710f-9fd6-d9c14c8969f2"
+    ],
+    "type": "rediscover"
+  },
+  {
+    "color": "linear-gradient(to bottom, rgba(17, 94, 89, 0.6), rgba(22, 78, 99, 0.5), rgba(15, 23, 42, 0.4))",
+    "coverUrls": [
+      "01a2027e-4d35-70d6-b1a6-1e514496fc10"
+    ],
+    "description": "Based on your calm preferences",
+    "id": "your-mood-mix-1795338182354",
+    "mood": "chill",
+    "name": "Your Calm Mix",
+    "trackCount": 5,
+    "trackIds": [
+      "01a2027e-4d36-70cd-9be5-1f6b36b4e576",
+      "01a2027e-4d49-7375-ae1a-643650fb6eda",
+      "01a2027e-4d59-752b-b7a3-89d9889bf0da",
+      "01a2027e-4d6a-738c-9db9-1e0c358dcf01",
+      "01a2027e-4d7f-7432-8dab-91873ed5d0c2"
+    ],
+    "type": "mood"
+  }
+]

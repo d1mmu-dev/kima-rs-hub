@@ -374,10 +374,11 @@ async fn other_capabilities_unaffected_by_missing_assets(pool: PgPool) {
             "podcasts": true,
             "audiobooks": false,
             "discover": false,
-            "mixes": false,
+            "mixes": true,
             "downloads": false,
             "imports": false,
             "stats": true,
+            "changelog": false,
         })
     );
     let (status, library) = client.get("/api/library/tracks").await;

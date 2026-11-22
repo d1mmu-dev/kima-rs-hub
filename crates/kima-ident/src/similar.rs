@@ -293,6 +293,15 @@ pub(crate) struct Candidate {
 /// identity keys (`name_key`), and the unaccented search vector (`artists_search_idx`) holding
 /// every word of a name's spellings (as given, normalised, and with "and" written `&`).
 pub(crate) async fn candidates(pool: &PgPool, entries: &[Entry]) -> sqlx::Result<Vec<Candidate>> {
+    candidates_where(pool, entries, true).await
+}
+
+/// [`candidates`], or with `present_only` false every artist row, a present track or not.
+async fn candidates_where(
+    pool: &PgPool,
+    entries: &[Entry],
+    present_only: bool,
+) -> sqlx::Result<Vec<Candidate>> {
     let mbids: Vec<Uuid> = entries.iter().filter_map(|e| e.mbid.map(|m| m.0)).collect();
     let keys: Vec<String> = entries
         .iter()
@@ -316,8 +325,8 @@ pub(crate) async fn candidates(pool: &PgPool, entries: &[Entry]) -> sqlx::Result
                                  ' | ')::tsquery
                       FROM unnest($3::text[]) AS s(v)
                       WHERE length(to_tsvector('simple', unaccent(s.v))) > 0))
-             AND EXISTS (SELECT 1 FROM albums al JOIN tracks t ON t.album_id = al.id
-                          WHERE al.artist_id = ar.id AND t.missing_since IS NULL)
+             AND (NOT $5 OR EXISTS (SELECT 1 FROM albums al JOIN tracks t ON t.album_id = al.id
+                                     WHERE al.artist_id = ar.id AND t.missing_since IS NULL))
            ORDER BY (COALESCE(ar.mbid = ANY($1::uuid[]), false) OR ar.name_key = ANY($2::text[])) DESC,
                     ar.id
            LIMIT $4"#,
@@ -325,6 +334,7 @@ pub(crate) async fn candidates(pool: &PgPool, entries: &[Entry]) -> sqlx::Result
         &keys,
         &spellings,
         MAX_CANDIDATES,
+        present_only,
     )
     .fetch_all(pool)
     .await?;
@@ -335,6 +345,56 @@ pub(crate) async fn candidates(pool: &PgPool, entries: &[Entry]) -> sqlx::Result
             name: r.name,
             mbid: r.mbid,
             has_image: r.has_image,
+        })
+        .collect())
+}
+
+/// Each entry's artist among `candidates`: by MBID, else by [`normalize_artist_name`]. The first wins when two
+/// artists share an MBID or a normalised name.
+fn match_entries<'c>(candidates: &'c [Candidate], entries: &[Entry]) -> Vec<Option<&'c Candidate>> {
+    let mut by_mbid: HashMap<Uuid, &Candidate> = HashMap::new();
+    let mut by_name: HashMap<String, &Candidate> = HashMap::new();
+    for c in candidates {
+        if let Some(m) = c.mbid {
+            by_mbid.entry(m).or_insert(c);
+        }
+        by_name.entry(normalize_artist_name(&c.name)).or_insert(c);
+    }
+    entries
+        .iter()
+        .map(|e| {
+            e.mbid
+                .and_then(|m| by_mbid.get(&m.0).copied())
+                .or_else(|| by_name.get(&normalize_artist_name(&e.name)).copied())
+        })
+        .collect()
+}
+
+/// An artist row a stored similar entry names, present tracks or not (M5b Task 18).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownArtist {
+    pub id: Uuid,
+    pub name: String,
+    pub mbid: Option<Uuid>,
+    pub has_image: bool,
+}
+
+/// Each entry matched, as [`resolve`] matches, to any artist row (a present track or not; upstream's
+/// `SimilarArtist.toArtist` is any `Artist` row); `None` for an entry kima knows only by name.
+pub async fn match_any(pool: &PgPool, entries: &[Entry]) -> sqlx::Result<Vec<Option<KnownArtist>>> {
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let candidates = candidates_where(pool, entries, false).await?;
+    Ok(match_entries(&candidates, entries)
+        .into_iter()
+        .map(|c| {
+            c.map(|c| KnownArtist {
+                id: c.id,
+                name: c.name.clone(),
+                mbid: c.mbid,
+                has_image: c.has_image,
+            })
         })
         .collect())
 }
@@ -352,24 +412,7 @@ pub async fn resolve(
         return Ok(Vec::new());
     }
     let candidates = candidates(pool, entries).await?;
-
-    // The first wins when two artists share an MBID or a normalised name.
-    let mut by_mbid: HashMap<Uuid, &Candidate> = HashMap::new();
-    let mut by_name: HashMap<String, &Candidate> = HashMap::new();
-    for c in &candidates {
-        if let Some(m) = c.mbid {
-            by_mbid.entry(m).or_insert(c);
-        }
-        by_name.entry(normalize_artist_name(&c.name)).or_insert(c);
-    }
-    let found: Vec<Option<&Candidate>> = entries
-        .iter()
-        .map(|e| {
-            e.mbid
-                .and_then(|m| by_mbid.get(&m.0).copied())
-                .or_else(|| by_name.get(&normalize_artist_name(&e.name)).copied())
-        })
-        .collect();
+    let found = match_entries(&candidates, entries);
 
     let matched: Vec<Uuid> = found.iter().flatten().map(|c| c.id).collect();
     let owned: HashMap<Uuid, i64> = sqlx::query!(

@@ -1329,12 +1329,20 @@ pub async fn reconcile_cancellable(
 }
 
 /// Re-reads every present file through the same album-artist election as a normal scan.
-/// The library queue serializes this with other library writers.
+/// The library queue serializes this with other library writers. A run that read every file is
+/// stamped (`system_settings.albums_refiled_at`, upstream `refileProcessor.ts`), which settles the
+/// release window's re-file action (M5b Task 15). A run that found no audio under a root whose library
+/// has tracks (an unmounted disk, [`ScanReport::root_empty_guard`]) read nothing and is not stamped,
+/// like upstream's "found no songs to read" outcome.
 pub async fn refile_cancellable(
     ctx: &LibraryCtx,
     cancel: &CancellationToken,
 ) -> Result<ScanReport, ScanError> {
-    reconcile_with(ctx, cancel, true).await
+    let report = reconcile_with(ctx, cancel, true).await?;
+    if report.failed.is_empty() && !report.root_empty_guard {
+        kima_db::releases::stamp_albums_refiled(&ctx.pool).await?;
+    }
+    Ok(report)
 }
 
 async fn reconcile_with(

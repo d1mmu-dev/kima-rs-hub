@@ -10,6 +10,7 @@ pub mod radio;
 pub mod range;
 mod routes;
 pub mod state;
+pub mod update_check;
 pub mod vibe_cache;
 
 pub use routes::router;

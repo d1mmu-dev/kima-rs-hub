@@ -1,0 +1,74 @@
+{
+  "stations": [
+    {
+      "description": "Calm, dreamy, low energy",
+      "name": "Calm",
+      "value": "calm"
+    },
+    {
+      "description": "Party, energetic, groovy",
+      "name": "Energy",
+      "value": "energy"
+    },
+    {
+      "description": "Aggressive, dark, fun quirky",
+      "name": "Intense",
+      "value": "intense"
+    },
+    {
+      "description": "Happy, uplifting, high energy",
+      "name": "Happy",
+      "value": "happy"
+    },
+    {
+      "description": "Sad, low energy, romantic",
+      "name": "Melancholy",
+      "value": "melancholy"
+    },
+    {
+      "description": "Focus, calm",
+      "name": "Focus: Calm",
+      "value": "focus-calm"
+    },
+    {
+      "description": "Focus, energetic, groovy",
+      "name": "Focus: Energy",
+      "value": "focus-energy"
+    },
+    {
+      "description": "Uplifting, happy, epic",
+      "name": "Feel-good",
+      "value": "feel-good"
+    },
+    {
+      "description": "The songs you play after dark, and songs like them",
+      "name": "Late Night",
+      "value": "late-night"
+    },
+    {
+      "description": "Romantic, sad, groovy",
+      "name": "Romantic",
+      "value": "romantic"
+    },
+    {
+      "description": "Driving, uplifting, summer",
+      "name": "Road Trip",
+      "value": "road-trip"
+    },
+    {
+      "description": "Nostalgic, high energy, happy",
+      "name": "Nostalgic",
+      "value": "nostalgic"
+    },
+    {
+      "description": "Epic, high energy, uplifting",
+      "name": "Epic",
+      "value": "epic"
+    },
+    {
+      "description": "Songs with no mood tag",
+      "name": "Wildcard",
+      "value": "wildcard"
+    }
+  ]
+}

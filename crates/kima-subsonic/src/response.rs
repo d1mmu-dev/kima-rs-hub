@@ -558,8 +558,11 @@ mod tests {
     fn xml_envelope_attribute_order() {
         assert_eq!(
             ok(Format::Xml, None),
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><subsonic-response xmlns=\"http://subsonic.org/restapi\" \
-             status=\"ok\" version=\"1.16.1\" type=\"Kima\" serverVersion=\"0.1.0\" openSubsonic=\"true\"/>"
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><subsonic-response xmlns=\"http://subsonic.org/restapi\" \
+                 status=\"ok\" version=\"1.16.1\" type=\"Kima\" serverVersion=\"{}\" openSubsonic=\"true\"/>",
+                env!("CARGO_PKG_VERSION")
+            )
         );
     }
 

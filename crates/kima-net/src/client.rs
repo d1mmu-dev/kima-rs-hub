@@ -25,7 +25,7 @@ use crate::outcome::{Evidence, Failure, Outcome};
 use crate::record::Entry;
 use crate::req::{Method, Req, query_string};
 use crate::secrets::{Secrets, redact_form, redact_url};
-use crate::source::{Bases, Source};
+use crate::source::{Bases, Host, Source};
 
 /// Largest JSON body read (spec §7.1).
 const MAX_JSON_BODY: usize = 4 * 1024 * 1024;
@@ -398,6 +398,16 @@ impl Net {
     /// (spec §15.3). A disabled client never is.
     pub fn enabled(&self) -> bool {
         self.live.as_ref().is_some_and(|l| l.switch.enabled())
+    }
+
+    /// Whether the network guard (`KIMA_NET_DENY_REAL=1`) would refuse a request to `host`, which would panic: a
+    /// caller that must not fail loudly (the update check) asks first. A disabled client sends nothing and refuses
+    /// nothing.
+    pub fn refuses_real_host(&self, host: Host) -> bool {
+        self.live.as_ref().is_some_and(|l| {
+            Url::parse(l.cfg.bases.get(host))
+                .map_or(l.cfg.deny_real, |u| guard::refuses(&u, l.cfg.deny_real))
+        })
     }
 
     /// When the source's pause ends, if it is paused now.

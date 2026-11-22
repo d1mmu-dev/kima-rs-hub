@@ -22,7 +22,7 @@ login, kima-rs now scans and watches a music folder, shows it as Artist, then Ye
 browse, search, stream (with transcodes), keep playlists and resume playback. An admin can also
 preview and apply a tidy on-disk layout. Music apps that speak Subsonic/OpenSubsonic can connect
 with per-app tokens (see [`docs/subsonic.md`](docs/subsonic.md)). Identification and the album
-autotagger and CLAP/analysis plumbing are built. Podcasts (M6a) are served, see [Podcasts](#podcasts); the vibe engine (M5) is ported but not enabled until the music CLAP checkpoint and its private assets exist, see [Vibe engine](#vibe-engine-m5-not-yet-enabled);
+autotagger and CLAP/analysis plumbing are built. Podcasts (M6a) are served, see [Podcasts](#podcasts); the vibe engine (M5) is ported but not enabled until the music CLAP checkpoint and its private assets exist, see [Vibe engine](#vibe-engine-m5); mixes, radio and what's new (M5b) are served, see [Mixes, radio and what's new](#mixes-radio-and-whats-new-m5b);
 private-model inference acceptance, audiobooks (M6b) and integrations are still open. See
 `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md` for what comes next.
 
@@ -208,6 +208,36 @@ values above, which were computed from that commit's Git objects. The pin table 
 stays unpinned, so it is never read and the moods report unavailable until its licences are cleared. The MusicBrainz genre list
 (`mbGenres.json`, CC0) is bundled in `crates/kima-vibe/assets/`.
 
+## Mixes, radio and what's new (M5b)
+
+The upstream daily mixes, mood mixes, radio stations, decades, the what's-new window and the for-you artist
+recommendations are served (22 routes, upstream v1.12.3 shapes; `/api/system/features` answers `"mixes": true`):
+
+- `/api/mixes`: the day's five mixes (recipes, genres, decades, discovery, night plays), `GET /api/mixes/{id}`,
+  `POST /api/mixes/refresh`, `POST /api/mixes/{id}/save` (as a playlist), mood presets and the mood-bucket mix
+  (`/api/mixes/mood/buckets/*`, saving it as "Your … Mix").
+- `/api/library/decades`, `/api/library/radio/stations`, `/api/library/radio/row`, `/api/library/radio` (discovery,
+  favorites, decade, genre, mood, workout, artist and all-library stations with upstream's play order).
+- `/api/whats-new/*`: the release window, changelog, open items, choices and dismissals, the saved mood mix's
+  question and the update check; `GET /api/recommendations/for-you`.
+
+Everything personal (mix lists, station sessions, saved mixes, release answers) belongs to the profile. Listener
+state that upstream keeps in Redis lives in the server's memory and is lost on a restart (D-260). While the
+mood heads are blocked (see [Vibe engine](#vibe-engine-m5)), recipe and mood mixes fall back or answer empty, and the
+mood and Workout radio tiles stay hidden (D-266). kima-rs ships its own release catalog, empty for now, so the
+what's-new window shows nothing and `/system/features` answers `"changelog": false` until its first entry (D-267).
+
+**Time zone.** A mix day is the server's calendar date, as upstream (owner Q11 = A). The container and the server
+run in UTC unless told otherwise, so mixes would roll over at 01:00/02:00 Polish time: set `TZ=Europe/Warsaw` (or
+your own zone) in the container's environment or the service unit. The night mix reads the listener's zone from
+the request (`?tz=`).
+
+**Update check.** `GET /api/whats-new/update-status` asks the latest release of `d1mmu-dev/kima-rs-hub` on GitHub at
+most once a day (shared by concurrent callers, stored in `system_settings`); an admin turns it off with
+`updateChecksEnabled: false` in `POST /api/system-settings`. Like upstream it is not stopped by `KIMA_IDENTIFY=off`;
+with `KIMA_NET_DENY_REAL=1` it answers like a failed check without sending anything (D-270). Differences:
+D-260–D-281.
+
 ## Podcasts
 
 Follow shows from Apple's charts, categories and search or by RSS feed URL, play their episodes (with resume and
@@ -305,7 +335,8 @@ New in kima-rs:
 | `KIMA_NET_DENY_REAL` | unset | `1` makes any outbound request to a host other than this machine panic. Set in CI so no test reaches the network. |
 | `KIMA_TRANSCODE_CACHE_MB` | `2048` | Size cap of the transcode cache under `KIMA_DATA_DIR`, in MB. |
 | `KIMA_ARTWORK_CACHE_MB` | `512` | Size cap of the cover-art cache under `KIMA_DATA_DIR/artwork`, in MB. The oldest albums are dropped first. `0` means nothing is kept, so every request rebuilds. |
-| `KIMA_VIBE_ASSET_DIR` | unset | Directory with the private vibe assets `feel_probe.json` and `mood_heads.json` (see [Vibe engine](#vibe-engine-m5-not-yet-enabled)). Unset, missing or unpinned files turn off only the vibe capabilities. |
+| `KIMA_VIBE_ASSET_DIR` | unset | Directory with the private vibe assets `feel_probe.json` and `mood_heads.json` (see [Vibe engine](#vibe-engine-m5)). Unset, missing or unpinned files turn off only the vibe capabilities. |
+| `TZ` | unset (UTC) | Server time zone (standard C library variable). The day of the daily mixes follows it; set `TZ=Europe/Warsaw` so mixes roll over at local midnight (M5b, owner Q11 = A). |
 | `KIMA_VIBE_EXACT_MAX` | `200000` | Vibe text search scans exactly up to this many eligible tracks and uses the HNSW index above it (D-184). A whole number; `0` always uses the index; anything else stops startup. |
 
 Keep `secrets.json` (or the two secret variables) safe: losing it makes stored encrypted settings

@@ -1,0 +1,43 @@
+{
+  "stations": [
+    {
+      "cover": "01a2027e-502b-711f-9fe8-f281e5ccd740",
+      "type": "all",
+      "value": null
+    },
+    {
+      "cover": "01a2027e-4f62-70f3-9527-78bc93714fe2",
+      "type": "discovery",
+      "value": null
+    },
+    {
+      "cover": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+      "type": "favorites",
+      "value": null
+    },
+    {
+      "count": 20,
+      "cover": "01a2027e-4f62-70f3-9527-78bc93714fe2",
+      "type": "genre",
+      "value": "electronic"
+    },
+    {
+      "count": 20,
+      "cover": "01a2027e-4db0-741b-8094-e758d79cfb10",
+      "type": "genre",
+      "value": "rock"
+    },
+    {
+      "count": 28,
+      "cover": "01a2027e-502b-711f-9fe8-f281e5ccd740",
+      "type": "decade",
+      "value": "2000"
+    },
+    {
+      "count": 23,
+      "cover": "01a2027e-4e96-774e-b264-ecf0f9b17f08",
+      "type": "decade",
+      "value": "1990"
+    }
+  ]
+}

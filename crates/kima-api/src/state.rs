@@ -109,6 +109,11 @@ pub struct AppState {
     pub vibe_text_embedder: Arc<dyn kima_ident::stages::embedding::TextEmbedder>,
     /// The mixes' and radio's listener state (M5b, D-260): what upstream keeps in Redis, per profile, in process.
     pub listeners: Arc<kima_mixes::store::ListenerStore>,
+    /// The release window's catalog (M5b Task 15): kima-rs's own, empty at the start (owner Q3 = B, D-267);
+    /// tests inject releases with [`AppState::with_releases`].
+    pub releases: Arc<[kima_api_types::releases::Release]>,
+    /// The update check in flight (M5b Task 17, upstream `inFlight`): callers that arrive while it runs share it.
+    pub update_check: Arc<crate::update_check::UpdateFlight>,
     /// Counts `password_permit()` calls, so tests can prove no argon2 work was started.
     password_permits: Arc<AtomicU64>,
 }
@@ -153,6 +158,8 @@ impl AppState {
             vibe_map_cache: Arc::default(),
             vibe_text_embedder: Arc::new(kima_ident::stages::embedding::NativeTextEmbedder),
             listeners: Arc::default(),
+            releases: kima_mixes::catalog::releases().into(),
+            update_check: Arc::default(),
             password_permits: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -192,6 +199,12 @@ impl AppState {
 
     pub fn with_fanart_env_key(mut self, key: Option<String>) -> Self {
         self.fanart_env_key = key;
+        self
+    }
+
+    /// A release catalog in place of kima-rs's own (tests).
+    pub fn with_releases(mut self, releases: Vec<kima_api_types::releases::Release>) -> Self {
+        self.releases = releases.into();
         self
     }
 

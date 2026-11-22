@@ -1,0 +1,371 @@
+{
+  "source": {
+    "head": "62e1b7a415e068ac219597eb1d9f537759661a2b",
+    "tz": "Europe/Warsaw",
+    "live": "the run's kima server: no mood heads, the shipped empty release catalog, KIMA_NET_DENY_REAL=1",
+    "heads": "crates/kima-api/tests/m5b_capture.rs m5b_capture_serve: same router and database, synthetic mood heads and a one-release synthetic catalog",
+    "seed": "crates/kima-api/tests/m5b_capture.rs m5b_capture_seed (SQL: vectors, mood scores, readings, tempo/key, mood tags, mood statistics, cover tokens, owner genres, similar artists)"
+  },
+  "captures": [
+    {
+      "name": "mixes",
+      "variant": "live",
+      "route": "GET /mixes",
+      "method": "GET",
+      "path": "/mixes?tz=Europe/Warsaw",
+      "status": 200
+    },
+    {
+      "name": "mix",
+      "variant": "live",
+      "route": "GET /mixes/:id",
+      "method": "GET",
+      "path": "/mixes/deep-cuts-2026-11-22?tz=Europe/Warsaw",
+      "status": 200
+    },
+    {
+      "name": "mix_save",
+      "variant": "live",
+      "route": "POST /mixes/:id/save",
+      "method": "POST",
+      "path": "/mixes/deep-cuts-2026-11-22/save?tz=Europe/Warsaw",
+      "status": 200
+    },
+    {
+      "name": "mixes_refresh",
+      "variant": "live",
+      "route": "POST /mixes/refresh",
+      "method": "POST",
+      "path": "/mixes/refresh?tz=Europe/Warsaw",
+      "status": 200
+    },
+    {
+      "name": "presets",
+      "variant": "live",
+      "route": "GET /mixes/mood/buckets/presets",
+      "method": "GET",
+      "path": "/mixes/mood/buckets/presets",
+      "status": 200
+    },
+    {
+      "name": "bucket_no_heads",
+      "variant": "live",
+      "route": "GET /mixes/mood/buckets/:mood",
+      "method": "GET",
+      "path": "/mixes/mood/buckets/chill",
+      "status": 400
+    },
+    {
+      "name": "bucket_save",
+      "variant": "live",
+      "route": "POST /mixes/mood/buckets/:mood/save",
+      "method": "POST",
+      "path": "/mixes/mood/buckets/chill/save",
+      "status": 200
+    },
+    {
+      "name": "mixes_with_mood",
+      "variant": "live",
+      "route": "GET /mixes",
+      "method": "GET",
+      "path": "/mixes?tz=Europe/Warsaw",
+      "status": 200
+    },
+    {
+      "name": "decades",
+      "variant": "live",
+      "route": "GET /library/decades",
+      "method": "GET",
+      "path": "/library/decades",
+      "status": 200
+    },
+    {
+      "name": "radio_stations",
+      "variant": "live",
+      "route": "GET /library/radio/stations",
+      "method": "GET",
+      "path": "/library/radio/stations",
+      "status": 200
+    },
+    {
+      "name": "radio_row",
+      "variant": "live",
+      "route": "GET /library/radio/row",
+      "method": "GET",
+      "path": "/library/radio/row?tz=Europe/Warsaw",
+      "status": 200
+    },
+    {
+      "name": "radio_row_all",
+      "variant": "live",
+      "route": "GET /library/radio/row",
+      "method": "GET",
+      "path": "/library/radio/row?scope=all&tz=Europe/Warsaw",
+      "status": 200
+    },
+    {
+      "name": "radio_all",
+      "variant": "live",
+      "route": "GET /library/radio",
+      "method": "GET",
+      "path": "/library/radio?type=all&limit=10",
+      "status": 200
+    },
+    {
+      "name": "radio_genre",
+      "variant": "live",
+      "route": "GET /library/radio",
+      "method": "GET",
+      "path": "/library/radio?type=genre&value=electronic&limit=10",
+      "status": 200
+    },
+    {
+      "name": "radio_decade",
+      "variant": "live",
+      "route": "GET /library/radio",
+      "method": "GET",
+      "path": "/library/radio?type=decade&value=2000&limit=10",
+      "status": 200
+    },
+    {
+      "name": "radio_artist",
+      "variant": "live",
+      "route": "GET /library/radio",
+      "method": "GET",
+      "path": "/library/radio?type=artist&value=01a2027e-4d33-70ad-bc9e-ead0bd5f9aeb&limit=10",
+      "status": 200
+    },
+    {
+      "name": "radio_discovery",
+      "variant": "live",
+      "route": "GET /library/radio",
+      "method": "GET",
+      "path": "/library/radio?type=discovery&limit=10",
+      "status": 200
+    },
+    {
+      "name": "radio_favorites",
+      "variant": "live",
+      "route": "GET /library/radio",
+      "method": "GET",
+      "path": "/library/radio?type=favorites&limit=10",
+      "status": 200
+    },
+    {
+      "name": "radio_mood_no_heads",
+      "variant": "live",
+      "route": "GET /library/radio",
+      "method": "GET",
+      "path": "/library/radio?type=mood&value=calm&seed=capture&offset=0",
+      "status": 200
+    },
+    {
+      "name": "whats_new_pending",
+      "variant": "live",
+      "route": "GET /whats-new/pending",
+      "method": "GET",
+      "path": "/whats-new/pending",
+      "status": 200
+    },
+    {
+      "name": "whats_new_current_none",
+      "variant": "live",
+      "route": "GET /whats-new/current",
+      "method": "GET",
+      "path": "/whats-new/current",
+      "status": 404
+    },
+    {
+      "name": "whats_new_changelog",
+      "variant": "live",
+      "route": "GET /whats-new/changelog",
+      "method": "GET",
+      "path": "/whats-new/changelog",
+      "status": 200
+    },
+    {
+      "name": "whats_new_open",
+      "variant": "live",
+      "route": "GET /whats-new/open",
+      "method": "GET",
+      "path": "/whats-new/open",
+      "status": 200
+    },
+    {
+      "name": "update_status",
+      "variant": "live",
+      "route": "GET /whats-new/update-status",
+      "method": "GET",
+      "path": "/whats-new/update-status",
+      "status": 200
+    },
+    {
+      "name": "mood_mixes",
+      "variant": "live",
+      "route": "GET /whats-new/mood-mixes",
+      "method": "GET",
+      "path": "/whats-new/mood-mixes",
+      "status": 200
+    },
+    {
+      "name": "mood_mixes_decision",
+      "variant": "live",
+      "route": "POST /whats-new/mood-mixes/decision",
+      "method": "POST",
+      "path": "/whats-new/mood-mixes/decision",
+      "status": 200
+    },
+    {
+      "name": "mood_mixes_save",
+      "variant": "live",
+      "route": "POST /whats-new/mood-mixes/save",
+      "method": "POST",
+      "path": "/whats-new/mood-mixes/save",
+      "status": 200
+    },
+    {
+      "name": "mood_mixes_saved",
+      "variant": "live",
+      "route": "GET /whats-new/mood-mixes",
+      "method": "GET",
+      "path": "/whats-new/mood-mixes",
+      "status": 200
+    },
+    {
+      "name": "choice_unknown_release",
+      "variant": "live",
+      "route": "POST /whats-new/:version/choice",
+      "method": "POST",
+      "path": "/whats-new/0.2.0/choice",
+      "status": 404
+    },
+    {
+      "name": "dismiss_unknown_release",
+      "variant": "live",
+      "route": "POST /whats-new/:version/dismiss",
+      "method": "POST",
+      "path": "/whats-new/0.2.0/dismiss",
+      "status": 404
+    },
+    {
+      "name": "recommendations",
+      "variant": "live",
+      "route": "GET /recommendations/for-you",
+      "method": "GET",
+      "path": "/recommendations/for-you",
+      "status": 200
+    },
+    {
+      "name": "heads_mixes",
+      "variant": "heads",
+      "route": "GET /mixes",
+      "method": "GET",
+      "path": "/mixes?tz=Europe/Warsaw",
+      "status": 200
+    },
+    {
+      "name": "heads_mix",
+      "variant": "heads",
+      "route": "GET /mixes/:id",
+      "method": "GET",
+      "path": "/mixes/rage-cleaning-2026-11-22?tz=Europe/Warsaw",
+      "status": 200
+    },
+    {
+      "name": "heads_presets",
+      "variant": "heads",
+      "route": "GET /mixes/mood/buckets/presets",
+      "method": "GET",
+      "path": "/mixes/mood/buckets/presets",
+      "status": 200
+    },
+    {
+      "name": "heads_bucket",
+      "variant": "heads",
+      "route": "GET /mixes/mood/buckets/:mood",
+      "method": "GET",
+      "path": "/mixes/mood/buckets/chill",
+      "status": 200
+    },
+    {
+      "name": "heads_bucket_save",
+      "variant": "heads",
+      "route": "POST /mixes/mood/buckets/:mood/save",
+      "method": "POST",
+      "path": "/mixes/mood/buckets/party/save",
+      "status": 200
+    },
+    {
+      "name": "heads_radio_row_all",
+      "variant": "heads",
+      "route": "GET /library/radio/row",
+      "method": "GET",
+      "path": "/library/radio/row?scope=all&tz=Europe/Warsaw",
+      "status": 200
+    },
+    {
+      "name": "heads_radio_mood",
+      "variant": "heads",
+      "route": "GET /library/radio",
+      "method": "GET",
+      "path": "/library/radio?type=mood&value=calm&seed=capture&offset=0",
+      "status": 200
+    },
+    {
+      "name": "heads_radio_workout",
+      "variant": "heads",
+      "route": "GET /library/radio",
+      "method": "GET",
+      "path": "/library/radio?type=workout&seed=capture&offset=0",
+      "status": 200
+    },
+    {
+      "name": "heads_whats_new_pending",
+      "variant": "heads",
+      "route": "GET /whats-new/pending",
+      "method": "GET",
+      "path": "/whats-new/pending",
+      "status": 200
+    },
+    {
+      "name": "heads_whats_new_current",
+      "variant": "heads",
+      "route": "GET /whats-new/current",
+      "method": "GET",
+      "path": "/whats-new/current",
+      "status": 200
+    },
+    {
+      "name": "heads_whats_new_choice",
+      "variant": "heads",
+      "route": "POST /whats-new/:version/choice",
+      "method": "POST",
+      "path": "/whats-new/0.2.0/choice",
+      "status": 200
+    },
+    {
+      "name": "heads_whats_new_changelog",
+      "variant": "heads",
+      "route": "GET /whats-new/changelog",
+      "method": "GET",
+      "path": "/whats-new/changelog",
+      "status": 200
+    },
+    {
+      "name": "heads_whats_new_open",
+      "variant": "heads",
+      "route": "GET /whats-new/open",
+      "method": "GET",
+      "path": "/whats-new/open",
+      "status": 200
+    },
+    {
+      "name": "heads_whats_new_dismiss",
+      "variant": "heads",
+      "route": "POST /whats-new/:version/dismiss",
+      "method": "POST",
+      "path": "/whats-new/0.2.0/dismiss",
+      "status": 200
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "tracks": [
+    {
+      "album": {
+        "coverArt": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "id": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "title": "Nineties A Album"
+      },
+      "artist": {
+        "id": "01a2027e-4d33-70ad-bc9e-ead0bd5f9aeb",
+        "name": "Nineties A"
+      },
+      "discNumber": 0,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 35,
+      "filePath": "M5b/Nineties A/1994 - Nineties A Album/05 - Nineties A 5.mp3",
+      "id": "01a2027e-4d7f-7432-8dab-91873ed5d0c2",
+      "title": "Nineties A 5",
+      "trackNo": 5
+    },
+    {
+      "album": {
+        "coverArt": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "id": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "title": "Nineties A Album"
+      },
+      "artist": {
+        "id": "01a2027e-4d33-70ad-bc9e-ead0bd5f9aeb",
+        "name": "Nineties A"
+      },
+      "discNumber": 0,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 35,
+      "filePath": "M5b/Nineties A/1994 - Nineties A Album/02 - Nineties A 2.mp3",
+      "id": "01a2027e-4d49-7375-ae1a-643650fb6eda",
+      "title": "Nineties A 2",
+      "trackNo": 2
+    },
+    {
+      "album": {
+        "coverArt": "01a2027e-4db0-741b-8094-e758d79cfb10",
+        "id": "01a2027e-4db0-741b-8094-e758d79cfb10",
+        "title": "Nineties B Album"
+      },
+      "artist": {
+        "id": "01a2027e-4daf-70dc-b32b-8341528a3dc5",
+        "name": "Nineties B"
+      },
+      "discNumber": 0,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 35,
+      "filePath": "M5b/Nineties B/1994 - Nineties B Album/01 - Nineties B 1.mp3",
+      "id": "01a2027e-4db2-778a-b677-09912c78a846",
+      "title": "Nineties B 1",
+      "trackNo": 1
+    },
+    {
+      "album": {
+        "coverArt": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "id": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "title": "Nineties A Album"
+      },
+      "artist": {
+        "id": "01a2027e-4d33-70ad-bc9e-ead0bd5f9aeb",
+        "name": "Nineties A"
+      },
+      "discNumber": 0,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 35,
+      "filePath": "M5b/Nineties A/1994 - Nineties A Album/04 - Nineties A 4.mp3",
+      "id": "01a2027e-4d6a-738c-9db9-1e0c358dcf01",
+      "title": "Nineties A 4",
+      "trackNo": 4
+    },
+    {
+      "album": {
+        "coverArt": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "id": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "title": "Nineties A Album"
+      },
+      "artist": {
+        "id": "01a2027e-4d33-70ad-bc9e-ead0bd5f9aeb",
+        "name": "Nineties A"
+      },
+      "discNumber": 0,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 35,
+      "filePath": "M5b/Nineties A/1994 - Nineties A Album/01 - Nineties A 1.mp3",
+      "id": "01a2027e-4d36-70cd-9be5-1f6b36b4e576",
+      "title": "Nineties A 1",
+      "trackNo": 1
+    },
+    {
+      "album": {
+        "coverArt": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "id": "01a2027e-4d35-70d6-b1a6-1e514496fc10",
+        "title": "Nineties A Album"
+      },
+      "artist": {
+        "id": "01a2027e-4d33-70ad-bc9e-ead0bd5f9aeb",
+        "name": "Nineties A"
+      },
+      "discNumber": 0,
+      "discSubtitle": null,
+      "displayTitle": null,
+      "duration": 35,
+      "filePath": "M5b/Nineties A/1994 - Nineties A Album/03 - Nineties A 3.mp3",
+      "id": "01a2027e-4d59-752b-b7a3-89d9889bf0da",
+      "title": "Nineties A 3",
+      "trackNo": 3
+    }
+  ]
+}

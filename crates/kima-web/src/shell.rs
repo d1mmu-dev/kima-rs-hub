@@ -51,6 +51,10 @@ fn is_vibe(route: &Route) -> bool {
     matches!(route, Route::Vibe { .. })
 }
 
+fn is_radio(route: &Route) -> bool {
+    *route == Route::Radio
+}
+
 /// The player's "match this vibe" (upstream `VibeToggleButton`): shown only while the server reports
 /// `vibeEmbeddings`, disabled without a library track. It opens the vibe page on the current track's
 /// matches instead of replacing the queue at once (D-250); the page's "Match Vibe" does that.
@@ -420,27 +424,34 @@ fn sidebar(ctx: &Ctx, route: Computed<Route>) -> DomNode {
         "Collection",
         route.map(|r| is_collection(&r)),
     );
+    // Upstream's rail lists radio right after collection (`primaryNavigation`).
+    let radio_nav = nav_item(
+        Route::Radio.to_string(),
+        "02",
+        "Radio",
+        route.map(|r| is_radio(&r)),
+    );
     let search = nav_item(
         Route::Search.to_string(),
-        "02",
+        "03",
         "Search",
         route.map(|r| r == Route::Search),
     );
     let playlists_nav = nav_item(
         Route::Playlists.to_string(),
-        "03",
+        "04",
         "Playlists",
         route.map(|r| is_playlists(&r)),
     );
     let podcasts_nav = nav_item(
         Route::Podcasts.to_string(),
-        "04",
+        "05",
         "Podcasts",
         route.map(|r| is_podcasts(&r)),
     );
     let vibe_nav = nav_item(
         Route::Vibe { track: None }.to_string(),
-        "05",
+        "06",
         "Vibe",
         route.map(|r| is_vibe(&r)),
     );
@@ -454,6 +465,7 @@ fn sidebar(ctx: &Ctx, route: Computed<Route>) -> DomNode {
                 </div>
                 <div class="space-y-0.5">
                     {collection}
+                    {radio_nav}
                     {search}
                     {playlists_nav}
                     {podcasts_nav}
@@ -728,6 +740,15 @@ fn drawer(ctx: &Ctx) -> DomNode {
                 ctx.menu_open.set(false);
                 ctx.sign_out();
             });
+            // Upstream's phone menu adds its quick links (discover, radio, releases, stats) to the tab bar's
+            // destinations; kima-web has radio of those so far.
+            let on_radio = is_radio(&vertigo::transaction(|c| ctx.router.get(c)));
+            let radio_class = if on_radio {
+                "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200 bg-white/10 text-white"
+            } else {
+                "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200 text-[var(--text-secondary)] hover:text-white hover:bg-white/5"
+            };
+            let radio_current = Value::new(on_radio.then(|| "page".to_owned())).to_computed();
             dom! {
                 <div class="min-[1025px]:hidden">
                     <div class="fixed inset-0 bg-black/60 z-(--z-drawer-backdrop) transition-opacity duration-200" on_click={close.clone()}></div>
@@ -743,6 +764,13 @@ fn drawer(ctx: &Ctx) -> DomNode {
                             </button>
                         </div>
                         <nav class="flex-1 overflow-y-auto py-4" role="navigation" aria-label="Mobile menu">
+                            <div class="px-3 mb-6">
+                                <div class="text-xs font-semibold text-[var(--text-muted)] px-3 mb-2">"Quick Links"</div>
+                                <a class={radio_class} href={Route::Radio.to_string()} aria-current={radio_current} on_click={close.clone()}>
+                                    {icon("radio", "w-5 h-5")}
+                                    <span class="text-sm font-medium">"Radio"</span>
+                                </a>
+                            </div>
                             <div class="px-3">
                                 <div class="text-xs font-semibold text-[var(--text-muted)] px-3 mb-2">"Actions"</div>
                                 <button class="w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-colors duration-200 text-left text-[var(--text-secondary)] hover:text-white hover:bg-white/5 disabled:opacity-50" on_click={scan} disabled={flag(admin.map(|allowed| !allowed))}>

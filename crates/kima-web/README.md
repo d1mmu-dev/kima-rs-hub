@@ -250,7 +250,7 @@ nothing for unknown; there is no separate explicit ("E") badge because upstream'
 
 ## Vibe (M10, first slice, D-250)
 
-`/vibe`, optionally `/vibe?track=<uuid>` (sidebar item 05 "Vibe", bottom-nav item after Collection). Reference: upstream
+`/vibe`, optionally `/vibe?track=<uuid>` (sidebar item 06 "Vibe" since the radio page took 02, bottom-nav item after Collection). Reference: upstream
 `frontend/app/vibe/page.tsx`, `features/vibe/*`, `components/player/VibeToggleButton.tsx` at the external checkout's
 `9450c94b`. The page reads `GET /api/system/features` first: with `vibeEmbeddings` off it says so ("Vibe is not
 available on this server", the model and analysis it needs) and sends no vibe request. Otherwise it loads
@@ -320,6 +320,35 @@ What is on the page:
   interactive map, ~45k DOM nodes and 15k click listeners, a point click 46-62 ms and a mood toggle 30-115 ms to paint
   (also when all 15k tracks are one mood). A phone-class run (390x844, CPU slowed 4x) takes 7.5-8.6 s to load, then
   125-210 ms per click/toggle. A canvas/WebGL drawing would be the next step for phones.
+
+## Radio (M5b Phase F Task 22, D-282)
+
+`/radio` (sidebar item 02 "Radio", the phone menu's "Quick Links"). Reference: upstream `frontend/app/radio/page.tsx`,
+`features/home/radioData.ts`, `features/home/components/StationCard.tsx`, `lib/station-refill.ts` at the external
+checkout's `b927e307` (identical to the M5b backend reference `9450c94b` for these files). One request,
+`GET /api/library/radio/row?scope=all&tz=<browser zone>`, names every station with today's cover; the page shows
+"Quick Start" (Shuffle All, Workout, Discovery, Favorites: the ones the server lists), "By Mood", "By Genre" and
+"By Decade" (a section without stations is left out), the station total in the header and upstream's footer line. While
+the row loads each section shows six pulsing placeholders; a failed row shows "Could not load the stations." with Retry
+and is asked again every 30 s while the page is open.
+
+A tile starts its station: `GET /api/library/radio?type=&value=&limit=100&tz=&seed=` (one seed per station; once a reply
+carries `next`, the next batch asks `offset=<next>`), checks upstream's minimum songs (Shuffle All 10, Discovery 20,
+Favorites 10, genre/decade 15, mood/Workout/Wildcard 1) with upstream's toasts, then the player plays the station
+(`Player::play_station`, session rules in `station.rs`): when the queue's last entry starts it asks for the next batch,
+appends only songs not yet queued (a server-ordered station's batches whole), ends after a batch with nothing new, retries a
+failed batch from the same place, and, when the queue had already run out, starts the first new song. Replacing or
+clearing the queue, playing an episode, signing out or switching profile ends the station; a batch that arrives later is
+dropped. While mood tiles are listed and the sound features are being built, "By Mood" carries upstream's note
+(`/api/enrichment/progress`, every 10 s while the page is open). Mood and Workout tiles appear only with mood statistics
+(owner Q2 = B, D-266), so today's live server shows Quick Start (without Workout), genres and decades.
+
+**Compromises** (each in D-282): no per-day cache of the row (fetched per visit), refill tried on entry start / queue end
+/ play press rather than every player change, refill point = the queue's last entry also when shuffling (kima-web's
+shuffle keeps no order), one-line toasts, numbered rail item, Radio as the only phone quick link, no TV-focus attributes
+or image cache, `.t-page-title`/`.page-end` added from the newer reference. Checked with native tests and a DB-free mocked
+API on the real WASM in headless Chrome (private evidence, wiring only); a real-server/library/playback browser run
+is still to do.
 
 ## Visual parity: compromises and assets
 

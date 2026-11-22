@@ -331,6 +331,27 @@ code {
     }
 }
 
+/* From the newer upstream reference (kima-hub `frontend/app/globals.css` at b927e307), for pages ported from it
+ * (`/radio`): a page's title, 28px on a phone and 32px from a tablet up, and the room under a page's last row
+ * (one section beat; kima-web's mini player marks no `data-mini-player`, so no extra clearance). */
+@layer components {
+    .t-page-title {
+        font-size: 1.75rem;
+        line-height: 1.1;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+        color: #fff;
+    }
+    @media (min-width: 48rem) {
+        .t-page-title {
+            font-size: 2rem;
+        }
+    }
+    .page-end {
+        padding-bottom: clamp(2rem, 3.5vw, 3rem);
+    }
+}
+
 /* A cover that fails to load leaves its placeholder background showing
  * instead of printing the alt text over it. */
 img {

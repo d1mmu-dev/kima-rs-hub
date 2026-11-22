@@ -28,6 +28,7 @@ pub const WEB_ROUTES: &[&str] = &[
     "/profiles",
     "/podcasts",
     "/vibe",
+    "/radio",
 ];
 
 /// Pages matched by the exact path only. `/` is `kima-web`'s browse root (`Route::new` maps it to
@@ -168,6 +169,7 @@ mod tests {
             "/podcasts/show",
             "/podcasts/category",
             "/vibe",
+            "/radio",
         ] {
             assert!(is_web_route(ok), "{ok}");
         }
@@ -179,6 +181,8 @@ mod tests {
             "/playlist",
             "/podcastsx",
             "/vibes",
+            "/radios",
+            "/api/library/radio",
             "/api/vibe/map",
             "/api/podcasts",
             "/api/library/tracks",

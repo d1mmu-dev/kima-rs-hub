@@ -10,6 +10,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use kima_api_types::library::Track;
@@ -21,11 +23,12 @@ use vertigo::{
     dom_element, get_driver, js,
 };
 
-use crate::api::client::ApiClient;
+use crate::api::client::{ApiClient, ApiError};
 use crate::auth::Session;
 use crate::icons::icon;
 use crate::position;
 use crate::route::Route;
+use crate::station::{StationSession, is_last_in_play_order, trigger_key};
 use crate::ui::{cover_url, flag, format_time, rows_box};
 
 /// How often the `<audio>` element is sampled (position, paused, ended).
@@ -34,6 +37,16 @@ const POLL_MS: u32 = 500;
 const RESTART_AFTER_SECS: f64 = 3.0;
 /// `last_saved` of a freshly loaded track: the first sample is always written.
 const NOT_SAVED: f64 = -1000.0;
+
+/// How a station asks for its next batch of tracks (upstream `playStation`'s `fetchBatch`).
+pub type StationFetch =
+    Rc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Vec<QueueItem>, ApiError>>>>>;
+
+/// The station playing in the queue: its session and its fetch.
+struct Station {
+    session: RefCell<StationSession>,
+    fetch: StationFetch,
+}
 
 pub fn queue_item(t: &Track) -> QueueItem {
     QueueItem {
@@ -261,6 +274,10 @@ struct Inner {
     /// Whole seconds left on the sleep timer, for the bar.
     sleep_left: Value<Option<u64>>,
     sleep_open: Value<bool>,
+    /// The station the queue came from, while it may still refill (upstream `stationRef`).
+    station: RefCell<Option<Rc<Station>>>,
+    /// The last queued track ended and playback stopped by itself (cleared when the playing entry changes).
+    queue_ended: Cell<bool>,
 }
 
 /// Desired transport state and readiness belong to different transitions: a
@@ -322,6 +339,8 @@ impl Player {
             sleep_deadline: Cell::new(None),
             sleep_left: Value::new(None),
             sleep_open: Value::new(false),
+            station: RefCell::new(None),
+            queue_ended: Cell::new(false),
         }))
     }
 
@@ -340,6 +359,8 @@ impl Player {
             return;
         }
         let start = start.min(queue.len() - 1);
+        self.end_station();
+        self.0.queue_ended.set(false);
         let before = self.current_item();
         self.request_play();
         self.0.pending_seek.set(None);
@@ -363,6 +384,101 @@ impl Player {
         // Before `play_queue`, so its save already carries shuffle off.
         self.0.shuffle.set(false);
         self.play_queue(queue, start);
+    }
+
+    /// Plays a station: when its last track starts, `fetch` is asked for more and the new tracks are appended
+    /// (upstream `playStation`). `server_ordered`: the batches come in the server's order (they carry `next`).
+    pub fn play_station(&self, tracks: Vec<QueueItem>, fetch: StationFetch, server_ordered: bool) {
+        if tracks.is_empty() {
+            return;
+        }
+        let session = StationSession::start(tracks.iter().map(|t| t.id.as_str()), server_ordered);
+        self.play_queue(tracks, 0);
+        *self.0.station.borrow_mut() = Some(Rc::new(Station {
+            session: RefCell::new(session),
+            fetch,
+        }));
+        self.refill_station();
+    }
+
+    /// Drops the station: the queue was replaced, cleared or left library tracks.
+    fn end_station(&self) {
+        *self.0.station.borrow_mut() = None;
+    }
+
+    /// Tries a refill in the background (upstream's effect on every player change). Only in the browser: native
+    /// tests drive [`Player::refill_station_now`] themselves.
+    fn refill_station(&self) {
+        if self.0.station.borrow().is_none() || !get_driver().is_browser() {
+            return;
+        }
+        let me = self.clone();
+        get_driver().spawn(async move {
+            me.refill_station_now().await;
+        });
+    }
+
+    /// Appends to the live queue; returns its length before.
+    fn append_to_queue(&self, items: Vec<QueueItem>) -> usize {
+        let mut queue = Self::read(&self.0.queue);
+        let before = queue.len();
+        queue.extend(items);
+        self.0.queue.set(queue);
+        self.persist();
+        before
+    }
+
+    /// Refills the station from the live queue (upstream `refillStationNow` + `refillAndResume`); `true` when it
+    /// started the first new track because the queue had already ended.
+    pub async fn refill_station_now(&self) -> bool {
+        let Some(station) = self.0.station.borrow().clone() else {
+            return false;
+        };
+        let queue = Self::read(&self.0.queue);
+        let index = Self::read(&self.0.index);
+        let Some(current) = queue.get(index) else {
+            return false;
+        };
+        if episode_ids(&current.id).is_some() {
+            // Upstream drops the station once the player leaves library tracks.
+            self.end_station();
+            return false;
+        }
+        if !is_last_in_play_order(queue.len(), index) {
+            return false;
+        }
+        let trigger = trigger_key(index, &current.id);
+        if !station
+            .session
+            .borrow_mut()
+            .begin(&trigger, queue.iter().map(|t| t.id.as_str()))
+        {
+            return false;
+        }
+        let fetched = (station.fetch)().await;
+        let fresh = match fetched {
+            Ok(batch) => station.session.borrow_mut().finish(batch),
+            Err(_) => {
+                // Best effort, like upstream's console error: the next change or a press of play tries again.
+                station.session.borrow_mut().fail();
+                return false;
+            }
+        };
+        let still_current = self
+            .0
+            .station
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| Rc::ptr_eq(s, &station));
+        if fresh.is_empty() || !still_current {
+            return false;
+        }
+        let first_new = self.append_to_queue(fresh);
+        if !self.0.queue_ended.get() {
+            return false;
+        }
+        self.go_to(first_new);
+        true
     }
 
     /// Plays one podcast episode from `resume` seconds (its saved progress) or the start.
@@ -409,12 +525,15 @@ impl Player {
         self.request_play();
         self.0.pending_seek.set(None);
         self.0.ended_handled.set(None);
+        self.0.queue_ended.set(false);
         vertigo::transaction(|_| {
             self.0.index.set(index);
             self.0.position.set(0.0);
         });
         self.after_jump(before);
         self.persist();
+        // A station refills when its last queued track starts.
+        self.refill_station();
     }
 
     /// A new `<audio>` is created (and autoplays) only when the current track changed. Asking for the
@@ -428,6 +547,11 @@ impl Player {
     }
 
     pub fn next(&self) {
+        self.advance();
+    }
+
+    /// `next`; `false` when there was nothing to go to (the end of the queue without repeat).
+    fn advance(&self) -> bool {
         let len = Self::read(&self.0.queue).len();
         let target = next_target(
             len,
@@ -436,8 +560,12 @@ impl Player {
             Self::read(&self.0.repeat) == Repeat::All,
             |max| get_driver().get_random(0, max),
         );
-        if let Some(i) = target {
-            self.go_to(i);
+        match target {
+            Some(i) => {
+                self.go_to(i);
+                true
+            }
+            None => false,
         }
     }
 
@@ -496,6 +624,16 @@ impl Player {
     pub fn toggle(&self) {
         if Self::read(&self.0.playing) {
             self.pause();
+        } else if self.0.queue_ended.get() && self.0.station.borrow().is_some() {
+            // Play after a station's queue ended: try its refill again (one try per press) and play the new
+            // tracks if it brings any, otherwise replay as before (upstream `playOrRefill`).
+            let me = self.clone();
+            get_driver().spawn(async move {
+                if !me.refill_station_now().await {
+                    me.request_play();
+                    me.play_initialized();
+                }
+            });
         } else {
             self.request_play();
             self.play_initialized();
@@ -649,6 +787,8 @@ impl Player {
         }
         self.0.intent.set(AudioIntent::default());
         self.0.pending_seek.set(None);
+        self.end_station();
+        self.0.queue_ended.set(false);
         self.0.episode_marks.borrow_mut().clear();
         self.0.sleep_deadline.set(None);
         *self.0.audio.borrow_mut() = None;
@@ -736,7 +876,11 @@ impl Player {
             }
         } else if ended && self.0.ended_handled.get() != Some(index) {
             self.0.ended_handled.set(Some(index));
-            self.next();
+            if !self.advance() {
+                // The queue ran out by itself: a station's refill now starts its first new track.
+                self.0.queue_ended.set(true);
+                self.refill_station();
+            }
         }
     }
 
@@ -1344,6 +1488,174 @@ mod tests {
             artist: None,
             album: None,
         }
+    }
+
+    fn player() -> Player {
+        let session = Session::new(Rc::new(crate::auth::MemoryStorage::default()));
+        Player::new(ApiClient::new(session.token(), || {}), session)
+    }
+
+    fn ids(player: &Player) -> Vec<String> {
+        Player::read(&player.0.queue)
+            .into_iter()
+            .map(|i| i.id)
+            .collect()
+    }
+
+    /// Polls `fut` once (the fetches below are either ready or gated by hand).
+    fn poll_once<F: Future>(fut: &mut std::pin::Pin<Box<F>>) -> std::task::Poll<F::Output> {
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        fut.as_mut().poll(&mut cx)
+    }
+
+    /// A station fetch answering from `batches` in turn (an empty list once they run out); counts its calls.
+    fn fetch_from(batches: Vec<Vec<&str>>, calls: Rc<Cell<u32>>) -> StationFetch {
+        let batches = Rc::new(RefCell::new(
+            batches
+                .into_iter()
+                .map(|b| b.into_iter().map(plain_item).collect::<Vec<_>>())
+                .collect::<std::collections::VecDeque<_>>(),
+        ));
+        Rc::new(move || {
+            calls.set(calls.get() + 1);
+            let batch = batches.borrow_mut().pop_front().unwrap_or_default();
+            Box::pin(std::future::ready(Ok(batch)))
+        })
+    }
+
+    /// A fetch that stays pending until `gate` holds an answer.
+    fn gated(gate: Rc<RefCell<Option<Vec<QueueItem>>>>) -> StationFetch {
+        Rc::new(move || {
+            let gate = gate.clone();
+            Box::pin(std::future::poll_fn(move |_| {
+                match gate.borrow_mut().take() {
+                    Some(batch) => std::task::Poll::Ready(Ok(batch)),
+                    None => std::task::Poll::Pending,
+                }
+            }))
+        })
+    }
+
+    fn refill(player: &Player) -> bool {
+        match poll_once(&mut Box::pin(player.refill_station_now())) {
+            std::task::Poll::Ready(started) => started,
+            std::task::Poll::Pending => panic!("a ready fetch left the refill pending"),
+        }
+    }
+
+    #[test]
+    fn a_station_refills_when_its_last_track_starts() {
+        let p = player();
+        let calls = Rc::new(Cell::new(0));
+        p.play_station(
+            vec![plain_item("a"), plain_item("b")],
+            fetch_from(vec![vec!["b", "c", "d"]], calls.clone()),
+            false,
+        );
+        // Not at the end yet: nothing is fetched.
+        assert!(!refill(&p));
+        assert_eq!(calls.get(), 0);
+        p.jump_to(1);
+        assert!(!refill(&p), "still playing: appended, not restarted");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(ids(&p), ["a", "b", "c", "d"]);
+        assert_eq!(Player::read(&p.0.index), 1);
+        // The same position does not fetch twice.
+        assert!(!refill(&p));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn a_station_whose_queue_ended_resumes_at_the_first_new_track() {
+        let p = player();
+        let calls = Rc::new(Cell::new(0));
+        p.play_station(
+            vec![plain_item("a")],
+            fetch_from(vec![vec![], vec!["x", "y"]], calls.clone()),
+            true,
+        );
+        // The first try (from the track's start) brought nothing new ... for a server-ordered station that ends it.
+        assert!(!refill(&p));
+        assert_eq!(calls.get(), 1);
+        // A fresh station whose queue already ended starts the refill's first track.
+        let p = player();
+        p.play_station(
+            vec![plain_item("a")],
+            fetch_from(vec![vec!["a", "b"]], Rc::new(Cell::new(0))),
+            false,
+        );
+        p.0.queue_ended.set(true);
+        assert!(refill(&p));
+        assert_eq!(ids(&p), ["a", "b"]);
+        assert_eq!(Player::read(&p.0.index), 1);
+    }
+
+    #[test]
+    fn replacing_the_queue_drops_the_station_and_its_late_batch() {
+        let p = player();
+        let gate = Rc::new(RefCell::new(None));
+        p.play_station(vec![plain_item("a")], gated(gate.clone()), false);
+        let mut pending = Box::pin(p.refill_station_now());
+        assert!(poll_once(&mut pending).is_pending());
+        p.play_queue(vec![plain_item("other")], 0);
+        *gate.borrow_mut() = Some(vec![plain_item("late")]);
+        assert_eq!(poll_once(&mut pending), std::task::Poll::Ready(false));
+        assert_eq!(ids(&p), ["other"]);
+        assert!(p.0.station.borrow().is_none());
+    }
+
+    #[test]
+    fn signing_out_drops_the_station_so_its_batch_never_reaches_the_next_profile() {
+        let p = player();
+        let gate = Rc::new(RefCell::new(None));
+        p.play_station(vec![plain_item("a")], gated(gate.clone()), false);
+        let mut pending = Box::pin(p.refill_station_now());
+        assert!(poll_once(&mut pending).is_pending());
+        // Sign-out / profile switch: `stop` retires the station (the client is retired as well).
+        p.stop();
+        assert!(p.0.station.borrow().is_none());
+        // The next profile starts its own queue before the old batch lands.
+        p.play_queue(vec![plain_item("next-profile")], 0);
+        *gate.borrow_mut() = Some(vec![plain_item("old-profile-song")]);
+        assert_eq!(poll_once(&mut pending), std::task::Poll::Ready(false));
+        assert_eq!(ids(&p), ["next-profile"]);
+    }
+
+    #[test]
+    fn an_episode_ends_the_station() {
+        let p = player();
+        p.play_station(
+            vec![plain_item("a")],
+            fetch_from(vec![vec!["b"]], Rc::new(Cell::new(0))),
+            false,
+        );
+        p.play_episode(plain_item(&episode_item_id("s", "e")), None);
+        assert!(p.0.station.borrow().is_none());
+    }
+
+    #[test]
+    fn a_failed_refill_is_tried_again_from_the_same_place() {
+        let p = player();
+        let calls = Rc::new(Cell::new(0));
+        let counted = calls.clone();
+        let fail_first: StationFetch = Rc::new(move || {
+            counted.set(counted.get() + 1);
+            let answer = if counted.get() == 1 {
+                Err(ApiError {
+                    status: None,
+                    message: "offline".into(),
+                })
+            } else {
+                Ok(vec![plain_item("b")])
+            };
+            Box::pin(std::future::ready(answer))
+        });
+        p.play_station(vec![plain_item("a")], fail_first, false);
+        assert!(!refill(&p));
+        assert_eq!(ids(&p), ["a"]);
+        assert!(!refill(&p));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(ids(&p), ["a", "b"]);
     }
 
     #[test]

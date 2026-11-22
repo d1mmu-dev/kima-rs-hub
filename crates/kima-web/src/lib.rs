@@ -12,6 +12,7 @@ mod player;
 mod position;
 mod route;
 mod shell;
+mod station;
 mod style;
 mod tracklist;
 mod ui;

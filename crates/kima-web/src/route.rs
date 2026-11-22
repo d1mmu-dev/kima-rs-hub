@@ -50,6 +50,8 @@ pub enum Route {
     Vibe {
         track: Option<String>,
     },
+    /// `/radio`: every station (upstream `app/radio/page.tsx`).
+    Radio,
     NotFound,
 }
 
@@ -101,6 +103,7 @@ impl Route {
             "/playlists" => Route::Playlists,
             "/settings" => Route::Settings,
             "/podcasts" => Route::Podcasts,
+            "/radio" => Route::Radio,
             "/vibe" => param("track").map_or(Route::NotFound, |track| Route::Vibe { track }),
             "/podcasts/show" => match (param("id"), raw(query, "itunesId")) {
                 (Ok(Some(id)), _) => Route::PodcastShow { id },
@@ -162,6 +165,7 @@ impl fmt::Display for Route {
             Route::PodcastCategory { id } => write!(f, "/podcasts/category?id={id}"),
             Route::Vibe { track: None } => f.write_str("/vibe"),
             Route::Vibe { track: Some(id) } => write!(f, "/vibe?track={id}"),
+            Route::Radio => f.write_str("/radio"),
             Route::NotFound => f.write_str("/404"),
         }
     }
@@ -198,6 +202,7 @@ mod tests {
             ("/playlists", Route::Playlists),
             ("/settings", Route::Settings),
             ("/podcasts", Route::Podcasts),
+            ("/radio", Route::Radio),
         ]
     }
 
@@ -319,6 +324,16 @@ mod tests {
         assert_eq!(album.page(), album);
         assert_ne!(album.page(), Route::Tracks { album: None }.page());
         assert_eq!(Route::Artists.page(), Route::Artists);
+    }
+
+    #[test]
+    fn radio_page_is_guarded_and_takes_no_params() {
+        assert_eq!(Route::new("/radio/"), Route::Radio);
+        assert_eq!(Route::new("/radio?x=1"), Route::Radio);
+        assert_eq!(Route::Radio.to_string(), "/radio");
+        assert_eq!(Route::Radio.page(), Route::Radio);
+        assert!(Route::Radio.requires_auth());
+        assert_eq!(Route::new("/radio/stations"), Route::NotFound);
     }
 
     #[test]

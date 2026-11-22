@@ -161,6 +161,7 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
         "/podcasts/category?id=1303",
         "/vibe",
         "/vibe?track=0b1c2d3e",
+        "/radio",
         ASSETS[0],
         ASSETS[1],
     ] {
@@ -196,6 +197,7 @@ async fn only_the_kima_web_routes_are_proxied(pool: PgPool) {
         "/loginx",
         "/searching",
         "/vibes",
+        "/radios",
         "/collections",
         "/playlist",
         "/x/login",
@@ -388,6 +390,16 @@ async fn login_is_server_rendered_markup(pool: PgPool) {
         "{vibe}"
     );
     assert!(vibe.contains(r#"href="/vibe""#), "{vibe}");
+    // The radio page (M5b Phase F): its public shell (the stations load in the browser) and its nav item.
+    let radio = reqwest::get(format!("{base}/radio")).await.unwrap();
+    assert_eq!(radio.status(), StatusCode::OK);
+    let radio = radio.text().await.unwrap();
+    assert!(
+        radio.contains(r#"data-testid="radio-page""#)
+            && radio.contains("Endless shuffles from your own music"),
+        "{radio}"
+    );
+    assert!(radio.contains(r#"href="/radio""#), "{radio}");
 
     // The two files the page names are served through the proxy; others in the directory are not.
     let attr = |name: &str| -> String {

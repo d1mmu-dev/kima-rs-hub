@@ -90,6 +90,7 @@ pub fn render() -> DomNode {
                 Route::PodcastPreview { itunes_id } => pages::podcasts::preview(&ctx, itunes_id),
                 Route::PodcastCategory { id } => pages::podcasts::category(&ctx, id),
                 Route::Vibe { .. } => pages::vibe::render(&ctx),
+                Route::Radio => pages::radio::render(&ctx),
                 Route::NotFound => pages::not_found(),
             }
         }))

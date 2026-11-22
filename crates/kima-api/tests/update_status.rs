@@ -180,9 +180,7 @@ async fn cached_in_settings_and_single_flight(pool: PgPool) {
     let held = replay.hold("releases/latest");
     let both = futures::future::join(e.status(), e.status());
     let release = async {
-        while replay.arrived().len() < 2 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        arrived(&replay, 2).await;
         // Give a second, unshared request time to arrive before letting the first answer.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         held.release();
@@ -373,6 +371,17 @@ async fn arrived(replay: &Replay, n: usize) {
     .expect("the request arrives");
 }
 
+/// Waits until `n` handles share the check in flight.
+async fn sharers(e: &Env, n: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while e.state.update_check.sharers() != n {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the waiter joins the flight");
+}
+
 /// Long enough for an unshared second request to reach the replay (the GitHub limiter spaces requests a minute
 /// apart, a thousandth of that in tests).
 async fn settle() {
@@ -442,10 +451,17 @@ async fn a_waiter_cancelled_while_waiting_changes_nothing(pool: PgPool) {
     let held = replay.hold("releases/latest");
     let first = check(&e);
     arrived(&replay, 1).await;
+    // The slot and the first caller share the flight; the waiter joins it before it is cancelled.
+    assert_eq!(e.state.update_check.sharers(), 2);
     let waiter = check(&e);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    sharers(&e, 3).await;
     waiter.abort();
     assert!(waiter.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        e.state.update_check.sharers(),
+        2,
+        "the cancelled waiter left"
+    );
     let late = check(&e);
     settle().await;
     held.release();

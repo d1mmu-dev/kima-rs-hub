@@ -405,7 +405,8 @@ impl Net {
     /// nothing.
     pub fn refuses_real_host(&self, host: Host) -> bool {
         self.live.as_ref().is_some_and(|l| {
-            Url::parse(l.cfg.bases.get(host)).map_or(true, |u| guard::refuses(&u, l.cfg.deny_real))
+            Url::parse(l.cfg.bases.get(host))
+                .map_or(l.cfg.deny_real, |u| guard::refuses(&u, l.cfg.deny_real))
         })
     }
 

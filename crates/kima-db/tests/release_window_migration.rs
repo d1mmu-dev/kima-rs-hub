@@ -8,18 +8,33 @@ use uuid::Uuid;
 
 const VERSION: i64 = 64;
 
-/// Every migration a server had before 0064 (all lower versions, so none is missing when the full set runs).
-fn before_release_window() -> Migrator {
+/// Every migration up to `last` (all lower versions, so none is missing when a longer set runs).
+fn migrator_upto(last: i64) -> Migrator {
     Migrator {
         migrations: Cow::Owned(
             kima_db::MIGRATOR
                 .iter()
-                .filter(|m| m.version < VERSION)
+                .filter(|m| m.version <= last)
                 .cloned()
                 .collect(),
         ),
         ..Migrator::DEFAULT
     }
+}
+
+/// Every migration a server had before 0064.
+fn before_release_window() -> Migrator {
+    migrator_upto(VERSION - 1)
+}
+
+/// Full rows as JSON, ordered, so an upgrade can be compared value by value.
+async fn rows(pool: &PgPool, sql: &str) -> serde_json::Value {
+    sqlx::query_scalar(&format!(
+        "SELECT COALESCE(json_agg(r ORDER BY r::text), '[]'::json) FROM ({sql}) r"
+    ))
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 async fn user(pool: &PgPool, name: &str, created_at: OffsetDateTime) {
@@ -65,14 +80,33 @@ async fn upgrade_takes_the_first_accounts_time(pool: PgPool) {
     // Inserted after a newer account: the earliest one counts, not the first row.
     user(&pool, "later", first + Duration::days(30)).await;
     user(&pool, "first", first).await;
+    let users = rows(&pool, "SELECT * FROM users").await;
+    let settings = rows(&pool, "SELECT to_jsonb(s) AS s FROM system_settings s").await;
 
-    kima_db::MIGRATOR.run(&pool).await.unwrap();
+    // Only up to 0064: a later migration may add its own columns.
+    migrator_upto(VERSION).run(&pool).await.unwrap();
     assert_eq!(installed_at(&pool).await, first);
-    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM system_settings")
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM system_settings")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(rows, 1);
+    assert_eq!(count, 1);
+    let refiled: Option<OffsetDateTime> =
+        sqlx::query_scalar("SELECT albums_refiled_at FROM system_settings")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(refiled, None, "no re-file has run since the upgrade");
+    // Every other value is kept.
+    assert_eq!(rows(&pool, "SELECT * FROM users").await, users);
+    assert_eq!(
+        rows(
+            &pool,
+            "SELECT (to_jsonb(s) - 'created_at' - 'albums_refiled_at') AS s FROM system_settings s"
+        )
+        .await,
+        settings
+    );
 }
 
 #[sqlx::test(migrations = false)]

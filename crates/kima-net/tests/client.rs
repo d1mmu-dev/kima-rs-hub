@@ -335,6 +335,27 @@ async fn deny_real_panics_on_real_host(pool: PgPool) {
         .await;
 }
 
+/// `refuses_real_host` answers exactly what the guard would do with the request: only `KIMA_NET_DENY_REAL=1`
+/// refuses, a real host or a base that is not a URL; loopback never; without the switch nothing is refused.
+#[sqlx::test(migrator = "kima_db::MIGRATOR")]
+async fn refuses_real_host_follows_the_deny_switch(pool: PgPool) {
+    let net = |bases: Bases, deny_real: bool| {
+        let mut cfg = NetConfig::for_tests(bases);
+        cfg.deny_real = deny_real;
+        Net::new(cfg, pool.clone(), IdentifySwitch::new(false, true))
+    };
+    let real = || Bases::production("https://musicbrainz.org/ws/2");
+    assert!(net(real(), true).refuses_real_host(Host::GitHub));
+    assert!(!net(real(), false).refuses_real_host(Host::GitHub));
+    assert!(!net(Bases::all("http://127.0.0.1:9"), true).refuses_real_host(Host::GitHub));
+    assert!(net(Bases::all("not a url"), true).refuses_real_host(Host::GitHub));
+    assert!(
+        !net(Bases::all("not a url"), false).refuses_real_host(Host::GitHub),
+        "without the deny switch a bad base is the request's own failure, not a refusal"
+    );
+    assert!(!Net::disabled().refuses_real_host(Host::GitHub));
+}
+
 #[sqlx::test(migrator = "kima_db::MIGRATOR")]
 async fn user_agent_sent_on_every_request(pool: PgPool) {
     let replay = Replay::start(Recording(vec![

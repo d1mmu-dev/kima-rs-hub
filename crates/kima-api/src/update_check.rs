@@ -131,6 +131,15 @@ type Flight = Shared<BoxFuture<'static, Result<UpdateStatus, CheckError>>>;
 pub struct UpdateFlight(Mutex<Option<Flight>>);
 
 impl UpdateFlight {
+    /// How many handles share the check in flight (the slot's own included); 0 with none. For tests.
+    #[doc(hidden)]
+    pub fn sharers(&self) -> usize {
+        self.slot()
+            .as_ref()
+            .and_then(Shared::strong_count)
+            .unwrap_or(0)
+    }
+
     fn slot(&self) -> std::sync::MutexGuard<'_, Option<Flight>> {
         self.0
             .lock()
@@ -171,8 +180,10 @@ fn fresh(last: Option<OffsetDateTime>) -> bool {
 
 /// Spawns the check. Called with the slot locked, so the task's [`Landed`] guard cannot empty it before it is set.
 fn start(state: AppState) -> Flight {
+    // Built before the task so the slot is emptied even when the task is dropped before its first poll.
+    let landed = Landed(state.update_check.clone());
     let task = tokio::spawn(async move {
-        let _landed = Landed(state.update_check.clone());
+        let _landed = landed;
         // A check that finished just before this one started answers it.
         let stored = kima_db::update_check::get(&state.pool).await?;
         if !stored.enabled {

@@ -163,7 +163,7 @@ token-like string and the cross-ids hold (mix list/detail/save, saved mood mix o
 question and its playlist, artist radio, heads mood page). `crates/kima-api-types/tests/m5b.rs` checks key paths
 against `m5b_upstream_keys.json` (upstream shapes at the M5b reference `9450c94b`; mix track rows = every Prisma
 `Track`/`Album` column, owner Q6 = B), the DTOs, cross-ids, populated values and integral floats; its fixture tests
-stay ignored until the capture is committed. `tools/check-m5b-upstream-keys.py <kima-hub checkout>` re-checks the
+run against the committed capture. `tools/check-m5b-upstream-keys.py <kima-hub checkout>` re-checks the
 key file against the cited upstream lines and the reference's Prisma models.
 
-Status (2026-11-22): prepared, not yet captured (the parent runs the script; it starts Docker).
+Status (2026-11-22): captured at `62e1b7a` (deterministic checks; the first capture at `81ee883` failed one cross-id check and the second only passed by chance, see the history), committed in `b526202`; `cargo test -p kima-api-types --all-targets` passes with no ignored m5b tests and `tools/check-m5b-upstream-keys.py` reports 0 problems for 475 key names.

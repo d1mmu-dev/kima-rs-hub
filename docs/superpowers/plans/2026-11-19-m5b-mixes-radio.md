@@ -310,24 +310,24 @@ Reserved rows: D-260 listener state (Q1, Task 6) · D-261 `LIBRARY_PLAYABLE` = p
 ### Task 19: Wire fixtures
 
 **Files:** `tools/capture-api-fixtures.sh` (set `m5b`), `crates/kima-api-types/tests/fixtures/m5b/*.json`, `crates/kima-api-types/tests/m5b.rs`, `tools/check-m5b-upstream-keys.py`.
-- [ ] Parent runs `KIMA_CAPTURE_SET=m5b tools/capture-api-fixtures.sh` from a clean committed tip (synthetic library with SQL-seeded `track_moods`/`mood_state` so recipe paths produce non-empty arrays; a second capture with heads absent).
-- [ ] **RED→GREEN:** key sets of all 22 endpoints against upstream handlers (not frontend types); the mix/mood-bucket `tracks[]` elements against the full Appendix D inventory (Q6 = B), not only the keys the frontend reads; cross-ids (mix → playlist, mood mix → whats-new state), populated optional arrays; grep fixtures for tokens.
-- [ ] Commit `test(api-types): m5b wire fixtures`.
+- [x] Parent runs `KIMA_CAPTURE_SET=m5b tools/capture-api-fixtures.sh` from a clean committed tip (synthetic library with SQL-seeded `track_moods`/`mood_state` so recipe paths produce non-empty arrays; a second capture with heads absent).
+- [x] **RED→GREEN:** key sets of all 22 endpoints against upstream handlers (not frontend types); the mix/mood-bucket `tracks[]` elements against the full Appendix D inventory (Q6 = B), not only the keys the frontend reads; cross-ids (mix → playlist, mood mix → whats-new state), populated optional arrays; grep fixtures for tokens.
+- [x] Commit `test(api-types): m5b wire fixtures`. [Reconciled 2026-11-22 against the git history and the Phase E evidence: `81ee883` capture set and checks, `b4549b9` fixtures (46 files), `4e72c56` JS numbers, `62e1b7a` loud checks, `b526202` recapture; key script 475 keys, 0 problems vs `9450c94b`.]
 
 ### Task 20: Flags, divergences, docs
 
-- [ ] `routes/system.rs`: `"mixes": true`; `changelog` stays `false` while kima-rs's own catalog is empty (Q3 = B; a test pins that it flips with the first entry). Tests `features_reports_mixes`, `features_changelog_off_while_catalog_empty`.
-- [ ] D-260.. rows final; README; roadmap row M5b; `docs/STATUS.md`; deployment note `TZ=Europe/Warsaw` (Q11 = A) in the README/compose docs.
-- [ ] Commit `docs(m5b): divergences, flags and status`.
+- [x] `routes/system.rs`: `"mixes": true`; `changelog` stays `false` while kima-rs's own catalog is empty (Q3 = B; a test pins that it flips with the first entry). Tests `features_reports_mixes`, `features_changelog_off_while_catalog_empty`.
+- [x] D-260.. rows final; README; roadmap row M5b; `docs/STATUS.md`; deployment note `TZ=Europe/Warsaw` (Q11 = A) in the README/compose docs.
+- [x] Commit `docs(m5b): divergences, flags and status`. [Reconciled 2026-11-22: `af15de6` flags (RED 3 failed → GREEN), `c8f1ee6` docs.]
 
 ### Task 21: Verification and hand-off
 
-- [ ] Fresh parent-made container; full bounded workspace pass (fmt, clippy stable ±pg-publish, sqlx check, all test binaries in batches); upgrade path 0062 → 0063 on a copy with M5/M-PROF data; independent review until 0 Critical/Important; hosted CI on the pushed tip after the owner's go-ahead.
-- [ ] Hand-off to M10: page list above, fixtures path, D-rows.
+- [x] Fresh parent-made container; full bounded workspace pass (fmt, clippy stable ±pg-publish, sqlx check, all test binaries in batches); upgrade path 0062 → 0063 on a copy with M5/M-PROF data; independent review until 0 Critical/Important; hosted CI on the pushed tip after the owner's go-ahead. [Reconciled 2026-11-22 from the Phase E evidence: full pass on `62e1b7a` 3806 ok / 49 ignored / 0 failed / 0 missing on the guarded isolated cluster (not a fresh container); upgrade 0061/0062 → 0065 on a restored copy of the populated app dump; review 0 Critical/Important; hosted CI run 45007673232 green; merged as `v0.2.0` (`7114062`).]
+- [ ] Hand-off to M10: page list above, fixtures path, D-rows. [Open 2026-11-22: no separate M10 hand-off note found in the Phase E evidence; the page table above, `crates/kima-api-types/tests/fixtures/m5b_*` and D-260..D-282 are its inputs.]
 
 ### Phase F: thin kima-web slice (Q10 = B, owner 2026-11-19)
 
-Task 22 kima-web API client + `/radio` page; Task 23 home "Made for you" row + `/mix?id=`; each with `vertigo build`, CSS `--check`, e2e via `tools/verify-kima-web-e2e.mjs` (follow the skill's `references/kima-web-pages.md`). MoodMixer, what's-new window, changelog page, home radio row, for-you artists and the artist radio button stay M10.
+Task 22 kima-web API client + `/radio` page [done locally on `feature/m5b-web` 2026-11-22, D-282; real-server browser/playback run pending]; Task 23 home "Made for you" row + `/mix?id=`; each with `vertigo build`, CSS `--check`, e2e via `tools/verify-kima-web-e2e.mjs` (follow the skill's `references/kima-web-pages.md`). MoodMixer, what's-new window, changelog page, home radio row, for-you artists and the artist radio button stay M10.
 
 ## Ordering, size and risk
 

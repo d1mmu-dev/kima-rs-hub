@@ -1,6 +1,6 @@
 # kima-rs-hub — stan prac
 
-_Ostatnia aktualizacja: 2026-11-22 · `main` = `ce5ed97`_
+_Ostatnia aktualizacja: 2026-11-22 · `main` = `7114062` (`v0.2.0`)_
 
 > Podsumowanie stanu projektu (aktualizowane po każdym etapie, publikowane razem z kolejnym merge'em do `main`). Źródłem prawdy jest historia gita; szczegóły różnic od upstreamu są w `docs/DIVERGENCES.md`, plan w `docs/superpowers/plans/2026-10-16-kima-rs-roadmap.md`.
 
@@ -23,7 +23,7 @@ Wierny port upstreamu **kima-hub v1.12.3** (pin `c7527577`) do Rusta; jedyny fro
 | M6a | Podcasty + filtr AI + strony kima-web | ✅ (porównanie wizualne stron → M10) |
 | **M-PROF** | **Profile w koncie (Netflix)** | ✅ na `main`; ręczne logowanie właściciela odłożone do wdrożenia |
 | M5 | Vibe (podobne utwory, nastrój) + modele muzyczne CLAP | ✅ scalone do `main` i wdrożone (silnik vibe, natywne modele muzyczne CLAP, automatyczne przejście wektorów D-194). Otwarte bramki odbioru na prawdziwym modelu: parytet na 20 prawdziwych utworach, recall@20 (Task 14) — nieuruchomione. Głowy nastroju nadal zablokowane (licencje) |
-| M5b | Mixy, radio, „co nowego”, rekomendacje | 🟡 fazy A–C (mixy, kubełki nastroju, radio) scalone do `main` (`ce5ed97`); faza D (okno „co nowego”, pytanie o zapisany mood mix, sprawdzanie aktualizacji, rekomendacje „dla ciebie”) i Task 20 (flagi `mixes: true`, `changelog` wyłączona przy pustym katalogu, D-260..D-281) Task 19 (fixtures API m5b: 46 plików, klucze zgodne z upstream `9450c94b`), Task 20 (flagi `mixes: true`, `changelog` wyłączona przy pustym katalogu, D-260..D-281) i Task 21 (pełny przebieg workspace bez błędów, upgrade 0062→0065 na wypełnionej bazie, przegląd 0 Critical/Important) gotowe i scalane do `main` jako `v0.2.0`; została faza F (cienki wycinek kima-web: `/radio`, „Made for you”, strona mixu) |
+| M5b | Mixy, radio, „co nowego”, rekomendacje | 🟡 backend (fazy A–E, 22 endpointy, fixtures, D-260..D-281) scalony do `main` jako `v0.2.0` (`7114062`); faza F (cienki wycinek kima-web): Task 22 strona `/radio` z dolewaniem stacji w odtwarzaczu gotowa lokalnie na `feature/m5b-web` (D-282, testy natywne + WASM z mockowanym API; przebieg na prawdziwym serwerze i odtwarzaniu oczekuje); Task 23 („Made for you” na stronie głównej, `/mix?id=`) następny |
 | M7 | Integracje (Lidarr, Soulseek, discover…) | ⏳ 2–3 tyg. |
 | M6b | Audiobooki (Audiobookshelf) | ⏳ ~1 tydz., po M7 |
 | M8 | Utwardzenie: 2FA, klucze API, share, limity | ⏳ 1–2 tyg. |
@@ -132,6 +132,7 @@ Poprawka po przeglądzie Task 14: **harness real-recall zaimplementowany, NIEURU
 
 ## Historia etapów (najnowsze na górze)
 
+- 2026-11-22: M5b faza F, Task 22 — kima-web `/radio`: jedna odpowiedź `/library/radio/row?scope=all` rysuje sekcje Quick Start / By Mood / By Genre / By Decade z okładkami; kafelek uruchamia stację (`/library/radio` z ziarnem i kursorem `offset`), odtwarzacz dolewa partie, gdy zaczyna się ostatni utwór (sesja stacji jak upstream `station-refill`, kończona przy zmianie kolejki, odcinku, wylogowaniu i zmianie profilu). Pozycja „02 Radio” w menu bocznym i szybki link w menu telefonu; typowane DTO wiersza radia i listy stacji w `kima-api-types`; trasa w proxy SSR. Różnice w D-282 (otwarte, do decyzji). Lokalnie, bez push.
 - 2026-11-22: M5b Task 20 — `/api/system/features` wysyła `"mixes": true` i `"changelog"` (false, dopóki własny katalog wydań kima-rs jest pusty; test pokazuje przełączenie przy pierwszym wpisie); wiersze D-260..D-281 domknięte (D-276 zaakceptowany decyzją rodzica); README: sekcja mixów/radia, notka wdrożeniowa `TZ=Europe/Warsaw` (Q11 A), przełącznik `updateChecksEnabled`. Lokalnie, bez push.
 - 2026-11-22: M5b — drobne uwagi z ponownego przeglądu fazy D (0 Critical/Important) poprawione jednym commitem: `refuses_real_host` zgodny z przełącznikiem `KIMA_NET_DENY_REAL` (test + mutacja RED), strażnik slotu sprawdzania aktualizacji tworzony przed zadaniem, test oczekującego dołączającego do lotu, ograniczona pętla oczekiwania, test migracji 0064 sprawdza `albums_refiled_at` i zachowanie wierszy.
 - 2026-11-21: M5b faza D (Task 15–18) lokalnie: okno „co nowego” (migracja 0064), pytanie o mood mix, sprawdzanie aktualizacji (0065, D-270), rekomendacje (D-271); przegląd i poprawki.

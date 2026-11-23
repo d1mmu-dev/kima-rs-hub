@@ -21,7 +21,13 @@
 // A page FAILS when any of them is out of bounds or the style probe finds default-styled controls / a missing
 // font / a stylesheet without utility rules. `--negative-control` proves this: it strips every class-selector rule
 // from kima-web (the old failure) and requires the checker to fail every page.
+//   MIX_ID=<id> | MIX_PREFER=<id prefix, default deep-cuts->   which of TODAY's Home mixes the `mix` page opens on both
+//                                    sides (ids are drawn per profile and day, so the id is read from /api/mixes)
+// Audio: Chrome inherits the environment, so run it with PULSE_SINK=<null sink> (plus --mute-audio, kept here because
+// no page in this list plays audio past the paused `player` check).
 // Usage: node tools/compare-kima-web-visual.mjs [--page=login,tracks] [--viewport=1440x900] [--no-ssr-shift] [--negative-control]
+// A page with `crop` also yields a `<page>:<section>` row: the same section on both sides, scrolled into view and cut
+// out by its own bounding box, so a page whose surroundings differ by decision can still be compared on the section.
 // For every page and every viewport (1440x900, 1024x768, 390x844) it screenshots both frontends
 // (authenticated where needed), writes <OUT>/<page>-<viewport>-{legacy,web,diff}.png and prints the share of
 // pixels that differ (max channel delta > PIXEL_TOL). Exit code 1 if a page is over THRESHOLD and not listed in
@@ -34,6 +40,7 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { cropImage, pickMixId, webSessionRecord, WEB_SESSION_KEY } from './kima-web-visual-lib.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CHROME = process.env.CHROME || 'chromium';
@@ -275,7 +282,7 @@ async function open(origin, p, { auth, tok, keyLegacy }) {
   await ev(`localStorage.clear(); sessionStorage.clear();`);
   if (auth) {
     if (keyLegacy) await ev(`localStorage.setItem('auth_token', ${JSON.stringify(tok.token)}); ${tok.refreshToken ? `localStorage.setItem('refresh_token', ${JSON.stringify(tok.refreshToken)});` : ''}`);
-    else await ev(`localStorage.setItem('kima-web.token', ${JSON.stringify(tok.token)})`);
+    else await ev(`localStorage.setItem(${JSON.stringify(WEB_SESSION_KEY)}, ${JSON.stringify(webSessionRecord(tok, 'visual-' + Date.now() + '-' + Math.random().toString(16).slice(2)))})`);
   }
   await send('Page.navigate', { url: origin + p });
 }
@@ -290,6 +297,10 @@ async function main() {
   const pl = pls.find((p) => p.name === 'Late Night Drive') || pls[0];
   const album = albums.find((a) => a.title === 'Northern Lights') || albums[0];
   void tracks;
+  const tz = encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+  const needMix = !ONLY || ONLY.includes('mix');
+  const mixId = needMix ? pickMixId(await api(`/mixes?tz=${tz}`, tok.token), { id: process.env.MIX_ID, prefer: process.env.MIX_PREFER || 'deep-cuts-' }) : null;
+  if (mixId) console.log(`mix page: ${mixId}`);
   const QUERY = 'blues'; // matches a track of the seeded library on both frontends
 
   // Each page: how to reach it on each side, plus an optional `act` run after load (identical user action).
@@ -309,6 +320,16 @@ async function main() {
     { name: 'playlists', legacy: '/playlists', web: '/playlists', auth: true },
     { name: 'playlist', legacy: `/playlist/${pl.id}`, web: `/playlists/${pl.id}`, auth: true },
     { name: 'settings', legacy: '/settings', web: '/settings', auth: true },
+    // M5b: Home root (kima-web: artists collection under the Made For You row, owner 2026-11-22; upstream: the full
+    // Home page), so the whole page differs by decision and the row itself is compared as `home:made-for-you`.
+    { name: 'home', legacy: '/', web: '/', auth: true,
+      crop: { name: 'made-for-you', legacy: 'section[data-tv-section="made-for-you"]', web: 'section[data-testid="made-for-you"]' } },
+    // The page body without the app shell (rail/sidebar widths differ until M10), cut at the viewport's bottom.
+    ...(mixId ? [{ name: 'mix', legacy: `/mix/${encodeURIComponent(mixId)}`, web: `/mix?id=${encodeURIComponent(mixId)}`, auth: true,
+      crop: { name: 'body', legacy: 'div.min-h-screen:has(> div.page-shell h1)', web: '[data-testid="mix-page"]' } }] : []),
+    // The first station section (the gaps between sections are D-282's accepted `.section-stack` spacing).
+    { name: 'radio', legacy: '/radio', web: '/radio', auth: true,
+      crop: { name: 'quick-start', legacy: 'div.min-h-screen section', web: '[data-testid="radio-page"] section' } },
     { name: 'player', legacy: '/collection?tab=tracks', web: '/collection/tracks', auth: true, actWeb: playFirst, actLegacy: playFirst, note: 'player bar with a track loaded' },
   ].filter((p) => !ONLY || ONLY.includes(p.name));
   void album;
@@ -337,6 +358,14 @@ async function main() {
         else res.legacyControls = await ev(`document.querySelectorAll('button,a,input,select,textarea').length`);
         res[side] = await shot();
         fs.writeFileSync(`${base}-${side}.png`, res[side]);
+        if (pg.crop) {
+          const rect = await ev(`(async()=>{const e=document.querySelector(${JSON.stringify(pg.crop[side])});if(!e)return null;e.scrollIntoView({block:e.getBoundingClientRect().height<innerHeight?'center':'start'});await new Promise(r=>setTimeout(r,400));const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})()`);
+          const img = rect ? cropImage(decodePng(await shot()), rect) : null;
+          res[side + 'Crop'] = img;
+          res[side + 'Rect'] = rect;
+          if (img) fs.writeFileSync(`${base}-${pg.crop.name}-${side}.png`, encodePng(img));
+          await ev(`window.scrollTo(0,0)`);
+        }
       }
       const d = diff(decodePng(res.legacy), decodePng(res.web));
       fs.writeFileSync(`${base}-diff.png`, encodePng(d.img));
@@ -361,10 +390,28 @@ async function main() {
         row.ssrShift = s.ratio * 100;
       }
       rows.push(row);
+      if (pg.crop) {
+        const name = `${pg.name}:${pg.crop.name}`;
+        if (!res.legacyCrop || !res.webCrop) {
+          rows.push({ page: name, viewport: vp, ratio: 100, ink: 100, ssim: 0, fgShare: 0, controls: {}, probeProblems: [],
+            problems: [`section missing (legacy ${!!res.legacyCrop}, web ${!!res.webCrop})`], rects: { legacy: res.legacyRect, web: res.webRect } });
+        } else {
+          const cd = diff(res.legacyCrop, res.webCrop), cs = structure(res.legacyCrop, res.webCrop);
+          fs.writeFileSync(`${base}-${pg.crop.name}-diff.png`, encodePng(cd.img));
+          const problems = [];
+          if (cs.ink > INK_THRESHOLD) problems.push(`foreground mismatch ${cs.ink.toFixed(1)}% > ${INK_THRESHOLD}%`);
+          if (cs.ssim < SSIM_MIN) problems.push(`SSIM ${cs.ssim.toFixed(3)} < ${SSIM_MIN}`);
+          if (cd.ratio * 100 > THRESHOLD) problems.push(`pixel diff ${(cd.ratio * 100).toFixed(2)}% > ${THRESHOLD}%`);
+          rows.push({ page: name, viewport: vp, ratio: cd.ratio * 100, ink: cs.ink, ssim: cs.ssim, fgShare: cs.fgShare, controls: {},
+            probeProblems: [], problems, rects: { legacy: res.legacyRect, web: res.webRect } });
+        }
+        const c = rows[rows.length - 1];
+        console.log(`${name.padEnd(10)} ${vp.padEnd(9)} diff ${c.ratio.toFixed(2).padStart(6)}%  ink ${c.ink.toFixed(1).padStart(5)}%  ssim ${c.ssim.toFixed(3)}  crop ${JSON.stringify(c.rects)}`);
+      }
       console.log(`${pg.name.padEnd(10)} ${vp.padEnd(9)} diff ${row.ratio.toFixed(2).padStart(6)}%  ink ${row.ink.toFixed(1).padStart(5)}%  ssim ${row.ssim.toFixed(3)}  controls ${row.controls.legacy}/${row.controls.web}` + (row.ssrShift !== undefined ? `   ssr->hydrated ${row.ssrShift.toFixed(2)}%` : ''));
     }
   }
-  fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify({ reference: REFERENCE, rows }, null, 2));
+  fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify({ reference: REFERENCE, mixId, rows }, null, 2));
   const names = [...new Set(rows.map((r) => r.page))];
   const hdr = VIEWPORTS.map((v) => v.join('x'));
   const table = (title, f) => {

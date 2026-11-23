@@ -2728,7 +2728,7 @@ dependencies = [
 
 [[package]]
 name = "kima-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2774,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "kima-api-types"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2785,7 +2785,7 @@ dependencies = [
 
 [[package]]
 name = "kima-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -2807,7 +2807,7 @@ dependencies = [
 
 [[package]]
 name = "kima-db"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures",
  "hex",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "kima-ident"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -2865,7 +2865,7 @@ dependencies = [
 
 [[package]]
 name = "kima-jobs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "croner",
@@ -2882,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "kima-library"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures",
  "hex",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "kima-mixes"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "hex",
@@ -2929,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "kima-ml"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ebur128",
  "kima-db",
@@ -2954,7 +2954,7 @@ dependencies = [
 
 [[package]]
 name = "kima-net"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2978,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "kima-podcast"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3004,7 +3004,7 @@ dependencies = [
 
 [[package]]
 name = "kima-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "kima-subsonic"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "axum-test",
@@ -3079,7 +3079,7 @@ dependencies = [
 
 [[package]]
 name = "kima-test-support"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kima-core",
  "kima-db",
@@ -3089,7 +3089,7 @@ dependencies = [
 
 [[package]]
 name = "kima-vibe"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rayon",
  "serde",
@@ -3100,7 +3100,7 @@ dependencies = [
 
 [[package]]
 name = "kima-web"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kima-api-types",
  "serde",
@@ -4331,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "record-fixtures"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kima-core",
  "kima-net",

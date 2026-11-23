@@ -387,6 +387,18 @@ Checked with native tests and a DB-free mocked API on the real WASM in headless 
 only), then on a real kima-server with a synthetic library (row, Refresh, mix playback, Save 200/409 read back from the
 database; private evidence).
 
+**Visual comparison (2026-11-23, reference `b927e307`, same real server for both frontends):**
+`tools/compare-kima-web-visual.mjs --page=home,mix,radio` adds section crops beside the whole pages (`home:made-for-you`,
+`mix:body`, `radio:quick-start`), because the app shell (M9 rail vs the reference's library sidebar) and the Home page
+around the row differ by decision. Sizes copied from M9-era components were brought to the reference's
+`SectionHeader`, `CarouselItem`, `PlayDisc`, `TrackRow` and `CoverArt` (D-283); a geometry probe on both frontends
+now measures them equal at 1440x900, 1024x768 and 390x844. Measured after the fix (diff% / foreground% / SSIM):
+`mix:body` 0.49/1.3/0.87, 0.28/0.6/0.94, 0.70/1.7/0.92 (anti-aliasing of the row icons and the player bar at the crop's
+bottom); `radio:quick-start` 0/0/1.00 at 1440x900 and 390x844, 21/50/0.57 at 1024x768 (the shared `.grid-media` column
+rule, open in D-282); `home:made-for-you` about 5/42/0.8 on desktop and tablet and 11.5/70/0.6 on a phone, the missing
+Mood Mixer button (M10) shifting the header and the flex row's 8 px bottom padding. The whole-page numbers stay far over
+the thresholds because of the shell and the Home layout; they are not a parity claim.
+
 ## Visual parity: compromises and assets
 
 kima-web does **not** reproduce the upstream UI as a finished goal. The target is the upstream kima-hub **v1.12.3** UI,

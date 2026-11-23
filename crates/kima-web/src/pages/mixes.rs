@@ -46,20 +46,17 @@ pub fn hero_background(color: Option<&str>) -> String {
     }
 }
 
-/// `20 songs, 1 hr 6 min` under the mix's name (upstream: `trackCount || tracks.length`, the total only when it
-/// is above zero).
-pub fn song_line(mix: &MixDetail) -> String {
+/// `20 songs` and `, 1 hr 6 min` under the mix's name, two spans as upstream (`trackCount || tracks.length`, the
+/// total only when it is above zero).
+pub fn song_line(mix: &MixDetail) -> (String, Option<String>) {
     let count = if mix.mix.track_count != 0 {
         mix.mix.track_count
     } else {
         mix.tracks.len() as i64
     };
     let seconds: i64 = mix.tracks.iter().map(|t| i64::from(t.duration)).sum();
-    if seconds > 0 {
-        format!("{}, {}", plural(count, "song"), total_duration(seconds))
-    } else {
-        plural(count, "song")
-    }
+    let total = (seconds > 0).then(|| format!(", {}", total_duration(seconds)));
+    (plural(count, "song"), total)
 }
 
 /// What the mix page shows for its request.
@@ -99,8 +96,8 @@ pub fn home(ctx: &Ctx) -> DomNode {
 fn row_header(action: DomNode) -> DomNode {
     dom! {
         <div class="flex items-center gap-3 mb-4">
-            <span aria-hidden="true" class="w-1 rounded-full shrink-0 h-8 bg-type-track"></span>
-            <h2 class="font-bold tracking-tight text-white text-2xl">"Made For You"</h2>
+            <span aria-hidden="true" class="w-1 rounded-full shrink-0 h-7 bg-type-track"></span>
+            <h2 class="font-bold tracking-tight text-white text-xl">"Made For You"</h2>
             <span class="flex-1 border-t border-white/10"></span>
             {action}
         </div>
@@ -180,9 +177,9 @@ fn made_for_you(ctx: &Ctx) -> DomNode {
             let body = match s {
                 RowState::Loading => {
                     let cells: Vec<DomNode> = (0..6)
-                        .map(|_| dom! { <div class="w-40 sm:w-44 shrink-0 aspect-square rounded-lg bg-[var(--bg-primary)] border border-white/10 animate-pulse"></div> })
+                        .map(|_| dom! { <div class="w-[140px] sm:w-[160px] md:w-[11.25rem] shrink-0 aspect-square rounded-lg bg-[var(--bg-primary)] border border-white/10 animate-pulse"></div> })
                         .collect();
-                    dom! { <div class="flex gap-4 overflow-hidden pb-2">{..cells}</div> }
+                    dom! { <div class="flex gap-[clamp(0.75rem,1.6vw,1.25rem)] overflow-hidden pb-2">{..cells}</div> }
                 }
                 RowState::Failed(message) => {
                     let retry = bind!(ctx, state, |_| {
@@ -230,10 +227,10 @@ fn mixes_grid(ctx: &Ctx, list: &[Mix]) -> DomNode {
                 on_play: None,
                 index,
             });
-            dom! { <div class="w-40 sm:w-44 shrink-0 snap-start" data-mix-card="true">{card}</div> }
+            dom! { <div class="w-[140px] sm:w-[160px] md:w-[11.25rem] shrink-0 snap-start" data-mix-card="true">{card}</div> }
         })
         .collect();
-    dom! { <div class="flex gap-4 overflow-x-auto snap-x pb-2">{..cards}</div> }
+    dom! { <div class="flex gap-[clamp(0.75rem,1.6vw,1.25rem)] overflow-x-auto snap-x pb-2">{..cards}</div> }
 }
 
 /// `/mix?id=<id>`.
@@ -303,7 +300,7 @@ fn mix_body(ctx: &Ctx, id: &str, detail: &Rc<MixDetail>) -> DomNode {
     let covers = mix_covers(mix, token.as_deref());
     let cover_art = match covers.len() {
         0 => {
-            dom! { <div class="w-full h-full flex items-center justify-center">{icon("music", "w-16 h-16 text-white/10")}</div> }
+            dom! { <div class="w-full h-full flex items-center justify-center">{icon("music", "w-10 h-10 text-[var(--text-muted)]")}</div> }
         }
         1 => {
             let src = covers[0].clone();
@@ -334,8 +331,8 @@ fn mix_body(ctx: &Ctx, id: &str, detail: &Rc<MixDetail>) -> DomNode {
         let click = bind!(ctx, queue, |_| ctx.player.play_queue(queue.clone(), 0));
         dom! {
             <button type="button" name="play-mix" aria-label={label} on_click={click}
-                class="h-14 w-14 rounded-full bg-brand hover:bg-brand-hover hover:scale-105 flex items-center justify-center transition-all">
-                {icon("play", "w-6 h-6 fill-current text-black ml-0.5")}
+                class="h-12 w-12 rounded-full bg-brand hover:scale-105 active:scale-95 flex items-center justify-center transition-all">
+                {icon("play", "w-5 h-5 fill-current text-[var(--color-on-brand)] ml-0.5")}
             </button>
         }
     };
@@ -414,7 +411,11 @@ fn mix_body(ctx: &Ctx, id: &str, detail: &Rc<MixDetail>) -> DomNode {
 
     let background = hero_background(mix.color.as_deref());
     let name = mix.name.clone();
-    let line = song_line(detail);
+    let (songs, total) = song_line(detail);
+    let total = match total {
+        Some(text) => dom! { <span>{text}</span> },
+        None => dom! { <span class="hidden" /> },
+    };
     dom! {
         <div class="min-h-screen" data-testid="mix-page">
             <div class="relative pt-16 pb-10 page-shell" style={background}>
@@ -427,7 +428,8 @@ fn mix_body(ctx: &Ctx, id: &str, detail: &Rc<MixDetail>) -> DomNode {
                         <h1 class="text-2xl md:text-4xl lg:text-5xl font-bold text-white leading-tight line-clamp-2 mb-2">{name}</h1>
                         {description}
                         <div class="flex items-center gap-1 text-sm text-[var(--text-secondary)]">
-                            <span>{line}</span>
+                            <span>{songs}</span>
+                            {total}
                         </div>
                     </div>
                 </div>
@@ -489,12 +491,12 @@ fn track_row(
     let row_class = state.map(|(current, _)| {
         format!(
             "group grid grid-cols-[40px_1fr_auto] md:grid-cols-[40px_minmax(200px,4fr)_minmax(100px,1fr)_80px] gap-4 items-center px-4 py-2 rounded-md transition-colors {}",
-            if current { "bg-white/5" } else { "hover:bg-white/5" }
+            if current { "bg-white/10" } else { "hover:bg-white/5" }
         )
     });
     let title_class = state.map(|(current, _)| {
         format!(
-            "text-sm truncate {}",
+            "text-sm font-medium truncate {}",
             if current { "text-brand" } else { "text-white" }
         )
     });
@@ -503,7 +505,7 @@ fn track_row(
         if current && playing {
             icon("audio-lines", "w-4 h-4 text-brand")
         } else {
-            dom! { <span class="text-sm tabular-nums text-[var(--text-muted)] group-hover:hidden">{number.clone()}</span> }
+            dom! { <span class="text-sm text-[var(--text-secondary)] group-hover:hidden">{number.clone()}</span> }
         }
     });
     let play = {
@@ -530,7 +532,7 @@ fn track_row(
         Some(src) => {
             dom! { <img alt="" loading="lazy" decoding="async" class="absolute inset-0 w-full h-full object-cover" src={src} /> }
         }
-        None => icon("music", "w-4 h-4 text-[var(--text-muted)]"),
+        None => icon("music", "w-5 h-5 text-[var(--text-muted)]"),
     };
     let play_label = format!("Play {}", item.title);
     let add_label = format!("Add {} to queue", item.title);
@@ -540,12 +542,14 @@ fn track_row(
     let duration = format_time(f64::from(track.duration));
     dom! {
         <div class={row_class} data-track-index={index.to_string()}>
-            <button type="button" class="w-10 h-10 flex items-center justify-center rounded-lg" aria-label={play_label} on_click={play}>
-                {number_view}
-                <span class="hidden group-hover:inline">{icon("play", "w-4 h-4 text-white fill-current")}</span>
-            </button>
+            <div class="flex items-center justify-center">
+                <button type="button" class="min-h-[44px] min-w-[44px] flex items-center justify-center" aria-label={play_label} on_click={play}>
+                    {number_view}
+                    <span class="hidden group-hover:inline">{icon("play", "w-4 h-4 text-white")}</span>
+                </button>
+            </div>
             <div class="flex items-center gap-3 min-w-0">
-                <div class="relative w-10 h-10 bg-[#181818] rounded flex items-center justify-center overflow-hidden shrink-0">{cover}</div>
+                <div class="relative w-10 h-10 bg-[#282828] rounded flex items-center justify-center overflow-hidden shrink-0">{cover}</div>
                 <div class="min-w-0">
                     <p class={title_class}>{title}</p>
                     <p class="text-xs text-[var(--text-secondary)] truncate">{artist}</p>
@@ -610,20 +614,20 @@ mod tests {
     fn the_song_line_counts_songs_and_time() {
         let mut detail = fixture_detail();
         let secs: i64 = detail.tracks.iter().map(|t| i64::from(t.duration)).sum();
+        // Two spans like upstream (`<span>N songs</span><span>, total</span>` in a gap-1 flex row).
         assert_eq!(
             song_line(&detail),
-            format!(
-                "{}, {}",
+            (
                 plural(detail.mix.track_count, "song"),
-                total_duration(secs)
+                Some(format!(", {}", total_duration(secs)))
             )
         );
         detail.mix.track_count = 0;
         detail.tracks.truncate(1);
         detail.tracks[0].duration = 0;
-        assert_eq!(song_line(&detail), "1 song");
+        assert_eq!(song_line(&detail), ("1 song".to_owned(), None));
         detail.tracks.clear();
-        assert_eq!(song_line(&detail), "0 songs");
+        assert_eq!(song_line(&detail), ("0 songs".to_owned(), None));
     }
 
     #[test]

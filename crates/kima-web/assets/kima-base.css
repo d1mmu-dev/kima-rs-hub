@@ -228,18 +228,25 @@ code {
 }
 
 /* ── The media grid ───────────────────────────────────────────────────────
- * Every wall of artwork cards uses this grid. auto-fill keeps a short library
- * at normal card size instead of stretching it; the gap grows with the
- * viewport from 12px on a phone to 20px on a desktop. */
+ * Upstream `frontend/app/globals.css` (pin c7527577 and reference b927e307): every artwork wall starts from one card
+ * width and one gap. A wider screen shows more cards and the cards stretch to fill the row; a phone fits two to a
+ * row. (The M9 port had a fluid `clamp(9.5rem, 14vw, 12rem)` floor, which gave 5 columns instead of the reference's 4
+ * at 1024px.) */
+:root {
+    --card-w: 11.25rem; /* 180px */
+    --card-gap: clamp(0.75rem, 1.6vw, 1.25rem); /* 12px on a phone to 20px on a desktop */
+}
+
 @layer components {
     .grid-media {
-        /* Fluid card floor: extra width goes to bigger artwork, not more columns.
-         * 152px still fits two cards on a 388px phone; 14vw keeps titles
-         * readable in the column left beside the sidebar and activity rail. */
-        --card-min: clamp(9.5rem, 14vw, 12rem);
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(var(--card-min), 1fr));
-        gap: clamp(0.75rem, 1.6vw, 1.25rem);
+        grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+        gap: var(--card-gap);
+    }
+    @media (min-width: 48rem) {
+        .grid-media {
+            grid-template-columns: repeat(auto-fill, minmax(min(var(--card-w), 100%), 1fr));
+        }
     }
 }
 

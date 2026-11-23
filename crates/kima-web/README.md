@@ -394,8 +394,9 @@ around the row differ by decision. Sizes copied from M9-era components were brou
 `SectionHeader`, `CarouselItem`, `PlayDisc`, `TrackRow` and `CoverArt` (D-283); a geometry probe on both frontends
 now measures them equal at 1440x900, 1024x768 and 390x844. Measured after the fix (diff% / foreground% / SSIM):
 `mix:body` 0.49/1.3/0.87, 0.28/0.6/0.94, 0.70/1.7/0.92 (anti-aliasing of the row icons and the player bar at the crop's
-bottom); `radio:quick-start` 0/0/1.00 at 1440x900 and 390x844, 21/50/0.57 at 1024x768 (the shared `.grid-media` column
-rule, open in D-282); `home:made-for-you` about 5/42/0.8 on desktop and tablet and 11.5/70/0.6 on a phone, the missing
+bottom); `radio:quick-start` 0/0/1.00 at all three viewports (at 1024x768 after the shared `.grid-media` took the
+reference's column rule, which also gives the collection grids the reference's 4 columns there);
+`home:made-for-you` about 5/42/0.8 on desktop and tablet and 11.5/70/0.6 on a phone, the missing
 Mood Mixer button (M10) shifting the header and the flex row's 8 px bottom padding. The whole-page numbers stay far over
 the thresholds because of the shell and the Home layout; they are not a parity claim.
 

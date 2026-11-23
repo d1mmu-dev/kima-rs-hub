@@ -381,8 +381,8 @@ as a playlist." and the existing playlist opens), and the track rows (play from 
 Mixer button (the row sits above the artists at `/`); no 5-minute cache (fetched per visit) and a scrolling flex row
 instead of the carousel component; play always restarts the mix from its first song (no pause/resume of the same mix);
 rows play from a button (no double-click/double-tap); the row shows an error with Retry instead of hiding; the saved
-playlist opens only while the listener is still on the mix. **Not approved yet** (owner decision pending, proposed
-destination M10): Refresh uses the refresh reply instead of refetching; add to queue is the only row action.
+playlist opens only while the listener is still on the mix. The owner also approved the remaining two differences
+until M10 (2026-11-23): Refresh uses the refresh reply instead of refetching; add to queue is the only row action.
 Checked with native tests and a DB-free mocked API on the real WASM in headless Chrome (private evidence, wiring
 only), then on a real kima-server with a synthetic library (row, Refresh, mix playback, Save 200/409 read back from the
 database; private evidence).
